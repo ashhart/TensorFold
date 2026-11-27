@@ -1,0 +1,1 @@
+- Tests: the environment-names check passes on main again; `--confidential`'s refused prefixes are explained and two new variables are listed (#5373, refs #5178). Thanks to @kotevcode.

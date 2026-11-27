@@ -190,14 +190,14 @@ def check(root, requested=None, pr=None):
     checker = runpy.run_path(str(root / 'tools/zig/lean_check.py'))
     before, after = lean_counts(base, checker), lean_counts(current, checker)
     findings.extend(new_lean(before, after))
-    cycle_findings, cycles = import_cycles(root, base, current)
-    findings.extend(cycle_findings)
+    structure_findings, structure = import_cycles(root, base, current)
+    findings.extend(structure_findings)
     return findings, dict(merge_base=revision,changed_files=len(changes),lean_base=sum(before.values()),
-                          lean_head=sum(after.values()),new_lean=sum((after - before).values()), **cycles)
+                          lean_head=sum(after.values()),new_lean=sum((after - before).values()), **structure)
 
 
 def import_cycles(root, base, current):
-    """The current cycle checker on both trees: a cycle the PR closes on its own, or a new core import, is an ERROR."""
+    """New closing cycles, core imports and unapproved cross-family edges are ERRORs."""
     return runpy.run_path(str(root / 'tools/zig/structure_check.py'))['compare'](base, current)
 
 
@@ -223,8 +223,10 @@ def main(argv=None):
     print(f"merge base {counts['merge_base']}; {counts['changed_files']} changed files; "
           f"lean {counts['lean_head']} vs {counts['lean_base']}, {counts['new_lean']} new; "
           f"import cycle edges {counts['cycle_head']} vs {counts['cycle_base']}, {counts['new_cycle']} new "
-          f"({counts['closing_cycle']} closing on their own), "
-          f"{counts['removed_cycle']} removed")
+          f"({counts['closing_cycle']} closing on their own), {counts['removed_cycle']} removed; "
+          f"cross-family edges {counts['family_head']} vs {counts['family_base']}, "
+          f"{counts['new_family']} new, {counts['removed_family']} removed, "
+          f"{counts['allowed_family']} allowed")
     errors = sum(level == 'ERROR' for level, _ in findings)
     warnings = sum(level == 'WARN' for level, _ in findings)
     print(f'{errors} error(s), {warnings} warning(s); warnings are advisory')

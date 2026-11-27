@@ -78,3 +78,7 @@ test "env defaults: TF_DRAMA_REFERENCE_CACHE unset keeps no voices and more than
     try std.testing.expectEqual(@as(?api.Opened, null), try drama_open.open(arena.allocator(), a, std.testing.io, .{ .dir = "", .model_type = "drama3" }, &problem));
     try std.testing.expectEqualStrings("TF_DRAMA_REFERENCE_CACHE must be 0 (off) through 16 entries", problem);
 }
+
+test "env defaults: TF_CUDA_SCHED reader" {
+    _ = @import("cuda_schedule.zig");
+}

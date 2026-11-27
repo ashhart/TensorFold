@@ -18,6 +18,15 @@ def tree(*imports, extra=None):
     return files
 
 
+def family_files(*edges):
+    """One named-family root per module, with the requested relative family imports."""
+    files = {}
+    for source, target in edges:
+        files[f"zig/src/families/{source}/root.zig"] = f'@import("../{target}/root.zig")'
+        files.setdefault(f"zig/src/families/{target}/root.zig", "")
+    return files
+
+
 def errors(found):
     return [m for level, m in found if level == "ERROR"]
 
@@ -89,6 +98,41 @@ class Ratchet(unittest.TestCase):
         found, counts = sc.compare(tree("a:b", "b:c", "c:a"), tree("a:b", "b:c"))
         self.assertEqual(found, [])
         self.assertEqual((counts["cycle_base"], counts["cycle_head"], counts["removed_cycle"]), (3, 0, 3))
+
+
+class CrossFamily(unittest.TestCase):
+    def test_a_new_family_edge_errors_and_names_the_importing_file(self):
+        base = family_files(("qwen4", "flashnext"))
+        head = family_files(("qwen4", "flashnext"), ("glm", "qwen27"))
+        found, counts = sc.compare(base, head)
+        self.assertEqual(errors(found), [
+            "families/glm -> families/qwen27: new cross-family import "
+            "(zig/src/families/glm/root.zig imports ../qwen27/root.zig)",
+        ])
+        self.assertEqual((counts["family_base"], counts["family_head"], counts["new_family"]), (1, 2, 1))
+
+    def test_qwen3_to_llama_is_always_allowed(self):
+        files = family_files(("qwen3", "llama"))
+        found, counts = sc.compare({}, files)
+        self.assertEqual(found, [])
+        self.assertEqual((counts["new_family"], counts["allowed_family"]), (0, 1))
+
+    def test_a_removed_family_edge_passes_and_shrinks_the_baseline(self):
+        base = family_files(("qwen4", "flashnext"), ("glm", "qwen27"))
+        head = family_files(("qwen4", "flashnext"))
+        found, counts = sc.compare(base, head)
+        self.assertEqual(found, [])
+        self.assertEqual((counts["family_base"], counts["family_head"], counts["removed_family"]), (2, 1, 1))
+
+    def test_today_main_passes_unchanged_with_its_recorded_baseline(self):
+        files = sc.checkout(sc.ROOT)
+        found, counts = sc.compare(files, files)
+        self.assertEqual(errors(found), [])
+        self.assertEqual(
+            (counts["family_base"], counts["family_head"], counts["new_family"],
+             counts["removed_family"], counts["allowed_family"]),
+            (11, 11, 0, 0, 1),
+        )
 
 
 class Graph(unittest.TestCase):

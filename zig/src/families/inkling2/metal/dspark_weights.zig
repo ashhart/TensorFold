@@ -5,6 +5,7 @@ const ck = @import("../../../core/checkpoint_metal.zig");
 const cfg = @import("../config.zig");
 const Model = @import("model.zig").Model;
 const fold = @import("dspark_fold.zig");
+const q4 = @import("draft_head_q4.zig");
 
 pub const hidden = 2304;
 pub const query = 3072;
@@ -52,8 +53,10 @@ pub const Loaded = struct {
     beta: mtl.Buffer, // [201024] BF16
     rnn_kappa: mtl.Buffer, // [4608, 768] BF16: y then newest_f columns
     rnn_rec: mtl.Buffer, // [512, 768] BF16: state then markov columns
+    draft_head_q4: ?q4.DraftHeadQ4 = null,
 
     pub fn deinit(l: *Loaded) void {
+        if (l.draft_head_q4) |*head| head.deinit();
         l.rnn_rec.deinit();
         l.rnn_kappa.deinit();
         l.beta.deinit();
@@ -64,8 +67,21 @@ pub const Loaded = struct {
     }
 
     pub fn fixedBytes(l: *const Loaded) u64 {
+        const q4_bytes = if (l.draft_head_q4) |head| head.fixedBytes() else 0;
         return l.checkpoint.residentBytes() + l.dflare.length() + l.phi.length() + l.beta.length() +
-            l.rnn_kappa.length() + l.rnn_rec.length();
+            l.rnn_kappa.length() + l.rnn_rec.length() + q4_bytes;
+    }
+
+    pub fn enableDraftHeadQ4(l: *Loaded, target: *const Model, used_bytes: u64, limit_bytes: u64) !void {
+        if (l.draft_head_q4 != null) return;
+        l.draft_head_q4 = try q4.maybeInit(
+            target.device,
+            target.weights.unembed.host(u16),
+            target.config.text.unpadded_vocab,
+            hidden,
+            used_bytes,
+            limit_bytes,
+        );
     }
 };
 
@@ -144,6 +160,7 @@ fn layer(c: *const ck.Checkpoint, i: usize) !Layer {
 }
 
 pub fn load(gpa: std.mem.Allocator, target: *const Model, dir: []const u8) !Loaded {
+    _ = try q4.enabled();
     try admit(&target.config);
     var checkpoint = ck.Checkpoint.init(gpa);
     errdefer checkpoint.deinit();
@@ -214,4 +231,26 @@ test "a misshapen DSpark tensor has a named refusal" {
     try std.testing.expectError(error.DSparkTensorShape, require(t, &.{ 2, 2 }, "witness"));
     t.dtype = .f32;
     try std.testing.expectError(error.DSparkTensorShape, require(t, &.{4}, "witness"));
+}
+
+test "Loaded fixedBytes accounts for optional draft_head_q4" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const dev = mtl.Device.init() catch return error.SkipZigTest;
+    defer dev.deinit();
+    var l: Loaded = .{
+        .checkpoint = ck.Checkpoint.init(std.testing.allocator),
+        .weights = undefined,
+        .dflare = try dev.buffer(64, mtl.ResourceOptions.shared),
+        .phi = try dev.buffer(64, mtl.ResourceOptions.shared),
+        .beta = try dev.buffer(64, mtl.ResourceOptions.shared),
+        .rnn_kappa = try dev.buffer(64, mtl.ResourceOptions.shared),
+        .rnn_rec = try dev.buffer(64, mtl.ResourceOptions.shared),
+    };
+    defer l.deinit();
+    const base_bytes = l.fixedBytes();
+    const w_bf = try std.testing.allocator.alloc(u16, 4 * 64);
+    defer std.testing.allocator.free(w_bf);
+    @memset(w_bf, 0);
+    l.draft_head_q4 = try q4.init(dev, w_bf, 4, 64);
+    try std.testing.expectEqual(base_bytes + l.draft_head_q4.?.fixedBytes(), l.fixedBytes());
 }

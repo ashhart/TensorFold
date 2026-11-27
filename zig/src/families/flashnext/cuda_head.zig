@@ -8,7 +8,7 @@ pub fn setting(value: ?[]const u8) !bool {
 }
 
 pub fn enabled() !bool {
-    return setting(@import("sys").getenv("TF_FLASHNEXT_SHARD_HEAD"));
+    return setting(@import("sys").environment.rawText("TF_FLASHNEXT_SHARD_HEAD"));
 }
 
 pub fn shard(t: Tensor, world: usize, rank: usize) !Tensor {

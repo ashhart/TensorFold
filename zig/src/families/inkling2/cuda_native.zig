@@ -10,7 +10,7 @@ const engine = @import("loop_engine.zig");
 const backend = @import("loop_backend.zig");
 
 pub const model_type = "inkling2_loop";
-pub const formats: []const []const u8 = &.{"modelopt-mixed"};
+pub const formats: []const []const u8 = &.{ "modelopt-mixed", "tfq3" };
 pub const default_context: i64 = 1_048_576;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = engine.prompt_rows;
@@ -107,13 +107,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     defer header_arena.deinit();
     var merged: core.safetensors.Header = .empty;
     for (ck.files.items) |file| try @import("names.zig").merge(header_arena.allocator(), &merged, file.names);
-    try @import("names.zig").precisions(merged, c.text.layers, &precisions);
+    try @import("names.zig").precisionsWithDir(gpa, io, merged, c.text.layers, dir, &precisions);
     const p = try plan_.build(&c.text, precisions[0..c.text.layers]);
-    var w = try @import("loop_weights.zig").load(gpa, ctx.d, &ck, &c, p);
+    var w = try @import("loop_weights.zig").loadWith(gpa, io, ctx.d, &ck, &c, p, dir);
     errdefer w.deinit();
     if (ck.unused() != 0) return error.UnusedCheckpointTensor;
     ck.release();
-    var k = try engine.Kernels.load(ctx);
+    var k = try engine.Kernels.loadWith(ctx, w.hasTfq3(), c.text.hidden, c.text.topk, c.text.expert_inter);
     errdefer k.deinit();
     var stream = try cuda.Stream.init(ctx.d, true);
     errdefer stream.deinit();

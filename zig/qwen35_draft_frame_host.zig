@@ -83,19 +83,34 @@ test "Draft frames: a common frame stages each stream's own ring positions and p
 }
 
 const Record = struct {
+    const HeadProjection = struct { columns: c_int, rows: c_int };
     var counts: [16]usize = @splat(0);
     var max_rows: u32 = 0;
     var uploads: usize = 0;
-    var downloads: usize = 0;
+    pub var downloads: usize = 0;
     var waits: usize = 0;
-    var fail: bool = false;
+    pub var fail: bool = false;
     var last_norm_input: u64 = 0;
+    pub var token_bias: u32 = 0;
     var block: usize = 8;
+    var head_projections: [8]HeadProjection = undefined;
+    var head_projection_count: usize = 0;
     fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const id = @intFromPtr(f);
         if (id < counts.len) counts[id] += 1;
         if (id == 13) last_norm_input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
         if (id == 1) max_rows = @max(max_rows, x);
+        if (id == 14) {
+            const parts = @as(*const cuda.qlinear.Parts, @ptrCast(@alignCast(args.?[2].?))).*;
+            const columns = parts.p[0].n;
+            if (columns > 256) {
+                head_projections[head_projection_count] = .{
+                    .columns = columns,
+                    .rows = @as(*const c_int, @ptrCast(@alignCast(args.?[3].?))).*,
+                };
+                head_projection_count += 1;
+            }
+        }
         if (id == 5) {
             std.debug.assert(z == 9 and threads == 128);
             if (fail) return cuda.abi.error_not_ready;
@@ -106,16 +121,22 @@ const Record = struct {
         uploads += 1;
         return cuda.abi.success;
     }
+    fn copyDevice(_: u64, _: u64, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return cuda.abi.success;
+    }
+    fn copy2d(_: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return cuda.abi.success;
+    }
     fn download(dst: ?*anyopaque, _: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         const data = @as([*]u8, @ptrCast(dst.?))[0..bytes];
         @memset(data, 0);
         if (downloads == 0) {
             const words = std.mem.bytesAsSlice(u32, data);
             for (0..words.len / 43) |row| {
-                words[row * 43 + 2] = @intCast(17 + row / (block - 1));
-                words[row * 43 + 3] = @intCast(128 + row / (block - 1));
-                words[row * 43 + 22] = @bitCast(@as(f32, 1));
-                words[row * 43 + 23] = @bitCast(@as(f32, 0));
+                words[row * 43 + 2] = @intCast(17 + Record.token_bias + row / (block - 1));
+                words[row * 43 + 3] = @intCast(128 + Record.token_bias + row / (block - 1));
+                words[row * 43 + 22] = @bitCast(@as(f32, 1) + @as(f32, @floatFromInt(Record.token_bias)));
+                words[row * 43 + 23] = @bitCast(@as(f32, @floatFromInt(Record.token_bias)));
             }
         }
         downloads += 1;
@@ -133,7 +154,7 @@ fn weight() cuda.qlinear.Affine4 {
     return .{ .w = 1, .s = 2, .b = 3, .n = 256, .k = 256, .npad = 256 };
 }
 
-test "Draft frames: the real hold adapter emits one frame for every stream and invalidates drafts on failure" {
+test "Draft frames: actual holds group mixed head widths and invalidate drafts on failure" {
     for ([_]usize{ 8, 16 }) |block| try actualFrame(block);
 }
 fn actualFrame(block: usize) !void {
@@ -143,6 +164,8 @@ fn actualFrame(block: usize) !void {
     driver.api.cuLaunchKernel = Record.launch;
     driver.api.cuMemcpyHtoDAsync_v2 = Record.upload;
     driver.api.cuMemcpyDtoHAsync_v2 = Record.download;
+    driver.api.cuMemcpyDtoDAsync_v2 = Record.copyDevice;
+    driver.api.cuMemcpy2DAsync_v2 = Record.copy2d;
     driver.api.cuStreamSynchronize = Record.wait;
     var e: q.engine.Engine = undefined;
     e.kit = null;
@@ -192,6 +215,7 @@ fn actualFrame(block: usize) !void {
     d.c.block = block;
     d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
     d.streams = .empty;
+    d.trace = null;
     defer d.streams.deinit(a);
     d.selection_base = 0;
     inline for (@typeInfo(@TypeOf(d.fns)).@"struct".field_names) |name| @field(d.fns, name) = function(&driver, 10);
@@ -272,10 +296,100 @@ fn actualFrame(block: usize) !void {
         try std.testing.expectEqual(@as(usize, 0), ctx.held_n);
         try std.testing.expectEqual(@as(usize, 0), ctx.grown);
     }
+
+    // The pre-fix hold path sends both contexts through the full head.
+    e.head = .{ .a4 = .{ .w = 1, .s = 2, .b = 3, .n = 248320, .k = 256, .npad = 248320 } };
+    d.c.vocab = 248320;
+    d.scratch.len = try d.layout(false);
+    _ = try d.layout(true);
+    contexts[0].wide = false;
+    contexts[1].wide = true;
+    e.affine.group_fn = function(&driver, 14);
+    Record.downloads = 0;
+    Record.head_projection_count = 0;
+    Record.fail = false;
+    try d.drafter().hold(holds[0..2]);
+
+    const per = block - 1;
+    var narrow_rows: usize = 0;
+    var tail_rows: usize = 0;
+    var full_rows: usize = 0;
+    for (Record.head_projections[0..Record.head_projection_count]) |projection| {
+        switch (projection.columns) {
+            98304 => narrow_rows += @intCast(projection.rows),
+            320 => tail_rows += @intCast(projection.rows),
+            248320 => full_rows += @intCast(projection.rows),
+            else => unreachable,
+        }
+    }
+    try std.testing.expectEqual(per, full_rows);
+    try std.testing.expectEqual(per, narrow_rows);
+    try std.testing.expectEqual(per, tail_rows);
+    if (block == 16) try traceRounds(&d, contexts[0..2], holds[0..2]);
+}
+
+fn traceRounds(d: *q.draft.Draft, contexts: []q.draft.Ctx, source: []lanes.drafter.Hold) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first = try lanes.Stream.init(a, .{ .id = "first", .prompt = &.{1}, .max_new = 8 });
+    defer first.deinit(a);
+    var second = try lanes.Stream.init(a, .{ .id = "second", .prompt = &.{1}, .max_new = 8 });
+    defer second.deinit(a);
+    try d.streams.put(a, &first, &contexts[0]);
+    try d.streams.put(a, &second, &contexts[1]);
+    defer {
+        if (comptime @hasField(q.draft.Ctx, "trace_snapshot")) for (contexts) |*ctx| ctx.trace_snapshot.deinit(a);
+    }
+    var holds: [2]lanes.drafter.Hold = undefined;
+    @memcpy(&holds, source);
+    holds[0].stream = &first;
+    holds[1].stream = &second;
+    holds[0].lanes = null;
+    holds[0].depth = 1;
+    holds[1].depth = 1;
+    holds[0].sampling = .{ .seed = 0x123456789abcdef, .temperature = 0.75 };
+    holds[1].sampling = .{ .seed = 0x76543210, .temperature = 1.25 };
+    try @import("qwen35_draft_trace_host.zig").run(Record, d, &holds, tmp);
+    try traceSaveFailure(d, &holds, tmp);
+}
+
+fn traceSaveFailure(d: *q.draft.Draft, holds: *const [2]lanes.drafter.Hold, tmp: std.testing.TmpDir) !void {
+    const t = try @import("qwen35_draft_trace_host.zig").enableTrace(d, tmp, "failed.jsonl");
+    defer q.draft.trace.drop(&d.trace);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    d.gpa = failing.allocator();
+    defer d.gpa = a;
+    Record.fail = false;
+    Record.downloads = 0;
+    var failed_hold = holds[0];
+    failed_hold.position = d.streams.get(failed_hold.stream).?.end + 1;
+    try d.drafter().hold(&.{failed_hold});
+    if (comptime @hasField(q.draft.trace.Trace, "dropped")) {
+        try std.testing.expectEqual(@as(u64, 1), t.dropped);
+        try std.testing.expect(t.broken);
+    }
+    try std.testing.expect(!d.streams.get(holds[0].stream).?.trace_active);
+    const accepted = [_]u32{41};
+    const item: lanes.drafter.Absorb = .{
+        .stream = failed_hold.stream,
+        .features = .{ .buffer = 1, .rows = 0, .row_bytes = 0, .space = .device, .dtype = .bf16 },
+        .start = failed_hold.position - 1,
+        .follow = &accepted,
+        .offered = 1,
+        .prompt = false,
+    };
+    try d.drafter().absorb(&.{item});
+    if (comptime @hasField(q.draft.trace.Trace, "dropped")) try std.testing.expectEqual(@as(u64, 1), t.dropped);
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/failed.jsonl", .{tmp.sub_path});
+    defer a.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1));
+    defer a.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), bytes.len);
 }
 
 test {
     _ = @import("qwen35_draft_equality.zig");
+    _ = @import("qwen35_draft_frame_mixed_host.zig");
     _ = @import("qwen35_draft_graphs_host.zig");
 }
 

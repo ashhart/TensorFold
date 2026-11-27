@@ -352,3 +352,51 @@ test "dense_text names exactly Small's 996 non-expert text tensors and rejects v
     try t.expect(!dirty.clean());
     try t.expectEqual(@as(usize, 1), dirty.unknown.items.len);
 }
+
+test "precisionsWithDir detects TFPW v3 shards alongside residual safetensors and requires pw_v3_tables.bin" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var hdr: [16]u8 = @splat(0);
+    std.mem.writeInt(u32, hdr[0..4], 0x57504654, .little); // "TFPW"
+    std.mem.writeInt(u32, hdr[4..8], 3, .little);
+    std.mem.writeInt(u32, hdr[12..16], 128, .little);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "layer_00.tffpw", .data = &hdr });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "layer_01.tffpw", .data = &hdr });
+
+    const empty: st.Header = .empty;
+    var prec: [2]plan.Precision = undefined;
+    // Missing pw_v3_tables.bin is refused.
+    try t.expectError(error.MissingTfq3Tables, names.precisionsWithDir(t.allocator, t.io, empty, 2, dir, &prec));
+
+    // With pw_v3_tables.bin present, both layers resolve to .tfq3.
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "pw_v3_tables.bin", .data = "PWV3" });
+    try names.precisionsWithDir(t.allocator, t.io, empty, 2, dir, &prec);
+    try t.expectEqual(plan.Precision.tfq3, prec[0]);
+    try t.expectEqual(plan.Precision.tfq3, prec[1]);
+
+    // A layer with num_experts == 0 is rejected as NoExperts.
+    std.mem.writeInt(u32, hdr[12..16], 0, .little);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "layer_01.tffpw", .data = &hdr });
+    try t.expectError(error.NoExperts, names.precisionsWithDir(t.allocator, t.io, empty, 2, dir, &prec));
+
+    // names.all with .tfq3 omits w13/w2 expert tensors while retaining routers and backbone.
+    const mini = try loadMini(a);
+    const tfq3_precs: [24]plan.Precision = @splat(.tfq3);
+    const Counter = struct {
+        experts: usize = 0,
+        routers: usize = 0,
+        pub fn put(s: *@This(), name: []const u8, _: st.DType, _: []const u64) !void {
+            if (std.mem.indexOf(u8, name, ".mlp.experts.") != null) s.experts += 1;
+            if (std.mem.endsWith(u8, name, ".mlp.gate.weight")) s.routers += 1;
+        }
+    };
+    var cnt: Counter = .{};
+    try names.all(&mini, &tfq3_precs, .model, &cnt);
+    try t.expectEqual(@as(usize, 0), cnt.experts);
+    try t.expectEqual(@as(usize, 24), cnt.routers);
+}
