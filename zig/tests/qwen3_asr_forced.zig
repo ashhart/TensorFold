@@ -19,32 +19,6 @@ fn widen(bits: u16) f64 {
     return @as(f32, @bitCast(@as(u32, bits) << 16));
 }
 
-/// The largest |a - b| over every column of every step, where it is, and the mean |a - b|.
-const Dist = struct {
-    worst: f64 = 0,
-    step: usize = 0,
-    col: usize = 0,
-    sum: f64 = 0,
-    n: usize = 0,
-
-    fn add(d: *Dist, step: usize, a: []const f64, b: []const f32) void {
-        for (a, b, 0..) |x, y, c| {
-            const e = @abs(x - y);
-            d.sum += e;
-            d.n += 1;
-            if (!(e <= d.worst)) {
-                d.worst = e;
-                d.step = step;
-                d.col = c;
-            }
-        }
-    }
-
-    fn print(d: Dist, label: []const u8) void {
-        std.debug.print("DIST {s}: worst column {d:.6} (step {d}, id {d}), mean {e:.4} over {d} logits\n", .{ label, d.worst, d.step, d.col, d.sum / @as(f64, @floatFromInt(@max(d.n, 1))), d.n });
-    }
-};
-
 const Rows = struct { equal: usize, rows: usize, worst: f64 };
 
 /// Rows of logits bit-equal between two runs, and the largest |difference|.
@@ -139,44 +113,15 @@ pub fn main(init: std.process.Init) !u8 {
     m.keep = null;
 
     const clip = std.fs.path.basename(case_dir.?);
-    var same: usize = 0;
-    var swaps: usize = 0;
-    var fails: usize = 0;
-    for (0..want.len) |k| {
-        const ours = forced.top(steps.items[k * vocab ..][0..vocab]);
-        const ref = try forced.reference(top2[2 * k], top2[2 * k + 1], ref_margin[k], want[k]);
-        switch (forced.judge(ours, ref, forced.bar)) {
-            .same => same += 1,
-            inline else => |v| {
-                if (v == .swap) swaps += 1 else fails += 1;
-                std.debug.print("{s} {s} step {d}: ours {d} (margin {d:.4}, runner-up {d}), reference {d} (margin {d:.4}, runner-up {d})\n", .{ if (v == .swap) "SWAP" else "FAIL", clip, k, ours.first, ours.margin, ours.second, ref.first, ref.margin, ref.second });
-            },
-        }
-    }
-    var ok = fails == 0;
-    std.debug.print("FORCED {s}: {d} steps, {d} same top token, {d} swaps within {d}, {d} fail{s}\n", .{ clip, want.len, same, swaps, forced.bar, fails, if (plant) |p| switch (p) {
+    var tally: forced.Tally = .{};
+    for (0..want.len) |k| try tally.step(clip, k, steps.items[k * vocab ..][0..vocab], top2[2 * k], top2[2 * k + 1], ref_margin[k], want[k]);
+    var ok = tally.fails == 0;
+    tally.print(clip, want.len, if (plant) |p| switch (p) {
         .splice => " (planted: the audio rows one position late)",
         .norms => " (planted: q_norm and k_norm swapped in every layer)",
-    } else "" });
+    } else "");
 
-    if (case.floats(gpa, "logits_fp32")) |fp32| {
-        defer gpa.free(fp32);
-        const bf = try case.floats(gpa, "logits_bf16");
-        defer gpa.free(bf);
-        if (fp32.len != want.len * vocab or bf.len != fp32.len) return error.StageSize;
-        var ours: Dist = .{};
-        var pkg: Dist = .{};
-        const row = try gpa.alloc(f64, vocab);
-        defer gpa.free(row);
-        for (0..want.len) |k| {
-            for (row, steps.items[k * vocab ..][0..vocab]) |*r, b| r.* = widen(b);
-            ours.add(k, row, fp32[k * vocab ..][0..vocab]);
-            for (row, bf[k * vocab ..][0..vocab]) |*r, b| r.* = b;
-            pkg.add(k, row, fp32[k * vocab ..][0..vocab]);
-        }
-        ours.print("ours to the package's fp32");
-        pkg.print("the package's bf16 to its fp32");
-    } else |e| if (e != error.NoSuchStage) return e;
+    try forced.distances(gpa, &case, steps.items, want.len, vocab);
 
     if (check_rows > 0) {
         // one prompt pass over the prompt and the first K reply ids, the head over its last K + 1 rows
