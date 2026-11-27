@@ -14,15 +14,15 @@ blocks and comments skipped):
   and `get` on an environment map (a value typed `Environ.Map` or `environment.Process`, or one unwrapped from it);
 - calls through a parameter typed as a function from a name to its value, such as `get: *const fn ([:0]const u8) ?[]const u8`;
 - the wrappers and validators `tools/zig/env_lookups.py` lists: each reads the variable one argument names, so its
-  callers' names are reads too.
+  callers' names are reads too, including calls through a constant that aliases the wrapper function itself.
 
 The name argument must be written out: a string, an array of strings, or a constant naming one. Any other lookup is a
 computed one, and the check fails unless `env_lookups.py` lists it, either as a listed wrapper's read of its own name
-parameter or with the names it reads; any other computed lookup inside a wrapper still fails. A listed array constant
-must hold only strings, or the check fails. As a cross-check, every literal shaped like a variable name (capitals,
-digits and an underscore) that no lookup reads must be explained in `env_lookups.py` (an error code, a kernel constant,
-a name set only for a child process). A name assembled at run time from pieces, or read only by a library the engine
-loads (NCCL, MCDMA), is not found.
+parameter (the parameter whole, its `.ptr`, or `buf[0..name.len :0]`) or with the names it reads; any other computed
+lookup inside a wrapper still fails. A listed array constant must hold only strings, or the check fails. As a
+cross-check, every literal shaped like a variable name (capitals, digits and an underscore) that no lookup reads must
+be explained in `env_lookups.py` (an error code, a kernel constant, a name set only for a child process). A name
+assembled at run time from pieces, or read only by a library the engine loads (NCCL, MCDMA), is not found.
 
 `--write` adds new reads as `untagged` and drops names nothing reads any more, keeping every other row's tags; the check
 then fails until each new row is tagged. When the scan itself has errors, `--write` leaves the page as it is. An
@@ -268,7 +268,7 @@ reports the setting's own value, does not count as logging.
 | `TF_CUDA_MEMORY_RECEIPTS` | release, tool, test | logs |
 | `TF_CUDA_POOL_AFTER_WARMUP` | release, tool, test | other |
 | `TF_CUDA_SCHED` | tool, test | other |
-| `TF_CUDA_SEGMENTS` | tool, test | other |
+| `TF_CUDA_SEGMENTS` | release, tool, test | other |
 | `TF_CUDA_TEST_ATTN_MT2` | release, tool, test | other |
 | `TF_CUDA_TEST_MLP128` | release, tool, test | other |
 | `TF_DFLASH_GRAPH` | release, tool, test | other |

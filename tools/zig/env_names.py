@@ -42,6 +42,9 @@ def wrapper_patterns(src: er.Source) -> list[tuple[re.Pattern, int, tuple[str, s
             stem = Path(file).stem
             receivers = [stem, rf'@import\("(?:[^"]*/)?{stem}(?:\.zig)?"\)'] + sorted(src.aliases.get(stem, set()))
             out.append((re.compile(rf"(?<![\w])(?:[\w.]*\.)?(?:{'|'.join(receivers)})\.{fn}\("), index, key))
+            # a direct alias of the function itself: `const f = @import("stem.zig").fn;` or `const f = stem.fn;`
+            for alias in re.findall(rf"\bconst\s+(\w+)\s*=\s*(?:{'|'.join(receivers)})\.{fn}\s*;", src.code):
+                out.append((re.compile(rf"(?<![\w.]){alias}\("), index, key))
         if isinstance(callers, tuple):
             out += [(re.compile(rx), i, key) for where, rx, i in callers if where in ("*", src.rel)]
     receivers = {"environment"} | src.aliases.get("environment", set())
@@ -69,7 +72,7 @@ def reads(srcs: list[er.Source]) -> tuple[list[er.Read], list[str]]:
             seen.add((r.line, r.call))
             if r.names:
                 found.append(r)
-            elif (r.file, r.function) in defs and params[(r.file, r.function)] & set(re.findall(r"\w+", r.arg)):
+            elif (r.file, r.function) in defs and forwards(r.arg, params[(r.file, r.function)]):
                 used.add((r.file, r.function))
             elif (r.file, r.call) in lk.NAMED:
                 used.add((r.file, r.call))
@@ -96,6 +99,12 @@ def forwarded(src: er.Source, fn: str, index: int) -> set[str]:
     if not words:
         return set()
     return {words[-1]} | set(re.findall(rf"\bfor\s*\(\s*{words[-1]}\s*\)\s*\|\s*(\w+)\s*\|", src.code))
+
+
+def forwards(arg: str, params: set[str]) -> bool:
+    """Whether a wrapper's computed read is its forwarding read: the name, its `.ptr`, or `buf[0..name.len :0]`."""
+    return any(re.fullmatch(rf"{p}(?:\.ptr)?|\w+\[\s*0\s*\.\.\s*{p}\.len\s*:\s*0\s*\]", arg.strip())
+               for p in params)
 
 
 def named(src: er.Source, given: tuple[str, ...] | str, srcs: list[er.Source]) -> tuple[str, ...] | None:
