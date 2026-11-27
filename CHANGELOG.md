@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
+
 - Docs: the pinned Qwen3.5-2B quick start stays first; the managed-choice alternative asks before downloading and Windows points to its guide (#5349) Thanks @ashhart for the report.
 
 - Checkpoints and packs: a sharded checkpoint whose index assigns a tensor to a different shard than the shard headers say is refused at load, and a Flash Next pack with no recorded source (made before 1.0) is refused with the command that rebuilds it. Saved prompt state is keyed to the TFQ3 tables the loaders already check. No weight bytes are read at load that were not read before.
