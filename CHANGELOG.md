@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on CUDA with `--kv-cache fp8`: `TF_QWEN_PROMPT_SPLITK=1` (off by default) runs a prompt chunk of at most 64 rows through split passes that spread the cached keys over every SM, so a short turn after a long kept conversation reaches its first token sooner; outputs are byte-identical to the tile kernel's, and `TF_QWEN_PROMPT_SPLITK_VERIFY=1` checks every such chunk against it (#PR, refs #5309).
+
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
 
 - Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
