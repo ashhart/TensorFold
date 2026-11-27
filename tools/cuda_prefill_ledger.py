@@ -102,7 +102,8 @@ def drafter_evidence(text, drafted, traced, rows, counters, expected='DFlash2'):
         require(normal(sources) in ('copiesonly', 'none', 'off'), f'plain arm loaded a drafter: {sources}')
         require(proposed == 0 and accepted == 0, 'plain arm reported drafted tokens')
         if traced:
-            require(not opened and not tails, 'plain arm emitted drafter prompt work')
+            require(not any(row.get('stage') in ('drafter_open', 'tap_upload', 'drafter_absorb', 'trailing_absorb')
+                            for row in rows), 'plain arm emitted drafter prompt work')
     return dict(request_draft=drafted, expected_drafter=expected if drafted else None,
                 observed_sources=sources, proposed_tokens=proposed, accepted_tokens=accepted,
                 traced_prompt_activity=bool(opened and tails) if traced else None,
@@ -175,8 +176,25 @@ def controls():
             draft_bad.append(dict(name=name, outcome='rejected', reason=str(error)))
         else:
             raise RuntimeError(f'planted drafter control unexpectedly accepted: {name}')
+    plain_bad = []
+    plain_header = 'serving (drafts: copies only; context: 4352)'
+    plain_counts = dict(drafted=0, accepted=0)
+    for stage in ('drafter_open', 'tap_upload', 'drafter_absorb', 'trailing_absorb'):
+        frames = sample_sequence(False)
+        phase = copy.deepcopy(frames[0])
+        phase.update(stage=stage, sequence=len(frames), start_token=0, rows=0)
+        if stage == 'drafter_absorb': phase.update(rows=4095)
+        if stage == 'trailing_absorb': phase.update(start_token=4095, rows=1)
+        frames.append(phase)
+        try:
+            drafter_evidence(plain_header, False, True, frames, plain_counts)
+        except ValueError as error:
+            plain_bad.append(dict(name=stage, outcome='rejected', reason=str(error),
+                                  server_header=plain_header, counters=plain_counts, input_json=json.dumps(frames)))
+        else:
+            raise RuntimeError(f'planted plain-arm control unexpectedly accepted: {stage}')
     return dict(schema='cuda-prefill-parser-controls.v1' , network_or_device_run=False,
-                source_sha256=digest(Path(__file__).read_bytes()), positives=['plain', 'drafted_final_row'], controls=results, drafter_controls=draft_bad)
+                source_sha256=digest(Path(__file__).read_bytes()), positives=['plain', 'drafted_final_row'], controls=results, drafter_controls=draft_bad, plain_controls=plain_bad)
 
 def run(args, n, drafted, enabled, repetition):
     tag = f'{n}-draft{int(drafted)}-trace{enabled}-rep{repetition}'
@@ -257,7 +275,7 @@ def main():
         if args.controls_output:
             args.controls_output.parent.mkdir(parents=True, exist_ok=True)
             write(args.controls_output, result)
-        print(f"PASS: {len(result['controls'])} parser and {len(result['drafter_controls'])} drafter controls rejected; no network or device run")
+        print(f"PASS: {len(result['controls'])} parser and {len(result['drafter_controls'])} drafter and {len(result['plain_controls'])} plain-arm controls rejected; no network or device run")
         return
     if not all((args.binary, args.model_dir, args.drafter, args.output)):
         p.error('device run requires --binary, --model-dir, --drafter and --output')
