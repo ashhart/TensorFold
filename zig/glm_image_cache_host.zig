@@ -141,6 +141,7 @@ test "GLM image cache: the actual lane opening enables a content-keyed image loo
     defer s.deinit(a);
     var e: glm.engine.Engine = undefined;
     e.gpa = a;
+    e.share_pages = false;
     e.capacity = N + 256;
     e.pages = &c.pages;
     var link: glm.follow.Link = undefined;
