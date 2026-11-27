@@ -21,10 +21,12 @@ const path_names = [_][]const u8{
     "ROCBLAS_TENSILE_LIBRARY",
     "HIPBLASLT_TENSILE_LIBRARY",
     "HIPBLASLT_EXTOP_LIBRARY_PATH",
-    "HIPBLASLT_TUNING_FILE",
     "MIOPEN_DEVICE_LIB_PATH",
     "MIOPEN_COMPILER",
     "MIOPEN_CUSTOM_CACHE_DIR",
+    "MIOPEN_KERNELS_PATH",
+    "MIOPEN_CACHE_DIR",
+    "MIOPEN_GCN_ASM_PATH",
 };
 
 /// The first flag that keeps request content on disk, sends it to another process or fetches its URLs; null: none.
