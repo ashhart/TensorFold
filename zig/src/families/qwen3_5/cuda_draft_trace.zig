@@ -21,13 +21,18 @@ pub const Round = struct {
     own: []const f64,
     accepted_rows: []const u32,
     accepted_tokens: []const u32,
+    frontier: []const lanes.draft_tree.GrowNode = &.{},
+    frontier_expected: usize = 0,
+    frontier_complete: bool = true,
     candidates: Candidates,
     sampling: ?lanes.Sampling = null,
 };
 
-/// Bit-preserving wire form; `own` and sampling temperature are f64 bits, `unary` f32 bits and `hp` BF16 hex.
-pub const Row = struct { ids: []const u32 = &.{}, unary: []const u32 = &.{}, hp: []const u8 = "" };
+/// Bit-preserving wire form; `own` and sampling temperature are f64 bits and `unary` f32 bits.
+pub const Row = struct { ids: []const u32 = &.{}, unary: []const u32 = &.{} };
 pub const Sampling = struct { seed: u64, temperature: u64 };
+pub const Parameters = struct { scale: u64, edge: u64, noise: u64 };
+pub const Frontier = struct { sequence: u32, parent: i32, token: u32, row: u32, own: u64, cost: u64 };
 pub const Record = struct {
     v: u8,
     stream: []const u8 = "",
@@ -37,10 +42,14 @@ pub const Record = struct {
     rank: u32 = 0,
     topk: u32 = 0,
     sampling: ?Sampling = null,
+    parameters: Parameters = .{ .scale = 0, .edge = 0, .noise = 0 },
     nodes: []const u32 = &.{},
     parents: []const i32 = &.{},
     own: []const u64 = &.{},
     candidates: []const Row = &.{},
+    frontier_count: ?u32 = null,
+    frontier_expected: ?u32 = null,
+    frontier: []const Frontier = &.{},
     accepted_rows: []const u32 = &.{},
     accepted_tokens: []const u32 = &.{},
     accepted_nodes: []const i32 = &.{},
@@ -49,7 +58,7 @@ pub const Record = struct {
 pub fn parse(gpa: Allocator, text: []const u8) !std.json.Parsed(Record) {
     const got = try std.json.parseFromSlice(Record, gpa, text, .{});
     errdefer got.deinit();
-    if (got.value.v != 1) return error.UnsupportedTraceVersion;
+    if (got.value.v != 2) return error.UnsupportedTraceVersion;
     return got;
 }
 
@@ -62,6 +71,10 @@ fn array(w: anytype, values: anytype) !void {
     try w.writeByte(']');
 }
 
+fn bits(x: f64) u64 {
+    return @bitCast(x);
+}
+
 fn ownArray(w: anytype, values: []const f64) !void {
     try w.writeAll("[");
     for (values, 0..) |value, i| {
@@ -72,9 +85,12 @@ fn ownArray(w: anytype, values: []const f64) !void {
 }
 
 fn validate(r: Round) !void {
-    if (r.candidates.table or r.candidates.apart != null or r.candidates.topk > lp_top or
-        r.nodes.len != r.parents.len or r.nodes.len != r.own.len or r.offered > r.nodes.len or
+    if (r.offered > r.nodes.len or r.parents.len != r.nodes.len or r.own.len != r.nodes.len or !r.frontier_complete or
+        r.frontier_expected != r.frontier.len or r.candidates.table or r.candidates.apart != null or r.candidates.topk > lp_top or
         r.accepted_rows.len != r.accepted_tokens.len) return error.BadDraftTrace;
+    for (r.frontier, 0..) |node, i| {
+        if (node.sequence != i or !std.math.isFinite(node.own) or !std.math.isFinite(node.cost)) return error.BadDraftTrace;
+    }
     const row_bytes = r.candidates.layout.words * 4;
     if (row_bytes < unary_offset + r.candidates.topk * 4 or r.candidates.words.len % row_bytes != 0 or
         r.candidates.projected.len != (r.candidates.words.len / row_bytes) * r.candidates.rank * 2) return error.BadDraftTrace;
@@ -83,10 +99,11 @@ fn validate(r: Round) !void {
 /// One complete line, built before any file write so an invalid or failed record is never half a line.
 pub fn writeRecord(w: anytype, r: Round) !void {
     try validate(r);
-    try w.writeAll("{\"v\":1,\"stream\":");
+    try w.writeAll("{\"v\":2,\"stream\":");
     try std.json.Stringify.value(r.stream, .{}, w);
     try w.print(",\"position\":{d},\"pending\":{d},\"offered\":{d},\"rank\":{d},\"topk\":{d}", .{ r.position, r.pending, r.offered, r.candidates.rank, r.candidates.topk });
     if (r.sampling) |s| try w.print(",\"sampling\":{{\"seed\":{d},\"temperature\":{d}}}", .{ s.seed, @as(u64, @bitCast(s.temperature)) });
+    try w.print(",\"parameters\":{{\"scale\":{d},\"edge\":{d},\"noise\":{d}}}", .{ bits(lanes.draft_tree.scale), bits(lanes.draft_tree.edge_weight), bits(lanes.draft_tree.noise_weight) });
     try w.writeAll(",\"nodes\":");
     try array(w, r.nodes);
     try w.writeAll(",\"parents\":");
@@ -103,10 +120,18 @@ pub fn writeRecord(w: anytype, r: Round) !void {
         try array(w, words[layout.ids..][0..r.candidates.topk]);
         try w.writeAll(",\"unary\":");
         try array(w, words[layout.logits..][0..r.candidates.topk]);
-        try w.writeAll(",\"hp\":\"");
-        const hp = std.mem.bytesAsSlice(u16, r.candidates.projected[i * r.candidates.rank * 2 ..][0 .. r.candidates.rank * 2]);
-        for (hp) |value| try w.print("{x:0>4}", .{value});
-        try w.writeAll("\"}");
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"frontier_count\":");
+    try w.print("{d}", .{r.frontier.len});
+    try w.print(",\"frontier_expected\":{d}", .{r.frontier_expected});
+    try w.writeAll(",\"frontier\":[");
+    for (r.frontier, 0..) |node, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print(
+            "{{\"sequence\":{d},\"parent\":{d},\"token\":{d},\"row\":{d},\"own\":{d},\"cost\":{d}}}",
+            .{ node.sequence, node.parent, node.token, node.row, @as(u64, @bitCast(node.own)), @as(u64, @bitCast(node.cost)) },
+        );
     }
     try w.writeAll("],\"accepted_rows\":");
     try array(w, r.accepted_rows);
@@ -123,6 +148,8 @@ pub fn writeRecord(w: anytype, r: Round) !void {
 
 pub fn drop(slot: *?*Trace) void {
     if (slot.*) |t| {
+        if (t.captures.len != 0) t.gpa.free(t.captures);
+        if (t.steps.len != 0) t.gpa.free(t.steps);
         t.file.close(t.io);
         t.gpa.destroy(t);
         slot.* = null;
@@ -133,6 +160,8 @@ pub const Trace = struct {
     gpa: Allocator,
     io: std.Io,
     file: std.Io.File,
+    steps: []lanes.draft_tree.GrowNode = &.{},
+    captures: []lanes.draft_tree.GrowTrace = &.{},
     broken: bool = false,
 
     pub fn fromEnv(gpa: Allocator, io: std.Io) ?*Trace {
