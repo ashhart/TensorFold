@@ -21,14 +21,18 @@ pub const Layer = struct { w: Weights, width: usize, dims: usize, limit: f32 };
 /// The block's scratch for `rows` rows: a projection's rows, [gate | up], the activation, its sums, split-K partials.
 pub const Scratch = struct { tmp: u64, gu: u64, act: u64, xs_act: u64, mm_part: u64 };
 
-pub const Kernels = struct { set: glue.Set, linear: cuda.qlinear.Linear, copy_rows: cuda.Function };
+pub const Kernels = struct { set: glue.Set, linear: cuda.qlinear.Linear, copy_rows: cuda.Function, dense_lean: bool = false };
 
 /// Fp4Linear.__call__ (prefill on a prompt chunk): bf16 out, or fp32 with `wide`; the prompt GEMM needs `ldx` % 8 == 0.
-fn mm(k: Kernels, stream: cuda.Stream, w: cuda.qmmf.Weight, x: u64, ldx: usize, rows: usize, out: u64, wide: bool, prompt: bool) !void {
+pub fn mm(k: Kernels, stream: cuda.Stream, w: cuda.qmmf.Weight, x: u64, ldx: usize, rows: usize, out: u64, wide: bool, prompt: bool) !void {
     const q: cuda.qlinear.Weight = .{ .nvfp4 = w };
     const in: cuda.qlinear.Rows = .{ .x = x, .ldx = ldx };
     if (prompt) {
         std.debug.assert(x % 16 == 0 and (rows == 1 or ldx % 8 == 0));
+        if (k.dense_lean and w.mode == .fp4) {
+            const tile = k.linear.nvfp4_prompt orelse return error.FormatNotLoaded;
+            return tile.denseMatmulOut(stream, x, ldx, rows, w, out, if (wide) .f32 else .bf16);
+        }
         return if (wide) k.linear.promptF32(stream, q, in, out, rows) else k.linear.prompt(stream, q, in, out, rows);
     }
     return if (wide) k.linear.decodeF32(stream, q, in, out, rows) else k.linear.decode(stream, q, in, out, rows);

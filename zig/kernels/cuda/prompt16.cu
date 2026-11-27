@@ -240,6 +240,9 @@ template __global__ void prompt_kernel<FP8, 128, 128, 2, 2, 2, false>(const __nv
         float, const int* __restrict__
 template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, LEAN_BF16>(TF_LEAN_ARGS);
 template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, LEAN_F32>(TF_LEAN_ARGS);
+// Independent smaller tiles retain each output lane's K16 MMA chain; two CTAs fit the shared-memory budget.
+template __global__ void prompt_lean<FP4, 64, 128, 2, 4, 3, LEAN_BF16>(TF_LEAN_ARGS);
+template __global__ void prompt_lean<FP4, 64, 128, 2, 4, 3, LEAN_F32>(TF_LEAN_ARGS);
 // The gate/up pair: two lean products then tf_q35_mlp_act's bytes in one launch (tf_prompt_lean_swiglu in nvfp4.zig).
 template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, LEAN_SWIGLU>(TF_LEAN_ARGS);
 #undef TF_LEAN_ARGS

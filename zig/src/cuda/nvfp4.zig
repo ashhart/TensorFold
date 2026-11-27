@@ -71,6 +71,7 @@ pub const Prompt = struct {
     lean: Function, // prompt_lean FP4, bf16 out
     lean_f32: Function, // and fp32 out
     lean_swiglu: Function, // a gate/up pair on the lean tile, bf16(silu(gate) * up) out
+    dense_lean: [2]Function = undefined, // optional 64 x 128 tile; GLM selects it only under its own flag
     sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
 
     pub const Tile = enum { lean, classic };
@@ -105,6 +106,26 @@ pub const Prompt = struct {
         std.fmt.comptimePrint(lean_name, .{2}),
     };
 
+    pub const dense_lean_symbols = [2][:0]const u8{
+        "_ZN11tf_prompt1611prompt_leanILi0ELi64ELi128ELi2ELi4ELi3ELi0EEEvPK13__nv_bfloat16PKhS5_fPviiiiiiS5_S5_fPKi",
+        "_ZN11tf_prompt1611prompt_leanILi0ELi64ELi128ELi2ELi4ELi3ELi1EEEvPK13__nv_bfloat16PKhS5_fPviiiiiiS5_S5_fPKi",
+    };
+    pub fn denseLeanSharedBytes() u32 {
+        return 3 * (64 * group * 2 + 128 * group / 2 + 128 * 4) + 48;
+    }
+    /// Same K16 fragments and rounding, independent 64 x 128 tiles, at most two blocks per multiprocessor.
+    pub fn denseMatmulOut(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out) !void {
+        if (w.mode != .fp4) return error.FormatMismatch;
+        return run(s, x, ldx, m, w, y, p.dense_lean[if (out == .f32) 1 else 0], .{
+            .bm = 64,
+            .bn = 128,
+            .threads = 256,
+            .shared = denseLeanSharedBytes(),
+            .blocks = 2 * p.sms,
+            .lean = true,
+        }, null);
+    }
+
     /// prompt16.cu LeanTile<FP4, 128, 256, 1, 8, 3>::SMEM: three stages, then a full and an empty barrier each.
     pub fn leanSharedBytes() u32 {
         const stage: u32 = (lean_bm * group * 2 + lean_bn * group / 2 + lean_bn * 4 + 127) / 128 * 128;
@@ -138,11 +159,16 @@ pub const Prompt = struct {
         try lean_f32.allowDynamicShared(leanSharedBytes());
         const lean_swiglu = try mod.function(lean_symbols[2]);
         try lean_swiglu.allowDynamicShared(leanSharedBytes());
+        var dense_lean: [2]Function = undefined;
+        for (&dense_lean, dense_lean_symbols) |*f, symbol| {
+            f.* = try mod.function(symbol);
+            try f.allowDynamicShared(denseLeanSharedBytes());
+        }
         var dev: abi.Device = 0;
         try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
-        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .lean_swiglu = lean_swiglu, .sms = @intCast(@max(sms, 1)) };
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .lean_swiglu = lean_swiglu, .dense_lean = dense_lean, .sms = @intCast(@max(sms, 1)) };
     }
 
     pub fn unload(p: *Prompt) void {

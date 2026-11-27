@@ -270,6 +270,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "triton")) return oracle_tests.tritonKernel(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "fp8-lane")) return fp8_tests.lane(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "fp8-experts")) return fp8_experts_tests.experts(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-dense-lean-contract")) return @import("contract_glm_dense_lean.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-prompt-gemm-profile")) return @import("contract_glm_dense_lean.zig").profile(gpu, try arg(rest, 0), if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 8192);
     if (std.mem.eql(u8, cmd, "nvfp4")) return nvfp4_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "mxfp4-experts")) return if (rest.len == 0) @import("mxfp4_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_mxfp4.zig").run(gpu) else error.UnknownCommand;

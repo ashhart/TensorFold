@@ -100,6 +100,8 @@ pub const usage =
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
+    \\  glm-dense-lean-contract   GLM dense prompt replacements against parent bytes, with two controls
+    \\  glm-prompt-gemm-profile <dense-up|dense-down> [rows]  actual GLM dense helper, 8192 rows by default
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
     \\  bf16-experts [contract]   grouped bf16 experts against float64 (repack, up, downs, rows, forms); contract: gates 1-4, controls red
     \\  mxfp4-experts [contract]  grouped MXFP4 experts' downs: bf16 experts' bytes on the decoded weights; contract: gates 1-4, controls red
