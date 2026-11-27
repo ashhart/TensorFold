@@ -206,6 +206,31 @@ pub fn gateUpPromptFits(ex: Experts, x: u64, x_stride: usize, out: u64) bool {
     return ex.width % cols == 0 and ex.dims % checkpoint_group == 0 and x_stride % 8 == 0 and x % 16 == 0 and ex.up % 16 == 0 and ex.up_s % 16 == 0 and out % 8 == 0;
 }
 
+/// The active context's device and the two limits `Kernels.load` sizes from.
+pub const Limits = struct {
+    device: c_int,
+    /// multiprocessor count: resident blocks are an occupancy times this
+    sms: usize,
+    /// max_shared_memory_per_block_optin: the prompt gate/up is admitted only when its block fits this
+    optin: usize,
+};
+
+/// The limits of the device the current context runs on, through `cuCtxGetDevice`; ordinal 0's are another GPU's.
+pub fn activeLimits(d: *const driver.Driver) !Limits {
+    var device: c_int = 0;
+    try d.check(d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
+    var sms: c_int = 0;
+    var optin: c_int = 0;
+    try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, device), "cuDeviceGetAttribute");
+    try d.check(d.api.cuDeviceGetAttribute(&optin, .max_shared_memory_per_block_optin, device), "cuDeviceGetAttribute");
+    return .{ .device = device, .sms = @intCast(sms), .optin = @intCast(optin) };
+}
+
+/// Resident blocks of a kernel on a device: its occupancy an SM (at least one), times the device's SM count.
+pub fn residentBlocks(occupancy: u32, sms: usize) usize {
+    return @max(1, occupancy) * sms;
+}
+
 pub const Kernels = struct {
     module: module_.Module,
     fns: [n_kinds][nts.len][mts.len]module_.Function,
@@ -221,34 +246,34 @@ pub const Kernels = struct {
 
     pub fn load(d: *const driver.Driver) !Kernels {
         if (!kernels.available) return error.BuiltWithoutKernels;
-        var device: c_int = 0;
-        var sms_c: c_int = 0;
-        var optin_c: c_int = 0;
-        try d.check(d.api.cuDeviceGet(&device, 0), "cuDeviceGet");
-        try d.check(d.api.cuDeviceGetAttribute(&sms_c, .multiprocessor_count, device), "cuDeviceGetAttribute");
-        try d.check(d.api.cuDeviceGetAttribute(&optin_c, .max_shared_memory_per_block_optin, device), "cuDeviceGetAttribute");
-        const sms: usize = @intCast(sms_c);
+        return loadModule(d, try module_.Module.load(d, kernels.fn_int4));
+    }
+
+    /// `load` over a module it owns, split so a host test drives every sizing decision through a fake driver.
+    pub fn loadModule(d: *const driver.Driver, module: module_.Module) !Kernels {
         var k: Kernels = undefined;
-        k.module = try module_.Module.load(d, kernels.fn_int4);
-        errdefer k.module.unload();
+        k.module = module;
+        errdefer k.module.unload(); // ownership passes first: every later error unloads it once
+        const limits = try activeLimits(d);
+        const sms = limits.sms;
         for (symbols, 0..) |row, i| for (row, 0..) |cols, j| for (cols, 0..) |s, q| {
             k.fns[i][j][q] = try k.module.function(s);
-            k.blocks[i][j][q] = @as(usize, @max(1, try k.fns[i][j][q].occupancy(warps * 32, 0))) * sms;
+            k.blocks[i][j][q] = residentBlocks(try k.fns[i][j][q].occupancy(warps * 32, 0), sms);
         };
         for (0..2) |o| {
             const sm = promptSmem(prompt_stages[o]);
             k.pdown[o] = try k.module.function(prompt_symbols[o]);
             try k.pdown[o].allowDynamicShared(sm);
-            k.pdown_blocks[o] = @as(usize, @max(1, try k.pdown[o].occupancy(prompt_threads, sm))) * sms;
+            k.pdown_blocks[o] = residentBlocks(try k.pdown[o].occupancy(prompt_threads, sm), sms);
         }
         const sm_gu = promptGuSmem(prompt_gu);
         k.pgu_fn = try k.module.function(prompt_gu_symbol);
         const static: usize = @intCast(try k.pgu_fn.attribute(.shared_size_bytes));
-        k.pgu_ready = promptGuFits(static, @intCast(optin_c));
+        k.pgu_ready = promptGuFits(static, limits.optin);
         k.pgu_blocks = 0;
         if (k.pgu_ready) {
             try k.pgu_fn.allowDynamicShared(sm_gu);
-            k.pgu_blocks = @as(usize, @max(1, try k.pgu_fn.occupancy(@intCast(prompt_gu.wr * prompt_gu.wc * 32), sm_gu))) * sms;
+            k.pgu_blocks = residentBlocks(try k.pgu_fn.occupancy(@intCast(prompt_gu.wr * prompt_gu.wc * 32), sm_gu), sms);
         }
         std.log.info("int4 kernels: prompt gate/up {s}, prompt down {d} blocks", .{ if (k.pgu_ready) "a block a 64-row item" else "not taken", k.pdown_blocks[0] });
         return k;
