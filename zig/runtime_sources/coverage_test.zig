@@ -27,18 +27,52 @@ const Checker = struct {
     sets: []const inventory.Set,
     failures: usize = 0,
 
-    fn requiredOptions(path: []const u8) ?@import("metal").CompileOptions {
-        if (std.mem.eql(u8, path, "h3_image_encoder_kernels.source")) {
-            return .{ .language = @import("metal").mlx().language, .math_functions = .precise };
-        }
-        return null;
+    const OptionRule = enum { mlx, precise, mlx_or_precise };
+    const precise_exports = [_][]const u8{
+        "h3_image_encoder_kernels.source",
+        "inkling2_metal.inkling2_dflash2",
+        "kernel_sources.core_affine_embed",
+        "kernel_sources.core_shared_attention",
+        "kernel_sources.flint_glue",
+        "kernel_sources.glm_draft_attention",
+        "kernel_sources.llama_glue",
+        "kernel_sources.minimax_m3_dflash2",
+        "kernel_sources.minimax_m3_glue",
+        "kernel_sources.qwen3_heads",
+        "kernel_sources.ricursive_dflash2",
+        "kernel_sources.ricursive_fp4",
+        "kernel_sources.ricursive_glue",
+        "kernel_sources.spark25_glue",
+        "kernel_sources.step5_attend_nax",
+        "kernel_sources.step5_glue",
+        "kernel_sources.step5_sparse",
+    };
+    const dual_exports = [_][]const u8{
+        "kernel_sources.core_moe_route",
+        "kernel_sources.minimax_m3_dspark",
+        "kernel_sources.nax",
+    };
+
+    fn requiredOptions(path: []const u8) OptionRule {
+        for (precise_exports) |candidate| if (std.mem.eql(u8, path, candidate)) return .precise;
+        for (dual_exports) |candidate| if (std.mem.eql(u8, path, candidate)) return .mlx_or_precise;
+        return .mlx;
+    }
+
+    fn optionsMatch(rule: OptionRule, actual: @import("metal").CompileOptions) bool {
+        const mlx = @import("metal").mlx();
+        if (std.meta.eql(actual, mlx)) return rule != .precise;
+        if (rule == .mlx) return false;
+        var precise = mlx;
+        precise.math_functions = .precise;
+        return std.meta.eql(actual, precise);
     }
 
     fn registered(self: *const Checker, path: []const u8, text: []const u8) bool {
-        const required = requiredOptions(path);
+        const rule = requiredOptions(path);
         for (self.sets) |set| for (set.origins.items) |origin| {
             if (!std.mem.eql(u8, origin.text, text)) continue;
-            if (required == null or std.meta.eql(origin.options, required.?)) return true;
+            if (optionsMatch(rule, origin.options)) return true;
         };
         return false;
     }
@@ -176,5 +210,34 @@ test "Metal runtime source coverage: controls reject an unregistered near-duplic
     try set.add("fixture", "base", base, @import("metal").mlx());
     var checker = Checker{ .sets = &.{set} };
     checker.source("fixture.near_duplicate", candidate);
+    try std.testing.expectEqual(@as(usize, 1), checker.failures);
+}
+
+test "Metal runtime source coverage: controls reject wrong compiler options in both directions" {
+    const mtl = @import("metal");
+    const ling = @import("../kernels/metal/ling/sources.zig");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var precise = mtl.mlx();
+    precise.math_functions = .precise;
+    var set = inventory.Set{ .a = arena.allocator(), .units = false, .generation = 13 };
+    try set.add("fixture", "mlx-only", ling.route, precise);
+    try set.add("fixture", "precise-only", sources.qwen3_heads, mtl.mlx());
+    var checker = Checker{ .sets = &.{set} };
+    checker.source("ling_sources.route", ling.route);
+    try std.testing.expectEqual(@as(usize, 1), checker.failures);
+    checker.source("kernel_sources.qwen3_heads", sources.qwen3_heads);
+    try std.testing.expectEqual(@as(usize, 2), checker.failures);
+}
+
+test "Metal runtime source coverage: controls reject an altered prefix" {
+    const original = "#define TF_RUNTIME_PROBE 1\nkernel void registered() {}\n";
+    const altered = "#define TF_RUNTIME_PROBE 0\nkernel void registered() {}\n";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var set = inventory.Set{ .a = arena.allocator(), .units = false, .generation = 13 };
+    try set.add("fixture", "base", original, @import("metal").mlx());
+    var checker = Checker{ .sets = &.{set} };
+    checker.source("fixture.prefix", altered);
     try std.testing.expectEqual(@as(usize, 1), checker.failures);
 }
