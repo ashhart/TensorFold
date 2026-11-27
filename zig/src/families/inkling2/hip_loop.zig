@@ -1,6 +1,7 @@
 //! Inkling 2's loop kernels on HIP (zig/kernels/hip/inkling2/loop.hip): their widths, shapes, checks and launches.
 const std = @import("std");
 const hip = @import("hip");
+const config = @import("config.zig");
 
 /// The hidden widths loop.hip is built at: Inkling 2 Mini's 2,304 and tiny-inkling2-mini's 256.
 pub const widths = [_]u32{ 2304, 256 };
@@ -15,6 +16,12 @@ pub const Width = enum(u1) {
 
     pub fn hidden(w: Width) u32 {
         return widths[@backingInt(w)];
+    }
+
+    /// The width built at `h`, or null.
+    pub fn of(h: u32) ?Width {
+        for (widths, 0..) |x, i| if (x == h) return @fromBackingInt(@intCast(i));
+        return null;
     }
 };
 
@@ -51,6 +58,23 @@ pub const Geometry = struct {
         return g.width.hidden();
     }
 };
+
+/// A checkpoint's loop geometry from its parsed text config, refusing by name, with `why` set, what the kernels lack.
+pub fn geometry(t: *const config.Text, why: *config.Why) error{ Inkling2LoopRequired, UnsupportedLoopHidden, UnsupportedLoopGateRank }!Geometry {
+    const lp = t.loop orelse {
+        why.set("the HIP loop kernels need text_config.loop_config, which this checkpoint lacks", .{});
+        return error.Inkling2LoopRequired;
+    };
+    const w = Width.of(t.hidden) orelse {
+        why.set("hidden_size {d} has no HIP loop kernels: loop.hip is built at hidden {d} and {d} only", .{ t.hidden, widths[0], widths[1] });
+        return error.UnsupportedLoopHidden;
+    };
+    if (lp.gate_rank != rank) {
+        why.set("loop_config gate_rank {d} is not the HIP loop kernels' fixed rank {d}", .{ lp.gate_rank, rank });
+        return error.UnsupportedLoopGateRank;
+    }
+    return .{ .width = w, .core_layers = lp.core_end - lp.core_start, .eps = t.eps };
+}
 
 /// The probe's functions: the baselines' f32 tanh, exp and 1 / sqrt as the kernels run them, then the device's own.
 pub const Math = enum(u8) { tanh, exp, inv_sqrt, device_tanh, device_exp, device_rsqrt };

@@ -1,6 +1,7 @@
 //! Inkling 2's HIP loop launches without a GPU: the grids and blocks a mock runtime records, and what is refused.
 const std = @import("std");
 const hip = @import("hip");
+const config = @import("config.zig");
 const k = @import("hip_loop.zig");
 const t = std.testing;
 
@@ -188,4 +189,61 @@ test "inkling2 loop hip: messages refuse more core layers than the geometry has:
     const c: k.MessageCall = .{ .bank0 = 0x1000, .bank1 = 0x2000, .qm = 0x3000, .kv = 0x4000, .out = 0x5000, .rows = 1, .count = tiny.core_layers + 1 };
     try t.expectError(E, k.messages(&kern, tiny, s, c));
     try t.expectEqual(@as(usize, 0), Mock.count);
+}
+
+/// Inkling 2 Mini's parsed text config, and the reason buffer a refusal fills.
+fn miniText() !config.Text {
+    var why: config.Why = .{};
+    return (try config.parse(t.allocator, @embedFile("fixtures/mini_config.json"), &why)).text;
+}
+
+test "inkling2 loop hip: Mini's config gives the 2,304 kernels, its 12 core layers and its rms_norm_eps" {
+    const text = try miniText();
+    var why: config.Why = .{};
+    const g = try k.geometry(&text, &why);
+    try t.expectEqual(k.Width.w2304, g.width);
+    try t.expectEqual(@as(u32, 12), g.core_layers);
+    try t.expectEqual(k.eps, g.eps);
+    try t.expectEqual(mini, g);
+}
+
+test "inkling2 loop hip: a config at hidden 256 with core layers 6 to 12 gives the 256 kernels, 6 core layers and its eps" {
+    var text = try miniText();
+    text.hidden = 256;
+    text.loop.?.core_end = 12;
+    text.eps = 1e-5;
+    var why: config.Why = .{};
+    const g = try k.geometry(&text, &why);
+    try t.expectEqual(k.Width.w256, g.width);
+    try t.expectEqual(@as(u32, 6), g.core_layers);
+    try t.expectEqual(@as(f32, 1e-5), g.eps);
+}
+
+test "inkling2 loop hip: every other hidden width is refused by name, naming it and the 2304 and 256 built" {
+    var text = try miniText();
+    for ([_]u32{ 512, 2048, 4096, 288, 32 }) |hidden| {
+        text.hidden = hidden;
+        var why: config.Why = .{};
+        try t.expectError(error.UnsupportedLoopHidden, k.geometry(&text, &why));
+        var want: [32]u8 = undefined;
+        try t.expect(std.mem.indexOf(u8, why.text(), try std.fmt.bufPrint(&want, "hidden_size {d} ", .{hidden})) != null);
+        try t.expect(std.mem.indexOf(u8, why.text(), "2304 and 256") != null);
+    }
+}
+
+test "inkling2 loop hip: a gate rank other than the kernels' 64 is refused by name, naming both" {
+    var text = try miniText();
+    text.loop.?.gate_rank = 32;
+    var why: config.Why = .{};
+    try t.expectError(error.UnsupportedLoopGateRank, k.geometry(&text, &why));
+    try t.expect(std.mem.indexOf(u8, why.text(), "gate_rank 32") != null);
+    try t.expect(std.mem.indexOf(u8, why.text(), "64") != null);
+}
+
+test "inkling2 loop hip: a checkpoint without a loop (Inkling 2 Small) is refused by name" {
+    var why: config.Why = .{};
+    const small = (try config.parse(t.allocator, @embedFile("fixtures/config.json"), &why)).text;
+    try t.expectEqual(@as(?config.Loop, null), small.loop);
+    try t.expectError(error.Inkling2LoopRequired, k.geometry(&small, &why));
+    try t.expect(std.mem.indexOf(u8, why.text(), "loop_config") != null);
 }
