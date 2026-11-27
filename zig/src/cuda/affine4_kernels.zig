@@ -43,6 +43,7 @@ pub const Affine4Kernels = struct {
     seg_fn: Function, // the split form over up to four projections of one input
     many_fn: Function, // GB10 keeps each member's K slices in its CTA
     prefill_fn: Function,
+    prefill2_fn: ?Function = null,
     prefill22_fn: Function, // the prompt tile on 2x2 warps and two stages (`half_prompt` picks it)
     prefill_many_fn: Function, // GB10: one prompt grid over projections sharing the bf16 input
     half_prompt: bool = false, // prompts on prefill22_fn: its four warps a block and two stages are quicker on an RTX 5090
@@ -73,6 +74,7 @@ pub const Affine4Kernels = struct {
         a.verify64_fn = try group_mod.function(symbols.verify64);
         a.verify128_fn = try group_mod.function(symbols.verify128);
         a.prefill_fn = try prefill_mod.function(symbols.prefill);
+        a.prefill2_fn = null;
         a.prefill22_fn = try prefill_mod.function(symbols.prefill22);
         a.prefill_many_fn = try prefill_mod.function(symbols.prefill_many);
         a.half_prompt = false;
@@ -102,6 +104,20 @@ pub const Affine4Kernels = struct {
 
     pub fn deinit(a: *Affine4Kernels) void {
         if (a.split) |*sp| sp.deinit();
+    }
+
+    /// Configure only the opt-in function; a carve-out of 64 KiB cannot hold two 42 KiB blocks.
+    pub fn enablePromptStages2(a: *Affine4Kernels, mod: Module) !void {
+        if (!a.pdl) return error.PromptStages2RequiresGb10;
+        const f = try mod.function(symbols.prefill2);
+        try f.allowDynamicShared(linear.prefill2_smem);
+        try f.setAttribute(.preferred_shared_memory_carveout, 100);
+        const blocks = try f.occupancy(256, linear.prefill2_smem);
+        if (blocks < 2) {
+            std.log.warn("two-stage Qwen prompt: only {d} CTA/SM after 100% shared carve-out; regs={d}, static={d}, dynamic={d}", .{ blocks, try f.attribute(.num_regs), try f.attribute(.shared_size_bytes), linear.prefill2_smem });
+            return error.PromptStages2Occupancy;
+        }
+        a.prefill2_fn = f;
     }
 
     /// qmm_fast.tile: MLX words (n, k/8), scales and biases (n, k/64) on the device into q's tiles (Affine4.layout).
@@ -346,15 +362,27 @@ pub const Affine4Kernels = struct {
 
     /// qmm.prefill_matmul (tile 0): weights rounded once to bf16, one fp32 chain over K; bf16 out.
     pub fn prompt(a: *const Affine4Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize) !void {
-        return a.promptTile(s, x, q, out, rows, a.half_prompt);
+        const stages2 = a.prefill2_fn != null and promptStages2Shape(q.n, q.k, rows) and !a.half_prompt;
+        return a.promptTile(s, x, q, out, rows, a.half_prompt, stages2);
     }
 
     /// The same arithmetic through qmm_prefill's 2x2-warp, two-stage tile.
     pub fn promptHalf(a: *const Affine4Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize) !void {
-        return a.promptTile(s, x, q, out, rows, true);
+        return a.promptTile(s, x, q, out, rows, true, false);
     }
 
-    fn promptTile(a: *const Affine4Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize, half: bool) !void {
+    /// Explicit ordinary reference, independent of this object's opt-in configuration.
+    pub fn promptThreeStage(a: *const Affine4Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize) !void {
+        return a.promptTile(s, x, q, out, rows, false, false);
+    }
+
+    /// Explicit two-stage tile, including small rows for contract gates; normal dispatch still requires over 16 rows.
+    pub fn promptStages2(a: *const Affine4Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize) !void {
+        if (a.prefill2_fn == null or rows == 0 or rows > 8192 or q.n != 5120 or (q.k != 17408 and q.k != 6144)) return error.UnsupportedPromptStages2;
+        return a.promptTile(s, x, q, out, rows, false, true);
+    }
+
+    fn promptTile(a: *const Affine4Kernels, s: Stream, x: u64, q: Affine4, out: u64, rows: usize, half: bool, stages2: bool) !void {
         const rows_t = (rows + 127) / 128;
         const band = (12 << 20) / (128 * q.k * 2);
         const group = @max(1, @min(rows_t, band));
@@ -362,9 +390,9 @@ pub const Affine4Kernels = struct {
         for ([_]u64{ x, q.w, q.s, q.b, out }) |v| g.add(v);
         for ([_]usize{ rows, q.n, q.k, q.npad, q.k, group }) |v| g.add(int(v));
         const grid = rows_t * ((q.n + 127) / 128);
-        const f = if (half) a.prefill22_fn else a.prefill_fn;
+        const f = if (half) a.prefill22_fn else if (stages2) a.prefill2_fn.? else a.prefill_fn;
         const threads: u32 = if (half) 128 else 256;
-        const smem: u32 = if (half) linear.prefill22_smem else prefill_smem;
+        const smem: u32 = if (half) linear.prefill22_smem else if (stages2) linear.prefill2_smem else prefill_smem;
         try launch_.launch(f, .{ .grid = .{ .x = u(grid), .y = 1, .z = 1 }, .block = .{ .x = threads }, .shared = smem }, s, &g);
     }
 
@@ -402,6 +430,11 @@ pub const Affine4Kernels = struct {
 
 test {
     _ = @import("gemv_many_host_test.zig");
+}
+
+/// Only the two ordinary Qwen prompt projections from the GB10 profile use this opt-in tile.
+pub fn promptStages2Shape(n: usize, k: usize, rows: usize) bool {
+    return rows > 16 and rows <= 8192 and n == 5120 and (k == 17408 or k == 6144);
 }
 
 /// The measured device envelope; other SM120 cards keep the existing tile.

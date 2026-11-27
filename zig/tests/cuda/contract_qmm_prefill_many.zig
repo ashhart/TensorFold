@@ -9,6 +9,7 @@ const c = core.contract.spec;
 const g = core.contract.gates;
 const Affine = core.contract.affine.Affine;
 const qlinear = cuda.qlinear;
+pub const stages2_control_shift: u64 = 4;
 
 fn noSums(_: c.Shape) usize {
     return 0;
@@ -298,6 +299,27 @@ pub const Product = struct {
 
     pub fn runHalf(self: *Product) !void {
         return self.separateRun(true, true);
+    }
+
+    pub fn runStages2(self: *Product) !void {
+        try self.affine.promptStages2(self.rig.s, self.x, self.qs[0], self.outs[0], self.rows);
+        try self.rig.s.synchronize();
+    }
+
+    pub fn runStages2Shifted(self: *Product) !void {
+        try self.affine.promptStages2(self.rig.s, self.x, self.qs[0], self.outs[0] + stages2_control_shift, self.rows);
+        try self.rig.s.synchronize();
+    }
+
+    pub fn replacedThreeStage(self: *Product) ![]const u8 {
+        try self.affine.promptThreeStage(self.rig.s, self.x, self.qs[0], self.base, self.rows);
+        return self.rig.bytes(self.base, self.bytes);
+    }
+
+    pub fn checkStages2(self: *Product, _: c.Gate) !?[]const u8 {
+        const got = try self.rig.gpu.gpa.dupe(u8, try self.rig.outputBytes());
+        defer self.rig.gpu.gpa.free(got);
+        return if (std.mem.eql(u8, got, try self.replacedThreeStage())) null else "two-stage output differs from three-stage";
     }
 
     pub fn runHalfSwapped(self: *Product) !void {

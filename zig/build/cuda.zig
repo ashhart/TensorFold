@@ -145,6 +145,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("moss_image_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda_kernels.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
     runner.addImport("prompt_pages", b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_prompt_pages.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = mods.api }, .{ .name = "core", .module = mods.core } } })); // TF_KV_SHARE's store, for the pages checks
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
+    @import("qwen_prompt_stages2.zig").consumers(b, runner);
     b.installArtifact(runner_exe);
     @import("muse.zig").tool(b, @import("muse.zig").module(b, target, optimize, cuda, mods.core, mods.lanes), strip); // tf-muse: rank 1 and checks
     // tf-tp-watch-check: the ranks' lines with no GPU or NCCL; a failing or dying rank stops every rank
@@ -260,6 +261,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-cuda-tfq3-host", "CUDA TFQ3 resource ownership and format refusals without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"CUDA TFQ3:"} })).step);
     const many = b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"qmmf many:"} }));
     b.step("test-qmmf-many-host", "Grouped NVFP4 tile ownership and compatibility without a GPU").dependOn(&many.step);
+    @import("qwen_prompt_stages2.zig").host(b, cuda);
     step.dependOn(&many.step);
     const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
