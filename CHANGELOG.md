@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5 on CUDA: SenseNova-Loop-9B (`sensenova_loop`) serves in BF16, text only, on the looped schedule (physical layers 0-3, 4-27 twice, 28-31) with its mHC stream routing, one copy of the weights and a cache slot per execution; drafts, vision, pipeline stages and tensor parallel are refused for it, and other Qwen checkpoints run as before (#3723, refs #3717). Thanks to @Maxrio9.
+
 - Metal: `serve --execution-witness` attests the Qwen3.8-27B-class engine for the 9B and 27B MLX 4-bit checkpoints, hashing the Metal libraries it builds at load; replies are unchanged and nothing changes with the flag off. Thanks to @kotevcode (#5184).
 
 - Server: `--confidential` refuses at startup every flag and variable that keeps or sends request content, and turns core dumps off; this is the startup slice, with stored Responses to follow (#5180, refs #5176). Thanks to @kotevcode.
