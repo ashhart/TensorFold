@@ -8,18 +8,15 @@ const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const img = @import("images.zig");
-const dspark = @import("dspark.zig");
-const dspark_state = @import("dspark_state.zig");
+const drafter_snap = @import("drafter_snap.zig");
 const cfg = @import("../config.zig");
 const draws = @import("draw.zig");
 const flight = @import("flight.zig");
 const sample = @import("sample.zig");
 const be = lanes.backend;
 
-const SavedSnap = struct {
-    target: snapshot.Snap,
-    dspark: ?dspark_state.Snap = null,
-};
+pub const DrafterHandle = drafter_snap.Drafter;
+pub const SavedSnap = drafter_snap.Saved;
 
 pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null, gpu_tokens: bool = false };
 const shared_widths = [_]usize{ 24, 32, 48, 64 };
@@ -54,7 +51,7 @@ pub const Metal = struct {
     shared: [shared_widths.len]lanes.config.Cost = undefined,
     shared_timed: usize = 0,
     tap_gen: u64 = 0,
-    drafter: ?*dspark.Drafter = null,
+    drafter: ?DrafterHandle = null,
     verify_gen: u64 = 0,
     pub var fail_first_draw_for_test: if (builtin.is_test) bool else void = if (builtin.is_test) false else {};
 
@@ -253,8 +250,8 @@ pub const Metal = struct {
         try self.feed(cache, ids[cache.len..], stream, &pictures);
     }
 
-    fn restoreSnap(self: *Metal, cache: *st.Cache, stream: *lanes.Stream, snap: *const SavedSnap) !void {
-        if (self.drafter) |d| try d.restoreSnap(stream, if (snap.dspark) |*ds| ds else null, snap.target.at);
+    pub fn restoreSnap(self: *Metal, cache: *st.Cache, stream: *lanes.Stream, snap: *const SavedSnap) !void {
+        if (self.drafter) |d| try d.restoreSnap(stream, if (snap.drafter) |*dr| dr else null, snap.target.at);
         try snapshot.restore(cache, self.model.queue, &snap.target);
     }
 
@@ -548,7 +545,7 @@ pub const Metal = struct {
 
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
         const self = cast(ptr);
-        return snapshot.bytes(at) + if (self.drafter != null) dspark_state.Snap.bytes(at) else 0;
+        return snapshot.bytes(at) + if (self.drafter) |d| d.snapBytes(at) else 0;
     }
 
     fn syncQueue(self: *Metal) !void {
@@ -578,7 +575,7 @@ pub const Metal = struct {
         snap.* = .{ .target = try snapshot.save(self.model.device, self.model.queue, cache) };
         errdefer snap.target.free();
         if (self.drafter) |d| {
-            snap.dspark = try d.saveSnap(stream, at, cache.tap, self.tap_gen);
+            snap.drafter = try d.saveSnap(stream, at, cache.tap, self.tap_gen);
         }
         return snap;
     }
@@ -589,8 +586,7 @@ pub const Metal = struct {
 
     pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
         const snap: *SavedSnap = @ptrCast(@alignCast(saved));
-        if (snap.dspark) |*ds| ds.free();
-        snap.target.free();
+        snap.free();
         cast(ptr).gpa.destroy(snap);
     }
 };

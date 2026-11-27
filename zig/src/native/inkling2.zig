@@ -10,7 +10,9 @@ const dspark = @import("../families/inkling2/metal/dspark.zig");
 const admit = @import("../families/inkling2/metal/admit.zig");
 const vision = @import("../families/inkling2/metal/vision.zig");
 const dflash2 = @import("../families/inkling2/metal/dflash2.zig");
+const dflash2_state = @import("../families/inkling2/metal/dflash2_state.zig");
 const dflash2_weights = @import("../families/inkling2/metal/dflash2_weights.zig");
+const snapshot = @import("../families/inkling2/metal/snapshot.zig");
 
 const AttachedDrafter = union(enum) {
     dspark: *dspark.Drafter,
@@ -255,9 +257,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         switch (d) {
             .dspark => |ds| {
                 try ds.warm(@intCast(streams));
-                h.metal.drafter = ds;
+                h.metal.drafter = .{ .dspark = ds };
             },
-            .dflash2 => {},
+            .dflash2 => |df| h.metal.drafter = .{ .dflash2 = df },
         }
         h.drafted = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.iface());
         h.drafted.?.first_rows = true;
@@ -272,7 +274,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = st.prompt_rows, .decode_share = o.decode_share, .structures = true, .logprobs = true, .draft_sources = .{ .drafter = if (drafter) |d| .{ .kind = d.kind(), .name = o.drafter_name orelse drafter_dir.? } else null } });
     if (o.vision) |v| h.host.info_.vision = .{ .ctx = h, .prepare = Host.prepare, .image_token = model.config.image_token, .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = vision.problem };
     h.cache = null;
-    h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
+    h.cache_cap = promptCacheCap(o.prompt_cache_gib, budget);
     if (h.cache_cap > 0) {
         const M = backend.Metal;
         const rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = true, .grid = st.prompt_rows, .min_prompt = 0 };
@@ -319,6 +321,10 @@ fn longest(bytes: u64, most: u32, streams: u64, draft_fixed: u64, draft_token: u
         if (contextStateBytes(mid, streams, draft_fixed, draft_token, draft_shared_token) <= bytes) lo = mid else hi = mid - 1;
     }
     return lo;
+}
+
+fn promptCacheCap(prompt_cache_gib: ?f64, budget: u64) u64 {
+    return if (prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
 }
 
 fn fitCache(ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void {
@@ -465,4 +471,57 @@ test "Inkling native longest context accounts target, streams and shared draft s
     // 36 GiB of state hold the model's whole window for eight drafted streams.
     const shared = dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0);
     try std.testing.expectEqual(@as(usize, 262144), longest(36 << 30, 262144, 8, fixed, token, shared));
+}
+
+test "Inkling native DFlash2 reservation, prompt_cache_gib bounds, and fitCache eviction" {
+    const df: AttachedDrafter = .{ .dflash2 = undefined };
+    try std.testing.expectEqual(dflash2.streamBytes(), df.streamFixed());
+    try std.testing.expectEqual(@as(u64, 0), df.streamToken());
+    try std.testing.expectEqual(@as(u64, 0), df.sharedToken());
+    try std.testing.expectEqual(4 * dflash2.streamBytes(), df.reservedBytes(4, 16384));
+
+    const budget = st.cacheBytes(128) + 2 * df.streamFixed();
+    try std.testing.expectEqual(@as(usize, 128), longest(budget, 256, 2, df.streamFixed(), df.streamToken(), df.sharedToken()));
+    try std.testing.expectEqual(@as(u64, 0), promptCacheCap(0, budget));
+    try std.testing.expectEqual(@as(u64, 2 << 30), promptCacheCap(2.0, budget));
+    try std.testing.expectEqual(budget, promptCacheCap(null, budget));
+
+    const SnapMock = struct {
+        dropped: usize = 0,
+        fn bytes(_: *anyopaque, at: u32) u64 {
+            return snapshot.bytes(at) + dflash2_state.Snap.bytes(at);
+        }
+        fn save(ptr: *anyopaque, _: ?*anyopaque, _: u32) anyerror!*anyopaque {
+            return ptr;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {}
+        fn drop(ptr: *anyopaque, _: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.dropped += 1;
+        }
+    };
+    var mock: SnapMock = .{};
+    const snap_128 = SnapMock.bytes(&mock, 128);
+    const snap_256 = SnapMock.bytes(&mock, 256);
+    var host: Host = undefined;
+    host.cache_cap = snap_128 + snap_256;
+    const rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = true, .grid = st.prompt_rows, .min_prompt = 0 };
+    host.cache = api.prompt_cache.Store.init(std.testing.allocator, .{
+        .ptr = &mock,
+        .vtable = &.{ .bytes = SnapMock.bytes, .save = SnapMock.save, .restore = SnapMock.restore, .drop = SnapMock.drop },
+    }, rules, host.cache_cap);
+    defer host.cache.?.deinit();
+
+    var p1: [192]u32 = undefined;
+    var p2: [320]u32 = undefined;
+    for (&p1, 0..) |*t, i| t.* = @intCast(i + 1);
+    for (&p2, 0..) |*t, i| t.* = @intCast(i + 1000);
+    try std.testing.expect(host.cache.?.keep(&p1, 128, null, &.{}, &.{}));
+    try std.testing.expect(host.cache.?.keep(&p2, 256, null, &.{}, &.{}));
+    try std.testing.expectEqual(snap_128 + snap_256, host.cache.?.held);
+
+    // Tightening available budget triggers fitCache eviction and calls snapDrop cleanly.
+    fitCache(&host, snap_256, null, &.{});
+    try std.testing.expectEqual(@as(usize, 1), mock.dropped);
+    try std.testing.expect(host.cache.?.held <= snap_256);
 }
