@@ -130,7 +130,7 @@ pub const Engine = struct {
             return err;
         };
         var c = try @import("config_dsa.zig").of(gpa, text);
-        if (is_tfq3) c.head_unit = 128;
+        if (@import("cuda_tfq3.zig").hasNonMoe(gpa, io, checkpoint)) c.head_unit = 128;
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);
@@ -181,6 +181,9 @@ pub const Engine = struct {
         const tiler: tile.Tiler = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
         e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, tile.Tiler.apply);
         errdefer e.w.deinit();
+        if (e.w.mtp) |*mtp| if (mtp.draft == .bf16 and e.w.head == .bf16) {
+            mtp.draft.bf16.w = e.w.head.bf16;
+        };
         errdefer {
             gpa.free(e.packs.ptrs);
             gpa.free(e.packs.bits);
