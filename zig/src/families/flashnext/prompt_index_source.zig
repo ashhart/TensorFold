@@ -1,6 +1,6 @@
 //! qmmw_nax.metal's expert gathers reading scales and biases through scale_index's index and table.
 const std = @import("std");
-const edit = @import("geometry_source.zig");
+const edit = @import("fsr_source.zig");
 
 /// Each read of the two K loops and each gather's row pointers: the scale row is the index row, the bias the table.
 const reads = [_][2][]const u8{
