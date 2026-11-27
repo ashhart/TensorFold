@@ -36,7 +36,7 @@ pub fn ask(ctx: *anyopaque, a: *api.ImprintAsk) bool {
 /// Every queued ask answered (between rounds, on the engine thread).
 pub fn answer(h: *LaneHost) void {
     if (h.cache) |store| if (store.disk) |r| {
-        if (!r.sync_writes) _ = rows.write.step(r);
+        if (!r.sync_writes) _ = rows.write.stepBudget(r, rows.write.slice.round_slice_ns);
     };
     h.lock();
     const list = h.disk.take(h.gpa);
@@ -74,9 +74,9 @@ pub fn ready(h: *LaneHost) bool {
     return !r.sync_writes or h.disk.quiet(h.admissions, std.Io.Clock.awake.now(h.io).toNanoseconds());
 }
 
-/// Stage one queued image or advance the synchronous writer, outside the lock.
+/// Gather one idle slice of the active or newest queued save, or advance the synchronous writer, outside the lock.
 pub fn step(h: *LaneHost) void {
-    _ = rows.write.step(h.cache.?.disk.?);
+    _ = rows.write.stepBudget(h.cache.?.disk.?, rows.write.slice.idle_slice_ns);
 }
 
 /// The engine loop's idle turn (under the lock): when `ready`, the lock let go and one block written; true if so.

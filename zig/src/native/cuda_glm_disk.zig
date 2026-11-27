@@ -189,7 +189,8 @@ pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, r
     const id = try cuda_disk.identityOf(a, io, ctx, o.dir, kernels, facts.items, p.hash, .{ .family = o.model_type, .backend = "cuda" });
     const r = try open(store, o, root, id, img.longest(sh));
     r.prefill_rate = p.rate;
-    std.log.info("glm: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB; {d} ranks' parts; a save stages up to {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20, prefixes.len, r.staging_bytes >> 20 });
+    var plan_buf: [128]u8 = undefined;
+    std.log.info("glm: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB; {d} ranks' parts; {s})", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20, prefixes.len, rows.write.formatHostPlan(r, &plan_buf) });
 }
 
 /// The store for `id` through the shared attach, whose staging floor takes a `longest`-token state whole (rows.attach).
@@ -252,12 +253,13 @@ test "CUDA disk open: GLM's store takes the shared attach's staging floor, so a 
         defer store.deinit(); // the store before its disk, as the rows fixtures close them
         try std.testing.expectEqual(r, store.disk.?);
         try std.testing.expectEqual(rows.Spill.off, r.spill);
-        const long = try rows.write.coldCharge(r, 124_928); // the conversation the default skipped (StagingFull)
+        const long = try rows.write.coldCharge(r, 124_928); // a cold state larger than the sliced cap
         try std.testing.expect(long > default);
+        try std.testing.expectEqual(default, r.staging_bytes); // sliced cap stays bounded
         if (budget > long) {
-            try std.testing.expect(r.staging_bytes >= long); // the permit a save's stage step asks `fits` of
-            try std.testing.expectEqual(try rows.write.coldCharge(r, window), r.staging_bytes); // the longest, whole
-        } else try std.testing.expectEqual(default, r.staging_bytes);
+            try std.testing.expect(rows.write.slice.evictionAllowance(r) >= long);
+            try std.testing.expectEqual(try rows.write.coldCharge(r, window), rows.write.slice.evictionAllowance(r));
+        } else try std.testing.expectEqual(default, rows.write.slice.evictionAllowance(r));
     }
 }
 
