@@ -17,8 +17,8 @@ const max_queries = 3;
 const max_pages = 3;
 const small_context_window = 8192;
 
-const small_context_budget = .{ .queries = 1, .pages = 1 };
-const full_context_budget = .{ .queries = max_queries, .pages = max_pages };
+const small_context_budget: PresearchBudget = .{ .queries = 1, .pages = 1 };
+const full_context_budget: PresearchBudget = .{ .queries = max_queries, .pages = max_pages };
 
 const small_context_planner = "Write one concise web search query for this task, aimed at the most authoritative official source. Include the product and version when known. Reply with the query only.";
 const full_context_planner = "Write up to three concise, distinct web search queries for this task. Prioritize authoritative official sources; include the product and version when known. Put one query on each line and reply with queries only.";
