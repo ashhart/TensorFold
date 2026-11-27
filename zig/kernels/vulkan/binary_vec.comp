@@ -54,13 +54,42 @@ uint bf16_add_bits(uint ha, uint hb) {
     }
     uint siga = (ea == 0u) ? (ha & 0x7fu) : (0x80u | (ha & 0x7fu));
     uint sigb = (eb == 0u) ? (hb & 0x7fu) : (0x80u | (hb & 0x7fu));
+    // Aligned fixed point, units of 2^(smax-K-F-149) with F fraction bits.
+    // The 2^-149-absolute representation this replaces wrapped to zero for
+    // exponents >= 9 (siga << (ea+15) exceeds u32). The larger operand's
+    // significand sits at bit K+F; the smaller operand's sub-grid bits are a
+    // sticky flag; the widest signed sum, 2 * 0xFF << (K+F), stays inside int32.
+    const uint K = 14u;
+    const uint F = 8u;
     uint sha = (ea == 0u) ? 16u : (ea + 15u);
     uint shb = (eb == 0u) ? 16u : (eb + 15u);
-    int va = int(siga << sha);
-    int vb = int(sigb << shb);
-    if ((ha & 0x8000u) != 0u) va = -va;
-    if ((hb & 0x8000u) != 0u) vb = -vb;
-    int sum = va + vb;
+    uint bsig, ssig, d;
+    bool bneg, sneg;
+    if (sha >= shb) {
+        bsig = siga; ssig = sigb; d = sha - shb;
+        bneg = (ha & 0x8000u) != 0u; sneg = (hb & 0x8000u) != 0u;
+    } else {
+        bsig = sigb; ssig = siga; d = shb - sha;
+        bneg = (hb & 0x8000u) != 0u; sneg = (ha & 0x8000u) != 0u;
+    }
+    uint smax = max(sha, shb);
+    int vb = int(bsig << (K + F));
+    uint kept;
+    bool sticky = false;
+    if (d <= K + F) {
+        kept = ssig << (K + F - d);
+    } else if (d <= K + F + 7u) {
+        uint r = d - K - F;
+        kept = ssig >> r;
+        sticky = (ssig & ((1u << r) - 1u)) != 0u;
+    } else {
+        kept = 0u;
+        sticky = ssig != 0u;
+    }
+    // A truncated operand being subtracted borrows its residue: the floor is
+    // one finer unit lower and a residue always remains.
+    if (sticky && (bneg != sneg)) kept += 1u;
+    int sum = (bneg ? -vb : vb) + (sneg ? -int(kept) : int(kept));
     if (sum == 0) {
         // -0 + -0 -> -0; every other exact-zero sum is +0.
         return ((ha & hb) & 0x8000u) != 0u ? 0x80000000u : 0u;
@@ -68,15 +97,25 @@ uint bf16_add_bits(uint ha, uint hb) {
     uint sgn = (sum < 0) ? 0x80000000u : 0u;
     uint mag = uint(abs(sum));
     int p = findMSB(mag);
-    if (p < 23) {
-        // F32 subnormal: the micro-unit value IS the mantissa field.
-        return sgn | mag;
+    int efield = int(smax) - int(K + F) - 22 + p;
+    if (efield < 1) {
+        // F32 subnormal: mantissa counts 2^-149 units, i.e. mag scaled by
+        // 2^(smax-K-F). Above the grid is exact; below it needs
+        // round-half-even. keep == 0x800000 carries into the minimum-normal
+        // encoding, which is the same bit pattern.
+        int mscale = int(smax) - int(K + F);
+        if (mscale >= 0) return sgn | (mag << uint(mscale));
+        uint r = uint(-mscale);
+        uint keep = mag >> r;
+        uint rem = mag & ((1u << r) - 1u);
+        uint halfway = 1u << (r - 1u);
+        if (rem > halfway || (rem == halfway && (sticky || (keep & 1u) != 0u))) keep += 1u;
+        return sgn | keep;
     }
-    int efield = p - 22;
-    uint keep = mag >> uint(p - 23);
-    uint rem = mag & ((1u << uint(p - 23)) - 1u);
-    uint halfway = 1u << uint(p - 24);
-    if (rem > halfway || (rem == halfway && (keep & 1u) != 0u)) {
+    uint keep = (p >= 23) ? (mag >> uint(p - 23)) : (mag << uint(23 - p));
+    uint rem = (p >= 24) ? (mag & ((1u << uint(p - 23)) - 1u)) : 0u;
+    uint halfway = (p >= 24) ? (1u << uint(p - 24)) : 1u;
+    if (rem > halfway || (rem == halfway && (sticky || (keep & 1u) != 0u))) {
         keep += 1u;
         if (keep == (1u << 24u)) { keep >>= 1u; efield += 1; }
     }

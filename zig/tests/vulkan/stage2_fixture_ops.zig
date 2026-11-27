@@ -60,7 +60,7 @@ pub const AddCase = struct { name: []const u8, elems: usize, at: Offsets = .{}, 
 pub const add_cases = [_]AddCase{
     .{ .name = "random 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 } },
     .{ .name = "cancel 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .cancel },
-    .{ .name = "classes 20", .elems = 20, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .classes },
+    .{ .name = "classes 24", .elems = 24, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .classes },
 };
 
 /// Planted classes-case inputs; every pair is exercised (elems == len).
@@ -85,6 +85,10 @@ const class_pairs = [_][2]u16{
     .{ 0x4f00, 0xb080 }, // 2^31 - 2^-29, huge spread: f32 rounds to 2^31
     .{ 0x42f6, 0xc2f6 }, // ±123 -> +0
     .{ 0x3f00, 0xc000 }, // 0.5 + -2 -> -1.5 exact
+    .{ 0x0500, 0x0500 }, // 2^-117 doubled -> 0x0580; the old 2^-149 repr wrapped sig<<25 to zero
+    .{ 0x0400, 0x0480 }, // 2^-119 + 2^-118 -> 0x04c0; sig<<24 hit the old repr's sign bit
+    .{ 0x0980, 0x0980 }, // 2^-108 doubled -> 0x0a00; sig<<34 masked to <<2 in the old u32 repr
+    .{ 0x0680, 0x8680 }, // ±2^-114 cancel -> +0 through the aligned path
 };
 
 pub const Add = struct {

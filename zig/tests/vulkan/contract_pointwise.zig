@@ -41,7 +41,7 @@ pub const PreserveCase = stage2.AddCase;
 pub const preserve_cases = [_]PreserveCase{
     .{ .name = "random 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 } },
     .{ .name = "cancel 512", .elems = 512, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .cancel },
-    .{ .name = "classes 20", .elems = 20, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .classes },
+    .{ .name = "classes 24", .elems = 24, .at = .{ .a = 128, .b = 256, .out = 384 }, .fill = .classes },
 };
 
 // Preserve gate reuses stage 2's add fixture; allow_subnormal_flush false: a flushing device fails the subnormal rows.
