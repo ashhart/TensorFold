@@ -170,7 +170,7 @@ fn openObject(root: ?HANDLE, units: []const u16, flags: c.O, is_dir: *bool, file
     const exclusive = flags.CREAT and flags.EXCL;
     const disposition: u32 = if (exclusive) 2 else if (flags.CREAT and flags.TRUNC) 5 else if (flags.CREAT) 3 else if (flags.TRUNC) 4 else 1;
     var options: u32 = 0x20;
-    options |= if (flags.DIRECTORY) 1 else 0x40;
+    options |= if (flags.DIRECTORY) 1 else if (flags.CREAT) 0x40 else 0;
     // FILE_CREATE already refuses every existing name; reparse inspection is valid only on an open.
     if (flags.NOFOLLOW and !exclusive) options |= 0x0020_0000;
     if (flags.DIRECT) options |= 0x8;
