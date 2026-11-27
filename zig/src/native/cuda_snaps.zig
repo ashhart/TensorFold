@@ -78,6 +78,7 @@ pub fn Snaps(comptime F: type, comptime image: ?*const api.prompt_cache.rows.Ima
             .save = F.snap_save,
             .restore = F.snap_restore,
             .drop = F.snap_drop,
+            .reclaimable = if (@hasDecl(F, "snap_reclaimable")) F.snap_reclaimable else null,
             .rows = image,
             .charged = if (@hasDecl(F, "snap_charged")) F.snap_charged else null,
             .spare = if (@hasDecl(F, "snap_spare")) F.snap_spare else null,

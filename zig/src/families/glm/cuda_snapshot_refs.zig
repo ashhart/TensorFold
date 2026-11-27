@@ -19,6 +19,15 @@ pub fn give(e: anytype, ids: []u32) void {
     e.gpa.free(ids);
 }
 
+/// A borrowed snapshot cannot free its pages; otherwise its sole-held prefix page is immediately reclaimable.
+pub fn reclaimable(e: anytype, id: u64) bool {
+    if (!active(e) or e.share.rank != 0) return false;
+    const s = e.snaps.get(id) orelse return false;
+    if (s.borrows != 0 or s.retired) return false;
+    for (s.shared_ids) |page| if (e.pages.?.pool.holders(page) == 1) return true;
+    return false;
+}
+
 pub fn pin(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
     if (s.len == 0 or s.retired) return error.NoKeptState;
