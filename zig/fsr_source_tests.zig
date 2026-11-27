@@ -64,16 +64,92 @@ test "FSR source injectors preserve an intended reservation already on a declara
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "max_total_threads_per_threadgroup(512)"));
 }
 
-test "FSR scale-index composition keeps one reservation on each wide gather macro" {
+fn expectDeclaration(text: []const u8, name: []const u8, threads: ?usize) !void {
+    var marker_storage: [160]u8 = undefined;
+    const marker = std.fmt.bufPrint(&marker_storage, "[[kernel]] void {s}(", .{name}) catch unreachable;
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, marker));
+    const at = std.mem.indexOf(u8, text, marker).?;
+    const boundary = std.mem.lastIndexOfAny(u8, text[0..at], "{};");
+    const prefix = text[(if (boundary) |i| i + 1 else 0)..at];
+    try std.testing.expectEqual(@as(usize, if (threads == null) 0 else 1), std.mem.count(u8, prefix, "max_total_threads_per_threadgroup"));
+    if (threads) |count| {
+        var storage: [80]u8 = undefined;
+        const attribute = std.fmt.bufPrint(&storage, "[[max_total_threads_per_threadgroup({d})]]", .{count}) catch unreachable;
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prefix, attribute));
+    }
+}
+
+fn withAttribute(a: std.mem.Allocator, text: []const u8, name: []const u8, attribute: []const u8) ![]const u8 {
+    const marker = try std.fmt.allocPrint(a, "[[kernel]] void {s}(", .{name});
+    const replacement = try std.fmt.allocPrint(a, "{s} {s}", .{ attribute, marker });
+    return std.mem.replaceOwned(u8, a, text, marker, replacement);
+}
+
+test "FSR final qmmw assemblies reserve each changed declaration once for every width and composition" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const ks = @import("kernel_sources");
     const indexed = @import("src/families/flashnext/prompt_index_source.zig").patch;
     const slotted = @import("src/families/flashnext/fsr_prompt_source.zig").patch;
-    for ([_][]const u8{ ks.flashnext_qmmw, try slotted(a, ks.flashnext_qmmw, true) }) |input| {
-        const text = try indexed(a, input);
-        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "max_total_threads_per_threadgroup(128)"));
+    var assemblies: usize = 0;
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |group| for ([_]bool{ false, true }) |ssd| {
+        const body = if (ssd) try slotted(a, ks.flashnext_qmmw, true) else ks.flashnext_qmmw;
+        for ([_]bool{ false, true }) |use_index| {
+            const selected = if (use_index) try indexed(a, body) else body;
+            const width = try @import("src/core/qmmw_source.zig").source(a, selected, bits, group);
+            const final = try @import("src/core/attention_precision.zig").source(a, true, width, ks.nax, false);
+            const expected: ?usize = if (use_index or ssd) 128 else null;
+            try expectDeclaration(final, "tf_gather_qmmw_nax_##BM", expected);
+            try expectDeclaration(final, "tf_gather_guw_nax_##BM", expected);
+            assemblies += 1;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 72), assemblies);
+}
+
+test "FSR final XNew assemblies reserve each changed declaration once for every packing and SSD state" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const expert = try @import("src/families/flashnext/fsr_contract_source.zig").recorded("qa_expert_gateup_fd30a642315017a8.metal");
+    const declarations = [_]struct { name: []const u8, threads: usize }{
+        .{ .name = "fz_xgu", .threads = 128 }, .{ .name = "fz_xdown", .threads = 128 }, .{ .name = "fz_route", .threads = 512 },
+    };
+    var assemblies: usize = 0;
+    for ([_]bool{ false, true }) |packing| for ([_]bool{ false, true }) |ssd| {
+        const assembled = try @import("src/families/flashnext/replay_compile.zig").xnewSource(a, expert, packing, ssd);
+        for (declarations) |d| try expectDeclaration(assembled.text, d.name, if (ssd) d.threads else null);
+        assemblies += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 4), assemblies);
+}
+
+test "FSR final declaration injectors reject repeated and conflicting reservations" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ks = @import("kernel_sources");
+    const indexed = @import("src/families/flashnext/prompt_index_source.zig").patch;
+    for ([_][]const u8{ "tf_gather_qmmw_nax_##BM", "tf_gather_guw_nax_##BM" }) |name| {
+        for ([_][]const u8{ "[[max_total_threads_per_threadgroup(64)]]", "[[max_total_threads_per_threadgroup(128)]] [[max_total_threads_per_threadgroup(128)]]" }) |attribute| {
+            try std.testing.expectError(error.KernelPatch, indexed(a, try withAttribute(a, ks.flashnext_qmmw, name, attribute)));
+        }
+    }
+    const slotted = try @import("src/families/flashnext/fsr_prompt_source.zig").patch(a, ks.flashnext_qmmw, true);
+    const repeated = try withAttribute(a, slotted, "tf_gather_qmmw_nax_##BM", "[[max_total_threads_per_threadgroup(128)]]");
+    try std.testing.expectError(error.KernelPatch, indexed(a, repeated));
+    const xnew = @import("src/families/flashnext/replay_expert_source.zig").text;
+    const patch = @import("src/families/flashnext/fsr_xnew_source.zig").patch;
+    const declarations = [_]struct { name: []const u8, threads: usize }{
+        .{ .name = "fz_xgu", .threads = 128 }, .{ .name = "fz_xdown", .threads = 128 }, .{ .name = "fz_route", .threads = 512 },
+    };
+    for (declarations) |d| {
+        const intended = try std.fmt.allocPrint(a, "[[max_total_threads_per_threadgroup({d})]]", .{d.threads});
+        for ([_][]const u8{ "[[max_total_threads_per_threadgroup(64)]]", intended }) |attribute| {
+            const pair = if (std.mem.eql(u8, attribute, intended)) try std.fmt.allocPrint(a, "{s} {s}", .{ attribute, attribute }) else attribute;
+            try std.testing.expectError(error.FsrXnewPatch, patch(a, try withAttribute(a, xnew, d.name, pair)));
+        }
     }
 }
 

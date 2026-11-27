@@ -41,6 +41,9 @@ class Family:
     params: tuple[str, ...]
     threads: int = 0                       # MLX's max_total_threads_per_threadgroup for this kernel (0: none)
 
+    def attr(self) -> str:
+        return f"[[max_total_threads_per_threadgroup({self.threads})]]\n" if self.threads else ""
+
 
 
 def metal_value(v: object) -> str:
