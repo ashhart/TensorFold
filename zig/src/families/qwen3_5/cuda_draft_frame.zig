@@ -107,6 +107,27 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     try publish(d, items, contexts);
 }
 
+/// A shorter proposal pass uses the same kernels and ring strides, then the original logical tree budget.
+pub fn forwardBlock(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx, block: usize) !void {
+    if (block == d.c.block) return forward(d, items, contexts);
+    if (block != 8 or d.c.block != 16) return error.BadDraftFrame;
+    for (items) |it| if (it.depth > 7 or it.lanes != null) return error.BadDraftFrame;
+    const logical = d.c.block;
+    const graph_on = d.graphs.on;
+    defer {
+        d.c.block = logical;
+        d.graphs.on = graph_on;
+    }
+    d.c.block = block;
+    // Existing cached hold graphs are sixteen-row graphs; the short pass uses their eager body.
+    d.graphs.on = false;
+    try forward(d, items, contexts);
+    for (items, contexts, 0..) |it, ctx, i| {
+        d.selection_base = i * (block - 1);
+        try d.selectHoldBlock(ctx, it, logical);
+    }
+}
+
 /// A hold frame's kernels, from the embedding to the selector rows; the packed logits when spanned.
 fn kernels(d: anytype, streams: usize, contexts: []const *draft.Ctx) !?u64 {
     const c = d.c;

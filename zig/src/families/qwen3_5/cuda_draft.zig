@@ -29,6 +29,7 @@ pub const frame = @import("cuda_draft_frame.zig");
 pub const memory = @import("cuda_draft_memory.zig");
 pub const spine = @import("cuda_dspine_frame.zig");
 pub const graphs = @import("cuda_draft_graphs.zig");
+pub const context_hold = @import("cuda_draft_hold.zig");
 const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function, dyn_conv_batch: cuda.Function, norm_rope_batch: cuda.Function, mask_rows: cuda.Function, attn_partial: cuda.Function, attn_merge: cuda.Function };
 
 /// qwen35_draft.cu's TapRows.
@@ -405,13 +406,17 @@ pub const Draft = struct {
     }
 
     pub fn selectHold(d: *Draft, ctx: *Ctx, it: dr.Hold) !void {
+        return @call(.always_inline, selectHoldBlock, .{ d, ctx, it, d.c.block });
+    }
+
+    pub fn selectHoldBlock(d: *Draft, ctx: *Ctx, it: dr.Hold, logical_block: usize) !void {
         const rows = d.c.block - 1;
         ctx.grown = 0;
         // a sampled hold's candidates ranked as its target draw ranks them (its seed, each draft's position)
         d.drawn = .{ .sampling = it.sampling, .position = it.position };
         defer d.drawn = .{};
         if (it.lanes) |shape| return d.selectLanes(ctx, it.pending, rows, shape);
-        const limit = if (d.c.block == 16) d.tree_nodes else 0;
+        const limit = if (logical_block == 16) d.tree_nodes else 0;
         if (limit > 0) {
             // the whole budget whenever drafts are asked: the block's forward costs the same at any depth
             const n = if (it.depth == 0) 0 else limit;
@@ -426,8 +431,11 @@ pub const Draft = struct {
 
     // the Drafter contract
 
+    pub const drafter_vtable: dr.Drafter.VTable = .{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn };
+
     pub fn drafter(d: *Draft) dr.Drafter {
-        return .{ .kind = if (d.c.kind == .dspine) "DSpine" else "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn } };
+        const original: dr.Drafter = .{ .kind = if (d.c.kind == .dspine) "DSpine" else "DFlash2", .ptr = d, .vtable = &drafter_vtable };
+        return context_hold.adapt(d, original, context_hold.enabled());
     }
 
     fn cast(p: *anyopaque) *Draft {

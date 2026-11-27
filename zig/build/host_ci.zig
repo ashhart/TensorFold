@@ -360,6 +360,7 @@ const macos_deferred = [_][]const u8{
     "test-metal-residency-owners-host",
     "test-qwen-serving-host",
     "test-qwen27-prompt-rows-host",
+    "test-qwen35-context-hold-host",
     "test-qwen35-draft-frame-host",
     "test-qwen35-draft-trees-host",
     "test-qwen35-frame-invalidation-host",
