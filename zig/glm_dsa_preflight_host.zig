@@ -5,5 +5,5 @@ fn expectedErrors(comptime _: std.log.Level, comptime _: @EnumLiteral(), comptim
 pub const std_options: std.Options = .{ .logFn = expectedErrors };
 
 test {
-    _ = @import("glm");
+    _ = @import("src/families/glm/cuda_dsa_preflight_test.zig");
 }
