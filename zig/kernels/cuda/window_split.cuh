@@ -157,7 +157,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_window_merge(const float* __
             acc = 0.f;
             for (int j = 0; j < tiles; ++j) {
                 const float mj = pm[(part0 + j) * g + hd];
-                if (mj != -INFINITY) { const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(m) && m == mj; const float x = po[(part0 + j) * g * d + o]; acc = same && x == x ? __fadd_rn(x, acc) : attn_odd::fold(x, same ? 1.0f : expf(__fsub_rn(mj, m)), acc); }
+                if (mj != -INFINITY) acc = attn_odd::fold(po[(part0 + j) * g * d + o], expf(__fsub_rn(mj, m)), acc);
             }
         }
         out[(r * h + kh * g + hd) * d + o % d] = __float2bfloat16_rn(__fdiv_rn(acc, l));

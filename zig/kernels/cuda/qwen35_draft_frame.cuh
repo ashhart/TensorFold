@@ -186,7 +186,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn_merge(const float*
         const size_t slot = base + chunk;
         if (PL[slot] == 0.0f) continue;
         const float next = fmaxf(mx, PM[slot]); const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == mx; const float a = same ? 1.0f : __expf(mx - next), b = __expf(PM[slot] - next);
-        sum = (same && isfinite(sum + PL[slot] * b)) ? sum + PL[slot] * b : sum * a + PL[slot] * b;
+        sum = sum * a + PL[slot] * b;
 #pragma unroll
         for (int i = 0; i < DPL; ++i) out[i] = (same && isfinite(fmaf(b, PO[slot * HD + lane * DPL + i], out[i]))) ? fmaf(b, PO[slot * HD + lane * DPL + i], out[i]) : fmaf(b, PO[slot * HD + lane * DPL + i], out[i] * a);
         mx = next;

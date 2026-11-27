@@ -172,7 +172,7 @@ extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* q
             const float mn = fmaxf(m[h], d);
             const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m[h]; const float corr = same ? 1.0f : __expf(m[h] - mn), pe = __expf(d - mn);
             l[h] = (same && isfinite(l[h] + pe)) ? l[h] + pe : l[h] * corr + pe;
-            for (int i = 0; i < 4; ++i) acc[h][i] = (same && isfinite(acc[h][i] + pe * vf[i])) ? acc[h][i] + pe * vf[i] : acc[h][i] * corr + pe * vf[i];
+            for (int i = 0; i < 4; ++i) acc[h][i] = acc[h][i] * corr + pe * vf[i];
             m[h] = mn;
         }
     }
@@ -231,7 +231,7 @@ extern "C" __global__ void __launch_bounds__(256) df_attn_part(const __nv_bfloat
             const float mn = fmaxf(m[h], d);
             const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m[h]; const float corr = same ? 1.0f : __expf(m[h] - mn), pe = __expf(d - mn);
             l[h] = (same && isfinite(l[h] + pe)) ? l[h] + pe : l[h] * corr + pe;
-            for (int i = 0; i < 4; ++i) acc[h][i] = (same && isfinite(acc[h][i] + pe * vf[i])) ? acc[h][i] + pe * vf[i] : acc[h][i] * corr + pe * vf[i];
+            for (int i = 0; i < 4; ++i) acc[h][i] = acc[h][i] * corr + pe * vf[i];
             m[h] = mn;
         }
     }

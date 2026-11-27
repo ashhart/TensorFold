@@ -335,13 +335,9 @@ __device__ __forceinline__ bool tree_group(
             }
             if (acc != acc) { // NaN: a replayed infinity (weighed in float64) may have met a weight of 0; again, kept
                 acc = 0.0f;
-                for (int w = 0; w < 4; ++w) {
-                    const float mw = ms[w * 16 + hd];
-                    if (mw != -INFINITY) {
-                        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mm) && mm == mw; const float x = os[(w * 16 + hd) * D + e];
-                        acc = same && x == x ? __fadd_rn(x, acc) : attn_odd::fold(x, same ? 1.0f : texp(__fsub_rn(mw, mm)), acc);
-                    }
-                }
+                for (int w = 0; w < 4; ++w)
+                    if (ms[w * 16 + hd] != -INFINITY)
+                        acc = attn_odd::fold(os[(w * 16 + hd) * D + e], texp(__fsub_rn(ms[w * 16 + hd], mm)), acc);
             }
             po[(part * G + head) * D + e] = acc;
             if (e == 0) pm[part * G + head] = mm, pl[part * G + head] = l;
@@ -522,7 +518,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
                     if (pm[q] == -INFINITY) continue;
                     const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(cm) && cm == pm[q];
                     const float aw = same ? 1.0f : texp(__fsub_rn(pm[q], cm));
-                    co = same && co == co ? __fadd_rn(co, po[q * d + e]) : attn_odd::fold(po[q * d + e], aw, co);
+                    co = attn_odd::fold(po[q * d + e], aw, co);
                     cl = (same && isfinite(__fadd_rn(cl, pl[q]))) ? __fadd_rn(cl, pl[q]) : __fmaf_rn(aw, pl[q], cl);
                 }
                 if (!(cl > 0.0f)) continue;

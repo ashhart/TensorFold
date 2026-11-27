@@ -540,11 +540,9 @@ __device__ __forceinline__ bool decode_tc_rows(
             acc0 = acc1 = 0.0f;
             for (int w = 0; w < 4; ++w) {
                 if (ms[w * 16 + hd] == -INFINITY) continue;
-                const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mm) && mm == ms[w * 16 + hd];
                 const float a = as[w * 16 + hd];
-                const float x0 = os[(w * 16 + hd) * D + e], x1 = os[(w * 16 + hd) * D + e + 1];
-                acc0 = same && x0 == x0 ? __fadd_rn(x0, acc0) : attn_odd::fold(x0, a, acc0);
-                acc1 = same && x1 == x1 ? __fadd_rn(x1, acc1) : attn_odd::fold(x1, a, acc1);
+                acc0 = attn_odd::fold(os[(w * 16 + hd) * D + e], a, acc0);
+                acc1 = attn_odd::fold(os[(w * 16 + hd) * D + e + 1], a, acc1);
             }
         }
         const float l = il[hd];

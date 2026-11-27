@@ -133,7 +133,8 @@ extern "C" __global__ void __launch_bounds__(256)
         }
         const float mt = warp_max(s);
         const float mn = fmaxf(m, mt);
-        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m; const float corr = same ? 1.0f : expf(m - mn);  // m = -inf on the first tile: 0
+        // m = -inf on the first tile: 0
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m; const float corr = same ? 1.0f : expf(m - mn);
         const float pj = lane < nk ? expf(s - mn) : 0.f;
         const float mass = warp_sum(pj);
         l = (same && isfinite(l + mass)) ? l + mass : l * corr + mass;

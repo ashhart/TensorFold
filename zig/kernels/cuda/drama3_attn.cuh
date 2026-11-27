@@ -66,8 +66,8 @@ extern "C" __global__ void __launch_bounds__(256) d3_attn_decode(const bf16* __r
     const float nm = fmaxf(m, sc);
     const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m; const float corr = same ? 1.0f : expf(m - nm), e = expf(sc - nm);
     l = (same && isfinite(l + e)) ? l + e : l * corr + e;
-    acc[0] = (same && isfinite(acc[0] + e * lo(vv.x))) ? acc[0] + e * lo(vv.x) : acc[0] * corr + e * lo(vv.x);
-    acc[1] = (same && isfinite(acc[1] + e * hi(vv.x))) ? acc[1] + e * hi(vv.x) : acc[1] * corr + e * hi(vv.x);
+    acc[0] = acc[0] * corr + e * lo(vv.x);
+    acc[1] = acc[1] * corr + e * hi(vv.x);
     acc[2] = (same && isfinite(acc[2] + e * lo(vv.y))) ? acc[2] + e * lo(vv.y) : acc[2] * corr + e * lo(vv.y);
     acc[3] = (same && isfinite(acc[3] + e * hi(vv.y))) ? acc[3] + e * hi(vv.y) : acc[3] * corr + e * hi(vv.y);
     acc[4] = (same && isfinite(acc[4] + e * lo(vv.z))) ? acc[4] + e * lo(vv.z) : acc[4] * corr + e * lo(vv.z);
@@ -126,8 +126,8 @@ extern "C" __global__ void __launch_bounds__(256) d3_attn_partial(const bf16* __
     const float nm = fmaxf(m, sc);
     const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m; const float corr = same ? 1.0f : expf(m - nm), e = expf(sc - nm);
     l = (same && isfinite(l + e)) ? l + e : l * corr + e;
-    acc[0] = (same && isfinite(acc[0] + e * lo(vv.x))) ? acc[0] + e * lo(vv.x) : acc[0] * corr + e * lo(vv.x);
-    acc[1] = (same && isfinite(acc[1] + e * hi(vv.x))) ? acc[1] + e * hi(vv.x) : acc[1] * corr + e * hi(vv.x);
+    acc[0] = acc[0] * corr + e * lo(vv.x);
+    acc[1] = acc[1] * corr + e * hi(vv.x);
     acc[2] = (same && isfinite(acc[2] + e * lo(vv.y))) ? acc[2] + e * lo(vv.y) : acc[2] * corr + e * lo(vv.y);
     acc[3] = (same && isfinite(acc[3] + e * hi(vv.y))) ? acc[3] + e * hi(vv.y) : acc[3] * corr + e * hi(vv.y);
     acc[4] = (same && isfinite(acc[4] + e * lo(vv.z))) ? acc[4] + e * lo(vv.z) : acc[4] * corr + e * lo(vv.z);

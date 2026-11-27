@@ -169,8 +169,8 @@ extern "C" __global__ void c_attn(const float* __restrict__ qkv, const float* __
     const float nm = fmaxf(m, sc);
     const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m; const float corr = same ? 1.0f : expf(m - nm), e = expf(sc - nm);
     l = (same && isfinite(l + e)) ? l + e : l * corr + e;
-    a0 = (same && isfinite(a0 + e * vc[r])) ? a0 + e * vc[r] : a0 * corr + e * vc[r];
-    a1 = (same && isfinite(a1 + e * vc[r + 1])) ? a1 + e * vc[r + 1] : a1 * corr + e * vc[r + 1];
+    a0 = a0 * corr + e * vc[r];
+    a1 = a1 * corr + e * vc[r + 1];
     m = nm;
   }
   out[(size_t)t * 1024 + h * 64 + 2 * lane] = a0 / l;

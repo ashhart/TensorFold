@@ -167,10 +167,10 @@ __device__ __forceinline__ void attn_one(TileStore store, Geo geo, const __nv_bf
             const float a0 = alpha[g], a1 = alpha[g + 8];
 #pragma unroll
             for (int n = 0; n < 8; n++) {
-                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[n][0] *= a0;
-                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[n][1] *= a0;
-                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[n][2] *= a1;
-                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[n][3] *= a1;
+                o[n][0] *= a0;
+                o[n][1] *= a0;
+                o[n][2] *= a1;
+                o[n][3] *= a1;
             }
             const int mt = lane >> 3;
 #pragma unroll
@@ -457,10 +457,10 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
                 const float a0 = alpha[16 * a + g], a1 = alpha[16 * a + g + 8];
 #pragma unroll
                 for (int n = 0; n < NT; n++) {
-                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[a][n][0] *= a0;
-                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[a][n][1] *= a0;
-                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[a][n][2] *= a1;
-                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[a][n][3] *= a1;
+                    o[a][n][0] *= a0;
+                    o[a][n][1] *= a0;
+                    o[a][n][2] *= a1;
+                    o[a][n][3] *= a1;
                 }
             }
             auto values = [&](int only) {

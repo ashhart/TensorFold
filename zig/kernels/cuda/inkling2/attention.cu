@@ -371,8 +371,8 @@ extern "C" __global__ void tf_ink2_merge(const float* __restrict__ part_o, const
         }
         const float mn = fmaxf(mm, ml.x);
         const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mm; const float a = same ? 1.0f : exp2f(mm - mn), b = exp2f(ml.x - mn);
-        ll = (same && isfinite(ll + ml.y * b)) ? ll + ml.y * b : ll * a + ml.y * b;
-        o = (same && isfinite(o + po * b)) ? o + po * b : o * a + po * b;
+        ll = ll * a + ml.y * b;
+        o = o * a + po * b;
         mm = mn;
     }
     const float sk = bf(sink[rh]) * kLog2e;
