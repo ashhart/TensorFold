@@ -480,6 +480,7 @@ fn qwenDefinitions(a: std.mem.Allocator) ![]kernel.Definition {
 }
 
 test "PDL launch guard: EXL3 x3ld and an unknown-symbol control" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest; // no setenv/unsetenv on Windows
     try std.testing.expectEqual(@as(c_int, 0), c_env.setenv("TF_QWEN_PDL", "1", 1));
     defer _ = c_env.unsetenv("TF_QWEN_PDL");
     try std.testing.expect(qwen35.cuda_pdl.on());
