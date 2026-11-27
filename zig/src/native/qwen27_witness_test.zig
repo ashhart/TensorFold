@@ -131,7 +131,7 @@ test "execution witness: the load's library builds are watched from begin until 
     try t.expect(!next.backend.built.?.missed); // the release gave the watch back
 }
 
-test "execution witness: a second load's witness is refused the watch and leaves the path; the first keeps its own" {
+test "execution witness: a nested load's witness on the same thread is refused the watch, and both leave the path" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var c = try Checkpoint.init(arena.allocator(), 4096);
@@ -141,9 +141,9 @@ test "execution witness: a second load's witness is refused the watch and leaves
     defer witness.release(first);
     const second = (try witness.begin(t.allocator, t.io, on)).?;
     try t.expect(second.backend.built.?.missed);
-    mtl.built.report("first's build", .{ 0, 0, 0 });
-    witness.release(second); // never the owner: the first's watch stays
-    try t.expectEqual(@as(usize, 1), first.backend.built.?.digests.items.len);
+    mtl.built.report("the nested load's build", .{ 0, 0, 0 }); // could be either's: neither digest may claim it
+    witness.release(second); // never the owner: the first's watch stays, void
+    try t.expect(first.backend.built.?.missed);
 }
 
 test "execution witness: a shard rewrite, the builds, the GPU, the shape and the profile change the 27B-class digest" {
