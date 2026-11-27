@@ -10,12 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA kernels: ERNIE 5.5's MultiMax on the head's fp32 logits (`tf_ernie55_multimax`, in a new `ernie5_5_head` image), each step rounded once in the vendor's order with nothing fused, under the kernel contract against the host's replay of those steps; nothing launches it yet, so served output is unchanged (#5202, part of #4926).
 
-- Drama 3: CUDA and Metal take weight names, shapes and load order from one shared map, and each backend keeps its own loader; loaded weights are unchanged (#5257, refs #4860). Thanks to @jschmied.
-
-- CUDA kernels: ERNIE 5.5's MultiMax on the head's fp32 logits (`tf_ernie55_multimax`, in a new `ernie5_5_head` image), each step rounded once in the vendor's order with nothing fused, under the kernel contract against the host's replay of those steps; nothing launches it yet, so served output is unchanged (#5202, part of #4926).
-
-
-
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: the batched multi-stream attention path stages its K and V convolution inputs with the paired call, as the one-segment path does, so main builds again (refs #5206).
