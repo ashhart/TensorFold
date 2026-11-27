@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
+
 - Checkpoints and packs: a sharded checkpoint whose index assigns a tensor to a different shard than the shard headers say is refused at load, and a Flash Next pack with no recorded source (made before 1.0) is refused with the command that rebuilds it. Saved prompt state is keyed to the TFQ3 tables the loaders already check. No weight bytes are read at load that were not read before.
 
 - Qwen vision on CUDA: the shared K/V tiles are stored as bf16 and widened to fp32 at use, with outputs byte-identical to before (refs #3143).
