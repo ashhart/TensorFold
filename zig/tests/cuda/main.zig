@@ -377,6 +377,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         if (rest.len != 1) return error.PromptGemmProfileArguments;
         return @import("qwen_prompt_gemm_profile.zig").run(gpu, rest[0]);
     }
+    if (std.mem.eql(u8, cmd, "glm-prompt-gemm-profile")) {
+        if (rest.len != 1) return error.PromptGemmProfileArguments;
+        return @import("glm_prompt_gemm_profile.zig").run(gpu, rest[0]);
+    }
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-bench")) return qmm_prefill_many_contract.bench(gpu);
     if (std.mem.eql(u8, cmd, "prompt-swiglu-contract")) return @import("contract_prompt_swiglu.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "prompt-swiglu-bench")) return @import("contract_prompt_swiglu.zig").bench(gpu);
