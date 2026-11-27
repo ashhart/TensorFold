@@ -28,6 +28,8 @@ const Opts = struct {
     alpha_arg: ?f32 = null,
     /// The site the file names; null writes the lane's own FFN write.
     site: ?[]const u8 = null,
+    /// The site the file says it was derived at; null writes its hook, so the vector is not transferred.
+    derived_at: ?[]const u8 = null,
 };
 
 const Fixture = struct {
@@ -79,6 +81,7 @@ fn vectorBytes(a: std.mem.Allocator, o: Opts) ![]u8 {
         .alpha = o.alpha,
         .base_model = o.base_model,
         .base_revision = o.base_revision,
+        .derived_at = o.derived_at,
         .layers = layers,
     });
 }
@@ -106,7 +109,8 @@ test "a residual-site vector is refused by name: this lane steers at the FFN wri
     var f = try Fixture.make(a, .{ .site = glp.residual_site });
     defer f.tmp.cleanup();
     const why = try f.refusal(a, "auto");
-    try std.testing.expect(has(why, "this model steers at ffn_out_pre_residual"));
+    // elsewhere the backend is refused before the file's site is read, so the site's own name is a Metal check
+    if (steers) try std.testing.expect(has(why, "this model steers at ffn_out_pre_residual")) else try std.testing.expect(has(why, "only the Metal engine"));
 }
 
 test "a vector that names visit 48 or later is refused before the model loads" {
@@ -133,6 +137,37 @@ test "a loop other than three fixed passes, or a config without one, is refused"
     var none = try Fixture.make(a, .{ .loop = null });
     defer none.tmp.cleanup();
     try std.testing.expect(has(try none.refusal(a, "auto"), "no text hidden size and loop_config"));
+}
+
+test "a loop_config whose passes multiply past a visit id is refused, not wrapped" {
+    if (!steers) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, .{ .loop = .{ .passes = 1_600_000_000_000_000_000 } });
+    defer f.tmp.cleanup();
+    try std.testing.expect(has(try f.refusal(a, "auto"), "counts more decoder visits than a visit id can name"));
+}
+
+test "a transferred vector's warning names the FFN write the lane applies it at" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, .{ .derived_at = glp.residual_site });
+    defer f.tmp.cleanup();
+    const Sink = struct {
+        list: std.ArrayList(u8) = .empty,
+        a: std.mem.Allocator,
+        fn capture(ctx: *anyopaque, text: []const u8) void {
+            const sink: *@This() = @ptrCast(@alignCast(ctx));
+            sink.list.appendSlice(sink.a, text) catch {};
+        }
+    };
+    var sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = Sink.capture };
+    defer log.Test.sink = null;
+    serve.report(a, f.g.?);
+    try std.testing.expect(has(sink.list.items, "it is applied at ffn_out_pre_residual"));
 }
 
 test "a width other than 2304 and the DeepSeek paired file are refused" {

@@ -430,11 +430,9 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (next_v) |nv| {
         if (canPreFuseNorm(&m.weight_plan, nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
-            if (d == null) {
-                glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
-            } else {
-                mlpPartial(m, e, s, d, 0, rows);
-            }
+            if (d) |dv| {
+                m.steer.?.partialArNorm(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
+            } else glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
         } else if (canPreFuse(nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
             const qs = r(m.weights.attn_queries[nv.layer - 1]);
@@ -571,7 +569,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
     for (visits, 0..) |*v, vi| {
         const prev_fused = vi > 0 and canPreFuse(v);
-        const prev_fused_norm = vi > 0 and canPreFuseNorm(&m.weight_plan, v) and steerDir(m, &visits[vi - 1]) == null;
+        const prev_fused_norm = vi > 0 and canPreFuseNorm(&m.weight_plan, v);
         const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
         try visit(m, e, s, v, prev_fused, prev_fused_norm, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps, options.meta);
     }

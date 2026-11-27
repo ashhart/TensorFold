@@ -113,6 +113,7 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
 fn loopRefusal(a: std.mem.Allocator, backend: []const u8, vector: glp.Vector, model: Model) error{OutOfMemory}!?[]const u8 {
     if (!metal(backend)) return try std.fmt.allocPrint(a, "--glp: the {s} engine does not steer Inkling 2 Mini: only the Metal engine does", .{backendName(backend)});
     if (model.varloop) return "--glp: this checkpoint varies its loop (is_varloop): a vector's ids name the visits of three fixed passes";
+    if (model.overflow) return "--glp: this checkpoint's loop_config counts more decoder visits than a visit id can name: the vector's ids cannot be checked";
     const hidden = model.hidden orelse return no_loop;
     const visits = model.visits orelse return no_loop;
     if (visits != inkling_visits) return try std.fmt.allocPrint(a, "--glp: this checkpoint's loop makes {d} decoder visits a token; the steered lane makes {d} (three core passes)", .{ visits, inkling_visits });
@@ -181,6 +182,8 @@ const Model = struct {
     visits: ?usize = null,
     /// Whether loop_config varies its passes (is_varloop).
     varloop: bool = false,
+    /// Whether loop_config's passes multiply past the visits a vector's ids can name.
+    overflow: bool = false,
     /// The repo id the checkpoint came from ("Org/Name"), empty when it is not a cache snapshot.
     repo: []const u8 = "",
     /// The commit a cache snapshot is, empty when it is not one.
@@ -206,7 +209,17 @@ fn modelOf(a: std.mem.Allocator, dir: []const u8) error{OutOfMemory}!Model {
         const passes = positive(loop.object.get("num_passes"));
         const start = positive(loop.object.get("core_start"));
         const end = positive(loop.object.get("core_end"));
-        if (m.layers != null and passes != null and start != null and end != null and end.? > start.?) m.visits = m.layers.? + (passes.? - 1) * (end.? - start.?);
+        if (m.layers != null and passes != null and start != null and end != null and end.? > start.?) {
+            // a config that counts past the visit ids a vector may name is refused, never wrapped
+            const core = std.math.mul(usize, passes.? - 1, end.? - start.?) catch {
+                m.overflow = true;
+                return m;
+            };
+            m.visits = std.math.add(usize, m.layers.?, core) catch {
+                m.overflow = true;
+                return m;
+            };
+        }
         if (loop.object.get("is_varloop")) |vl| m.varloop = vl != .bool or vl.bool;
     };
     return m;
@@ -282,8 +295,13 @@ pub fn report(a: std.mem.Allocator, v: Vec) void {
             digest,
         });
     }
-    const applied = if (vector.isPaired()) vector.hook_point else "the residual stream";
+    const applied = appliedSite(vector.hook_point);
     if (vector.transferred) log.line("warning: this vector was derived at {f}, not at {f}: it is applied at {s}", .{ std.zig.fmtString(vector.derived_at), std.zig.fmtString(vector.hook_point), applied });
+}
+
+/// The site the lane applies the vector at, as the operator reads it: the file's hook, or the residual stream's name.
+fn appliedSite(hook: []const u8) []const u8 {
+    return if (std.mem.eql(u8, hook, "residual_stream")) "the residual stream" else hook;
 }
 
 /// The checkpoint the vector was derived from, with its revision when it names one; the file's own words, escaped.

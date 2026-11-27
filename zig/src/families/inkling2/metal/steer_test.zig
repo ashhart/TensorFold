@@ -63,12 +63,12 @@ test "a zero direction keeps a negative-zero residual's bits, in the unfused sum
 test "each steer kernel has one launch record, its thread limit and the ordering pragma" {
     // the contract and the engine compile the same three kernels; each source carries its glue list
     const contract = @import("kernel_sources").inkling2_steer;
-    for ([_][]const u8{ steer.symbol, steer.ar_symbol, steer.add_symbol }) |symbol| {
+    for ([_][]const u8{ steer.symbol, steer.ar_symbol, steer.norm_symbol, steer.add_symbol }) |symbol| {
         try t.expect(std.mem.count(u8, contract, symbol) >= 1);
         try t.expect(std.mem.count(u8, shader, symbol) >= 1);
     }
-    try t.expectEqual(@as(usize, 3), records.len);
-    for (records, [_][]const u8{ steer.symbol, steer.ar_symbol, steer.add_symbol }, [_]u32{ 0, 240, 0 }) |record, symbol, tg| {
+    try t.expectEqual(@as(usize, 4), records.len);
+    for (records, [_][]const u8{ steer.symbol, steer.ar_symbol, steer.norm_symbol, steer.add_symbol }, [_]u32{ 0, 240, 240, 0 }) |record, symbol, tg| {
         try t.expect(std.mem.endsWith(u8, record.name, symbol));
         try t.expectEqual(p.threads, record.threads);
         try t.expectEqual(record.threads, record.reserved);

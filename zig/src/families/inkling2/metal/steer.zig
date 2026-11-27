@@ -12,11 +12,13 @@ pub const symbol = "tf_ink2_mlp_partial_steer";
 pub const add_symbol = "tf_ink2_steer_add";
 /// The steered visit output fused with the next reader's mix, as main's tf_inkling2_mlp_partial_ar fuses it.
 pub const ar_symbol = "tf_ink2_mlp_partial_ar_steer";
+pub const norm_symbol = "tf_ink2_mlp_partial_ar_norm_steer";
 
 /// The steer kernels' arguments: the elements and the strength.
 pub const Args = extern struct { count: u32, alpha: f32 };
 /// The fused launch's arguments: main's rows, sources and queries, then the strength.
 pub const ArArgs = extern struct { rows: u32, sources: u32, queries: u32, alpha: f32 };
+pub const NormArgs = extern struct { rows: u32, sources: u32, alpha: f32 };
 
 /// One visit's direction: its zero-based visit id and the vector to add.
 pub const Visit = struct { id: u32, dir: []const f32 };
@@ -51,6 +53,7 @@ pub const Plan = struct {
     dirs: mtl.Buffer,
     pipe: mtl.Pipeline,
     ar_pipe: mtl.Pipeline,
+    norm_pipe: mtl.Pipeline,
 
     /// The direction that steers `visit`, as a buffer reference; null when the vector does not cover it.
     pub fn dir(p: *const Plan, visit: u32) ?Ref {
@@ -77,7 +80,17 @@ pub const Plan = struct {
         e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
+    /// The steered output, the next mix and its norm in one launch: main's mlpPartialArNorm, p steered by `d`.
+    pub fn partialArNorm(p: *const Plan, e: mtl.ComputeEncoder, d: Ref, t: Ref, x: Ref, blocks: Ref, inv_rms: Ref, queries: Ref, norm_w: Ref, p_out: Ref, partial_out: Ref, norm_out: Ref, rows: u32, sources_: u32) void {
+        std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5);
+        e.setPipeline(p.norm_pipe);
+        inline for (.{ t, x, blocks, inv_rms, queries, norm_w, d, p_out, partial_out, norm_out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setValue(NormArgs{ .rows = rows, .sources = sources_, .alpha = p.alpha }, 10);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
     pub fn deinit(p: *Plan) void {
+        p.norm_pipe.deinit();
         p.ar_pipe.deinit();
         p.pipe.deinit();
         p.dirs.deinit();
@@ -113,6 +126,9 @@ pub fn init(gpa: std.mem.Allocator, device: mtl.Device, src: Source) !*Plan {
     const ar_pipe = try mtl.Pipeline.init(device, lib, ar_symbol, false);
     errdefer ar_pipe.deinit();
     if (ar_pipe.maxThreads() < 256) return error.Inkling2Threads;
-    plan.* = .{ .gpa = gpa, .alpha = src.alpha, .ids = ids, .cover = cover, .dirs = dirs, .pipe = pipe, .ar_pipe = ar_pipe };
+    const norm_pipe = try mtl.Pipeline.init(device, lib, norm_symbol, false);
+    errdefer norm_pipe.deinit();
+    if (norm_pipe.maxThreads() < 256) return error.Inkling2Threads;
+    plan.* = .{ .gpa = gpa, .alpha = src.alpha, .ids = ids, .cover = cover, .dirs = dirs, .pipe = pipe, .ar_pipe = ar_pipe, .norm_pipe = norm_pipe };
     return plan;
 }
