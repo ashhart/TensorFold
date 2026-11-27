@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_CUDA_SCHED=blocking` (off by default; also `auto`, `spin` or `yield`) sets how a served model's host thread waits for its GPU. Blocking frees the core the driver's default spins on a GB10, with identical tokens and pictures; on Inkling 2 Mini decode is about 2% slower (#5165).
+
 - Desktop: development builds stage engine 1.2.8 instead of 1.1.0 on macOS ARM64, so tool calls reach Desktop as structured calls rather than chat text (#4545). Thanks to @mvanhorn.
 
 - GLM on CUDA: layer read-ahead uses the checkpoint's model prefix, fixing full GLM/DSA, whose read-ahead read nothing; Flash spans are unchanged (refs #5256).
