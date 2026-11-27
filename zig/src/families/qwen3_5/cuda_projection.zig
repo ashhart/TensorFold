@@ -49,7 +49,10 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
     // EXL3, TFQ3 and BF16 matrices use their own row kernels at every width.
     switch (l) {
         .x3 => |q| return if (prompt and rows > 16) e.kit.?.dense.prompt(e.stream, q, x, .bf16, rows, out, .bf16) else e.kit.?.dense.decode(e.stream, q, x, .bf16, rows, out, .bf16),
-        .tfq3 => |q| return e.tfq3.?.kernels.dense(e.stream, q, x, q.k, out, q.n, rows, false),
+        .tfq3 => |q| return if (prompt and rows > 16)
+            e.tfq3.?.kernels.densePrompt(e.stream, q, x, q.k, out, q.n, rows, false)
+        else
+            e.tfq3.?.kernels.dense(e.stream, q, x, q.k, out, q.n, rows, false),
         .bf => |q| {
             const b16 = if (e.kit) |kit| &kit.b16 else &e.tfq3.?.b16;
             // The small BF16 row kernel accepts at most 128 rows, including during a full prompt pass.

@@ -65,8 +65,13 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
         },
         .tfq3 => |t| {
             const tk = k.set.tfq3 orelse return error.FormatNotLoaded;
-            try tk.dense(stream, t.gate, x, x_stride, s.gu, 2 * w, rows, false);
-            try tk.dense(stream, t.up, x, x_stride, s.gu + w * 2, 2 * w, rows, false);
+            if (prompt and rows > 16) {
+                try tk.densePrompt(stream, t.gate, x, x_stride, s.gu, 2 * w, rows, false);
+                try tk.densePrompt(stream, t.up, x, x_stride, s.gu + w * 2, 2 * w, rows, false);
+            } else {
+                try tk.dense(stream, t.gate, x, x_stride, s.gu, 2 * w, rows, false);
+                try tk.dense(stream, t.up, x, x_stride, s.gu + w * 2, 2 * w, rows, false);
+            }
             return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
         },
     };

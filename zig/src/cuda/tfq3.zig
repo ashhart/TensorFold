@@ -79,6 +79,7 @@ pub const Kernels = struct {
     wmma_fused: [3]Function, // 3b, 4b, 5b: fused BM=16 (wide N, small K, rows < 48)
     wmma_prefill64: [3]Function, // 3b, 4b, 5b: fused BM=64, BN=128 Tensor Core prefill (rows >= 48)
     moe_gu: Function,
+    moe_gu_softcap: Function,
     moe_down: Function,
     xrot: ?DeviceBuffer = null,
     xrot_elems: usize = 0,
@@ -103,6 +104,7 @@ pub const Kernels = struct {
             .wmma_fused = undefined,
             .wmma_prefill64 = undefined,
             .moe_gu = try mod_moe.function("tf_tfq3_moe_gu_swiglu"),
+            .moe_gu_softcap = try mod_moe.function("tf_tfq3_moe_gu_softcap"),
             .moe_down = try mod_moe.function("tf_tfq3_moe_down"),
         };
         inline for ([_]u8{ 3, 4, 5 }, 0..) |b, i| {
@@ -239,6 +241,53 @@ pub const Kernels = struct {
         }
     }
 
+    /// Tiled Tensor Core prompt prefill (`BM=64, BN=128`, 4x weight reuse, zero split-K `yr` global traffic).
+    pub fn densePrompt(k: *const Kernels, stream: Stream, w: DenseWeight, x: u64, ldx: usize, out: u64, ldo: usize, rows: usize, out_f32: bool) !void {
+        if (rows == 0 or w.n == 0 or w.k == 0 or w.n % 128 != 0 or w.k % 128 != 0 or ldx < w.k or ldo < w.n) return error.Tfq3Shape;
+        const xrot = k.xrot orelse return error.Tfq3ScratchNotReserved;
+        const bi = try bitIndex(w.bits);
+        const out_elem: usize = if (out_f32) 4 else 2;
+        const f32_flag: u32 = @intFromBool(out_f32);
+        const n_bc: u32 = w.k >> 7;
+        const cap_rows: usize = @min(@as(usize, 512), k.xrot_elems / w.k);
+        if (cap_rows == 0) return error.Tfq3ScratchNotReserved;
+
+        var done: usize = 0;
+        while (done < rows) {
+            const take: usize = @min(rows - done, cap_rows);
+            const x_off = x + done * ldx * 2;
+            const y_off = out + done * ldo * out_elem;
+            {
+                var a: launch_.Args = .{};
+                a.add(x_off);
+                a.add(xrot.ptr);
+                a.add(w.k);
+                a.add(@as(u32, @intCast(ldx)));
+                try launch_.launch(k.fwht_x, .{ .grid = .{ .x = n_bc, .y = @intCast(take) }, .block = .{ .x = 32 } }, stream, &a);
+            }
+            {
+                var a: launch_.Args = .{};
+                a.add(w.words);
+                a.add(w.scales);
+                a.add(w.tables);
+                a.add(xrot.ptr);
+                a.add(y_off);
+                a.add(@as(u32, @intCast(take)));
+                a.add(w.k);
+                a.add(@as(u32, @intCast(ldo)));
+                a.add(w.sr_split);
+                a.add(w.row_off);
+                a.add(f32_flag);
+                if (take > 16) {
+                    try launch_.launch(k.wmma_prefill64[bi], .{ .grid = .{ .x = w.n / 128, .y = @intCast((take + 63) / 64) }, .block = .{ .x = 256 } }, stream, &a);
+                } else {
+                    try launch_.launch(k.wmma_fused[bi], .{ .grid = .{ .x = w.n / 128, .y = @intCast((take + 15) / 16) }, .block = .{ .x = 256 } }, stream, &a);
+                }
+            }
+            done += take;
+        }
+    }
+
     /// Routed MoE projection for `rows` tokens × `top_k` picks (supports mixed 3b/4b/5b per expert).
     pub fn moe(
         k: *const Kernels,
@@ -296,6 +345,86 @@ pub const Kernels = struct {
                 a.add(lim);
                 a.add(act_mode);
                 try launch_.launch(k.moe_gu, .{ .grid = .{ .x = l.inter / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
+            }
+            {
+                var a: launch_.Args = .{};
+                a.add(l.weights);
+                a.add(l.scales);
+                a.add(l.metas);
+                a.add(l.tables);
+                a.add(act_rot.ptr);
+                a.add(p_off);
+                a.add(ey_off);
+                a.add(l.dims);
+                a.add(l.inter);
+                a.add(l.experts);
+                a.add(top_k);
+                a.add(pick_stride);
+                a.add(out_slot_stride);
+                a.add(@as(u32, @intFromBool(out_f32)));
+                try launch_.launch(k.moe_down, .{ .grid = .{ .x = l.dims / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
+            }
+            done += take;
+        }
+    }
+
+    /// Routed MoE projection using Inkling-2 softcapped SwiGLU (`gate_cap`, `up_cap`).
+    pub fn moeSoftcap(
+        k: *const Kernels,
+        stream: Stream,
+        l: MoeLayer,
+        x: u64,
+        x_stride: usize,
+        picks: u64,
+        pick_stride: u32,
+        ey: u64,
+        out_slot_stride: u32,
+        rows: usize,
+        top_k: u32,
+        gate_cap: f32,
+        up_cap: f32,
+        out_f32: bool,
+    ) !void {
+        if (rows == 0 or top_k == 0 or l.dims % 128 != 0 or l.inter % 128 != 0) return error.Tfq3Shape;
+        const xrot = k.xrot orelse return error.Tfq3ScratchNotReserved;
+        const act_rot = k.act_rot orelse return error.Tfq3ScratchNotReserved;
+        const cap_x: usize = k.xrot_elems / l.dims;
+        const cap_a: usize = k.act_rot_elems / (@as(usize, top_k) * l.inter);
+        const cap_rows: usize = @min(cap_x, cap_a);
+        if (cap_rows == 0) return error.Tfq3ScratchNotReserved;
+        const ey_elem: usize = if (out_f32) 4 else 2;
+
+        var done: usize = 0;
+        while (done < rows) {
+            const take: usize = @min(rows - done, cap_rows);
+            const x_off = x + done * x_stride * 2;
+            const p_off = picks + done * @as(usize, pick_stride) * 4;
+            const ey_off = ey + done * @as(usize, out_slot_stride) * l.dims * ey_elem;
+            {
+                var a: launch_.Args = .{};
+                a.add(x_off);
+                a.add(xrot.ptr);
+                a.add(l.dims);
+                a.add(@as(u32, @intCast(x_stride)));
+                try launch_.launch(k.fwht_x, .{ .grid = .{ .x = l.dims >> 7, .y = @intCast(take) }, .block = .{ .x = 32 } }, stream, &a);
+            }
+            {
+                var a: launch_.Args = .{};
+                a.add(l.weights);
+                a.add(l.scales);
+                a.add(l.metas);
+                a.add(l.tables);
+                a.add(xrot.ptr);
+                a.add(p_off);
+                a.add(act_rot.ptr);
+                a.add(l.dims);
+                a.add(l.inter);
+                a.add(l.experts);
+                a.add(top_k);
+                a.add(pick_stride);
+                a.add(gate_cap);
+                a.add(up_cap);
+                try launch_.launch(k.moe_gu_softcap, .{ .grid = .{ .x = l.inter / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
             }
             {
                 var a: launch_.Args = .{};
@@ -378,6 +507,7 @@ pub fn uploadTfpwLayer(
 pub const TfpnStore = struct {
     gpa: std.mem.Allocator,
     tables: DeviceBuffer,
+    owns_tables: bool = true,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
     tensors: std.StringHashMapUnmanaged(DenseWeight) = .empty,
     bytes: usize = 0,
@@ -388,7 +518,7 @@ pub const TfpnStore = struct {
         if (paths.len == 0) return error.InvalidTfq3Shard;
 
         const tables = try uploadTables(gpa, io, d, dir);
-        var store: TfpnStore = .{ .gpa = gpa, .tables = tables, .bytes = tables.len };
+        var store: TfpnStore = .{ .gpa = gpa, .tables = tables, .owns_tables = true, .bytes = tables.len };
         errdefer store.deinit();
         for (paths) |path| try store.addFile(io, d, path);
         return store;
@@ -398,7 +528,22 @@ pub const TfpnStore = struct {
         const path = try std.fs.path.join(gpa, &.{ dir, file });
         defer gpa.free(path);
         const tables = try uploadTables(gpa, io, d, dir);
-        var store: TfpnStore = .{ .gpa = gpa, .tables = tables, .bytes = tables.len };
+        var store: TfpnStore = .{ .gpa = gpa, .tables = tables, .owns_tables = true, .bytes = tables.len };
+        errdefer store.deinit();
+        try store.addFile(io, d, path);
+        return store;
+    }
+
+    /// Loads one `TFPN` shard sharing a caller-owned `pw_v3_tables.bin` device buffer.
+    pub fn loadFileWithTables(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, dir: []const u8, file: []const u8, tables_ptr: u64) !TfpnStore {
+        const path = try std.fs.path.join(gpa, &.{ dir, file });
+        defer gpa.free(path);
+        var store: TfpnStore = .{
+            .gpa = gpa,
+            .tables = .{ .d = d, .ptr = tables_ptr, .len = fmt.tables_file_bytes },
+            .owns_tables = false,
+            .bytes = 0,
+        };
         errdefer store.deinit();
         try store.addFile(io, d, path);
         return store;
@@ -478,7 +623,7 @@ pub const TfpnStore = struct {
         store.tensors.deinit(store.gpa);
         for (store.buffers.items) |*b| b.free();
         store.buffers.deinit(store.gpa);
-        store.tables.free();
+        if (store.owns_tables) store.tables.free();
     }
 };
 

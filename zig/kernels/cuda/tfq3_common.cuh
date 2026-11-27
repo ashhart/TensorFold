@@ -91,6 +91,15 @@ __device__ __forceinline__ float tfq3_glu(float g, float u, float lim, uint32_t 
     return __bfloat162float(__float2bfloat16(sg * uv));
 }
 
+// Inkling-2 softcapped SwiGLU: matches zig/kernels/cuda/inkling2/modelopt.cu:act() bit-for-bit.
+__device__ __forceinline__ float tfq3_glu_softcap(float g, float u, float gate_cap, float up_cap) {
+    const float raw = __bfloat162float(__float2bfloat16_rn(g));
+    const float gc = gate_cap * tanhf(raw / gate_cap);
+    const float uc = up_cap * tanhf(__bfloat162float(__float2bfloat16_rn(u)) / up_cap);
+    const float sigmoid = 1.0f / (1.0f + expf(-raw));
+    return __bfloat162float(__float2bfloat16_rn((gc * sigmoid) * uc));
+}
+
 __device__ __forceinline__ void tfq3_q8_4b(
     uint32_t& st, uint32_t wc, const Tfq3Tables* __restrict__ T,
     __half2& q0a, __half2& q0b, __half2& q1a, __half2& q1b
