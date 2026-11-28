@@ -68,7 +68,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
 
 - CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
-- CLI: a failed first reply from `tensorfold start` reports the server's refusal text reliably on a loaded machine, with a 30-second bound so unattended runs never hang (#5379).
 
 - CUDA: an int4 W4A16 kernel serves GPTQ group-128 routed experts and the LM head (#4183). Thanks @BadAd84.
 
@@ -4750,16 +4749,3 @@ Earlier entries document the Python release line.
 
 - A rewrite: `tensorfold serve`, `pull`, `models` and `info` for Nemotron 3.5 Lightning, Qwen3.8-27B and Qwen3.8
   Flash Next on Apple Silicon, with drafts that never change the output.
-
-- CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
-
-- CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
-
-- CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352).
-
-- CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352). Thanks to @ashhart.
-
-- CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352). Thanks to @ashhart.
-
-- CLI: a failed first reply from `tensorfold start` reports the server's refusal text reliably on a loaded machine, with a 30-second bound so unattended runs never hang (#5379).
-
