@@ -8,6 +8,7 @@ const t = std.testing;
 /// The names GLM's CUDA readers pass to the shared parser, and the default each reader keeps.
 const Name = struct { name: [:0]const u8, default: bool = false };
 const switches = [_]Name{
+    .{ .name = "TF_GLM_CONTROL_FOLD" },
     .{ .name = "TF_GLM_KEEP_SEQS" },
     .{ .name = "TF_GLM_HOST_CACHE" },
     .{ .name = "TF_GLM_VISION_HOST" },

@@ -576,6 +576,7 @@ reports the setting's own value, does not count as logging.
 | `TF_GEMMA4_COPIES` | release, tool, test | other |
 | `TF_GLM_CHUNK_SOLO` | release, tool, test | other |
 | `TF_GLM_CLEAR_THINKING` | release, tool, test | other |
+| `TF_GLM_CONTROL_FOLD` | release, tool, test | other |
 | `TF_GLM_CONTEXT_CEILING` | release, tool, test | other |
 | `TF_GLM_COPIES` | release, tool, test | other |
 | `TF_GLM_DENSE_BITS` | release, tool, test | other |

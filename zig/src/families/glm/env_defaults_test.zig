@@ -27,3 +27,9 @@ test "env defaults: TF_GLM_DENSE_BITS unset keeps bf16, 0 spells bf16, and 5 is 
     try std.testing.expectError(error.BadSetting, ranks.Settings.read(&denseFive, &problem));
     try std.testing.expectEqualStrings("TF_GLM_DENSE_BITS: 4, 6, 8 or 16", problem);
 }
+
+test "env defaults: TF_GLM_CONTROL_FOLD unset keeps separate compute-stream keep controls" {
+    var problem: []const u8 = "";
+    const s = try ranks.Settings.read(&absent, &problem);
+    try std.testing.expect(!s.control_fold);
+}
