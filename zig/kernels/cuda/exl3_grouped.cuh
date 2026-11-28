@@ -26,6 +26,20 @@ struct GroupedArgs {
 // How a warp reads its k tiles: main's loop, or a tile ahead (sm_120 up); SKIP and STALE are the contract's faults.
 enum Load : int { PLAIN = 0, AHEAD = 1, SKIP = 2, STALE = 3 };
 
+// This lane's words of the tile at p, at word indices at (ldg_lane_words with its indices computed once a warp).
+template <int LW>
+__device__ __forceinline__ void ldg_at(const uint32_t* p, const int (&at)[LW], uint32_t (&w)[LW]) {
+#pragma unroll
+    for (int l = 0; l < LW; ++l) w[l] = ldg_stream_u32(p + at[l]);
+}
+
+// PLAIN at sm_120 up is the contract's baseline alone (the served kernels read ahead): its indices before the loop.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+constexpr bool plain_at_once = true;
+#else
+constexpr bool plain_at_once = false;
+#endif
+
 // One warp's k tiles [kt0, kt0 + nkt) of an expert matrix for MT 16-member tiles: per-lane loads, the shared decode.
 template <int CB, int K2, int NT, int LOAD, int MT = 1>
 __device__ __forceinline__ void warp_tiles(const uint32_t* T, int ntiles, int kt0, int nkt, int nt0,
@@ -41,13 +55,24 @@ __device__ __forceinline__ void warp_tiles(const uint32_t* T, int ntiles, int kt
     }
     const size_t kstride = (size_t)ntiles * TW;
     const uint32_t* tb = T + (size_t)kt0 * kstride + (size_t)nt0 * TW;
+    int at[LW] = {};  // PLAIN at sm_120 up: the lane's word indices in a tile, before the loop
+    if constexpr (LOAD == PLAIN && plain_at_once) {
+        int word, offset;
+        lane_start<K2>(lane, word, offset);
+#pragma unroll
+        for (int l = 0; l < LW; ++l) at[l] = (word + l) % TW;
+    }
     uint32_t nx[NT][LW];  // the next tile's words, in flight while this one decodes
     if (LOAD != PLAIN && nkt > 0)
 #pragma unroll
         for (int j = 0; j < NT; ++j) ldg_lane_words<K2>(tb + j * TW, lane, nx[j]);
     for (int i = 0; i < nkt; ++i) {
         uint32_t w[NT][LW];
-        if constexpr (LOAD == PLAIN) {
+        if constexpr (LOAD == PLAIN && plain_at_once) {
+            const uint32_t* t0 = T + (size_t)(kt0 + i) * kstride + (size_t)nt0 * TW;
+#pragma unroll
+            for (int j = 0; j < NT; ++j) ldg_at(t0 + j * TW, at, w[j]);
+        } else if constexpr (LOAD == PLAIN) {
             const uint32_t* t0 = T + (size_t)(kt0 + i) * kstride + (size_t)nt0 * TW;
 #pragma unroll
             for (int j = 0; j < NT; ++j) ldg_lane_words<K2>(t0 + j * TW, lane, w[j]);
