@@ -16,6 +16,7 @@ test {
     _ = @import("metal_inkling2_dspark_controls.zig");
     _ = @import("metal_inkling2_split_controls.zig");
     _ = @import("metal_inkling2_vision_controls.zig");
+    _ = @import("metal_inkling2_dense_controls.zig");
     _ = @import("metal_inkling2_tree_controls.zig");
     _ = @import("metal_inkling2_dflash2_controls.zig");
 }

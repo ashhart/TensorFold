@@ -18,6 +18,7 @@ pub const Suites = struct {
     dspark: @import("metal_inkling2_dspark.zig").Suite,
     draft_head_q4: @import("metal_inkling2_draft_head_q4.zig").Suite,
     vision: @import("metal_inkling2_vision.zig").Suite,
+    dense: @import("metal_inkling2_dense.zig").Suite,
     tree: @import("metal_inkling2_tree.zig").Suite,
     dflash2: @import("metal_inkling2_dflash2.zig").Suite,
     sample: @import("metal_inkling2_sample.zig").Suite,
@@ -39,6 +40,7 @@ pub const Suites = struct {
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .draft_head_q4 = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .vision = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dense = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .tree = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dflash2 = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .sample = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -58,6 +60,7 @@ pub const Suites = struct {
         try s.dspark.collect(only);
         try s.draft_head_q4.collect(only);
         try s.vision.collect(only);
+        try s.dense.collect(only);
         try s.tree.collect(only);
         try s.dflash2.collect(only);
         try s.sample.collect(only);
@@ -78,6 +81,7 @@ pub const Suites = struct {
         s.dspark.deinit();
         s.draft_head_q4.deinit();
         s.vision.deinit();
+        s.dense.deinit();
         s.tree.deinit();
         s.dflash2.deinit();
         s.sample.deinit();
