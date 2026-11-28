@@ -6,6 +6,7 @@ pub const types = @import("types.zig");
 pub const slice = @import("slice.zig");
 pub const convert = @import("convert.zig");
 pub const mlx = @import("mlx.zig");
+pub const mlx_affine = @import("mlx_affine.zig");
 /// One canonical key per module, whatever prefix a checkpoint or loader writes.
 pub const keys = @import("keys.zig");
 pub const dense = @import("dense.zig");

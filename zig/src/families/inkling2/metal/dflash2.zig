@@ -186,6 +186,7 @@ pub const Drafter = struct {
     use_embed_norm: bool = true,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, target: *const Model, drafter_dir: []const u8) !*Drafter {
+        if (target.config.quant != .modelopt_nvfp4) return error.UnsupportedDFlash2TargetQuant;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const d = try gpa.create(Drafter);
@@ -337,7 +338,7 @@ pub const Drafter = struct {
         ids[0] = pending;
         for (1..n) |j| ids[j] = c.mask;
         s.seq.slice(u32, n)[0] = pending;
-        k.embed(&d.pipelines, e, at(s.ids, 0), r(d.target.weights.embed), r(d.target.weights.embed_norm), at(s.resid, 0), .{
+        k.embed(&d.pipelines, e, at(s.ids, 0), r(d.target.weights.embed.bf16), r(d.target.weights.embed_norm), at(s.resid, 0), .{
             .rows = n,
             .width = c.hidden,
             .use_norm = @intFromBool(d.use_embed_norm),
@@ -382,7 +383,7 @@ pub const Drafter = struct {
         k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(d.loaded.weights.norm), at(s.x, 0), .{ .rows = n, .width = c.hidden, .eps = c.eps, .add = 1 });
         const draft_rows = n - 1;
         const x_draft = at(s.x, w.hidden * 2);
-        fwd.dense(d.target, e, d.target.weights.unembed, x_draft, at(s.logits, 0), draft_rows);
+        fwd.dense(d.target, e, d.target.weights.unembed.bf16, x_draft, at(s.logits, 0), draft_rows);
         fwd.dense(d.target, e, d.loaded.weights.hidden_proj, x_draft, at(s.hid, 0), draft_rows);
         k.topk16(&d.pipelines, e, at(s.logits, 0), at(s.tval, 0), at(s.tid, 0), .{ .rows = draft_rows, .vocab = w.valid_vocab, .k = c.top_k, .stride = w.padded_vocab });
         k.walk(&d.pipelines, e, at(s.tval, 0), at(s.tid, 0), at(s.hid, 0), r(d.loaded.weights.pred_cb), r(d.loaded.weights.succ_cb), at(s.seq, 0), .{ .slots = draft_rows, .rank = c.rank, .top = c.top_k, .vocab = w.valid_vocab, .softcap = c.softcap });

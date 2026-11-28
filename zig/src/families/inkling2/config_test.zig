@@ -214,3 +214,68 @@ test "kortexa-inkling2-exl3-v1 quantization_config is accepted on Small and refu
     try refused(edited, "kortexa-inkling2-exl3-v1", "unknown-exl3-v2", error.Quant, "kortexa-inkling2-exl3-v1");
     try refused(mini, from, to, error.Quant, "Inkling 2 Small");
 }
+
+test "MLX 4-bit affine g64 config is accepted on Mini and wrong mode, bits, group_size or family are refused" {
+    const from =
+        \\  "quantization_config": {
+        \\    "quant_method": "modelopt",
+        \\    "quant_algo": "NVFP4"
+        \\  }
+    ;
+    const both =
+        \\  "quantization": {
+        \\    "group_size": 64,
+        \\    "bits": 4,
+        \\    "mode": "affine"
+        \\  },
+        \\  "quantization_config": {
+        \\    "group_size": 64,
+        \\    "bits": 4,
+        \\    "mode": "affine"
+        \\  }
+    ;
+    const q_only =
+        \\  "quantization": {
+        \\    "group_size": 64,
+        \\    "bits": 4,
+        \\    "mode": "affine"
+        \\  }
+    ;
+    const qc_only =
+        \\  "quantization_config": {
+        \\    "group_size": 64,
+        \\    "bits": 4,
+        \\    "mode": "affine"
+        \\  }
+    ;
+    for ([_][]const u8{ both, q_only, qc_only }) |rep| {
+        const edited = try std.mem.replaceOwned(u8, t.allocator, mini, from, rep);
+        defer t.allocator.free(edited);
+        var why: config.Why = .{};
+        const c = try config.parse(t.allocator, edited, &why);
+        try t.expectEqual(config.Quant.mlx_affine4, c.quant);
+    }
+    const base = try std.mem.replaceOwned(u8, t.allocator, mini, from, q_only);
+    defer t.allocator.free(base);
+    try refused(base, "\"bits\": 4", "\"bits\": 8", error.Quant, "bits must be 4");
+    try refused(base, "\"bits\": 4", "\"bits\": 3", error.Quant, "bits must be 4");
+    try refused(base, "\"group_size\": 64", "\"group_size\": 32", error.Quant, "group_size must be 64");
+    try refused(base, "\"group_size\": 64", "\"group_size\": 128", error.Quant, "group_size must be 64");
+    try refused(base, "\"mode\": \"affine\"", "\"mode\": \"nf4\"", error.Quant, "mode must be \"affine\"");
+    try refused(base, "\"mode\": \"affine\"", "\"kind\": \"affine\"", error.Quant, "mode must be \"affine\"");
+    try refused(mini, from, "\"quantization\": 4", error.Quant, "quantization is not an object");
+    try refused(real, from, q_only, error.Quant, "Inkling 2 Mini only");
+    const conflict =
+        \\  "quantization": {
+        \\    "group_size": 64,
+        \\    "bits": 4,
+        \\    "mode": "affine"
+        \\  },
+        \\  "quantization_config": {
+        \\    "group_size": 32,
+        \\    "bits": 4,
+        \\    "mode": "affine"
+        \\  }
+    ;
+    try refused(mini, from, conflict, error.Quant, "group_size must be 64");
+}

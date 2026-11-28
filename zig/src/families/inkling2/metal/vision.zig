@@ -73,12 +73,12 @@ pub const Tower = struct {
     qchunk: u32,
     follow: ?mtl.ResidencySet.Follow = null,
 
-    /// The tower from `dir`'s checkpoint (the shards holding model.visual.*), sized for `opts.max_tokens` image tokens.
+    /// The tower from `dir`'s checkpoint (model.visual.* or model.vision_tower.*), sized for `opts.max_tokens`.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, device: mtl.Device, queue: mtl.Queue, cfg: *const config.Config, opts: Options) !*Tower {
         var checkpoint = ck.Checkpoint.init(gpa);
         errdefer checkpoint.deinit();
         try geometry(cfg.vision, opts);
-        try readShards(&checkpoint, io, dir, device);
+        try readShards(&checkpoint, io, dir, device, cfg.quant == .mlx_affine4);
         const t = try loadFromCheckpoint(gpa, device, queue, cfg, opts, &checkpoint);
         t.owned = checkpoint;
         return t;
@@ -93,7 +93,7 @@ pub const Tower = struct {
         t.* = .{ .gpa = gpa, .device = device, .queue = queue, .cfg = v, .max_tokens = opts.max_tokens, .lib = undefined, .gemm = .{}, .glue = undefined, .layers = &.{}, .patch_w = undefined, .pos_table = undefined, .cls = undefined, .cls_pos = undefined, .pre_w = undefined, .pre_b = undefined, .proj_in = undefined, .proj_out = undefined, .scratch = undefined, .qchunk = 0 };
         t.layers = try gpa.alloc(Layer, v.layers);
         errdefer gpa.free(t.layers);
-        try t.bind(checkpoint);
+        try t.bind(checkpoint, cfg.quant == .mlx_affine4);
         const src = try frags.source(device, gpa, sources.vision);
         defer gpa.free(src);
         t.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
@@ -128,7 +128,8 @@ pub const Tower = struct {
     }
 
     /// Reads the shards that hold the tower's tensors into the tower's own checkpoint.
-    fn readShards(checkpoint: *ck.Checkpoint, io: std.Io, dir: []const u8, device: mtl.Device) !void {
+    fn readShards(checkpoint: *ck.Checkpoint, io: std.Io, dir: []const u8, device: mtl.Device, mlx: bool) !void {
+        const prefix = if (mlx) "model.vision_tower." else "model.visual.";
         const gpa = checkpoint.allocator;
         const index_path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
         defer gpa.free(index_path);
@@ -147,7 +148,7 @@ pub const Tower = struct {
             if (map != .object) return error.BadCheckpointIndex;
             var it = map.object.iterator();
             while (it.next()) |e| {
-                if (!std.mem.startsWith(u8, e.key_ptr.*, "model.visual.") or e.value_ptr.* != .string) continue;
+                if (!std.mem.startsWith(u8, e.key_ptr.*, prefix) or e.value_ptr.* != .string) continue;
                 const name = e.value_ptr.string;
                 const seen = for (files.items) |f| {
                     if (std.mem.eql(u8, f, name)) break true;
@@ -161,7 +162,7 @@ pub const Tower = struct {
             defer gpa.free(joined);
             const path = try gpa.dupeSentinel(u8, joined, 0);
             defer gpa.free(path);
-            try checkpoint.addFileSelected(device, path, "", "model.visual.");
+            try checkpoint.addFileSelected(device, path, "", prefix);
         }
     }
 
@@ -174,43 +175,43 @@ pub const Tower = struct {
         return .{ .buf = x.buffer, .off = x.offset };
     }
 
-    fn layerTensor(checkpoint: *const ck.Checkpoint, i: usize, comptime tail: []const u8, dims: []const usize) !Ref {
+    fn layerTensor(checkpoint: *const ck.Checkpoint, mlx: bool, i: usize, tail: []const u8, dims: []const usize) !Ref {
         var name_buf: [128]u8 = undefined;
-        return tensor(checkpoint, try std.fmt.bufPrint(&name_buf, "model.visual.backbone.layers.{d}." ++ tail, .{i}), dims);
+        const pre = if (mlx) "model.vision_tower.layers." else "model.visual.backbone.layers.";
+        return tensor(checkpoint, try std.fmt.bufPrint(&name_buf, "{s}{d}.{s}", .{ pre, i, tail }), dims);
     }
 
-    fn bind(t: *Tower, checkpoint: *const ck.Checkpoint) !void {
+    fn bind(t: *Tower, checkpoint: *const ck.Checkpoint, mlx: bool) !void {
         const v = t.cfg;
         const h: usize = v.hidden;
         const ff: usize = h * v.mlp_ratio;
-        const pre = "model.visual.backbone.";
-        t.patch_w = try tensor(checkpoint, pre ++ "embeddings.patch_embedding.weight", &.{ h, image.patch_width });
-        t.pos_table = try tensor(checkpoint, pre ++ "embeddings.position_embedding", &.{ @as(usize, v.grid) * v.grid, h });
-        t.cls = try tensor(checkpoint, pre ++ "embeddings.class_embedding", &.{h});
-        t.cls_pos = try tensor(checkpoint, pre ++ "embeddings.cls_position_embedding", &.{h});
-        t.pre_w = try tensor(checkpoint, pre ++ "ln_pre.weight", &.{h});
-        t.pre_b = try tensor(checkpoint, pre ++ "ln_pre.bias", &.{h});
-        t.proj_in = try tensor(checkpoint, "model.visual.proj_in.weight", &.{ v.proj_hidden, h * v.merge * v.merge });
-        t.proj_out = try tensor(checkpoint, "model.visual.proj_out.weight", &.{ v.text_hidden, v.proj_hidden });
+        t.patch_w = try tensor(checkpoint, if (mlx) "model.vision_tower.embeddings.patch_embedding.weight" else "model.visual.backbone.embeddings.patch_embedding.weight", &.{ h, image.patch_width });
+        t.pos_table = try tensor(checkpoint, if (mlx) "model.vision_tower.embeddings.position_embedding.weight" else "model.visual.backbone.embeddings.position_embedding", &.{ @as(usize, v.grid) * v.grid, h });
+        t.cls = try tensor(checkpoint, if (mlx) "model.vision_tower.embeddings.class_embedding" else "model.visual.backbone.embeddings.class_embedding", &.{h});
+        t.cls_pos = try tensor(checkpoint, if (mlx) "model.vision_tower.embeddings.cls_position_embedding" else "model.visual.backbone.embeddings.cls_position_embedding", &.{h});
+        t.pre_w = try tensor(checkpoint, if (mlx) "model.vision_tower.pre_layernorm.weight" else "model.visual.backbone.ln_pre.weight", &.{h});
+        t.pre_b = try tensor(checkpoint, if (mlx) "model.vision_tower.pre_layernorm.bias" else "model.visual.backbone.ln_pre.bias", &.{h});
+        t.proj_in = try tensor(checkpoint, if (mlx) "model.vision_tower.merger.linear_1.weight" else "model.visual.proj_in.weight", &.{ v.proj_hidden, h * v.merge * v.merge });
+        t.proj_out = try tensor(checkpoint, if (mlx) "model.vision_tower.merger.linear_2.weight" else "model.visual.proj_out.weight", &.{ v.text_hidden, v.proj_hidden });
         for (t.layers, 0..) |*l, i| {
-            l.ln1_w = try layerTensor(checkpoint, i, "ln_1.weight", &.{h});
-            l.ln1_b = try layerTensor(checkpoint, i, "ln_1.bias", &.{h});
-            l.ln2_w = try layerTensor(checkpoint, i, "ln_2.weight", &.{h});
-            l.ln2_b = try layerTensor(checkpoint, i, "ln_2.bias", &.{h});
-            l.ls1 = try layerTensor(checkpoint, i, "ls_1.gamma", &.{h});
-            l.ls2 = try layerTensor(checkpoint, i, "ls_2.gamma", &.{h});
-            l.w[0] = try layerTensor(checkpoint, i, "self_attn.q_proj.weight", &.{ h, h });
-            l.w[1] = try layerTensor(checkpoint, i, "self_attn.k_proj.weight", &.{ h, h });
-            l.w[2] = try layerTensor(checkpoint, i, "self_attn.v_proj.weight", &.{ h, h });
-            l.w[3] = try layerTensor(checkpoint, i, "self_attn.out_proj.weight", &.{ h, h });
-            l.b[0] = try layerTensor(checkpoint, i, "self_attn.q_proj.bias", &.{h});
-            l.b[1] = try layerTensor(checkpoint, i, "self_attn.k_proj.bias", &.{h});
-            l.b[2] = try layerTensor(checkpoint, i, "self_attn.v_proj.bias", &.{h});
-            l.b[3] = try layerTensor(checkpoint, i, "self_attn.out_proj.bias", &.{h});
-            l.fc1_w = try layerTensor(checkpoint, i, "mlp.c_fc.weight", &.{ ff, h });
-            l.fc1_b = try layerTensor(checkpoint, i, "mlp.c_fc.bias", &.{ff});
-            l.fc2_w = try layerTensor(checkpoint, i, "mlp.c_proj.weight", &.{ h, ff });
-            l.fc2_b = try layerTensor(checkpoint, i, "mlp.c_proj.bias", &.{h});
+            l.ln1_w = try layerTensor(checkpoint, mlx, i, if (mlx) "layernorm_before.weight" else "ln_1.weight", &.{h});
+            l.ln1_b = try layerTensor(checkpoint, mlx, i, if (mlx) "layernorm_before.bias" else "ln_1.bias", &.{h});
+            l.ln2_w = try layerTensor(checkpoint, mlx, i, if (mlx) "layernorm_after.weight" else "ln_2.weight", &.{h});
+            l.ln2_b = try layerTensor(checkpoint, mlx, i, if (mlx) "layernorm_after.bias" else "ln_2.bias", &.{h});
+            l.ls1 = try layerTensor(checkpoint, mlx, i, if (mlx) "lambda_1" else "ls_1.gamma", &.{h});
+            l.ls2 = try layerTensor(checkpoint, mlx, i, if (mlx) "lambda_2" else "ls_2.gamma", &.{h});
+            l.w[0] = try layerTensor(checkpoint, mlx, i, "self_attn.q_proj.weight", &.{ h, h });
+            l.w[1] = try layerTensor(checkpoint, mlx, i, "self_attn.k_proj.weight", &.{ h, h });
+            l.w[2] = try layerTensor(checkpoint, mlx, i, "self_attn.v_proj.weight", &.{ h, h });
+            l.w[3] = try layerTensor(checkpoint, mlx, i, "self_attn.out_proj.weight", &.{ h, h });
+            l.b[0] = try layerTensor(checkpoint, mlx, i, "self_attn.q_proj.bias", &.{h});
+            l.b[1] = try layerTensor(checkpoint, mlx, i, "self_attn.k_proj.bias", &.{h});
+            l.b[2] = try layerTensor(checkpoint, mlx, i, "self_attn.v_proj.bias", &.{h});
+            l.b[3] = try layerTensor(checkpoint, mlx, i, "self_attn.out_proj.bias", &.{h});
+            l.fc1_w = try layerTensor(checkpoint, mlx, i, if (mlx) "mlp.fc1.weight" else "mlp.c_fc.weight", &.{ ff, h });
+            l.fc1_b = try layerTensor(checkpoint, mlx, i, if (mlx) "mlp.fc1.bias" else "mlp.c_fc.bias", &.{ff});
+            l.fc2_w = try layerTensor(checkpoint, mlx, i, if (mlx) "mlp.fc2.weight" else "mlp.c_proj.weight", &.{ h, ff });
+            l.fc2_b = try layerTensor(checkpoint, mlx, i, if (mlx) "mlp.fc2.bias" else "mlp.c_proj.bias", &.{h});
         }
     }
 

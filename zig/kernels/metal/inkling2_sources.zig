@@ -4,6 +4,7 @@ pub const attention = @import("inkling2/attention_sources.zig").attention;
 pub const prompt_attention = @import("inkling2/attention_sources.zig").prompt_attention;
 pub const prompt_attention_pre_m5 = @import("inkling2/attention_sources.zig").prompt_attention_pre_m5;
 pub const glue = @import("inkling2/glue_sources.zig").glue;
+pub const affine4 = @import("inkling2/affine4_sources.zig").affine4;
 pub const experts = @import("inkling2/experts_sources.zig").experts;
 pub const experts_mma = @import("inkling2/experts_sources.zig").experts_mma;
 pub const dense_mma = @import("inkling2/dense_sources.zig").dense_mma;
