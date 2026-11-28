@@ -18,7 +18,7 @@ inline void q27_write(device uchar* p, uint i, float v, uint type) {
   else ((device float*)p)[i] = v;
 }
 
-struct Head { uint width, rows, stride, activation, gain; float eps; uint heads, row_stride, shift; };
+struct Head { uint width, rows, stride, activation, gain; float eps; uint shift, heads, row_stride; };
 
 // Head RMSNorm retains its native-input rounding before gain multiplication for MLX, or 1+w in FP32 when shift != 0.
 kernel void q27_head_norm(device const uchar* X [[buffer(0)]], device const uchar* W [[buffer(1)]],

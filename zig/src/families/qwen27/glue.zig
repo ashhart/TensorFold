@@ -13,7 +13,7 @@ pub fn floatType(dtype: DType) !Float {
     };
 }
 
-pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32, heads: u32 = 1, row_stride: u32 = 0, shift: u32 = 0 };
+pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32, shift: u32 = 0, heads: u32 = 1, row_stride: u32 = 0 };
 pub const QkNormRope = extern struct { width: u32, heads: u32, kv_heads: u32, rows: u32, rotary: u32, key_stride: u32, eps: f32, theta: f32, h_end: u32, w_end: u32, plane: u32 };
 pub const Embed = extern struct { width: u32, rows: u32, vocab: u32, bits: u32, group: u32, metadata: Float };
 pub const EmbedBf16 = extern struct { width: u32, rows: u32, vocab: u32 };
