@@ -77,3 +77,84 @@ test "prefill heads: production copy dispatch pads finite heads and extracts pit
     try t.expectError(error.BadGlue, @import("forward_prefill_glue.zig").glueOne(undefined, &r, &c));
     try t.expectEqual(@as(usize, 4), Mock.copies);
 }
+
+test "prefill heads: three-quarter copies pad twenty-four heads and extract three of four groups" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemsetD8Async = Mock.zero;
+    d.api.cuMemcpy2DAsync_v2 = Mock.copy;
+    Mock.fail = false;
+    Mock.copies = 0;
+    Mock.zeros = 0;
+    var r: @import("run.zig").Runner = .{ .gpa = t.allocator, .d = &d, .stream = .{ .d = &d, .handle = null }, .kernels = undefined, .triton = undefined, .weights = undefined };
+    defer r.deinit();
+    const glueOne = @import("forward_prefill_glue.zig").glueOne;
+    var source: [3 * 48]u16 align(16) = undefined;
+    for (&source, 0..) |*x, i| x.* = @intCast(i + 1);
+    var padded: [3 * 64 + 16]u16 align(16) = @splat(0xA5A5);
+    try r.external("source", @intFromPtr(&source));
+    try r.external("padded", @intFromPtr(&padded));
+    var args: [2]calls.Named = undefined;
+    var c = call("glue.pf_heads_q", &args, .{ .role = .{ .buf = "source" }, .dt = .bf16, .shape = &.{ 3, 48 }, .stride = &.{ 48, 1 } }, .{ .role = .{ .buf = "padded" }, .dt = .bf16, .shape = &.{ 3, 64 }, .stride = &.{ 64, 1 }, .offset = 16 });
+    try glueOne(undefined, &r, &c);
+    for (0..3) |row| {
+        try t.expectEqualSlices(u16, source[row * 48 ..][0..48], padded[8 + row * 64 ..][0..48]);
+        try t.expect(std.mem.allEqual(u16, padded[8 + row * 64 + 48 ..][0..16], 0));
+    }
+    try t.expect(std.mem.allEqual(u16, padded[0..8], 0xA5A5));
+    try t.expect(std.mem.allEqual(u16, padded[padded.len - 8 ..], 0xA5A5));
+    var sink: [24]f32 align(16) = undefined;
+    for (&sink, 0..) |*x, i| x.* = @as(f32, @floatFromInt(i)) - 12;
+    var sink32: [36]f32 align(16) = @splat(99);
+    try r.external("sink", @intFromPtr(&sink));
+    try r.external("sink32", @intFromPtr(&sink32));
+    c = call("glue.pf_heads_sink", &args, .{ .role = .{ .buf = "sink" }, .dt = .f32, .shape = &.{24}, .stride = &.{1} }, .{ .role = .{ .buf = "sink32" }, .dt = .f32, .shape = &.{32}, .stride = &.{1}, .offset = 8 });
+    try glueOne(undefined, &r, &c);
+    try t.expectEqualSlices(f32, &sink, sink32[2..26]);
+    try t.expect(std.mem.allEqual(f32, sink32[26..34], 0));
+    try t.expect(sink32[0] == 99 and sink32[35] == 99);
+    var full: [4 * 11 * 16]u16 align(16) = undefined;
+    for (&full, 0..) |*x, i| x.* = @intCast(i);
+    var real: [3 * 11 * 16]u16 align(16) = @splat(0xA5A5);
+    try r.external("full", @intFromPtr(&full));
+    try r.external("real", @intFromPtr(&real));
+    c = call("glue.pf_heads_out", &args, .{ .role = .{ .buf = "full" }, .dt = .bf16, .shape = &.{ 4, 5, 16 }, .stride = &.{ 11 * 16, 16, 1 }, .offset = 3 * 16 * 2 }, .{ .role = .{ .buf = "real" }, .dt = .bf16, .shape = &.{ 3, 5, 16 }, .stride = &.{ 11 * 16, 16, 1 }, .offset = 3 * 16 * 2 });
+    try glueOne(undefined, &r, &c);
+    for (&real, 0..) |value, i| {
+        const row = (i / 16) % 11;
+        try t.expectEqual(if (row >= 3 and row < 8) full[i] else @as(u16, 0xA5A5), value);
+    }
+    try t.expectEqual(@as(usize, 3), Mock.copies);
+    try t.expectEqual(@as(usize, 2), Mock.zeros);
+}
+
+test "prefill heads: the copies refuse head counts other than sixteen and twenty-four of thirty-two" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemsetD8Async = Mock.zero;
+    d.api.cuMemcpy2DAsync_v2 = Mock.copy;
+    Mock.fail = false;
+    Mock.copies = 0;
+    Mock.zeros = 0;
+    var r: @import("run.zig").Runner = .{ .gpa = t.allocator, .d = &d, .stream = .{ .d = &d, .handle = null }, .kernels = undefined, .triton = undefined, .weights = undefined };
+    defer r.deinit();
+    const glueOne = @import("forward_prefill_glue.zig").glueOne;
+    var buf: [4 * 64]u16 align(16) = @splat(0);
+    try r.external("a", @intFromPtr(&buf));
+    try r.external("b", @intFromPtr(&buf));
+    var args: [2]calls.Named = undefined;
+    // 20 of 32 heads' columns, then 32 of 32
+    for ([_]i64{ 40, 64 }) |cols| {
+        var c = call("glue.pf_heads_q", &args, .{ .role = .{ .buf = "a" }, .dt = .bf16, .shape = &.{ 1, cols }, .stride = &.{ cols, 1 } }, .{ .role = .{ .buf = "b" }, .dt = .bf16, .shape = &.{ 1, 64 }, .stride = &.{ 64, 1 } });
+        try t.expectError(error.BadGlue, glueOne(undefined, &r, &c));
+    }
+    for ([_]i64{ 8, 20, 32 }) |n| {
+        var c = call("glue.pf_heads_sink", &args, .{ .role = .{ .buf = "a" }, .dt = .f32, .shape = &.{n}, .stride = &.{1} }, .{ .role = .{ .buf = "b" }, .dt = .f32, .shape = &.{32}, .stride = &.{1} });
+        try t.expectError(error.BadGlue, glueOne(undefined, &r, &c));
+    }
+    // one of four groups, then four of four
+    for ([_]i64{ 1, 4 }) |g| {
+        var c = call("glue.pf_heads_out", &args, .{ .role = .{ .buf = "a" }, .dt = .bf16, .shape = &.{ 4, 2, 8 }, .stride = &.{ 16, 8, 1 } }, .{ .role = .{ .buf = "b" }, .dt = .bf16, .shape = &.{ g, 2, 8 }, .stride = &.{ 16, 8, 1 } });
+        try t.expectError(error.BadGlue, glueOne(undefined, &r, &c));
+    }
+    try t.expectEqual(@as(usize, 0), Mock.copies);
+    try t.expectEqual(@as(usize, 0), Mock.zeros);
+}

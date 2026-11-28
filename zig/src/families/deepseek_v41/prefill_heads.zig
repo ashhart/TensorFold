@@ -1,20 +1,33 @@
-//! Sixteen real heads through the unchanged 32-head prefill core; copies preserve the run's group-major layout.
+//! Sixteen or twenty-four real heads lead the unchanged 32-head prefill core's, the rest zero, in group-major layout.
 const std = @import("std");
 const cuda = @import("cuda");
 const calls = @import("block_calls.zig");
 const E = @import("block.zig").Emitter;
 const Arg = calls.Arg;
 
+/// The core's head count: a padded rank runs these, its own heads first.
+pub const core_heads: i64 = 32;
+
+/// A rank whose heads go through the padded core: four ranks (16 heads) and three ranks' 24-head shares.
+pub fn padded(heads: i64) bool {
+    return heads == 16 or heads == 24;
+}
+
+/// `real` of `full` as a whole ratio the copies accept: a half (16 of 32) or three quarters (24 of 32).
+fn part(real: i64, full: i64) bool {
+    return real > 0 and (2 * real == full or 4 * real == 3 * full);
+}
+
 pub fn query(e: *E, q: Arg, hd: i64) !Arg {
-    const padded = try e.buf("L.pf.q32", .{}, .bf16, &.{ e.n, 32 * hd });
-    try e.glue("pf_heads_q", &.{ q, padded });
-    return padded;
+    const full = try e.buf("L.pf.q32", .{}, .bf16, &.{ e.n, core_heads * hd });
+    try e.glue("pf_heads_q", &.{ q, full });
+    return full;
 }
 
 pub fn sink(e: *E, real: Arg) !Arg {
-    const padded = try e.buf("L.pf.sink32", .{}, .f32, &.{32});
-    try e.glue("pf_heads_sink", &.{ real, padded });
-    return padded;
+    const full = try e.buf("L.pf.sink32", .{}, .f32, &.{core_heads});
+    try e.glue("pf_heads_sink", &.{ real, full });
+    return full;
 }
 
 pub fn extract(e: *E, source: Arg, dest: Arg) !void {
@@ -35,24 +48,24 @@ pub fn glue(r: anytype, c: *const calls.Call) !bool {
     var zero: usize = 0;
     if (std.mem.eql(u8, c.name, "glue.pf_heads_q")) {
         if (src.dt != .bf16 or src.shape.len != 2 or dst.shape.len != 2 or src.shape[0] <= 0 or src.shape[1] <= 0 or
-            dst.shape[0] != src.shape[0] or dst.shape[1] != 2 * src.shape[1] or src.stride[1] != 1 or dst.stride[1] != 1 or
+            dst.shape[0] != src.shape[0] or !part(src.shape[1], dst.shape[1]) or src.stride[1] != 1 or dst.stride[1] != 1 or
             src.stride[0] != src.shape[1] or dst.stride[0] != dst.shape[1]) return error.BadGlue;
         width = @intCast(2 * src.shape[1]);
         height = @intCast(src.shape[0]);
         sp = width;
-        dp = 2 * width;
+        dp = @intCast(2 * dst.shape[1]);
         zero = height * dp;
     } else if (std.mem.eql(u8, c.name, "glue.pf_heads_sink")) {
-        if (src.dt != .f32 or src.shape.len != 1 or dst.shape.len != 1 or src.shape[0] != 16 or dst.shape[0] != 32 or
+        if (src.dt != .f32 or src.shape.len != 1 or dst.shape.len != 1 or !padded(src.shape[0]) or dst.shape[0] != core_heads or
             src.stride[0] != 1 or dst.stride[0] != 1) return error.BadGlue;
-        width = 64;
+        width = @intCast(4 * src.shape[0]);
         height = 1;
         sp = width;
-        dp = 128;
+        dp = @intCast(4 * core_heads);
         zero = dp;
     } else if (std.mem.eql(u8, c.name, "glue.pf_heads_out")) {
         if (src.dt != .bf16 or src.shape.len != 3 or dst.shape.len != 3 or dst.shape[0] <= 0 or dst.shape[1] <= 0 or dst.shape[2] <= 0 or
-            src.shape[0] != 2 * dst.shape[0] or src.shape[1] != dst.shape[1] or src.shape[2] != dst.shape[2] or
+            !part(dst.shape[0], src.shape[0]) or src.shape[1] != dst.shape[1] or src.shape[2] != dst.shape[2] or
             src.stride[2] != 1 or dst.stride[2] != 1 or src.stride[1] != src.shape[2] or dst.stride[1] != dst.shape[2] or
             src.stride[0] < src.shape[1] * src.shape[2] or dst.stride[0] < dst.shape[1] * dst.shape[2]) return error.BadGlue;
         width = @intCast(2 * dst.shape[1] * dst.shape[2]);
