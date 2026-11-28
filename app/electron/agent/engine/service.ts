@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { promises as fs, existsSync } from 'node:fs'
+import { constants, promises as fs, existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -595,6 +595,106 @@ export class EngineService {
     } catch { return null }
   }
 
+  // Drafter-only checkpoints (config.json carries dflash_config, as the library scanner reads it) are
+  // companions, not chat models: 1.2.10 lists them but they get no row. Any unreadable or malformed
+  // config counts as "not known to be a drafter", so the row stays exactly as before.
+  private async isDrafterOnly(repo: string): Promise<boolean> {
+    try {
+      // Cache containment, as library.ts and model-revisions.ts do it: only the real folders under the
+      // hub root count, so a symlinked or escaping cache folder simply reads as "not known".
+      const hub = await fs.realpath(this.hub)
+      const root = repoCacheDir(hub, repo)
+      if (await fs.realpath(root) !== root) return false
+      const candidate = await this.revisions.selected(repo) ?? await this.unpinnedSnapshot(root)
+      // Canonical, then contained: macOS hands out /var/... whose realpath is /private/var/..., so the
+      // real folder is compared by prefix against the canonical root instead of by string equality.
+      const directory = await this.canonicalInside(root, candidate)
+      if (!directory) return false
+      const raw = await this.readCacheFile(path.join(directory, 'config.json'), path.join(root, 'blobs'), 128 * 1024)
+      if (raw == null) return false
+      const config: any = JSON.parse(raw)
+      return !!config && typeof config === 'object' && !!config.dflash_config
+    } catch { return false }
+  }
+
+  // The engine's own resolution (zig/src/cli/hub.zig cachedSnapshot): refs/main's revision when that
+  // snapshot is on disk, else the newest non-symlink snapshot holding a config.json, so a pruned ref or
+  // a checkpoint another HF client downloaded still resolves. A missing ref is no ref, not an abort.
+  private async unpinnedSnapshot(root: string): Promise<string | null> {
+    // Every intermediate folder must be the real folder under the repo root, not a link elsewhere. The
+    // root is canonicalised first so a prefix such as macOS /var (-> /private/var) still contains them.
+    const canonical = await fs.realpath(root).catch(() => null)
+    if (!canonical) return null
+    // Only snapshots is required: a cache another client left without a refs folder is still a cache,
+    // and no ref simply means the newest validated snapshot wins.
+    const refs = await this.canonicalInside(canonical, path.join(canonical, 'refs'))
+    const snapshots = await this.canonicalInside(canonical, path.join(canonical, 'snapshots'))
+    if (!snapshots) return null
+    // No blob root: an HF ref is a plain file, so a link there is refused.
+    const ref = refs ? await this.readCacheFile(path.join(refs, 'main'), null, 256).catch(() => null) : null
+    if (ref) {
+      const revision = ref.trim()
+      if (/^[0-9a-fA-F]{40}$/.test(revision)) {
+        const named = await this.snapshotDir(snapshots, revision)
+        if (named) return named
+      }
+    }
+    let newest: string | null = null
+    let newestMtime = -1
+    for (const name of await fs.readdir(snapshots).catch(() => [])) {
+      const candidate = await this.snapshotDir(snapshots, name)
+      if (!candidate) continue
+      const stat = await fs.stat(candidate).catch(() => null)
+      if (!stat || stat.mtimeMs <= newestMtime) continue
+      const config = await fs.stat(path.join(candidate, 'config.json')).catch(() => null)
+      if (!config || !config.isFile()) continue
+      newestMtime = stat.mtimeMs
+      newest = candidate
+    }
+    return newest
+  }
+
+  // One snapshot entry, as the engine's rule reads it: a real folder (not a link) inside the canonical
+  // snapshots dir, so its returned path can be handed straight to the config read.
+  private async snapshotDir(snapshots: string, name: string): Promise<string | null> {
+    const candidate = path.join(snapshots, name)
+    const stat = await fs.lstat(candidate).catch(() => null)
+    if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) return null
+    return this.canonicalInside(snapshots, candidate)
+  }
+
+  // The real path a cache entry resolves to, kept only while it stays under its canonical parent.
+  private async canonicalInside(parent: string, candidate: string | null): Promise<string | null> {
+    if (!candidate) return null
+    const real = await fs.realpath(candidate).catch(() => null)
+    return real && real.startsWith(parent + path.sep) ? real : null
+  }
+
+  // One bounded read from an open handle, no symlink hop past the folder's own blobs (library.ts's json()).
+  private async readCacheFile(file: string, blobRoot: string | null, maxBytes: number): Promise<string | null> {
+    const link = await fs.lstat(file)
+    let actual = file
+    if (link.isSymbolicLink()) {
+      // Hugging Face stores a snapshot's config.json as a link into this repo's own blobs folder.
+      if (blobRoot === null) return null
+      // Both sides are canonical, so a hub reached through a symlinked prefix still matches.
+      const blobs = await fs.realpath(blobRoot).catch(() => null)
+      // The blob root itself must be this repo's real folder (library.ts's check): a blobs link that
+      // points at another folder is not this repo's cache, even if the file lands inside its target.
+      if (!blobs || blobs !== blobRoot) return null
+      actual = await fs.realpath(file).catch(() => null) ?? ''
+      if (!actual || path.dirname(actual) !== blobs || actual.endsWith('.incomplete') || actual.endsWith('.ranges')) return null
+    } else if (!link.isFile()) return null
+    const handle = await fs.open(actual, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const stat = await handle.stat()
+      if (!stat.isFile() || stat.size > maxBytes) return null
+      const data = Buffer.alloc(stat.size)
+      if ((await handle.read(data, 0, data.length, 0)).bytesRead !== data.length) return null
+      return data.toString('utf8')
+    } finally { await handle.close() }
+  }
+
   private requiredDrafter(model: string, canonical = this.localRepos.get(model) ?? model): string | null {
     return this.options.modelSettings?.(model)?.speculativeDecoding === 'off' ? null : drafterFor(canonical)
   }
@@ -624,6 +724,7 @@ export class EngineService {
     for (const repo of Object.keys(selected)) if (!models.has(repo)) models.set(repo, { repo, family: '', modelType: '' })
     const out: EngineInstalledModel[] = []
     for (const model of models.values()) {
+      if (await this.isDrafterOnly(model.repo)) continue // Companion checkpoint: the model it drafts for carries the row.
       const drafter = this.requiredDrafter(model.repo)
       const drafterBytes = drafter ? await this.cachedModelBytes(drafter) : null
       const entry: EngineInstalledModel = { ...model, source: selected[model.repo] ? 'download' : 'cache', format: null, contextTokens: null, weightsBytes: null, memoryFloorBytes: null, fitsMemory: null, drafter, drafterInstalled: drafter ? drafterBytes != null : null }

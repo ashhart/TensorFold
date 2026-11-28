@@ -4,11 +4,13 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import type { EngineEvent } from '../types'
+import { parseModelsOutput, runEngineCli } from './cli'
 import { HF_ORIGIN } from './hub'
 import { EngineService, engineChildEnv } from './service'
 import { recordEnginePerformance, setEnginePerformanceRecorder } from './provider'
 import { makeHarness, processAlive, seedModel, waitFor } from './test-fixtures/harness'
 import { ModelRevisions } from './model-revisions'
+import { repoCachedBytes } from './paths'
 
 const GIB = 1024 ** 3
 const SHA = 'd'.repeat(40)
@@ -105,6 +107,108 @@ async function liveEligibilityAndCacheScenarios() {
   await service.setEnvOverrides({})
   assert.deepEqual(service.envOverrides(), {}, 'clearing every override leaves a clean saved map')
   await h.cleanup()
+}
+
+// Issue #4407: engine 1.3.0's `startup budget` line must not drop a downloaded model from the
+// installed list, and the drafter-only checkpoints 1.2.10 lists must not get a row of their own.
+async function startupBudgetAndDrafterRows() {
+  const MODEL = 'TensorFold/Qwen3.8-27B-MLX-4bit'
+  const DRAFTER = 'z-lab/Qwen3.8-27B-DFlash2'
+  const DRAFTER_BYTES = 8192 // The seeded drafter's single weight file, added to its model's floor.
+  const h = await makeHarness({ FAKE_ENGINE_FAMILIES: 'qwen3:Qwen3.8-27B DFlash2 drafter', FAKE_INFO_BUDGET: '1' })
+  const service = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, totalMemoryBytes: 32 * GIB, emit: () => {} })
+  try {
+    await seedModel(h.hub, MODEL, { checkpoint: true })
+    await seedModel(h.hub, DRAFTER, { checkpoint: true, dflash: true, bytes: DRAFTER_BYTES })
+    const listed = parseModelsOutput((await runEngineCli(h.binary, ['models'], h.env)).stdout).map((m) => m.repo)
+    assert.deepEqual(listed, [MODEL, DRAFTER], 'the fake mirrors 1.2.10 by listing the drafter row too')
+    // The `models` rows: the startup-budget model keeps its measured floor, the drafter has no row.
+    const rows = await service.installed()
+    assert.deepEqual(rows.map((m) => m.repo), [MODEL], 'the downloaded model survives and the drafter is left out')
+    const model = rows[0]
+    const infoText = (await runEngineCli(h.binary, ['info', MODEL], h.env)).stdout
+    assert.match(infoText, /^startup budget: /m, 'the fake prints the 1.3.0 line in place of the memory floor')
+    const printed = Number(/startup budget: ([\d.]+) GiB/.exec(infoText)![1])
+    assert.equal(model.memoryFloorBytes, Math.round(printed * GIB) + await repoCachedBytes(h.hub, DRAFTER), 'the printed budget, its reserve included, plus the drafter it drafts for')
+    assert.equal(model.source, 'cache')
+    assert.equal(model.family, 'Qwen3.5-2B or Qwen3.8-27B')
+    assert.equal(model.format, '4-bit, group 64')
+    assert.equal(model.fitsMemory, true, 'the parsed budget sized the model against this Mac')
+    // A pruned refs/main still resolves: the engine's own snapshot rule (hub.zig cachedSnapshot) names
+    // the newest snapshot with a config.json, so the drafter stays a companion and not a row.
+    const drafterRoot = path.join(h.hub, `models--${DRAFTER.replace('/', '--')}`)
+    const drafterSnapshot = path.join(drafterRoot, 'snapshots', 'a'.repeat(40))
+    await fs.rm(path.join(drafterRoot, 'refs', 'main'))
+    assert.deepEqual(parseModelsOutput((await runEngineCli(h.binary, ['models'], h.env)).stdout).map((m) => m.repo), [MODEL, DRAFTER], 'the fake follows the engine rule and still lists the drafter without a ref')
+    // The helpers answer with canonical paths, so the expectation is canonicalised too: under a macOS
+    // temp prefix (/var -> /private/var) the raw string and the realpath differ.
+    assert.equal(await (service as any).unpinnedSnapshot(drafterRoot), await fs.realpath(drafterSnapshot), 'the newest-snapshot rule resolves a pruned refs/main')
+    assert.deepEqual((await service.installed(true)).map((m) => m.repo), [MODEL], 'the pruned ref still leaves the drafter out')
+    // Same cache reached through a symlinked prefix, as macOS hands out /var/... : the helpers must
+    // canonicalise each step and then check containment, never compare a realpath against the raw path.
+    const linkedHub = path.join(h.root, 'hub-via-link')
+    await fs.symlink(h.hub, linkedHub)
+    const viaLink = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: { ...h.env, HF_HUB_CACHE: linkedHub }, totalMemoryBytes: 32 * GIB, emit: () => {} })
+    try {
+      assert.equal(await (viaLink as any).isDrafterOnly(DRAFTER), true, 'a hub behind a symlink still reads the drafter config')
+      assert.equal(await (viaLink as any).unpinnedSnapshot(path.join(linkedHub, path.basename(drafterRoot))), await fs.realpath(drafterSnapshot), 'the newest-snapshot rule resolves through the symlinked prefix')
+      assert.deepEqual((await viaLink.installed(true)).map((m) => m.repo), [MODEL], 'the symlinked prefix still leaves the drafter out')
+    } finally { viaLink.shutdown() }
+    // The same two repos arriving through the selected-revisions map: still one row.
+    const revisions = new ModelRevisions(h.root, () => h.hub)
+    await revisions.commit([{ repo: MODEL, revision: 'a'.repeat(40) }, { repo: DRAFTER, revision: 'a'.repeat(40) }])
+    const pinned = await service.installed(true)
+    assert.deepEqual(pinned.map((m) => m.repo), [MODEL], 'a drafter in the revisions map is left out too')
+    assert.equal(pinned[0].source, 'download')
+    // And through the library scanner, whose drafter entry is not loadable.
+    await service.scanLibrary({ includeHuggingFace: true })
+    const scanned = await service.installed(true)
+    const library = (await service.librarySnapshot()).models
+    const local = library.find((m) => m.repo === MODEL)
+    const localDrafter = library.find((m) => m.repo === DRAFTER)
+    assert.equal(localDrafter?.complete, true, 'the drafter fixture is a complete checkpoint, not an invalid header')
+    assert.equal(localDrafter?.weightsBytes, DRAFTER_BYTES, 'its weights read through the snapshot link into blobs/')
+    assert.equal(localDrafter?.drafterOnly, true, "config.json's dflash_config marks it a companion")
+    assert.equal(localDrafter?.loadable, false, 'the scanner keeps the drafter out of the loadable rows')
+    assert.match(localDrafter?.reason ?? '', /drafter/, 'the reason names it a drafter checkpoint')
+    assert.ok(local?.loadable && scanned.some((m) => m.source === 'library' && m.repo === local.id), 'the scanned checkpoint still reaches the list')
+    assert.equal(scanned.filter((m) => m.repo === DRAFTER).length, 0, 'no source contributes a drafter row')
+    // Containment, negative: a snapshot's config.json that links out of this repo's blobs/ is never
+    // followed, so that checkpoint reads as "not known to be a drafter" and keeps its row.
+    const ESCAPING = 'Org/Escaping'
+    await seedModel(h.hub, ESCAPING, { checkpoint: true })
+    const escapingRoot = path.join(h.hub, `models--${ESCAPING.replace('/', '--')}`)
+    const escapingSnapshot = path.join(escapingRoot, 'snapshots', 'a'.repeat(40))
+    // Both files sit under the harness root, so h.cleanup() in the finally block takes them with it.
+    const escape = path.join(h.root, 'escape.json')
+    await fs.writeFile(escape, JSON.stringify({ model_type: 'qwen3', dflash_config: {} }))
+    await fs.rm(path.join(escapingSnapshot, 'config.json'))
+    await fs.symlink(escape, path.join(escapingSnapshot, 'config.json'))
+    assert.equal(await (service as any).isDrafterOnly(ESCAPING), false, 'the escaping link is not followed, so it is not known to be a drafter')
+    const kept = (await service.installed(true)).filter((m) => m.source !== 'library').map((m) => m.repo).sort()
+    assert.deepEqual(kept, [ESCAPING, MODEL].sort(), 'the escaping link keeps its row; only the contained drafter is dropped')
+    // A cache with no refs folder at all (another client's download) is still a cache: only snapshots is
+    // required, so the newest validated snapshot resolves and the drafter stays a companion, not a row.
+    const NO_REFS = 'Org/NoRefs'
+    await seedModel(h.hub, NO_REFS, { checkpoint: true, dflash: true })
+    const noRefsRoot = path.join(h.hub, `models--${NO_REFS.replace('/', '--')}`)
+    const noRefsSnapshot = path.join(noRefsRoot, 'snapshots', 'a'.repeat(40))
+    await fs.rm(path.join(noRefsRoot, 'refs'), { recursive: true, force: true })
+    assert.equal(await (service as any).unpinnedSnapshot(noRefsRoot), await fs.realpath(noRefsSnapshot), 'a missing refs folder falls through to the newest snapshot')
+    assert.equal(await (service as any).isDrafterOnly(NO_REFS), true, 'a cache with no refs folder still reads its drafter config')
+    // A blobs folder that is itself a link outside the repo cache is not this repo's blobs: the config
+    // link is refused before its target is read, so a valid drafter config there is never seen.
+    const BLOBS_LINK = 'Org/BlobsLink'
+    await seedModel(h.hub, BLOBS_LINK, { checkpoint: true, dflash: true })
+    const blobsLinkRoot = path.join(h.hub, `models--${BLOBS_LINK.replace('/', '--')}`)
+    const outsideBlobs = path.join(h.root, 'outside-blobs')
+    await fs.rename(path.join(blobsLinkRoot, 'blobs'), outsideBlobs)
+    await fs.symlink(outsideBlobs, path.join(blobsLinkRoot, 'blobs'))
+    assert.equal(await (service as any).isDrafterOnly(BLOBS_LINK), false, 'a blobs folder linked outside the repo cache is refused, not followed')
+  } finally {
+    service.shutdown()
+    await h.cleanup()
+  }
 }
 
 async function main() {
@@ -325,6 +429,7 @@ async function main() {
   await waitFor(() => !processAlive(orphan.pid!), 5000, 'orphaned engine to be reaped')
   await h.cleanup()
   await liveEligibilityAndCacheScenarios()
+  await startupBudgetAndDrafterRows()
   console.log('engine service tests passed')
 }
 

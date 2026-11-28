@@ -54,14 +54,19 @@ export interface ModelInfo {
 }
 
 const GIB = 1024 ** 3
+// Engine 1.3.0 prints one of two priced startup-budget lines, both of which name the floor. The
+// conservative Metal plan is fully parenthesised; the CUDA/Metal --context plan is not. "not priced"
+// matches neither, so an unpriced budget still falls through to the floor (or is a parse failure).
 const STARTUP_BUDGET_RE = /^(\d+(?:\.\d+)?) GiB \(conservative raw\/packed text weights, both prompt planes\/selectors, KV\/state, keepalive and \d+(?:\.\d+)? GiB runtime reserve; trained window\)$/
+const STARTUP_BUDGET_AT_CONTEXT_RE = /^(\d+(?:\.\d+)?) GiB at --context \d+: /
 
 export function parseInfoOutput(text: string): ModelInfo {
   const field = (name: string) => new RegExp(`^${name}: (.+)$`, 'm').exec(text)?.[1]?.trim() ?? null
   const family = /^(.+) \(([A-Za-z0-9_.-]+)\)$/.exec(field('family') ?? '')
   const weights = /\((\d+) bytes\)/.exec(field('weights') ?? '')
   const floor = /^([\d.]+) GiB \(weights plus a ([\d.]+) GiB runtime margin\)$/.exec(field('memory floor') ?? '')
-  const startup = STARTUP_BUDGET_RE.exec(field('startup budget') ?? '')
+  const budgetLine = field('startup budget') ?? ''
+  const startup = STARTUP_BUDGET_RE.exec(budgetLine) ?? STARTUP_BUDGET_AT_CONTEXT_RE.exec(budgetLine)
   if (!family || !weights || (!floor && !startup)) throw new Error(text.trim().split(/\r?\n/)[0] || 'tensorfold-native info printed nothing.')
   const weightsBytes = Number(weights[1])
   const context = Number(field('context'))
