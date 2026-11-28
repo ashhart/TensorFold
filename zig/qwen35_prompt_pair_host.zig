@@ -37,6 +37,7 @@ test "prompt pair: actual adapter leaves qkv and z separate and binds one a/b la
     var e = fixture.engine(&d, true);
     d.api.cuLaunchKernel = Trace.launch;
     e.affine.prefill_fn = function(&d, 0x6151);
+    e.affine.prefill2_fn = null;
     e.affine.prefill22_fn = function(&d, 0x6152);
     e.affine.prefill_many_fn = function(&d, 0x6153);
     e.g = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 1, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 4096, .linear = @splat(false) };

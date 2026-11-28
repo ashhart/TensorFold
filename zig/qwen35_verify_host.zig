@@ -97,6 +97,7 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     e.affine.gemv_fn = function(d, 2);
     e.affine.group_fn = function(d, 3);
     e.affine.prefill_fn = function(d, 4);
+    e.affine.prefill2_fn = null;
     e.affine.prefill22_fn = function(d, 4);
     e.affine.half_prompt = false;
     if (@hasField(cuda.qlinear.Affine4Kernels, "verify_fn")) e.affine.verify_fn = function(d, 5);
