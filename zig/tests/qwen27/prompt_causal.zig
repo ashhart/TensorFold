@@ -45,7 +45,7 @@ fn fill(xs: []u16, rng: std.Random) void {
 fn run(queue: mtl.Queue, op: *attn.Attention, scratch: *attn.Scratch, binding: *attn.Binding, plan: attn.Plan, inputs: [5]mtl.Buffer, caches: []const attn.Cache) !void {
     const cb = queue.commandBuffer();
     const e = cb.compute(.concurrent);
-    try op.encode(e, scratch, binding, plan, .{ .buffer = inputs[0] }, .{ .buffer = inputs[1] }, .{ .buffer = inputs[2] }, .{ .buffer = inputs[4] }, caches, .{ .buffer = inputs[3] }, true, false);
+    try op.encodeContiguous(e, scratch, binding, plan, .{ .buffer = inputs[0] }, .{ .buffer = inputs[1] }, .{ .buffer = inputs[2] }, .{ .buffer = inputs[4] }, caches, .{ .buffer = inputs[3] }, true, false);
     e.end();
     cb.commit();
     cb.wait();

@@ -21,7 +21,7 @@ pub const after =
     \\  kend = min(kend, kbeg + (seen_tg - kbeg + PTK - 1) / PTK * PTK);
 ;
 pub const raw = [_][]const u8{q.runtime_sources.attention_prompt};
-const pins = [_][]const u8{"67fa58af326c188ed6881226d8232e78a50129c1eb82cf59e08b2525e4ec76e5"};
+const pins = [_][]const u8{"9e91642dba22185a7edb4e61b7633f2ca5fd8ca1061c617157277fd66a051b2d"};
 
 pub fn baseline(a: std.mem.Allocator, text: []const u8) ![]u8 {
     const count = std.mem.count(u8, text, after ++ "\n");
@@ -36,7 +36,7 @@ pub fn planted(a: std.mem.Allocator, text: []const u8, cap: bool) ![]u8 {
     return std.mem.replaceOwned(u8, a, text, from, to);
 }
 
-test "causal prompt baseline: tensor-unit source matches the frozen parent, paged edits remain two" {
+test "causal prompt baseline: tensor-unit source matches the frozen parent, paged edits remain four" {
     const a = std.testing.allocator;
     for (raw, pins) |text, pin| {
         const old = try baseline(a, text);
@@ -44,7 +44,7 @@ test "causal prompt baseline: tensor-unit source matches the frozen parent, page
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(old, &digest, .{});
         try std.testing.expectEqualStrings(pin, &std.fmt.bytesToHex(digest, .lower));
-        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "(r, kt, kend, q, k, v, xs"));
+        try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "(r, kt, kend, q, k, v, xs"));
         const begin = std.mem.indexOf(u8, text, after ++ "\n").?;
         try std.testing.expect(std.mem.indexOf(u8, text[begin..][0..after.len], "barrier") == null);
     }
