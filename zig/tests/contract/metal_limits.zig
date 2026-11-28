@@ -46,7 +46,11 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
-    if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
+    if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) {
+        const units = std.mem.indexOf(u8, d.name, " m5 ") != null or std.mem.indexOf(u8, d.name, " tensor ") != null;
+        if (std.mem.indexOf(u8, d.name, " tensor ") != null and units) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
+        return device.tensorUnits() == units;
+    }
     if (std.mem.startsWith(u8, d.name, "q27 stack qk ")) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
@@ -75,11 +79,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) {
         if (!assemble) return undefined;
-        const units = std.mem.indexOf(u8, d.name, " m5 ") != null;
+        const causal = std.mem.indexOf(u8, d.name, " tensor ") != null;
+        const units = std.mem.indexOf(u8, d.name, " m5 ") != null or causal;
         const paged = std.mem.indexOf(u8, d.name, " paged ") != null;
         const form = for (@import("contract").q27_prompt.forms) |f| {
             if (std.mem.indexOf(u8, d.name, f.tag) != null) break f;
-        } else return error.UnknownLaunch;
+        } else if (causal) @import("contract").q27_prompt.forms[0] else return error.UnknownLaunch;
         const text_here = try tf.qwen27.simd_attention.grouped(a, units, true, form.group, form.kv_heads, paged);
         return .{ .decl = d, .function = fun, .here = text_here, .pre_m5 = if (units) "" else text_here };
     }
