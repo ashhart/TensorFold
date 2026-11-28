@@ -44,7 +44,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_NO_TREES` | Exactly `0` or `1`; default off. `1` keeps the CUDA drafter's chains only, and retains precedence over `TF_DRAFT_NODES` |
 | `TF_DFLASH_QL_SPAN` | Exactly `0` or `1`; default off. `1` drafts a ModelOpt NVFP4 or FP8 head over the DFlash2 vocabulary spans; other head formats stay whole |
 | `TF_DFLASH_GRAPH` | Exactly `0` or `1`; default off. `1` replays DFlash2 holds and live absorbs from CUDA graphs, with the same kernels and arguments in the same order |
-| `TF_QWEN_DRAFT_FULL_HEAD` | Exactly `0` or `1`; default off. Read once when a CUDA DFlash2 drafter starts. `1` sends every hold with a wide stream through one full head, one top-k and one word readback; all-narrow holds and the default path are unchanged |
+| `TF_QWEN_DRAFT_FULL_HEAD` | Exactly `0` or `1`; default on. Read once when a CUDA DFlash2 drafter starts. Every hold with a wide stream goes through one full head, one top-k and one word readback; `0` restores the split path, and all-narrow holds are unchanged |
 | `TF_QWEN_GRAPH_STATS` | Exactly `0` or `1`; default off. Read once when a CUDA DFlash2 drafter starts. `1` prints per-stream-count, width-mode and width-mask hold counters at shutdown: captures, replays, eager frames, key misses, evictions and width-not-graphable frames. It changes no launches or tokens |
 | `TF_MTP_TREES` | Exactly `0` or `1`; default off (1 turns the MTP drafter's trees on) |
 | `TF_MTP_BATCH` | Exactly `0` or `1`; default on. `0` keeps one stream at a time |

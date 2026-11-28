@@ -7,33 +7,27 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
 
 - Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
+- Qwen3.8-27B on Metal: Q and K head norm and RoPE run as one `q27_qk_norm_rope` dispatch instead of two head-norm launches, the barrier between them and two RoPE launches, on every chip and pass, keys-only prompt tails included; on an M5 Ultra every cache row and `qa` byte and the served replies match the previous path (#2955, part of #2940).
+
+- CUDA: drafted Qwen3.8-27B now sends a draft hold with any wide stream through the full head in one pass by default, winning back the 1.3.7 loss at 4 greedy streams (+2.3% to +3.1% on two GB10s) with identical tokens; `TF_QWEN_DRAFT_FULL_HEAD=0` restores the split path (#5490, fixes #4439).
+
 - CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
 
 - Nemotron 3.5 Super on CUDA at TP=2: the expert rank runs a window's shared expert on a side stream beside its routed experts, with the same plans and kernels, so tokens are unchanged (#4886).
 
 - Qwen 3.5/3.6/3.8 on CUDA with MTP drafts: cold prompt chunks that end before the MTP head's first tapped row skip the last layer's unread rows and the head, as chunks without taps already did; tokens unchanged (#4882).
 
-
-
 - CLI: `tensorfold tfq3 MODEL` pulls, converts and inspects TFQ3 checkpoints for the dedicated families and any Safetensors architecture, encoding natively in Zig when the external `tfq3` GPU binary is not installed; serving paths are unchanged (#5018).
 
-- CUDA: drafted Qwen3.8-27B gains opt-in `TF_QWEN_DRAFT_FULL_HEAD=1`, which sends a draft hold with any wide stream through the full head in one pass; on one GB10 it wins back the 1.3.7 loss at 4 greedy streams (+3.1%) with identical tokens. Default off, as are the `TF_DFLASH_GRAPH` mixed-width graph keys and `TF_QWEN_GRAPH_STATS` counters added with it (#5481, refs #4439).
-
 - Server: `serve --confidential` disables prompt retention without requesting checkpoint slots and omits generated OCR text from error logs; CUDA families that keep no prompts accept a zero cache budget (#5426).
-
-
 
 - Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
 
 - Desktop: a ready attachment can start a local or remote conversation without typed text, and folder guidance clears after a successful selection or launch (#4836). Thanks @taylorarndt for the report.
 
-
-
 - Inkling 2 Mini on HIP (groundwork, not yet served): CUDA's text-weight loader becomes generic, so one HIP rank can load the text weights through it; CUDA's loading is unchanged (#5031, part of #4274). Thanks to @AbrahamCete.
 
 - Server: preserve a tool reply's real finish reason and identify completed calls at the token limit, so session benchmarks never answer an open-envelope call even when its arguments are valid JSON (#4830)
-
-
 
 - Core: a chat template's content.N index counts only the code points up to the requested index instead of the whole string; rendered text and token ids are unchanged (#5396). Thanks to @BadAd84.
 

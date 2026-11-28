@@ -237,6 +237,7 @@ pub const glm_select = @embedFile("glm_select.metal");
 pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
+pub const core_tree_round = @embedFile("core/tree_round.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal") ++ @embedFile("core/affine_mm_glu.metal");
 pub const core_affine_nonfinite = @embedFile("core/affine_mm_nonfinite.h");
 /// A hyper-connection block boundary in two launches (core/hc.zig).
@@ -253,6 +254,8 @@ pub const packed_metallib = @import("nemotron_packed_metallib").bytes;
 /// The core lane projection (tensor units): every window row's sums in one weight read, and its row order.
 pub const core_lane_projection = @embedFile("core/lane_projection.metal");
 pub const core_lane_order = @embedFile("core/lane_order.metal");
+/// qk: the M5's 4-bit g64 products on the lane layout as load leaves it, tf_lane_reg's words (core/qk_projection.zig).
+pub const core_qk = @embedFile("core/qk.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).
 pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 /// The core DeltaNet kernels (core/deltanet_kernels.zig).
@@ -376,3 +379,5 @@ pub const inkling2_tfq3 = @import("inkling2/tfq3_sources.zig").tfq3;
 
 /// Fused DFlash2 decode kernels: K-norm+RoPE+append, QKV prep, and dynamic-conv2+residual+RMSNorm.
 pub const glm_dflash_opt = @embedFile("glm_dflash_opt.metal");
+/// Qwen27 flat activation shares the production specialization with its contract.
+pub const q27_mlp_xs = @embedFile("qwen27/mlp_xs.metal");
