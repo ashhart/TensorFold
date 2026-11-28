@@ -6,6 +6,7 @@ const row = @import("core").row_projection;
 const sources = @import("qwen_runtime_sources");
 const projection = @import("projection.zig");
 const profile = @import("core").gpu_profile;
+const policy = @import("quant_policy.zig");
 const qk = lane.qk;
 pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
@@ -17,23 +18,21 @@ pub var qk_rows: bool = true;
 pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true, cooperative: bool = false, xs_group: u16 = 64, shift: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, mlp_rows, ane_input, mlp_ane, add_ane };
 
-/// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
-pub fn longPrompt(name: []const u8, tensor_units: bool) bool { return tensor_units and std.mem.endsWith(u8, name, " Ultra"); }
+pub const longPrompt = policy.longPrompt;
+pub const longKey = policy.longKey;
 
-test "long prompt dispatches only on an Ultra with tensor units" {
-    try std.testing.expect(longPrompt("Apple M5 Ultra", true) and !longPrompt("Apple M5 Max", true) and !longPrompt("Apple M5 Pro", true) and !longPrompt("Apple M3 Ultra", false));
-}
-
-/// Whether a reg projection's `rows` take its long key: prompt rows past `lane.reg_rows` on a `longPrompt` chip.
-pub fn longKey(long_prompt: bool, prompt: bool, rows: u32) bool { return long_prompt and prompt and rows > lane.reg_rows; }
-
-test "only prompt chunks past 128 rows take the long key" {
-    try std.testing.expect(longKey(true, true, 129) and longKey(true, true, 2048) and !longKey(true, true, 128) and !longKey(true, false, 2048) and !longKey(false, true, 2048));
+test {
+    _ = @import("quant_policy.zig");
 }
 
 pub const Kernels = struct {
-    allocator: std.mem.Allocator, residency: ?mtl.ResidencySet.Follow = null, device: mtl.Device, profiler: ?*profile.Trace = null,
-    row_pipelines: ?row.Pipelines = null, simd: ?row.simd.Pipelines = null, simd_bits: ?row.simd_bits.Pipelines = null,
+    allocator: std.mem.Allocator,
+    residency: ?mtl.ResidencySet.Follow = null,
+    device: mtl.Device,
+    profiler: ?*profile.Trace = null,
+    row_pipelines: ?row.Pipelines = null,
+    simd: ?row.simd.Pipelines = null,
+    simd_bits: ?row.simd_bits.Pipelines = null,
     /// Raw matrices take simd_qmm_bits' tiles; off on tensor units, whose raw matrices are runs short of a lane tile.
     raw_tiles: bool = true,
     /// Per [n, k] shape: whether the scalar twin's 1-2 row bits equal the tiles' (checked once on this chip).
@@ -46,19 +45,23 @@ pub const Kernels = struct {
     prompt: bool = false,
     /// Set on `longPrompt` chips: chunks past a short entry's capacity take one dispatch on a separate long key.
     long_prompt: bool = false,
-    lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty, cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
+    lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
+    cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
     /// Per [n, k]: whether simd_qmm's half operands give its tiles' bits (checked once on this chip).
     half_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// Per [n, k]: whether chunk pairs on tf_sq_prep_s's sums give simd_qmm's tiles' bits (checked once on this chip).
     sum_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// The last norm's output, its tf_sq_fits words and tf_sq_prep_h output, while no later norm writes over it.
-    fits: ?Fits = null, fits_words: ?mtl.Buffer = null, prep_words: ?mtl.Buffer = null,
+    fits: ?Fits = null,
+    fits_words: ?mtl.Buffer = null,
+    prep_words: ?mtl.Buffer = null,
     /// tf_sq_prep_s's sums for a chunk-pair projection's prompt rows, written just before it.
     sum_words: ?mtl.Buffer = null,
     /// qk's pipelines, made at the first plain matrix's quant.
     qks: ?qk.Pipelines = null,
     sn: ?(if (@hasDecl(@import("core"), "sensenova_loop")) @import("core").sensenova_loop.linear_gpu.LinearGpu else void) = null,
-    sn_xs128_mode: bool = false, sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
+    sn_xs128_mode: bool = false,
+    sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
         while (it.next()) |p| {
@@ -67,7 +70,9 @@ pub const Kernels = struct {
         }
         k.residency = hook;
     }
-    pub fn joined(k: *Kernels, p: *const lane.Projection) void { if (k.residency) |f| mtl.resident.fields.apply(p, f, true); }
+    pub fn joined(k: *Kernels, p: *const lane.Projection) void {
+        if (k.residency) |f| mtl.resident.fields.apply(p, f, true);
+    }
 
     pub fn deinit(k: *Kernels) void {
         k.setResident(null);
@@ -119,16 +124,24 @@ pub const Kernels = struct {
         return p;
     }
 
-    fn xsGroup(k: *const Kernels, width: u32) u16 { return if (!k.device.tensorUnits()) 0 else if (k.sn_xs128_mode) (if (width % 128 == 0) 128 else 0) else 64; }
+    fn xsGroup(k: *const Kernels, width: u32) u16 {
+        return if (!k.device.tensorUnits()) 0 else if (k.sn_xs128_mode) (if (width % 128 == 0) 128 else 0) else 64;
+    }
 
     /// Encodes the product without ordering its output; the caller barriers before dependent reads or writes.
-    pub fn quant(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32) !void { return k.quantSkip(input_encoder, p, x, xs, dims, y, rows, 0); }
+    pub fn quant(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32) !void {
+        return k.quantSkip(input_encoder, p, x, xs, dims, y, rows, 0);
+    }
 
     /// `quant` over input groups [cut[0], cut[0] + cut[1]) only, into fp32 partial sums.
-    pub fn quantCut(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: Sums, dims: Ref, y: Ref, rows: u32, cut: [2]u32) !void { return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, 0, cut); }
+    pub fn quantCut(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: Sums, dims: Ref, y: Ref, rows: u32, cut: [2]u32) !void {
+        return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, 0, cut);
+    }
 
     /// `quant` over a fused two-half projection (the MLP's gate_up) without the first `skip` tiles of each half.
-    pub fn quantSkip(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32) !void { return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, skip, .{ 0, 0 }); }
+    pub fn quantSkip(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32) !void {
+        return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, skip, .{ 0, 0 });
+    }
 
     fn quantImpl(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
@@ -544,9 +557,7 @@ pub const half_rows = 64;
 /// A norm's output, its rows and width: the words in `Kernels.fits_words` are its.
 const Fits = struct { x: Ref, rows: u32, k: u32 };
 
-pub fn padded(rows: u32) u32 {
-    return 16 * ((rows + 15) / 16);
-}
+pub const padded = policy.padded;
 
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
@@ -581,17 +592,6 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
     return source;
 }
 
-test "specialized source selects zero, 64, and 128 group sums" {
-    const a = std.testing.allocator;
-    for ([_]struct { xs: bool, xg: u16, want: []const u8 }{
-        .{ .xs = false, .xg = 64, .want = "#define Q27_XS 0\n" },
-        .{ .xs = true, .xg = 64, .want = "#define Q27_XS 64\n" },
-        .{ .xs = true, .xg = 128, .want = "#define Q27_XS 128\n" },
-    }) |case| {
-        for ([_]Kind{ .norm, .input_norm, .mlp }) |kind| {
-            const src = try specializedSource(a, .{ .kind = kind, .k = 4096, .n = 12288, .xs = case.xs, .xs_group = case.xg });
-            defer a.free(src);
-            try std.testing.expect(std.mem.startsWith(u8, src, case.want));
-        }
-    }
+test {
+    _ = @import("quant_gpu_test.zig");
 }
