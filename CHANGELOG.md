@@ -7,6 +7,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Core: a chat template's content.N index counts only the code points up to the requested index instead of the whole string; rendered text and token ids are unchanged (#5396). Thanks to @BadAd84.
 
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
+- Server: GLM tool calls stream to OpenAI-compatible clients as incremental `tool_calls` deltas (the header, then argument fragments) instead of one chunk when the call closes; streamed deltas concatenate to exactly the non-streaming response, and generated tokens are unchanged (#5470).
 
 - Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
 
