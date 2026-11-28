@@ -20,7 +20,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-sensenova-loop-config-host", "SenseNova loop config table through config reader and Metal admission without a GPU").dependOn(&loop_cfg_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
-    const submission = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/submission.zig"), .target = b.graph.host });
+    const submission = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/submission.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = real_metal }} });
     const submission_step = b.step("test-qwen27-metal4-host", "Check Qwen27 queue selection and record Metal submission without shaders");
     submission_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = submission })).step);
     if (b.graph.host.result.os.tag == .macos) {

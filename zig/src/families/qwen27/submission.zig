@@ -54,3 +54,7 @@ test "Qwen27 selects Metal 4 only when requested and supported" {
     try std.testing.expectEqual(3, try select(Fake{ .available = false, .attempted = &attempted }, true, false));
     try std.testing.expect(attempted);
 }
+
+test "Qwen27 submission exposes its Metal queue API on a host" {
+    _ = open;
+}
