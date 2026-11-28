@@ -91,9 +91,8 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.ids, st.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.segments, st.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync");
     const rows = items.len * (c.block - 1);
-    const mixed = mixedHeadEligible(e.head, contexts);
-    // The graph key does not include the mixed-width row mask; mixed batches must run eagerly.
-    const spanned = if (mixed) try kernels(d, items.len, contexts) else try draft.graphs.hold(d, items.len, contexts, narrow(contexts), kernels);
+    const mixed = mixedHeadPath(d, contexts);
+    const spanned = try draft.graphs.hold(d, items.len, contexts, narrow(contexts), kernels);
     if (!mixed) try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
@@ -138,7 +137,7 @@ fn kernels(d: anytype, streams: usize, contexts: []const *draft.Ctx) !?u64 {
         masked = d.h2;
     }
     try d.norm(masked, d.w.final_norm, d.x, rows);
-    const mixed = mixedHeadEligible(e.head, contexts);
+    const mixed = mixedHeadPath(d, contexts);
     const spanned = if (mixed) blk: {
         try mixedHead(d, contexts, d.staged.bytes);
         break :blk null;
@@ -146,6 +145,11 @@ fn kernels(d: anytype, streams: usize, contexts: []const *draft.Ctx) !?u64 {
     if (!mixed) try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
     return spanned;
+}
+
+/// The opt-in pre-b250 route sends any mixed hold through one full head; all-narrow holds never split.
+pub fn mixedHeadPath(d: anytype, contexts: []const *draft.Ctx) bool {
+    return mixedHeadEligible(d.e.head, contexts) and !d.full_head;
 }
 
 /// Mixed contexts use the same head-width class as an otherwise identical homogeneous frame.

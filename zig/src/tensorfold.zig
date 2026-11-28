@@ -83,6 +83,7 @@ pub const flashnext_batch_meta = @import("families/flashnext/batch_meta.zig");
 pub const flashnext_learned = @import("families/flashnext/learned.zig");
 pub const flashnext_think_check = @import("families/flashnext/think_check.zig");
 pub const glm = @import("families/glm/glm.zig");
+pub const tfq3_check = glm.tfq3.check;
 pub const qwen35 = @import("families/qwen3_5/qwen3_5.zig");
 pub const qwen35_stages = @import("families/qwen3_5/stages.zig");
 pub const gemma4 = @import("families/gemma4/gemma4.zig");

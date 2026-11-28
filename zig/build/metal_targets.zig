@@ -290,6 +290,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .link_libc = true,
             .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, exlr8_build.cliImport(b, target, optimize, engine) },
         });
+        if (std.mem.eql(u8, p.name, "tensorfold")) mod.addImport("glm_tfq3_check", engine);
         if (p.c_source) |file| {
             mod.addCSourceFile(.{ .file = b.path(file), .flags = &.{"-std=c11"} });
         }
@@ -329,6 +330,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
         .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, optimize, mods.engine), .{ .name = "core", .module = mods.engine } },
     }) });
+    cli_tests.root_module.addImport("glm_tfq3_check", mods.engine);
     const run_cli_tests = b.addRunArtifact(cli_tests);
     test_step.dependOn(&run_cli_tests.step);
     b.step("test-cli", "The checkpoint CLI's host tests").dependOn(&run_cli_tests.step);

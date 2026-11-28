@@ -30,6 +30,18 @@ test "confidential: off by default, and a plain start with HOME, PATH and HF_* s
     try t.expectEqual(@as(?[]const u8, null), try confidential.refusal(a, on, &clean));
 }
 
+test "confidential mode: engine open keeps no prompt prefix or checkpoint state" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = try cli.request(a, "d", "t", .{ .prompt_cache_gib = 4, .checkpoint_slots = 3 });
+    try t.expectEqual(@as(?f64, 4), plain.prompt_cache_gib);
+    try t.expectEqual(@as(?i64, 3), plain.keep);
+    const on = try cli.request(a, "d", "t", .{ .confidential = true, .prompt_cache_gib = 4, .checkpoint_slots = 3 });
+    try t.expectEqual(@as(?f64, 0), on.prompt_cache_gib);
+    try t.expectEqual(@as(?i64, null), on.keep);
+}
+
 test "confidential: each flag that keeps or sends request content names itself" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // the Windows build refuses --confidential itself
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
@@ -38,6 +50,7 @@ test "confidential: each flag that keeps or sends request content names itself" 
     var env: std.process.Environ.Map = .init(a);
     const cases = [_]struct { flag: []const u8, argv: []const []const u8 }{
         .{ .flag = "--record", .argv = &.{ "--record", "/tmp/rows" } },
+        .{ .flag = "--prompt-cache-gib", .argv = &.{ "--prompt-cache-gib", "2" } },
         .{ .flag = "--prompt-cache-disk or --learn-conversations", .argv = &.{ "--prompt-cache-disk", "/tmp/kept" } },
         .{ .flag = "--prompt-cache-disk or --learn-conversations", .argv = &.{"--learn-conversations"} },
         .{ .flag = "--learn", .argv = &.{"--learn"} },
@@ -58,7 +71,8 @@ test "confidential: each flag that keeps or sends request content names itself" 
         const why = (try confidential.refusal(a, args, &env)).?;
         try t.expect(std.mem.indexOf(u8, why, c.flag) != null);
     }
-    // as parsed where the build serves it: --fsr-route-trace is a macOS flag
+    // GPU-only flags use direct Args here: this native host build does not serve all of them.
+    try t.expectEqualStrings("--checkpoint-slots", confidential.kept(.{ .confidential = true, .checkpoint_slots = 1 }).?);
     try t.expectEqualStrings("--fsr-route-trace", confidential.kept(.{ .confidential = true, .fsr_trace = "/tmp/trace" }).?);
 }
 
