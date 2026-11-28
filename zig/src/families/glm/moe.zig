@@ -85,7 +85,7 @@ pub fn block(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref,
             }, rows, c.topk, c.experts, c.swiglu_limit);
             if (full) return false;
         }
-    } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0) {
+    } else if (canBoth(w) and s & (Class.shared | Class.routed) == 0) {
         const one = rows == 1 and x.fused_route; // the gate/up groups replay the select: the logits alone
         if (s & Class.route == 0 and one and on(x, "r_router")) logits(x, e, w, x_in, rows);
         if (s & Class.route == 0 and !one) route(x, e, w, x_in, rows);
@@ -181,6 +181,17 @@ pub fn native(w: *const wts.Moe, which: enum { shared, routed, both }) bool {
     };
 }
 
+/// Whether the shared expert uses 8/64 single-matrix weights (compatible with fused moe_gateup_0_sh8).
+pub fn shared8(w: *const wts.Moe) bool {
+    return w.sh_gate_up.more == 0 and w.sh_gate_up.bits == 8 and w.sh_gate_up.group == 64 and
+        w.sh_down.more == 0 and w.sh_down.bits == 8 and w.sh_down.group == 64;
+}
+
+/// Whether both routed and shared experts run in the single fused gather launch (`both`).
+pub fn canBoth(w: *const wts.Moe) bool {
+    return native(w, .routed) and (native(w, .shared) or shared8(w));
+}
+
 /// Part 1: the shared expert into `ys`; part 2: the routed experts of `group` (unique ids, members, count) into `ye`.
 fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32, part: u32, group: [3]Ref) void {
     const c = x.c;
@@ -213,8 +224,12 @@ fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows
     // Two outputs a simdgroup (more reads in flight, the same sums): gate/up to 4 rows, down at one (M5 Ultra).
     const gu_two = rows <= 4;
     const rps: u32 = if (gu_two) 2 else 4;
+    const sh8 = shared8(w);
     if (on(x, "e_gateup")) { // a profile's knock-outs leave out one launch of this path, never the path
-        e.setPipeline(if (one) k.moe_gateup_pick else if (gu_two) k.moe_gateup_0_one else k.moe_gateup_0);
+        const pick_p = if (sh8) k.moe_gateup_sh8_pick else k.moe_gateup_pick;
+        const one_p = if (sh8) k.moe_gateup_0_sh8_one else k.moe_gateup_0_one;
+        const four_p = if (sh8) k.moe_gateup_0_sh8 else k.moe_gateup_0;
+        e.setPipeline(if (one) pick_p else if (gu_two) one_p else four_p);
         bind(e, 0, .{x_in});
         shape(e, 1, .{ rows, D });
         bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b });
@@ -227,7 +242,10 @@ fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows
     }
     if (!on(x, "e_down")) return;
     const down_rps: u32 = if (rows == 1) 2 else 4;
-    e.setPipeline(if (one) k.moe_down_pick else if (rows == 1) k.moe_down_0_one else k.moe_down_0);
+    const pick_d = if (sh8) k.moe_down_sh8_pick else k.moe_down_pick;
+    const one_d = if (sh8) k.moe_down_0_sh8_one else k.moe_down_0_one;
+    const four_d = if (sh8) k.moe_down_0_sh8 else k.moe_down_0;
+    e.setPipeline(if (one) pick_d else if (rows == 1) one_d else four_d);
     bind(e, 0, .{sc.act});
     shape(e, 1, .{ rows, c.topk + 1, N });
     bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b });

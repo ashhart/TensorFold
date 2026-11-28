@@ -61,6 +61,12 @@ pub const Kernels = struct {
     moe_down_0_one: mtl.Pipeline,
     moe_gateup_pick: mtl.Pipeline, // one row: each routed group replays the route select's picks, no select launch
     moe_down_pick: mtl.Pipeline, // and the down projections of the picks in pick order
+    moe_gateup_0_sh8: mtl.Pipeline, // 4/64 routed experts fused with an 8/64 shared expert
+    moe_down_0_sh8: mtl.Pipeline,
+    moe_gateup_0_sh8_one: mtl.Pipeline,
+    moe_down_0_sh8_one: mtl.Pipeline,
+    moe_gateup_sh8_pick: mtl.Pipeline,
+    moe_down_sh8_pick: mtl.Pipeline,
     combine_0: mtl.Pipeline, // their combine: the shared expert's row read from the last slot
     moe_gateup_2: mtl.Pipeline,
     moe_down_2: mtl.Pipeline,
@@ -257,17 +263,17 @@ pub fn instance(comptime key: []const u8, comptime params: []const u8, comptime 
 
 /// Generated kernel `key`'s source.
 pub fn generatedSource(comptime key: []const u8) []const u8 {
-    return kernelOf(key).source;
+    return comptime kernelOf(key).source;
 }
 
 /// Generated kernel `key`'s first function.
 pub fn generatedFunction(comptime key: []const u8) [:0]const u8 {
-    return kernelOf(key).functions[0];
+    return comptime kernelOf(key).functions[0];
 }
 
 fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
     @setEvalBranchQuota(20000);
-    for (sources.glm.all) |k| if (comptime std.mem.eql(u8, k.key, key)) return k;
+    for (sources.glm.all) |k| if (std.mem.eql(u8, k.key, key)) return k;
     @compileError("no generated GLM kernel " ++ key);
 }
 
@@ -299,6 +305,47 @@ fn pickSources(gpa: std.mem.Allocator, route_core: []const u8, gu: []const u8, d
     return .{ gate_up, try edit(gpa, down, member, by_pick) };
 }
 
+/// Rewrite a fused 4/64 MoE source so its shared expert reads packed 8/64 weights with `uint4` loads.
+pub fn sh8Source(gpa: std.mem.Allocator, base: []const u8, is_gateup: bool, params_from: []const u8, params_to: []const u8, name: []const u8) ![]u8 {
+    const q8_from =
+        \\template <> inline float qdotv<8, 16>(const device uint8_t* w, const thread float* xt, float scale, float bias,
+        \\                                      float sum) {
+        \\  float accum = 0.0f;
+        \\  for (int i = 0; i < 16; i++) accum += xt[i] * w[i];
+        \\  return scale * accum + sum * bias;
+        \\}
+    ;
+    const q8_to =
+        \\template <> inline float qdotv<8, 16>(const device uint8_t* w, const thread float* xt, float scale, float bias,
+        \\                                      float sum) {
+        \\  const uint4 raw = *(const device uint4*)w;
+        \\  float accum = 0.0f;
+        \\  for (int i = 0; i < 4; i++) {
+        \\    const uchar4 q = as_type<uchar4>(raw[i]);
+        \\    accum += (xt[4 * i] * float(q.x) + xt[4 * i + 1] * float(q.y) +
+        \\              xt[4 * i + 2] * float(q.z) + xt[4 * i + 3] * float(q.w));
+        \\  }
+        \\  return scale * accum + sum * bias;
+        \\}
+    ;
+    const s1 = try edit(gpa, base, q8_from, q8_to);
+    defer gpa.free(s1);
+    const cond_to = if (is_gateup) "if (SB != 4 && (PART == 1 || int(threadgroup_position_in_grid.z) == int(X_shape[0]) * TOPK)) {" else "if (SB != 4 && (PART == 1 || int(threadgroup_position_in_grid.z) == int(ACT_shape[0]) * TOPK)) {";
+    const s2 = try edit(gpa, s1, "if (PART == 1 && SB != 4) {", cond_to);
+    defer gpa.free(s2);
+    const io_from = if (is_gateup) "ACT[size_t(r) * N + row0 + j] = sl * up;" else "Y[size_t(r) * N + row0 + j] = bfloat(v);";
+    const io_to = if (is_gateup) "ACT[(PART == 0 ? size_t(r) * (TOPK + 1) + TOPK : size_t(r)) * N + row0 + j] = sl * up;" else "Y[(PART == 0 ? size_t(r) * (TOPK + 1) + TOPK : size_t(r)) * N + row0 + j] = bfloat(v);";
+    const s3 = try edit(gpa, s2, io_from, io_to);
+    defer gpa.free(s3);
+    const s4 = if (is_gateup) try edit(gpa, s3, "[[kernel]] void custom_kernel_tf_glm5_fused_moe_gateup", "[[max_total_threads_per_threadgroup(512)]] [[kernel]] void custom_kernel_tf_glm5_fused_moe_gateup") else try edit(gpa, s3, "const device bfloat* x = ACT + size_t(r) * K + lane * SV;", "const device bfloat* x = ACT + (PART == 0 ? size_t(r) * (TOPK + 1) + TOPK : size_t(r)) * K + lane * SV;");
+    defer gpa.free(s4);
+    if (std.mem.count(u8, s4, params_from) != 2) return error.KernelCompile;
+    const s5 = try std.mem.replaceOwned(u8, gpa, s4, params_from, params_to);
+    defer gpa.free(s5);
+    const old_n = if (is_gateup) "glm_moe_gateup_0" else "glm_moe_down_0";
+    return edit(gpa, s5, old_n, name);
+}
+
 const m16_names = affine_mm.names ++ mm_groups.names;
 
 /// Compile every library on worker threads.
@@ -319,7 +366,7 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.wide = null;
     const m3_fast = !device.tensorUnits();
     k.m3_fast = m3_fast;
-    var jobs: [generated.len + 28]Job = undefined;
+    var jobs: [generated.len + 34]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -430,11 +477,33 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     jobs[generated.len + 23] = .{ .device = device, .source = sources.glm_select, .names = &.{ "glm_select_mark", "glm_select_merge" }, .out = &select_out };
     const softmax_rows_src = comptime sources.ops_softmax ++ sources.glm_softmax_rows;
     jobs[generated.len + 24] = .{ .device = device, .source = softmax_rows_src, .names = &.{"glm_softmax_rows"}, .out = @as(*[1]mtl.Pipeline, &k.softmax_rows) };
+    const gu_from = "4096, 2048, 4, 8, 16, 128, 0, 4, 16, 8";
+    const dn_from = "2048, 4096, 4, 8, 16, 128, 0, 4, 16, 8";
+    const gu_one_from = "4096, 2048, 2, 8, 16, 128, 0, 4, 16, 8";
+    const dn_one_from = "2048, 4096, 2, 8, 16, 128, 0, 4, 16, 8";
+    const gu_sh8 = try sh8Source(gpa, gu0_src, true, gu_from, "4096, 2048, 4, 8, 16, 128, 0, 8, 16, 16", "glm_moe_gateup_0_sh8");
+    defer gpa.free(gu_sh8);
+    const dn_sh8 = try sh8Source(gpa, down0_src, false, dn_from, "2048, 4096, 4, 8, 16, 128, 0, 8, 16, 16", "glm_moe_down_0_sh8");
+    defer gpa.free(dn_sh8);
+    const gu_sh8_one = try sh8Source(gpa, gu0_src, true, gu_from, "4096, 2048, 2, 8, 16, 128, 0, 8, 16, 16", "glm_moe_gateup_0_sh8_one");
+    defer gpa.free(gu_sh8_one);
+    const dn_sh8_one = try sh8Source(gpa, down0_src, false, dn_from, "2048, 4096, 2, 8, 16, 128, 0, 8, 16, 16", "glm_moe_down_0_sh8_one");
+    defer gpa.free(dn_sh8_one);
+    const gu_sh8_pick = try sh8Source(gpa, picks[0], true, gu_one_from, "4096, 2048, 2, 8, 16, 128, 0, 8, 16, 16", "glm_moe_gateup_0_sh8_pick");
+    defer gpa.free(gu_sh8_pick);
+    const dn_sh8_pick = try sh8Source(gpa, picks[1], false, dn_one_from, "2048, 4096, 2, 8, 16, 128, 0, 8, 16, 16", "glm_moe_down_0_sh8_pick");
+    defer gpa.free(dn_sh8_pick);
+    jobs[generated.len + 27] = .{ .device = device, .source = gu_sh8, .names = &.{"glm_moe_gateup_0_sh8"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0_sh8) };
+    jobs[generated.len + 28] = .{ .device = device, .source = dn_sh8, .names = &.{"glm_moe_down_0_sh8"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0_sh8) };
+    jobs[generated.len + 29] = .{ .device = device, .source = gu_sh8_one, .names = &.{"glm_moe_gateup_0_sh8_one"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0_sh8_one) };
+    jobs[generated.len + 30] = .{ .device = device, .source = dn_sh8_one, .names = &.{"glm_moe_down_0_sh8_one"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0_sh8_one) };
+    jobs[generated.len + 31] = .{ .device = device, .source = gu_sh8_pick, .names = &.{"glm_moe_gateup_0_sh8_pick"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_sh8_pick) };
+    jobs[generated.len + 32] = .{ .device = device, .source = dn_sh8_pick, .names = &.{"glm_moe_down_0_sh8_pick"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_sh8_pick) };
 
     const m3_src = if (m3_fast) try affine_mm.source(device, gpa, .{ .glm_m3_fast = true, .exact_nonfinite = true }) else try gpa.dupe(u8, "");
     defer gpa.free(m3_src);
     var m3_out: affine_mm.Pipes = undefined;
-    if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
+    if (m3_fast) jobs[generated.len + 33] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
     const active_jobs = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
     if (comptime @TypeOf(visitor) != void) {
         for (active_jobs) |j| try visitor.raw("glm", j.names[0], j.source);
