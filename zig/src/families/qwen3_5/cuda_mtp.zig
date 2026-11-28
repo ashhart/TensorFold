@@ -513,9 +513,13 @@ pub const Mtp = struct {
 
     // the Drafter contract
 
-    pub fn drafter(d: *Mtp) dr.Drafter {
+    pub const drafter_vtable: dr.Drafter.VTable = blk: {
         const adapter = @import("cuda_mtp_contract.zig").Adapter(Mtp);
-        return .{ .kind = "MTP", .ptr = d, .vtable = &.{ .taps = adapter.taps, .facts = adapter.facts, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+        break :blk .{ .taps = adapter.taps, .facts = adapter.facts, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn };
+    };
+
+    pub fn drafter(d: *Mtp) dr.Drafter {
+        return @import("cuda_prefill_trace.zig").wrapDrafter(d, .{ .kind = "MTP", .ptr = d, .vtable = &drafter_vtable });
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {

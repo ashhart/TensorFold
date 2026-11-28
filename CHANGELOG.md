@@ -7,6 +7,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
 
 - Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
+- CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
+
 - Nemotron 3.5 Super on CUDA at TP=2: the expert rank runs a window's shared expert on a side stream beside its routed experts, with the same plans and kernels, so tokens are unchanged (#4886).
 
 - Qwen 3.5/3.6/3.8 on CUDA with MTP drafts: cold prompt chunks that end before the MTP head's first tapped row skip the last layer's unread rows and the head, as chunks without taps already did; tokens unchanged (#4882).
