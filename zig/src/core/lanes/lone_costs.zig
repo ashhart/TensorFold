@@ -132,9 +132,9 @@ pub fn band(len: usize) usize {
 /// The furthest a kept deadline or spacing reaches into the next stream: carried doublings would end every re-check.
 pub const carry_most: u64 = 256;
 
-/// The kept calibration a stream starts from and leaves: its sampling mode's, at its context's band.
+/// The kept calibration a stream starts from and leaves: its sampling mode's, at its prompt's band, whatever its reply.
 pub fn slot(kept: *[2][bands]?Kept, s: anytype) *?Kept {
-    return &kept[@intFromBool(s.sampling != null)][band(s.context.items.len)];
+    return &kept[@intFromBool(s.sampling != null)][band(s.prompt_len)];
 }
 
 /// A finished lone stream's calibration, so the next stream starts priced instead of probing every width again.

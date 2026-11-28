@@ -248,6 +248,119 @@ test "draft sources: a new cold stream's first grow is its prior, a calibrated b
     }
 }
 
+const NoDevice = struct {
+    pub fn sync(_: @This()) !void {}
+};
+const Host = struct { block: u32 = 16, nodes: u32 = 15, landing: lanes.draft_tree.Landing = .{}, runner: struct { d: NoDevice = .{} } = .{} };
+
+/// A stream of a `prompt`, its first sampled token committed, as the lane host commits it before alone() runs.
+fn firstCommitted(prompt: []u32, id: []const u8) !lanes.Stream {
+    @memset(prompt, 3);
+    var s = try lanes.Stream.init(gpa, .{ .id = id, .prompt = prompt, .max_new = 512 });
+    errdefer s.deinit(gpa);
+    _ = try s.commit(gpa, &.{3}, &.{});
+    return s;
+}
+
+/// `rounds` lone rounds of `s` through `ad.lone`: the grows its drafter was asked for.
+fn grows(e: *lanes.Engine, b: *Host, s: *lanes.Stream, rounds: usize) !Grows.Drafter {
+    var d: Grows.Drafter = .{};
+    var skip = false;
+    var out: [16]u32 = undefined;
+    for (0..rounds) |_| _ = try ad.lone(Grows, Grows.now, b, &d, e, s, 3, &skip, null, null, &out);
+    return d;
+}
+
+test "draft sources: the prior's boundaries are the prompt's length, after the first token is committed" {
+    const cases = [_]struct { prompt: usize, nodes: u32 }{
+        .{ .prompt = ad.cold_context - 1, .nodes = 15 },
+        .{ .prompt = ad.cold_context, .nodes = 7 },
+        .{ .prompt = 8191, .nodes = 7 },
+        .{ .prompt = 8192, .nodes = 3 },
+    };
+    for (cases) |c| {
+        var cfg: lanes.Config = undefined;
+        var target: lanes.fake.Fake = undefined;
+        var clock: lanes.fake.FixedClock = undefined;
+        var e = try engine(&cfg, &target, &clock);
+        defer e.deinit();
+        defer cfg.deinit(gpa);
+        defer target.deinit();
+        const prompt = try gpa.alloc(u32, c.prompt);
+        defer gpa.free(prompt);
+        var s = try firstCommitted(prompt, "lone-first-commit");
+        defer s.deinit(gpa);
+        try std.testing.expectEqual(c.prompt + 1, s.context.items.len);
+        var b: Host = .{};
+        const d = try grows(&e, &b, &s, 2);
+        try std.testing.expectEqual(c.nodes, d.asked[0]);
+        try std.testing.expectEqual(c.nodes, d.asked[1]);
+    }
+}
+
+test "draft sources: a reply that crosses a band boundary files its calibration in the band it seeded" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    const prompt = try gpa.alloc(u32, 8000);
+    defer gpa.free(prompt);
+    var s = try firstCommitted(prompt, "lone-crossing");
+    defer s.deinit(gpa);
+    var b: Host = .{};
+    _ = try grows(&e, &b, &s, 2);
+    const reply: [192]u32 = @splat(3);
+    _ = try s.commit(gpa, &reply, &.{});
+    const end = s.context.items.len;
+    try std.testing.expect(lc.band(end) != lc.band(prompt.len)); // the reply ends past 8,192
+    ad.retain(&e, &s); // the lone driver's filing when alone() returns
+    e.release(&s); // and the engine's when the stream ends
+    try std.testing.expect(e.lone_kept[0][lc.band(prompt.len)] != null);
+    try std.testing.expect(e.lone_kept[0][lc.band(end)] == null);
+    var next = try firstCommitted(prompt, "lone-after-crossing");
+    defer next.deinit(gpa);
+    const d = try grows(&e, &b, &next, 1);
+    try std.testing.expectEqual(@as(u32, 0), next.lone_cold); // the next 8,000-token request starts priced
+    try std.testing.expectEqual(ad.priced(b.nodes).?, d.asked[0]);
+}
+
+test "draft sources: a lone stream reclaimed after a detach resumes priced from its band's calibration" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    const prompt = try gpa.alloc(u32, 100);
+    defer gpa.free(prompt);
+    var b: Host = .{};
+    var first = try firstCommitted(prompt, "lone-calibrates");
+    defer first.deinit(gpa);
+    _ = try grows(&e, &b, &first, 2);
+    ad.retain(&e, &first);
+    const kept = slots(e.lone_kept[0][lc.band(prompt.len)]);
+    try std.testing.expect(kept.len > 0);
+    var s = try firstCommitted(prompt, "lone-reclaimed");
+    defer s.deinit(gpa);
+    _ = try grows(&e, &b, &s, 1);
+    try std.testing.expectEqualSlices(?f64, kept, s.depth.?.ms.?.slots);
+    // a request takes the stream into the lane core and leaves: the reclaim detaches it, its round state dropped
+    try e.adopt(&s);
+    try std.testing.expect(e.detach(&s));
+    try std.testing.expect(s.depth == null);
+    const d = try grows(&e, &b, &s, 1);
+    try std.testing.expectEqual(@as(u32, 0), s.lone_cold);
+    try std.testing.expect(s.depth != null and s.depth.?.ms != null);
+    // the band's kept times are back in the stream's table, beside the round it has just timed
+    const own = s.depth.?.ms.?.slots;
+    for (kept, 0..) |k, i| if (k != null) try std.testing.expect(i < own.len and own[i] != null);
+    try std.testing.expectEqual(ad.priced(b.nodes).?, d.asked[0]);
+}
+
 /// A lone stream of `context` tokens whose first `rounds` rounds ran on the wall clock in `world`.
 fn wallRounds(e: *lanes.Engine, s: *lanes.Stream, world: World, rounds: usize) !void {
     var parents: [15]i32 = undefined;

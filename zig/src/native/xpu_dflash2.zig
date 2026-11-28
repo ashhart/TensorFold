@@ -45,11 +45,11 @@ pub const Width = struct { nodes: u32, trial: ?u32 = null };
 
 /// A stream's first lone round seeds its band's prices, or its prior when cold (no trial: it files the prior's times).
 pub fn seed(e: *lanes.Engine, s: *Stream) !void {
-    if (s.prices_seeded) return;
+    if (s.prices_seeded and s.depth != null) return; // a detach drops the round state: the reclaim seeds again
     s.prices_seeded = true;
     _ = try e.rule.rates(lanes.windows.who(s));
     const kept = lone_costs.slot(&e.lone_kept, s).*;
-    s.lone_cold = if (kept == null) prior(s.context.items.len) else 0;
+    s.lone_cold = if (kept == null) prior(s.prompt_len) else 0; // the prompt's rows: the first token is committed
     try lone_costs.seed(e.gpa, kept, s);
 }
 
@@ -67,7 +67,7 @@ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     return .{ .nodes = pick.counts[0], .trial = pick.trial };
 }
 
-/// A finished lone stream files its calibration under its context band, so the next stream starts priced.
+/// A finished lone stream files its calibration under its prompt's band, so the next stream starts priced.
 pub fn retain(e: *lanes.Engine, s: *Stream) void {
     lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
 }
