@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: an external drafter's feature reader returns rows retained for its own stream instead of a view into the shared tap buffer, so a parked stream no longer reads another stream's newer rows (refs #2496).
+
 - Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
 
 - GLM on CUDA: the DFlash2 draft selector skips candidate ids outside the vocabulary and treats an invalid anchor as token 0 instead of reading past the table; in-range drafts are unchanged (#5449). Thanks to @kelchm.
