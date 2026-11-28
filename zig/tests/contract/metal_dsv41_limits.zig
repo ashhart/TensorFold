@@ -39,6 +39,10 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.topk512, .pre_m5 = sources.dsv41.topk512 };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 topk bounded ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.topk512_bounded, .pre_m5 = sources.dsv41.topk512_bounded };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 ix ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.index, .pre_m5 = sources.dsv41.index };

@@ -22,6 +22,8 @@ pub const xmma = @embedFile("experts_mma.metal");
 pub const xunits = @embedFile("experts_units.metal");
 /// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
 pub const topk512 = @embedFile("topk512.metal");
+/// The same top-512 of long rows, appended to topk512: chunk bounds, then the keys at or above the 512th bound.
+pub const topk512_bounded = topk512 ++ @embedFile("topk512_bounded.metal");
 pub const glue = @embedFile("glue.metal");
 /// DeepSeek V4.1 decode launches that split or fuse the phase-1 glue at the same bits (deepseek_v41/fused.metal).
 pub const fused = segs_h ++ @embedFile("fused.metal");

@@ -19,3 +19,4 @@ pub const glue_tmp = @import("glue.zig");
 pub const vision = @import("vision.zig");
 pub const cand = @import("cand.zig");
 pub const segs = @import("segs.zig");
+pub const topk_bounded = @import("topk_bounded.zig");

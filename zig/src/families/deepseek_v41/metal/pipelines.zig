@@ -19,6 +19,7 @@ pub const fused = @import("fused.zig");
 pub const hc = @import("hc.zig");
 pub const glue_k = @import("glue_k.zig");
 pub const fold = @import("fold.zig");
+pub const topk_bounded = @import("topk_bounded.zig");
 
 /// Rows a decode launch carries at most (the row kernels' widest tier).
 pub const max_rows = 16;
@@ -58,6 +59,8 @@ pub const Pipelines = struct {
     /// the backbone's gate matvec, route and experts' plan in one launch (moe.zig's decode MoE)
     gate_plan: mtl.Pipeline,
     topk512: mtl.Pipeline,
+    /// the decode top-512 of rows past topk_bounded.long keys: chunk bounds, then their candidates
+    topk_bounded: topk_bounded.Pipelines,
     cand: mtl.Pipeline,
     cand_segs: mtl.Pipeline,
     xmma: xmma.Pipelines,
@@ -97,6 +100,8 @@ pub const Pipelines = struct {
         errdefer p.gate_plan.deinit();
         p.topk512 = try one(device, sources.dsv41.topk512, "tf_topk512");
         errdefer p.topk512.deinit();
+        p.topk_bounded = try topk_bounded.Pipelines.load(device);
+        errdefer p.topk_bounded.deinit();
         p.cand = try cand.load(device);
         errdefer p.cand.deinit();
         p.cand_segs = try cand.loadSegs(device);
@@ -128,6 +133,7 @@ pub const Pipelines = struct {
         if (p.route_dspark) |r| r.deinit();
         p.gate_plan.deinit();
         p.topk512.deinit();
+        p.topk_bounded.deinit();
         p.cand.deinit();
         p.cand_segs.deinit();
         p.xmma.deinit();

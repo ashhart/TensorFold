@@ -65,4 +65,5 @@ test {
     _ = @import("round_prof.zig");
     _ = pool;
     _ = pool_bufs;
+    _ = pipelines.topk_bounded;
 }
