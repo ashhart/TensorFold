@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `"kept_probs": true` on `/v1/chat/completions` (with `logprobs: true`) and `/v1/completions` (with a `logprobs` count) adds a `kept_probs` list for each reply token: the tokens left after temperature, `top_k`, `top_p` and `min_p`, renormalized to sum to 1; a sampled request needs `top_k` from 1 to 20, and a nonzero `presence_penalty` or `frequency_penalty` or a grammar returns HTTP 400; the reply's tokens and every other field are the same with the option on or off (#3207, fixes #3182).
+
 - The New Project Folder row keeps **Browse** on one line while the folder input shrinks. (#4824) Thanks @jamesadcock for the report.
 
 - Inkling 2 CUDA gains grouped-expert and vision kernels, shared core attention/gamma operations, explicit orientation handling and exact arithmetic comparisons (#4127). Thanks to @ajensenwaud.
