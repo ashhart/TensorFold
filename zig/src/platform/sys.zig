@@ -23,6 +23,7 @@ pub const posix = if (windows) @import("win_posix.zig") else std.posix;
 /// A library by path or by name. A bare name is never looked for in the working directory, on any system.
 pub const DynLib = if (windows) WinDynLib else if (builtin.os.tag == .macos) MacDynLib else std.DynLib;
 pub const experimental = @import("experimental.zig");
+pub const process_resident = @import("process_resident.zig");
 pub const memory_policy = @import("memory_policy.zig");
 pub const machine = @import("machine.zig");
 pub const working_set = @import("working_set.zig");
