@@ -63,6 +63,7 @@ pub const moss_image: []const u8 = if (available) &Blob("fatbin_moss_image").byt
 pub const nemo_audio: []const u8 = if (available) &Blob("fatbin_nemo_audio").bytes else &.{};
 pub const moss_image_decoder: []const u8 = if (available) &Blob("fatbin_moss_image_decoder").bytes else &.{};
 pub const moss_image_encoder: []const u8 = if (available) &Blob("fatbin_moss_image_encoder").bytes else &.{};
+pub const ricursive_tp2: []const u8 = if (available) &Blob("fatbin_ricursive_tp2").bytes else &.{};
 pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes else &.{};
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};
 pub const lane_gemv: []const u8 = if (available) &Blob("fatbin_lane_gemv").bytes else &.{};

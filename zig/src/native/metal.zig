@@ -109,7 +109,6 @@ const Host = struct {
         const r = try nemotron.gpu_round.run(h.gpa, h.metal, s, h.round, .{ .ctx = hooks.ctx, .committed = hooks.committed, .yield = hooks.yield });
         return r.paused;
     }
-
     fn halt(ctx: *anyopaque, reason: []const u8) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.halt(reason);

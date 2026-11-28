@@ -171,6 +171,7 @@ pub const usage =
     \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
     \\  ripple-forward            Ripple's forward rounds (streams, verify windows, mixes) == one-row steps, bit for bit (synthetic)
     \\  ripple-serve              Ripple's lane backend: shared rounds, copied drafts, kept states, logprob rows (synthetic)
+    \\  ricursive-tp2-contract    Ripple's two-rank glue (ricursive_tp2.cu) through gates 1-4, controls red
     \\  moss-contract [ONLY..]    MOSS-Image's own kernels, its decoder's unpack and its encoder's mixer, gates 1-4, controls red
     \\  idol-decoder-contract     Idol's decoders' stem, to_kv, head norms and attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red

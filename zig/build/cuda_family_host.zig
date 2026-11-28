@@ -98,6 +98,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-rules-host", rules_about).dependOn(&rules_run.step);
     step.dependOn(&rules_run.step);
     @import("glm_contract_host.zig").host(b, cuda, mods.core, step);
+    @import("ricursive_tp2.zig").hostTests(b, cuda, mods.core, mods.lanes, step);
     @import("dory.zig").host(b, @import("dory.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     @import("muse.zig").host(b, @import("muse.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));

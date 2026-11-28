@@ -175,11 +175,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .not_mine => {},
         .opened => |engine| return engine,
     }
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type) and open_family.ranked(F, o)) return openWith(F, a, gpa, io, o, problem);
     const at = @import("cuda_alias.zig").which(o.model_type);
-    inline for (registry, 0..) |F, i| if (at == i) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry, 0..) |F, i| if (at == i and open_family.ranked(F, o)) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry) |F| if (comptime @hasDecl(F, "ranks")) if (std.mem.eql(u8, o.model_type, F.model_type)) {
+        problem.* = F.ranks_refusal; // a family that serves only at its own --tp, and no other family took this one
+        return null;
+    };
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
+
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: api.Open, problem: *[]const u8) !?api.Opened {
     const resolved = (try @import("cuda_launch.zig").resolve(F, a, asked, problem)) orelse return null; // resolved and placed, before admission
     const o = family_memory.familyOpen(F, resolved);
@@ -520,6 +526,7 @@ test {
     _ = prompt_pages;
     _ = cuda_device; // the device and variable tests
     _ = windows;
+    _ = open_family;
 }
 
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
@@ -538,25 +545,22 @@ test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance 
     h.inner.chunk_invariant = false;
     try std.testing.expect(!h.backend().chunk_invariant);
 }
-
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
     try @import("cuda_prompt_cancel_test.zig").check(Host, Host.serve);
 }
-
 test "family readiness reaches production lane admission without binding CUDA" {
     try @import("cuda_health_test.zig").check(Host, Host.readiness, Host.serve);
 }
-
 test "Flash Next takes kept prompt states and drafts together on any rank count" {
     try @import("cuda_flashnext_refusal_test.zig").cache();
 }
-
 test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }
 test {
     _ = @import("cuda_health_test.zig");
     _ = @import("cuda_ceiling_test.zig");
+    _ = @import("cuda_open_refusal_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
     _ = kv_pages;
@@ -576,16 +580,13 @@ test "Learner ownership: direct Nemotron trainer destruction drains before its f
 test "Save recovery: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
     try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni", "qwen3" });
 }
-
 test "qwen3 on CUDA refuses the flags it does not serve by name, before any checkpoint or device access" {
     try @import("cuda_qwen3_test.zig").flags(open);
     try @import("cuda_qwen3_test.zig").kernels(open);

@@ -7,6 +7,7 @@ pub const weights = @import("cuda_weights.zig");
 pub const model = @import("cuda_model.zig");
 pub const backend = @import("cuda_backend.zig");
 pub const native = @import("cuda_native.zig");
+pub const tp2 = @import("tp2.zig");
 
 test {
     _ = kernels;

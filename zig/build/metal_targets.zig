@@ -489,19 +489,4 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     return metal_server.nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null, null);
 }
 
-pub fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
-    const kimi = b.createModule(.{
-        .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
-            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "core", .module = engine }},
-        }) } },
-    });
-    kimi.addImport("lanes", lanes);
-    return kimi;
-}
+pub const kimiModule = @import("metal_kimi.zig").module;
