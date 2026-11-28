@@ -120,6 +120,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_Q27_COPY_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (0 disables copied rows)" },
+    .{ .name = "TF_Q27_INLINE_SUMS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0, the default, keeps the separate sums pass)" },
+    .{ .name = "TF_Q27_DRAFT_TWINS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0, the default, keeps the draft matmul tiles)" },
     .{ .name = "TF_Q27_KV_GROW", .scope = .metal, .kind = .u32, .multiple = 16, .blank_default = false, .forms = "0 (off, the default) or a row count that is a multiple of 16, at most 4294967280" },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a lone Qwen3.8-27B stream's DFlash2 block take 8 or 16 rows from its landed depth; default 0)" },

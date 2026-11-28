@@ -2,7 +2,7 @@
 const std = @import("std");
 const sources = @import("qwen_runtime_sources");
 
-pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true, xs_group: u16 = 64, shift: bool = false, cooperative: bool = false };
+pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true, xs_group: u16 = 64, shift: bool = false, cooperative: bool = false, inline_sums: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, mlp_rows, ane_input, mlp_ane, add_ane };
 
 /// The quantized helper specialization compiled by get.

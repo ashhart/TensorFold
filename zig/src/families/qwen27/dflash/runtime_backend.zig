@@ -26,6 +26,8 @@ pub const Tiled = struct {
     biases: mtl.Buffer,
     n: usize,
     k: usize,
+    scalar: bool = false,
+    paired: bool = false,
     pub fn init(device: mtl.Device, p: core.affine4.Prepared) !Tiled {
         const w = try device.buffer(p.words.len * 4, options);
         errdefer w.deinit();
@@ -74,6 +76,7 @@ pub const Backend = struct {
     prepared: std.AutoHashMapUnmanaged(usize, core.affine4_lane.Adapter) = .empty,
     tiled: std.AutoHashMapUnmanaged(usize, Tiled) = .empty,
     simd: ?simd.Pipelines = null,
+    draft_twins: bool = false,
     pub fn init(a: std.mem.Allocator, target: *@import("../model.zig").Model, checkpoint: *core.checkpoint_metal.Checkpoint, c: cfg.Config) !Backend {
         return initBound(a, Target.qwen(target), checkpoint, c);
     }
@@ -120,7 +123,10 @@ pub const Backend = struct {
         const units = b.target.device.tensorUnits();
         const order = if (units) try core.lane_projection.RegOrder.init(b.target.device) else null;
         defer if (order) |o| o.deinit();
-        if (!units) b.simd = try simd.Pipelines.load(b.target.device);
+        if (!units) {
+            b.simd = try simd.Pipelines.load(b.target.device);
+            b.draft_twins = try @import("sys").environment.read(bool, "TF_Q27_DRAFT_TWINS", false);
+        }
         var rows: std.ArrayList(u16) = .empty;
         defer rows.deinit(b.allocator);
         var kept = b.checkpoint.tensors.iterator();
@@ -143,10 +149,15 @@ pub const Backend = struct {
         var prepared_words = try core.affine4.prepare(b.allocator, rows, shape[0], shape[1]);
         defer prepared_words.deinit();
         if (order) |o| {
-            const adapter = try core.affine4_lane.Adapter.init(b.allocator, b.target.device, prepared_words, try @import("../projection.zig").split(shape[0], shape[1]), o);
+            const adapter = try core.affine4_lane.Adapter.initWithInlineSums(b.allocator, b.target.device, prepared_words, try @import("../projection.zig").split(shape[0], shape[1]), o, b.target.kernels.inline_sums);
             try @import("../residency.zig").putPrepared(b, key, adapter);
         } else {
-            const t = try Tiled.init(b.target.device, prepared_words);
+            var t = try Tiled.init(b.target.device, prepared_words);
+            if (b.draft_twins) {
+                errdefer t.deinit();
+                t.scalar = try simd.twinExact(&b.simd.?, b.target.device, t.matrix());
+                t.paired = try simd.pairedExact(&b.simd.?, b.target.device, t.matrix());
+            }
             try @import("../residency.zig").putTiled(b, key, t);
         }
     }

@@ -73,7 +73,7 @@ const common = [_]Reg{
     .{ .v = .{ .kind = .simd_bits, .bits = 8, .group = 64 }, .name = "metal simd_qmm_bits q8 g64" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32 }, .name = "metal lane projection q6 g32 sk1" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32, .sk = 4, .f32_out = true }, .name = "metal lane projection q6 g32 sk4 fp32 out" },
-} ++ affine_k.half ++ affine_k.glm_m3;
+} ++ affine_k.half ++ affine_k.glm_m3 ++ affine_k.draft_twins;
 
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
 const m5_only = @import("metal_lane_variants.zig").m5;
