@@ -87,7 +87,16 @@ pub const Backend = struct {
         errdefer if (attention_full) |x| x.deinit();
         const topk = try core.bf16_topk_gpu.Ops.init(target.device);
         errdefer topk.deinit();
-        var head = try @import("runtime_head.zig").Head.init(a, target.device, target.weights.head);
+        // A pair rank's own head holds only its shard's rows; the drafter re-prepares the whole lm_head.
+        var whole: ?@import("../gpu_weights.zig").FullHead = null;
+        defer if (whole) |*h| {
+            for (h.owned.items) |*buf| buf.deinit();
+            h.owned.deinit(a);
+        };
+        if (target.shard) |*sh| if (sh.ranks > 1) {
+            whole = try @import("../gpu_weights.zig").fullHead(a, target.device, checkpoint, sh, target.head_width);
+        };
+        var head = try @import("runtime_head.zig").Head.init(a, target.device, if (whole) |h| h.linear else target.weights.head);
         errdefer head.deinit();
         // the trimmed head's shape is the drafter's own: compile its pipeline here, not in the first draft round
         try target.kernels.prepareDecode(head.linear);

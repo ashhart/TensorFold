@@ -122,6 +122,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a lone Qwen3.8-27B stream's DFlash2 block take 8 or 16 rows from its landed depth; default 0)" },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 absorbs a shared round's DFlash2 taps for all streams in one pass)" },
+    .{ .name = "TF_Q27_PAIR_TRACE", .scope = .metal, .kind = .toggle, .forms = "0, 1, true, false, on or off (any case); set prints the pair trace counters" },
+    .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .scope = .metal, .kind = .u64, .trim = " \t", .first_digit = true, .min = 1, .max = std.math.maxInt(u32), .forms = "a whole number of rounds from 1 to 4294967295 between trace flushes" },
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
@@ -587,6 +589,7 @@ test {
     _ = @import("environment_flashnext_test.zig");
     _ = @import("environment_kv_test.zig");
     _ = @import("environment_kolibri_test.zig");
+    _ = @import("environment_pair_test.zig");
 }
 
 test {

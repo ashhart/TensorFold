@@ -94,6 +94,8 @@ pub fn appendBlock(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, 
     try encodeAppend(ops, g, preparation, taps, positions, frame, transaction);
     try ops.vtable.context_stage(ops.ptr, transaction, frame, next);
     const output = try encode(ops, g, preparation, next, anchor, frame, block, &.{});
+    const head_metric = @import("metal").pass_metrics.phase(.draft_head);
+    defer head_metric.end();
     var lattice = try ops.vtable.lattice(ops.ptr, frame, output.head, output.projected, g.config);
     errdefer lattice.deinit();
     try lattice.check(g.config);
@@ -236,6 +238,8 @@ pub fn absorbBlocks(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation,
     for (streams) |s| if (s.anchor >= g.config.vocab or s.context.cache == 0 or s.context.begin > s.context.end or s.context.end - s.context.begin > g.config.span() - 1) return error.BadDraftContext;
     if (stacked) |s| try encodeStacked(ops, g, preparation, frame, s) else try encodeAbsorbs(ops, g, preparation, frame, absorbs);
     const output = try encodeStreams(ops, g, preparation, streams, frame, block, &.{});
+    const head_metric = @import("metal").pass_metrics.phase(.draft_head);
+    defer head_metric.end();
     try ops.vtable.lattices(ops.ptr, frame, output.head, output.projected, g.config, block, out);
     for (out) |l| try l.check(g.config);
 }
@@ -255,6 +259,8 @@ pub fn forwardBlock(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation,
     const frame = try start(ops, g, preparation, context, anchor);
     defer ops.vtable.release(ops.ptr, frame);
     const output = try encode(ops, g, preparation, context, anchor, frame, block, &.{});
+    const head_metric2 = @import("metal").pass_metrics.phase(.draft_head);
+    defer head_metric2.end();
     var lattice = try ops.vtable.lattice(ops.ptr, frame, output.head, output.projected, g.config);
     errdefer lattice.deinit();
     try lattice.check(g.config);

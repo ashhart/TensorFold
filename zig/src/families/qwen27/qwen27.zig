@@ -9,6 +9,7 @@ pub const tied_head = @import("tied_head.zig");
 pub const affine = @import("affine.zig");
 pub const widths = @import("widths.zig");
 pub const checkpoint = @import("checkpoint.zig");
+pub const checkpoint_identity = @import("core").checkpoint_identity;
 pub const weights = @import("weights.zig");
 pub const attention = @import("attention.zig");
 pub const attention_plan = @import("attention_plan.zig");

@@ -95,6 +95,8 @@ pub fn build(b: *std.Build) void {
     const slide_test_hooks = b.option(bool, "slide-test-hooks", "Living Weights test hooks, such as TF_SLIDE_FORGET_FAIL (never in a release)") orelse false;
     if (slide_test_hooks and release_version != null) @panic("-Dslide-test-hooks is for test builds: a -Dversion release never carries it");
     build_options.addOption(bool, "slide_test_hooks", slide_test_hooks);
+    // One shared module: every consumer imports the same instance, so no compilation sees two roots for one file.
+    const build_options_module = build_options.createModule();
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "debug, safe, fast or small (default fast)") orelse .fast;
     // Nemotron's draft vocabulary (zig/src/families/nemotron/draft_ids.txt), for every backend
     const ids_files = b.addWriteFiles();
@@ -218,7 +220,7 @@ pub fn build(b: *std.Build) void {
         const gemma4_host_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         gemma4_host_mods.sources.addImport("nemotron_packed_metallib", embedded(b, b.addWriteFiles().add("gemma4-compile-empty.metallib", ""), "nemotron_packed.metallib"));
         @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
-        @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, build_options_module);
         @import("zig/build/glm_disk_host.zig").steps(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, test_step);
         @import("zig/build/prefill_widths_metal.zig").compileHost(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
         @import("zig/build/prefill_widths_metal.zig").rest(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);

@@ -17,7 +17,9 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
         .imports = &.{ .{ .name = "core", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "living", .module = living }, .{ .name = "checkpoint_cli", .module = checkpoint_cli } },
     }) });
-    exe.root_module.addOptions("build_options", build_options);
+    const bom = build_options.createModule();
+    exe.root_module.addImport("build_options", bom);
+    engines.addImport("build_options", bom); // the served families read the engine version (the pair's identity fingerprint)
     _ = server_build.addTo(b, exe.root_module, target, .ReleaseSafe);
     if (test_step == null) {
         exe.root_module.strip = true;

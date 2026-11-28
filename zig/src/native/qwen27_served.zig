@@ -13,6 +13,9 @@ const share_fit = @import("qwen27_share_fit.zig");
 const slot_state = @import("qwen27_slots.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
+const link = @import("qwen27_link.zig");
+const pair_mod = @import("qwen27_pair.zig");
+const pair_flags = @import("qwen27_pair_flags.zig");
 pub const lanes_backend = lb;
 const startup = @import("qwen27_startup.zig");
 const reserve = @import("qwen27_reserve.zig");
@@ -46,6 +49,7 @@ pub const Options = struct {
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
     rope_yarn: ?f64 = null,
+    pair: ?[]const u8 = null, // --speed-up: this rank's settings file; `Pair.init` reads the rank out of it
     slide: bool = false, // --slide: Folded Memory Weights v3 live learning
     dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
 };
@@ -73,6 +77,11 @@ pub const Host = struct {
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
     folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v3 controller
+    pair: ?*lb.Pair = null, // --speed-up: the seam this rank owns; rank 1 follows through it
+    link: ?*lb.Link = null, // rank 0's round sender and rank 1's follower target; `Metal.link` points here
+    hw: ?mtl.Device = null, // the pair's device, opened before the model's so the seam exists for the load
+    picks: ?mtl.Buffer = null, // a round's head-seam picks (one u32 a row), read by the lane backend
+    workers: link.Workers = .{}, // the link watchdog and rank 1's follower, joined by `close` before the pair frees
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -147,13 +156,7 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return cache_fit.hostMemory(0, reset_peak);
 }
 
-/// The words for a request the engine refuses.
-fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.PromptTooLong => "the prompt and max_tokens do not fit this server's --context",
-        else => null,
-    };
-}
+pub const words = pair_flags.words; // the words for a request the engine refuses
 
 /// The prompt cache's copies of a stream's slot (snapshot.zig): its DeltaNet states, K/V rows and taps ring.
 const Snaps = struct {
@@ -193,7 +196,7 @@ const Snaps = struct {
         const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at, &h.spares);
         return @ptrCast(st);
     }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
         return error.RestoredInPrefill; // the backend restores a stream's kept state in its prompt pass
     }
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
@@ -243,20 +246,30 @@ fn laterBytes(h: *const Host) u64 {
 }
 
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
+    try pair_flags.refuseOptions(o.pair != null, o, false, why); // before the seam, the shard or the vision tower loads
     try @import("qwen27_prompt_floor.zig").environment(a, platform.environment.rawText("TF_PROMPT_ROWS"), why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    const seam = try pair_mod.openSeam(gpa, io, o.pair, a, why); // glm_dsa's order: the seam exists before the weights load and ready()
+    const hw: ?mtl.Device = if (seam) |x| x.hw else null;
+    const pair: ?*lb.Pair = if (seam) |x| x.pair else null;
+    errdefer if (hw) |d| d.deinit(); // first, so released last: after the pair whose buffers and events it made
+    errdefer if (pair) |p| p.deinit();
+    const model = if (pair) |p|
+        try q.model.Model.loadShardDeferred(gpa, io, dir, reserve.loaded_rows, p.rank, 2, .mlp) // whole attention a rank: one seam a layer, 65 exchanges a token not 257
+    else
+        q.model.Model.loadDeferredOpts(gpa, io, dir, reserve.loaded_rows, .{ .rope_yarn = o.rope_yarn }) catch |err| {
+            if (err == error.UnsupportedRopeScaling or err == error.RopeYarnFactor or err == error.RopeYarnConflict) {
+                why.* = try std.fmt.allocPrint(a, "--rope-yarn / rope_parameters ({s}): YaRN requires valid factor and original_max_position_embeddings matching max_position_embeddings", .{@errorName(err)});
+            }
+            return err;
+        };
+    errdefer model.deinit();
+    // The drafter's config probe runs after the target loads: off a pair rank 1's refused-load teardown path.
     if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
     };
-    const model = q.model.Model.loadDeferredOpts(gpa, io, dir, reserve.loaded_rows, .{ .rope_yarn = o.rope_yarn }) catch |err| {
-        if (err == error.UnsupportedRopeScaling or err == error.RopeYarnFactor or err == error.RopeYarnConflict) {
-            why.* = try std.fmt.allocPrint(a, "--rope-yarn / rope_parameters ({s}): YaRN requires valid factor and original_max_position_embeddings matching max_position_embeddings", .{@errorName(err)});
-        }
-        return err;
-    };
-    errdefer model.deinit();
     if (@import("qwen27_mtp_flags.zig").deviceRefusal(o.mtp_drafts, model.device.tensorUnits(), try q.decode_round.pagesOn())) |r| {
         why.* = r.why;
         return r.err;
@@ -270,13 +283,17 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     with.dir = dir;
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
-    const h = try attach(gpa, io, model, null, with, a, why);
+    const fp = if (pair != null) try pair_mod.pairFingerprint(gpa, io, model, dir, a, why) else null;
+    const h = try attach(gpa, io, model, null, with, a, why, pair, fp);
     h.owns_model = true;
+    h.pair = pair;
+    h.hw = hw;
     return h;
 }
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
-pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
+pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8, pair: ?*lb.Pair, fp: ?tf.pair_rows.Fingerprint) !*Host {
+    try pair_flags.refuseOptions(pair != null, o, drafter != null, why);
     const setup = tf.startup_receipt.span(.runtime_setup);
     defer setup.end();
     try @import("qwen27_prompt_floor.zig").environment(a, platform.environment.rawText("TF_PROMPT_ROWS"), why);
@@ -300,12 +317,14 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
+    try pair_flags.refuseSerial(pair != null, drafter != null or o.drafter != null, serial, why); // before the drafter loads
     const h = try parent.create(Host);
     errdefer parent.destroy(h);
     h.counted = .{ .parent = parent };
     const profiling = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
     const gpa = if (profiling) h.counted.allocator() else parent;
     var draft_model = drafter;
+    // Both ranks load the drafter: the loads stay in lockstep (the pair's deferred seam pass needs both GPUs at once).
     const owns_draft = drafter == null and o.drafter != null;
     if (owns_draft) draft_model = q.dflash.runtime_model.Model.loadSpan(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference, capacity + window) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
@@ -353,8 +372,19 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.cache = null;
     h.resident = null;
     h.disk_stage = null;
+    // create() leaves unnamed Host fields undefined: a debug-filled optional is non-null, so name h.link first.
+    h.link = null;
+    h.hw = null;
+    h.picks = null;
+    h.workers = .{};
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
-    h.trace = null;
+    h.trace = null; // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in pages; Fit charged each its window
+    // the pair's picks and link at function scope, before the runner: a failure releases them after it, as close does
+    errdefer if (h.picks) |b| b.deinit();
+    errdefer if (h.link) |l| {
+        l.deinit();
+        gpa.destroy(l);
+    };
     const paged = try q.decode_round.pagesOn();
     const kv_step = if (paged) null else q.kv_grow.step(@import("sys").environment.rawText("TF_Q27_KV_GROW")) catch |err| {
         why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16";
@@ -363,6 +393,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.runner = try if (paged) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initGrow(gpa, model, slots, capacity + window, 1, kv_step);
     if (kv_step) |s| std.log.info("qwen27: K/V grows as used: a slot starts at {d} rows and grows by {d} or a quarter, up to {d}", .{ q.kv_grow.first(s, capacity + window), s, capacity + window });
     errdefer h.runner.deinit();
+    h.pair = pair;
+    if (pair) |p| {
+        try pair_flags.refuseStreams(true, slots, why);
+        try pair_mod.wire(gpa, h, p, model.device);
+    }
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
         h.runner.profile(&h.trace.?);
@@ -378,7 +413,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
     h.back.serial_copy_match = policy.serialCopyMatch(units, window, lanes_value);
+    h.back.link = h.link;
+    // one Mac keeps `Metal.init`'s switch; a pair turns resume off (rank 1 resets the slot at each round's `begin`)
+    h.back.slot_resume = lb.slotResume(h.back.slot_resume, pair);
     h.back.chunk = h.runner.promptRows(@min(rows, reserve.requestedFor(model.device.generation(), model.config)));
+    // a pair stages each chunk's widest seam, so its pass may carry only the window's rows (qwen27_pair.chunk)
+    if (pair != null) h.back.chunk = lb.pairChunk(@intCast(h.back.chunk));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.runner.grown = .{ .ctx = h, .added = Host.added };
     h.back.vision = o.images;
@@ -394,7 +434,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), @import("sensenova_mtp_drafter.zig").drafter(m));
     }
     errdefer if (h.wrap) |*w| w.deinit();
-    if (h.draft != null or mtp_on or h.sn_mtp != null) try h.back.measure(io);
+    // one Mac prices its windows before the lane config copies their costs, as on main; a pair, once both are ready
+    if ((h.draft != null or mtp_on or h.sn_mtp != null) and lb.measuresFirst(pair)) try h.back.measure(io);
+    h.mtp = null;
+    h.wrap = null;
     if (mtp_on) {
         const x = try Mtp.init(gpa, h.back, .{ .cap = o.mtp_drafts, .floor = o.mtp_confidence });
         h.mtp = x;
@@ -408,7 +451,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .image_share = if (o.vision) |x| x.image_share else .request, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft) |d| .{ .kind = d.model.graph.config.kind(), .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .penalties = true, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
+    // a pair's /health names the two-Mac mode (the oracle recorder refuses it); one Mac's Info is main's
+    h.host = api.LaneHost.init(gpa, io, &h.core, pair_flags.withPolicy(api.Info{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft) |d| .{ .kind = d.model.graph.config.kind(), .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .penalties = true, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer }, pair != null));
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
@@ -427,12 +471,16 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         };
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
-    ane.end(); // slot 0's history rewind: even two full copies may evict it
-    const rewind_room = laterRoom(h);
-    if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
-    try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
+    ane.end();
+    // a pair's prompt states are two Macs' and its slots are one: no reuse in landing 1, and no disk learning
+    if (pair == null) {
+        // Slot 0's history rewind, wired before cache sizing: even a cache with two full-context copies may evict it.
+        const rewind_room = laterRoom(h);
+        if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
+        try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
+    }
     errdefer if (h.cache) |*store| store.deinit();
-    if (o.learn) |l| try disk.attach(h, io, a, l);
+    if (pair == null) if (o.learn) |l| try disk.attach(h, io, a, l);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
@@ -448,7 +496,15 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.folded_mem) |fm| fm.deinit();
     if (model.idle_release) |owner| @import("qwen27_idle.zig").attach(h, owner);
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
+    if (pair) |p| try h.workers.startFollower(p, h.back, a, why); // rank 1 listens before either rank signals ready
+    errdefer if (pair) |p| h.workers.stop(p); // a failed ready or start joins the threads before `open` frees the pair
+    if (pair) |p| try pair_mod.ready(p, fp.?, a, why); // a mismatch's words name the fact that differs (`Pair.ready`)
+    if (pair) |p| try h.workers.startWatch(p, a, why); // a dead link is not a serving state: exit for the supervisor
+    // no health gate on rank 1: pair_supervise.sh and pair_accept.py read its /health; prefill refuses its requests
     try h.host.start();
+    errdefer h.host.stop(); // a start-up failure after the host is up stops it before `open` frees what it serves
+    // Both ranks of a pair time their lane costs: the rounds are local and symmetric, leaving both drafters alike.
+    if (h.draft != null and !lb.measuresFirst(pair)) try h.back.measure(io);
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else if (h.sn_mtp != null) slots else 0, .drafter = if (h.draft) |d| d.model.graph.config.kind() else "DFlash2", .images = o.images != null }});
     return h;
@@ -503,6 +559,9 @@ pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
     if (h.folded_mem) |fm| fm.deinit();
+    // the pair's threads go after the host stops (no round is mid-flight) and before the model frees the device
+    if (h.pair) |p| h.workers.stop(p);
+    pair_mod.teardown(h.gpa, h.pair, h.link, h.hw);
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
@@ -518,6 +577,7 @@ pub fn close(ptr: *anyopaque) void {
     if (h.sn_mtp) |m| m.deinit();
     if (h.trace) |*t| t.reportRest();
     h.runner.deinit();
+    if (h.picks) |b| b.deinit();
     if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();
     h.gpa.destroy(h);
@@ -531,5 +591,7 @@ test {
         _ = @import("qwen27_served_test.zig");
         _ = @import("qwen27_startup_test.zig");
         _ = @import("qwen27_startup_line.zig");
+        _ = @import("qwen27_pair_tests.zig");
+        _ = @import("qwen27_served_cache_test.zig");
     }
 }

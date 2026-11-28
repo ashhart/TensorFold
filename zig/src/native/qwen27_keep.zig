@@ -125,3 +125,32 @@ pub fn finishPrefetch(b: *lb.Metal) !void {
     b.prefetched_count = accepted.path.len;
     @memcpy(b.picks.contents()[0 .. b.rows * @sizeOf(contract.Pick)], g.matcher.buffers[2].contents()[0 .. b.rows * @sizeOf(contract.Pick)]);
 }
+
+pub fn encodeArgmaxRange(b: *lb.Metal, e: mtl.ComputeEncoder, first: usize, rows: usize) !void {
+    const logits = b.runner.model.frame.get(.logits);
+    const vocab: u32 = @intCast(b.runner.model.config.vocab);
+    var at = first;
+    while (at < first + rows) : (at += contract.max_rows) {
+        const n = @min(first + rows - at, contract.max_rows);
+        try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
+    }
+}
+
+pub fn encodeArgmaxTail(ptr: *anyopaque, e: mtl.ComputeEncoder) anyerror!void {
+    try encodeArgmaxRange(lb.Metal.self(ptr), e, 0, lb.Metal.self(ptr).rows);
+}
+
+/// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
+pub fn argmaxRows(b: *lb.Metal, first: usize, rows: usize) !void {
+    const metric = mtl.pass_metrics.phase(.sampling);
+    defer metric.end();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = b.runner.model.queue.commandBuffer();
+    const e = cb.compute(.serial);
+    try encodeArgmaxRange(b, e, first, rows);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (q.decode_round.gpuFailed(cb, "a draw")) return error.DrawGpuFailure;
+}
