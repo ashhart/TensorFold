@@ -168,7 +168,8 @@ pub const Pages = struct {
     fn parts(p: *const Pages) [2]struct { at: u64, bytes: u64 } {
         if (!p.e.settings.kv_split) return .{ .{ .at = p.base(), .bytes = p.page }, .{ .at = 0, .bytes = 0 } };
         const pooled = state.pkPageBytes(&p.e.w);
-        return .{ .{ .at = p.base(), .bytes = pooled }, .{ .at = p.base() + p.pool.total() * pooled, .bytes = p.page - pooled } };
+        const latent = state.latentPageBytes(&p.e.w);
+        return .{ .{ .at = p.base(), .bytes = pooled }, .{ .at = p.base() + p.pool.total() * pooled, .bytes = latent } };
     }
 
     /// The pool and the pages' arena; the paged sequences are the engine's (it frees every slot).

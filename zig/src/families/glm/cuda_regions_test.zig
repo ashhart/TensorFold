@@ -72,6 +72,7 @@ const Rig = struct {
         r.l.qk = 256;
         r.l.index.heads = 32;
         r.l.index.d = 128;
+        r.l.index.own = true;
         r.l.index.geom = .{};
     }
 

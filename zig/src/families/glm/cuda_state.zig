@@ -74,7 +74,7 @@ pub fn pageBytes(w: *const weights.Weights) u64 {
     return shapeOf(w).pageBytes();
 }
 
-/// Cache `j`'s rows on pages: its part of page 0 at `p.kv`, the others through `table` (the latent rows through `ltable`, if any).
+/// Cache `j` on page 0 at `p.kv`; later rows use `table`, or `ltable` for latent rows when split.
 fn onPages(x: *dsa_block.Caches, s: Shape, p: Paged, table: u64, ltable: u64, j: usize) void {
     x.lc = if (p.split) p.kv + j * s.latentBytes() else p.kv + s.cacheAt(j);
     x.pk = if (!s.pooled(j)) 0 else if (p.pk != 0) p.pk + s.pooledBefore(j) * s.pkBytes() else x.lc + s.latentBytes();

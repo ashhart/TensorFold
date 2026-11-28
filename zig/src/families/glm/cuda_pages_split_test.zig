@@ -285,3 +285,33 @@ test "GLM KV split: a request longer than a class fits admission and is refused 
     try std.testing.expectError(error.ClassTooSmall, p.open(1, 5000, 100));
     try expect(!p.used[1] and p.pool.idle());
 }
+
+test "GLM KV split: full GLM's shared caches and padded page keep exact region strides and poison offsets" {
+    var f: Fake = undefined;
+    try f.init(true);
+    for (&f.layers) |*l| l.mixer = .{ .mla = undefined };
+    f.e.w.config = .{ .dsa = true, .rope = 64, .kpool = 1 };
+    for (1..3) |i| f.e.w.config.shared.set(i);
+    f.e.w.share = try shard.Share.of(&f.e.w.config, 0, 2);
+    f.e.share = f.e.w.share;
+    const p = try f.pool(3, 16, true);
+    defer f.deinit(p);
+    const s = state.shapeOf(&f.e.w);
+    const pooled = state.pkPageBytes(&f.e.w);
+    const latent = state.latentPageBytes(&f.e.w);
+    try expect(state.pageBytes(&f.e.w) > pooled + latent); // the combined page has alignment padding; the regions do not
+    try expectEqual(@as(usize, 2), s.pooledBefore(s.caches));
+    const base = p.arena.?.ptr;
+    for (f.st(1).caches, 0..) |c, j| {
+        try expectEqual(base + 16 * pooled + j * s.latentBytes(), c.lc);
+        try expectEqual(if (s.pooled(j)) base + s.pooledBefore(j) * s.pkBytes() else 0, c.pk);
+        try expectEqual(latent, c.ps);
+    }
+    p.poison = true;
+    const ids = try p.open(1, 600, 100);
+    try expectEqual(2 * ids.len, F.fills.items.len);
+    for (ids, 0..) |id, i| {
+        try expectEqual([2]u64{ base + id * pooled, pooled / 4 }, F.fills.items[2 * i]);
+        try expectEqual([2]u64{ base + 16 * pooled + id * latent, latent / 4 }, F.fills.items[2 * i + 1]);
+    }
+}

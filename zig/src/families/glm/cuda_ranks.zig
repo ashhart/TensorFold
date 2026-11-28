@@ -555,32 +555,6 @@ pub fn mediaFingerprint(f: *Fingerprint, limits: @import("cuda_images.zig").Limi
 pub fn artifact(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
     return @import("core").checkpoint_identity.fullIdentity(gpa, io, dir);
 }
-test "TF_GLM_PAIR_EXPERTS: off by default, 0 or 1, and every rank must agree" {
-    const Reader = struct {
-        fn absent(_: [:0]const u8) ?[]const u8 {
-            return null;
-        }
-        fn on(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "1" else null;
-        }
-        fn off(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "0" else null;
-        }
-        fn bad(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "2" else null;
-        }
-    };
-    var problem: []const u8 = "";
-    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).pair_experts);
-    const on = try Settings.read(Reader.on, &problem);
-    try std.testing.expect(on.pair_experts);
-    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).pair_experts);
-    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
-    try std.testing.expectEqualStrings("TF_GLM_PAIR_EXPERTS: 0 or 1", problem);
-    const all = [_]Fingerprint{ Fingerprint.of(2, 0, on, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), @splat(0)) };
-    try std.testing.expectEqual(Mismatch{ .field = .pair_experts, .rank = 1 }, mismatch(&all).?);
-}
-
 test "wire pieces: a blank override is unset; the tools' form takes its world from TF_GLM_WORLD" {
     const Reader = struct {
         fn at(key: [:0]const u8, world: ?[]const u8, pieces: ?[]const u8) ?[]const u8 {

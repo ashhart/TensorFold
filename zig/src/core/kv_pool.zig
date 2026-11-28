@@ -4,7 +4,6 @@ const Allocator = std.mem.Allocator;
 pub const groups = @import("kv_groups.zig");
 pub const retirement = @import("kv_pool_retire.zig");
 const owners = @import("kv_pool_classes.zig");
-
 test {
     _ = @import("kv_groups_test.zig");
     _ = @import("kv_pool_trim_cost_test.zig");

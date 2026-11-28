@@ -75,6 +75,7 @@ const Rank = struct {
     fn init(r: *Rank, split: bool, comm: cuda.nccl.Comm) !void {
         try r.f.init(split);
         r.f.d.api.cuLaunchKernel = Wire.put;
+        r.f.d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Wire.put);
         r.f.d.api.cuMemcpyDtoH_v2 = Wire.download;
         r.f.d.api.cuCtxGetDevice = Wire.device;
         r.f.d.api.cuDeviceGetAttribute = Wire.discrete;

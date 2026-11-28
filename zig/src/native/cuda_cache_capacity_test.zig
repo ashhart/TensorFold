@@ -73,6 +73,8 @@ test "KV pool plan: a family's load-set window rows before its build constant, a
     Loaded.rows = 48;
     try t.expectEqual(@as(u64, 8192 + 48), pool.budgetOf(Loaded, l, 88 << 30, o, 8192, false, false, 0, null).window);
     try t.expectEqual(@as(u64, 8192), pool.budgetOf(struct {}, l, 88 << 30, o, 8192, false, false, 0, null).window);
+}
+
 test "CUDA cache default leaves no copies when unpaged windows use all room" {
     const GiB: u64 = 1 << 30;
     const l: @import("core").kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
