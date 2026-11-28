@@ -184,10 +184,10 @@ pub const GatedCase = struct {
     at: GatedOffsets = .{},
 };
 
-// Served tokens: one decode row and a prefill chunk (rows = 1, max_prefill_rows = 32), plus controls on three tokens.
+// Served tokens: one decode row and a prefill chunk (rows = 1, max_prefill_rows = 64), plus controls on three tokens.
 pub const gated_cases = [_]GatedCase{
     .{ .name = "1x16x128", .tokens = 1, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
-    .{ .name = "32x16x128 dynamic zero token", .tokens = 32, .fill = .dynamic, .zero_token = true, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
+    .{ .name = "64x16x128 dynamic zero token", .tokens = 64, .fill = .dynamic, .zero_token = true, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
     .{ .name = "controls 3x16x128", .tokens = 3, .controls = true, .at = .{ .x = 128, .weight = 0, .gate = 256, .out = 384 } },
 };
 

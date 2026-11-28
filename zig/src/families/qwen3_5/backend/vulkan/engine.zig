@@ -11,15 +11,15 @@ const View = vk.tensor.View;
 
 pub const max_prefill_rows = fwd.max_prefill_rows;
 
-// Chunk cut = min(done+32,total), pure, host-tested; totals 32/33/63/64/65 cut at 32 / 32,33 / 32,63 / 32,64 / 32,64,65
+// Chunk cut = min(done+64,total), pure; the host tests cover totals 64, 65, 127, 128 and 129.
 pub fn chunkEnd(done: usize, total: usize) usize {
     return @min(done +| max_prefill_rows, total);
 }
 
 // The staged-transfer buffer: 8 MiB so the load's ~27k tensors stream in large chunks instead of one 64 KiB fence each.
 pub const staging_bytes: u64 = 8 << 20;
-// The 8 MiB scratch arena holds persistent windows and worst-layer prefill transients (~5.6 MiB), with headroom.
-pub const arena_bytes: u64 = 8 << 20;
+// The 16 MiB scratch arena holds persistent windows (~2.6 MB) and worst-layer prefill transients (~11.1 MB at 64 rows).
+pub const arena_bytes: u64 = 16 << 20;
 
 // Step errors include dispatch.Error; Timeout exits 124 and InFlight exits 1 inside `vk.orExit`, before teardown.
 pub const Error = vk.dispatch.Error ||
@@ -190,7 +190,7 @@ pub const Engine = struct {
         e.poisoned = false;
     }
 
-    // Check ids/bounds, commit 32-row chunks. Failure poisons (partial RNN state never reused); refusals touch nothing.
+    // Check ids/bounds, commit 64-row chunks. Failure poisons (partial RNN state never reused); refusals touch nothing.
     pub fn prefill(e: *Engine, tokens: []const u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0) return error.UnsupportedPrompt;
@@ -204,7 +204,7 @@ pub const Engine = struct {
         }
     }
 
-    // One forward chunk has 1..32 checked rows; its logits give the next-token distribution after the chunk.
+    // One forward chunk has 1..64 checked rows; its logits give the next-token distribution after the chunk.
     pub fn prefillChunk(e: *Engine, tokens: []const u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0 or tokens.len > max_prefill_rows) return error.UnsupportedPrompt;
@@ -355,15 +355,15 @@ test "the plan refuses empty, stepless and overflowing sequences before any GPU 
     try testing.expectError(error.ContextTooLong, planFor(cap, std.math.maxInt(u64) - 1, 1, 3));
 }
 
-test "the canonical cut ends every whole-request length at 32-row boundaries" {
+test "the canonical cut ends every whole-request length at 64-row boundaries" {
     for ([_]struct { len: usize, cuts: []const usize }{
         .{ .len = 1, .cuts = &.{1} },
-        .{ .len = 31, .cuts = &.{31} },
-        .{ .len = 32, .cuts = &.{32} },
-        .{ .len = 33, .cuts = &.{ 32, 33 } },
-        .{ .len = 63, .cuts = &.{ 32, 63 } },
-        .{ .len = 64, .cuts = &.{ 32, 64 } },
-        .{ .len = 65, .cuts = &.{ 32, 64, 65 } },
+        .{ .len = 63, .cuts = &.{63} },
+        .{ .len = 64, .cuts = &.{64} },
+        .{ .len = 65, .cuts = &.{ 64, 65 } },
+        .{ .len = 127, .cuts = &.{ 64, 127 } },
+        .{ .len = 128, .cuts = &.{ 64, 128 } },
+        .{ .len = 129, .cuts = &.{ 64, 128, 129 } },
     }) |case| {
         var done: usize = 0;
         var at: usize = 0;

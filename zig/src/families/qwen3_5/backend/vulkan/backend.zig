@@ -7,8 +7,8 @@ const pinned = @import("../../config.zig");
 const Engine = engine_mod.Engine;
 const be = lanes.backend;
 
-// Each prompt pass uses chunks of at most 32 rows.
-pub const max_prompt_rows: usize = 32;
+// Each prompt pass uses chunks of at most 64 rows: the served step is the engine's own chunk.
+pub const max_prompt_rows: usize = engine_mod.max_prefill_rows;
 
 /// The SDPA arm's visible-key limit, the state's capacity ceiling (state.zig).
 pub const max_capacity = @import("state.zig").max_capacity;
@@ -91,12 +91,12 @@ pub const Vulkan = struct {
         // steps floor 1: a prompt-only warm pass (max_new 0) still reads one row past the prompt
         try engine_mod.planFor(self.engine.capacity(), 0, ids.len, @max(stream.max_new, 1));
         try self.engine.reset(); // a new prompt starts from a really zeroed state (also clears a poisoned one)
-        try self.engine.prefill(ids); // the same canonical 32-row schedule the stepped path runs
+        try self.engine.prefill(ids); // the same canonical 64-row schedule the stepped path runs
         stream.fill_at.store(@intCast(ids.len), .monotonic);
         self.owner = stream;
     }
 
-    // Each 32-row call checks ids and capacity before reset; visible() tracks progress.
+    // Each 64-row call checks ids and capacity before reset; visible() tracks progress.
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
         const self = cast(ptr);
         if (self.owner) |o| {

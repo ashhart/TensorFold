@@ -88,9 +88,9 @@ pub const served_cases = [_]SdpaCase{
     .{ .name = "decode n=1025 stride+1", .rows = 1, .prefix = 1024 },
     .{ .name = "decode n=7167 stream-1", .rows = 1, .prefix = 7166 },
     .{ .name = "decode n=7168 stream", .rows = 1, .prefix = 7167 },
-    .{ .name = "prefill rows32 n1..32", .rows = 32, .prefix = 0 },
+    .{ .name = "prefill rows64 n1..64", .rows = 64, .prefix = 0 },
     .{ .name = "prefill rows17 across 1024", .rows = 17, .prefix = 1007 },
-    .{ .name = "prefill rows32 to 7168", .rows = 32, .prefix = 7136 },
+    .{ .name = "prefill rows64 to 7168", .rows = 64, .prefix = 7104 },
 };
 
 // Attend f64 dots/max/softmax/output for n=prefix+r+1 in (kv_head,capacity,head_dim); matches fx.Attend.init order.
@@ -343,7 +343,7 @@ test "generalized reference equals the fixture's Attend element for element" {
 
 test "served cases stay inside the engine's shapes and hit every reduction edge" {
     for (served_cases) |case| {
-        try testing.expect(case.rows == 1 or case.rows <= 32); // decode rows 1, prefill <= 32
+        try testing.expect(case.rows == 1 or case.rows <= 64); // decode rows 1, prefill <= max_prefill_rows (64)
         const capacity = capacityOf(case);
         try testing.expect(capacity <= max_visible_keys); // kStreamKeys
         try testing.expectEqual(visibleKeys(case, case.rows - 1), capacity); // exact fit
