@@ -1101,12 +1101,19 @@ one content delta at the end, so the joined deltas equal the finished reply. The
 the model's own, unchanged; `logprobs` keeps those tokens under `reasoning_content`. A client that sends the reasoning
 back sends the text twice, which costs prompt tokens on the next turn.
 
-`thinking_budget` (the request's; absent or 0 takes `--thinking-budget`) replaces the reply's budget-th token,
-while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.
-The cut depends on token count, so serial and drafted decoding use the same cut. A model that closes the block
-earlier is left alone. The MLX engine forces the close inside its rounds; CUDA stops the engine at the cut and
-decodes on from the reply, as for a required tool call. Flash Next forces it inside its GPU-side rounds, on one Mac
-and in speed-up mode.
+`thinking_budget` (the native request field; absent or 0 takes `--thinking-budget`) replaces the reply's budget-th token,
+while it is still thinking, with a closing sequence, then continues the answer. The generic sequence is a newline, the
+closing think marker and a blank line; Inkling 2 uses `<|end_message|><|message_model|><|content_text|>` to close the
+thought message and open the text channel. A model that closes the block earlier is left alone. The cut depends on token
+count, so serial and drafted decoding use the same cut. The MLX engine forces the close inside its rounds; CUDA stops
+the engine at the cut and decodes on from the reply, as for a required tool call. Flash Next forces it inside its
+GPU-side rounds, on one Mac and in speed-up mode.
+
+With both the native request field and `--thinking-budget` absent or 0, no budget cut occurs. `max_tokens` still caps
+the whole reply, including forced close tokens: a native budget equal to it can emit only the first close token in the
+last slot before finishing `length`, while a larger native budget does not cut before the same length finish. Thus an
+equal or larger budget does not reserve answer tokens. The Anthropic `thinking.budget_tokens` field instead must be
+positive and less than `max_tokens`; zero, equal and larger values are refused with HTTP 400.
 
 With thinking enabled, the native server refuses a positive budget with HTTP 400 before opening a stream or
 submitting the request if the engine does not support thinking budgets. This also applies to a positive

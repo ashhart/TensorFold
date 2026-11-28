@@ -25,6 +25,10 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     startup_receipt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"startup receipt:"} })).step);
     @import("q27_profile_host.zig").steps(b, server_tests);
     b.step("test-wait-reasons-server-host", "The ledger's wait, refusal and failure labels in /metrics and /v1/load").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"wait reason ledger:"} })).step);
+    b.step("test-inkling2-thinking-budget-host", "Inkling 2 CLI and request thinking budgets close thinking; no-budget tokens stay unchanged").dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = server_tests,
+        .filters = &.{"Inkling 2 thinking budget:"},
+    })).step);
     // the open-connection limit, one address's share under pressure and its flags (#3048), on Linux hosts too
     b.step("test-connection-admission-host", "Connection limit, per-address share, trusted proxies and idle shedding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "security: ", "connection CLI:" } })).step);
     b.step("test-managed-log-host", "A managed child's log without keys in the file, its readiness and its startup tail").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "benchmark log:", "benchmark_server_test.", "benchmark_server_log_test." } })).step);

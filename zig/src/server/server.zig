@@ -174,7 +174,16 @@ pub const Server = struct {
             const template_images = templateImages(srv);
             if (!template_images) log.line("warning: --vision: the chat template writes no image placeholder for an image part, so image requests will fail; serve with --chat-template naming a template that has an image path", .{});
         }
-        if (text.tokenId(if (minimax) reply_text.mm_markers.close else "</think>")) |end| {
+        // Inkling 2's forced budget close ends the thought message and opens the model's text channel.
+        if (@import("chat_inkling2.zig").enabled(srv)) {
+            const end = text.tokenId("<|end_message|>");
+            const message = text.tokenId("<|message_model|>");
+            const content = text.tokenId("<|content_text|>");
+            if (end != null and message != null and content != null) {
+                srv.think_close = try a.dupe(u32, &.{ end.?, message.?, content.? });
+                srv.think_close_end = end;
+            } else srv.info.thinking_budget = false;
+        } else if (text.tokenId(if (minimax) reply_text.mm_markers.close else "</think>")) |end| {
             const lead = try text.encode(a, "\n", false);
             const trail = try text.encode(a, "\n\n", false);
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });

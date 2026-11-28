@@ -9,6 +9,38 @@ const errors = @import("errors.zig");
 const t = std.testing;
 
 const talk = "[{\"role\":\"user\",\"content\":\"Hi\"}]";
+const budget_open = "<|message_model|><|content_thinking|>";
+const budget_close = "<|end_message|><|message_model|><|content_text|>";
+
+const BudgetIds = struct { script: []const u32, expected: []const u32, natural: []const u32 };
+
+fn budgetIds(a: std.mem.Allocator) !BudgetIds {
+    const head = try h.encodeReply(a, budget_open);
+    const prefix = try std.mem.concat(a, u32, &.{ head, &.{ 64, 65, 66 } });
+    const answer = try h.encodeReply(a, "391");
+    const close = try h.encodeReply(a, budget_close);
+    const end = try h.encodeReply(a, "<|end_message|>");
+    try t.expectEqual(@as(usize, 5), prefix.len);
+    try t.expectEqual(@as(usize, 3), close.len);
+    return .{
+        .script = try std.mem.concat(a, u32, &.{ prefix, answer, end }),
+        .expected = try std.mem.concat(a, u32, &.{ prefix[0..4], close, answer, end }),
+        .natural = try std.mem.concat(a, u32, &.{ prefix, close, answer, end }),
+    };
+}
+
+fn expectReply(a: std.mem.Allocator, got: h.Seen, expected_ids: []const u32, reasoning: []const u8, content: []const u8) !void {
+    try t.expectEqualStrings(reasoning, got.reasoning);
+    try t.expectEqualStrings(content, got.content);
+    const values = try a.alloc(json.Value, expected_ids.len);
+    for (expected_ids, values) |id, *value| value.* = .{ .int = try std.fmt.allocPrint(a, "{d}", .{id}) };
+    const expected = try json.stringify(a, .{ .array = values }, .{ .ascii = false, .compact = true });
+    try t.expectEqualStrings(expected, got.token_ids);
+}
+
+fn expectBounded(a: std.mem.Allocator, got: h.Seen, expected_ids: []const u32) !void {
+    return expectReply(a, got, expected_ids, "ab", "391");
+}
 
 /// The prompt a chat renders to on the `kind` fixture, decoded, and the server's thinking-off effort.
 fn rendered(a: std.mem.Allocator, kind: []const u8, thinking: bool, named: ?[]const u8) !struct { text: []const u8, off: ?[]const u8 } {
@@ -53,4 +85,89 @@ test "Inkling 2 reply: another model type keeps no thinking-off effort" {
     const a = arena.allocator();
     try t.expectEqualStrings("none", (try rendered(a, "release", false, null)).off.?);
     try t.expect((try rendered(a, "llama", false, null)).off == null);
+}
+test "Inkling 2 thinking budget: the request budget closes thinking before the answer" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = try budgetIds(a);
+    const body = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}],\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":5}}";
+    var cx: errors.Cx = .{ .a = a };
+    const translated = try @import("anthropic_translate.zig").translate(&cx, (try json.parse(a, body)).ok, false);
+    try translated.object.put(a, "return_token_ids", .{ .bool = true });
+    for ([_]bool{ false, true }) |stream| {
+        for ([_]usize{ 1, 2, 3, 256 }) |stride| {
+            try translated.object.put(a, "stream", .{ .bool = stream });
+            const got = try h.askLaneBody(a, "release", ids.script, translated, stream, stride);
+            try expectBounded(a, got, ids.expected);
+        }
+    }
+}
+
+test "Inkling 2 thinking budget: the CLI budget closes thinking before the answer" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = try budgetIds(a);
+    for ([_]bool{ false, true }) |stream| {
+        for ([_]usize{ 1, 2, 3, 256 }) |stride| {
+            const got = try h.askLaneBudget(a, "release", ids.script, ",\"return_token_ids\":true", stream, stride, 5);
+            try expectBounded(a, got, ids.expected);
+        }
+    }
+}
+
+test "Inkling 2 thinking budget: no budget preserves reasoning, answer and every reply token" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const head = try h.encodeReply(a, budget_open);
+    const prefix = try std.mem.concat(a, u32, &.{ head, &.{ 64, 65 } });
+    const close = try h.encodeReply(a, budget_close);
+    const answer = try h.encodeReply(a, "391");
+    const end = try h.encodeReply(a, "<|end_message|>");
+    const ids = try std.mem.concat(a, u32, &.{ prefix, close, answer, end });
+    for ([_]bool{ false, true }) |stream| {
+        for ([_]usize{ 1, 2, 3, 256 }) |stride| {
+            const got = try h.askLane(a, "release", ids, ",\"return_token_ids\":true", stream, stride);
+            try expectBounded(a, got, ids);
+        }
+    }
+}
+
+test "Inkling 2 thinking budget: native zero inherits CLI and both zero preserve every token" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = try budgetIds(a);
+    const zero = ",\"return_token_ids\":true,\"thinking_budget\":0";
+    for ([_]bool{ false, true }) |stream| {
+        for ([_]usize{ 1, 2, 3, 256 }) |stride| {
+            const uncut = try h.askLane(a, "release", ids.natural, zero, stream, stride);
+            try expectReply(a, uncut, ids.natural, "abc", "391");
+            const inherited = try h.askLaneBudget(a, "release", ids.script, zero, stream, stride, 5);
+            try expectBounded(a, inherited, ids.expected);
+        }
+    }
+}
+
+test "Inkling 2 thinking budget: native equal and oversized budgets keep the whole-reply limit" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = try budgetIds(a);
+    const text = "{\"model\":\"m\",\"max_tokens\":5,\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}],\"thinking_budget\":5,\"chat_template_kwargs\":{\"enable_thinking\":true}}";
+    const body = (try json.parse(a, text)).ok;
+    try body.object.put(a, "return_token_ids", .{ .bool = true });
+    for ([_]i64{ 5, 10 }) |budget| {
+        try body.object.put(a, "thinking_budget", .{ .int = try std.fmt.allocPrint(a, "{d}", .{budget}) });
+        for ([_]bool{ false, true }) |stream| {
+            try body.object.put(a, "stream", .{ .bool = stream });
+            for ([_]usize{ 1, 2, 3, 256 }) |stride| {
+                const got = try h.askLaneBody(a, "release", ids.script, body, stream, stride);
+                try expectReply(a, got, if (budget == 5) ids.expected[0..5] else ids.script[0..5], if (budget == 5) "ab" else "abc", "");
+                try t.expectEqualStrings("length", got.finish);
+            }
+        }
+    }
 }
