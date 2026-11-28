@@ -115,6 +115,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const drama3_embed = if (shaders) drama3_lib else no_shaders;
     drama3_build.addNative(b, target, optimize, metal, engines, drama3_embed);
     drama3_build.targets(b, target, optimize, metal, drama3_embed, test_step, no_compiler);
+    const qwen3_asr_build = @import("qwen3_asr_metal.zig");
+    qwen3_asr_build.targets(b, target, optimize, metal, mods.sources, if (shaders) qwen3_asr_build.metallib(b, metal_std) else no_shaders, no_compiler);
 
     const programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
         .{ .name = "tf-metal-tests", .path = "zig/tests/gpu_tests.zig", .about = "GPU runtime tests" },
