@@ -481,6 +481,10 @@ fn timeLayer(a: std.mem.Allocator, dir: []const u8, layer: u32, n: usize) !void 
         }
         const multi: Multi = .{ .slots = sh.slots, .extra = extra[0..made] };
         fixture.fillInput(r, rows, 31);
+        if (env("TF_DSV41_TIMING_HOT") != null) {
+            try @import("timing_hot.zig").run(a, r, &names, p0, rows, n);
+            continue;
+        }
         // TF_DSV41_TIMING_SAME: every row's input is row 0's, so the rows mostly share their experts (a draft block)
         if (env("TF_DSV41_TIMING_SAME") != null) {
             const x = r.io[0].slice(u16, rows * 4 * r.c.hidden);

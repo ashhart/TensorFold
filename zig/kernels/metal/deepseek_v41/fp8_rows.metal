@@ -331,6 +331,7 @@ template <uint RT, uint NB, uint CL, typename T>
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
+  // an output a simdgroup: lane k holds tile k's root (zero past the tiles); lane 0's butterfly is the pair tree
   for (uint o = tile; o < BW * RT; o += nsg) {
     const uint col = o / RT, r = o % RT;
     if (r >= a.R) continue;
