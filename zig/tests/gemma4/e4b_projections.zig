@@ -58,8 +58,8 @@ const Class = struct {
     n: usize,
 };
 
-/// One quantized stack/run set: decode-style rows one at a time, then all rows as a served window (forward.project).
-fn quantized(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, tag: []const u8, runs: []const g4.weights.Linear, pitch: usize, x: []const u16, k: usize, rows: usize) !void {
+/// One quantized stack/run set: rows one at a time, then all rows as a served window; true when the two differ.
+fn quantized(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, tag: []const u8, runs: []const g4.weights.Linear, pitch: usize, x: []const u16, k: usize, rows: usize) !bool {
     const xb = try m.device.buffer(rows * k * 2, shared);
     defer xb.deinit();
     @memcpy(xb.slice(u16, rows * k), x[0 .. rows * k]);
@@ -88,6 +88,7 @@ fn quantized(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, 
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.x", .{tag}), x, rows, k);
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.win", .{tag}), y_win.slice(u16, rows * pitch), rows, pitch);
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.tile", .{tag}), y_tile.slice(u16, rows * pitch), rows, pitch);
+    return !same;
 }
 
 /// A bf16 linear through gemma4/dense.metal, all rows at once (its row bits do not depend on the window).
@@ -192,6 +193,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const wanted = [_]usize{ 0, 3, 5, 11, 17, 23, 24, 35, 41 };
     var cur: usize = 0;
+    var differ: usize = 0;
     for (0..geo.layers) |i| {
         const cb = m.queue.commandBuffer();
         const e = cb.compute(.serial);
@@ -203,17 +205,17 @@ pub fn main(init: std.process.Init) !void {
             var tag: [64]u8 = undefined;
             const qkv_in = try grab(m, gpa, s.normed[cur], rows * geo.hidden * 2);
             defer gpa.free(qkv_in);
-            try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "qkv_L{d}", .{i}), l.qkv.list(), l.qkv.n, qkv_in, geo.hidden, rows);
+            differ += @intFromBool(try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "qkv_L{d}", .{i}), l.qkv.list(), l.qkv.n, qkv_in, geo.hidden, rows));
             const qd = geo.query_heads * g4.config.headDim(i);
             const o_in = try grab(m, gpa, s.attn, rows * qd * 2);
             defer gpa.free(o_in);
-            try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "o_L{d}", .{i}), &.{l.o}, l.o.n, o_in, qd, rows);
+            differ += @intFromBool(try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "o_L{d}", .{i}), &.{l.o}, l.o.n, o_in, qd, rows));
             const gu_in = try grab(m, gpa, s.n_mlp, rows * geo.hidden * 2);
             defer gpa.free(gu_in);
-            try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "gateup_L{d}", .{i}), l.gate_up.list(), l.gate_up.n, gu_in, geo.hidden, rows);
+            differ += @intFromBool(try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "gateup_L{d}", .{i}), l.gate_up.list(), l.gate_up.n, gu_in, geo.hidden, rows));
             const down_in = try grab(m, gpa, s.act, rows * geo.intermediate * 2);
             defer gpa.free(down_in);
-            try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "down_L{d}", .{i}), &.{l.down}, l.down.n, down_in, geo.intermediate, rows);
+            differ += @intFromBool(try quantized(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "down_L{d}", .{i}), &.{l.down}, l.down.n, down_in, geo.intermediate, rows));
             const h_out = try grab(m, gpa, s.h[1 - cur], rows * geo.hidden * 2);
             defer gpa.free(h_out);
             try dense(m, io, gpa, dir, try std.fmt.bufPrint(&tag, "plegate_L{d}", .{i}), l.ple_gate.?, h_out, rows);
@@ -226,5 +228,10 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("layer {d} captured\n", .{i});
         }
         cur = 1 - cur;
+    }
+    // the dumps are all written; a served window that differs from its rows one at a time fails the run
+    if (differ != 0) {
+        std.debug.print("{d} served-window comparisons DIFFER from the rows one at a time\n", .{differ});
+        return error.WindowRowsDiffer;
     }
 }
