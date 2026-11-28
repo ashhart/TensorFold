@@ -3,8 +3,8 @@
 const std = @import("std");
 const direct_io = @import("direct_io.zig");
 
-/// The bytes of one reader's read.
-pub const chunk = 8 << 20;
+/// The bytes of one reader's read: direct_io's staging chunk.
+pub const chunk = direct_io.chunk;
 pub const max_readers = 16;
 /// Files one read may draw on (a loader's held shards).
 pub const max_sources = 64;
@@ -18,11 +18,8 @@ pub const Source = struct { path: [:0]const u8, memory: []const u8 };
 const Piece = struct { file: usize, lo: u64, len: usize, dst: usize };
 const Range = struct { file: usize, lo: u64, hi: u64 };
 
-/// TF_LOAD_DIRECT=0 leaves loaders on their mappings; unset or any other value, they read past the page cache.
-pub fn enabled() bool {
-    const v = std.c.getenv("TF_LOAD_DIRECT") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
-}
+/// TF_LOAD_DIRECT=0 leaves loaders on their mappings; direct_io owns the switch.
+pub const enabled = direct_io.enabled;
 
 pub const Gather = struct {
     gpa: std.mem.Allocator,
