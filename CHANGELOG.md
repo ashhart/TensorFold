@@ -4,10 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: GLM tool calls stream to OpenAI-compatible clients as incremental `tool_calls` deltas (the header, then argument fragments) instead of one chunk when the call closes; streamed deltas concatenate to exactly the non-streaming response, and generated tokens are unchanged (#5470).
+
 - Core: a chat template's content.N index counts only the code points up to the requested index instead of the whole string; rendered text and token ids are unchanged (#5396). Thanks to @BadAd84.
 
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
-- Server: GLM tool calls stream to OpenAI-compatible clients as incremental `tool_calls` deltas (the header, then argument fragments) instead of one chunk when the call closes; streamed deltas concatenate to exactly the non-streaming response, and generated tokens are unchanged (#5470).
 
 - Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
 
@@ -29,8 +30,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the prompt-imprint key-index test starts from an empty temporary directory, so a run interrupted on Windows (which reuses process IDs) no longer leaves a later run a stale starting state (#5406).
 
 - CLI: `tensorfold log` also reads the request log `TENSORFOLD_REQUEST_LOG` writes: `list`, `show ID`, `follow` and `--json` show each reply beside its request, and a bare body is numbered by reader order, never keyed by fields inside it (#5246, refs #3666). Thanks to @devopsfortunato.
-
-
 
 - Server: `--confidential` also refuses library search-path variables.
 - Server: `--confidential` also refuses accelerator plugin and kernel library-path variables.
