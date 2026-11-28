@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const fl = tf.spark25_metal;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
+const metal_admit = @import("metal_admit.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -34,6 +35,18 @@ const Host = struct {
     }
 };
 
+fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    return metal_admit.streams(a, "spark2_5", stream_bytes, left, o, window, problem);
+}
+
+fn admittedWindow(a: std.mem.Allocator, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    return admittedStreams(a, fl.state.cacheBytes(@intCast(window + 1)), left, o, window, problem);
+}
+
+fn longestWindow(budget: u64, most: usize) usize {
+    return fl.budget.longest(budget, most + 1) -| 1;
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
@@ -58,13 +71,17 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = "SPARK_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
     };
-    const fits = fl.budget.longest(budget, @min(model.config.context, fl.state.max_capacity));
+    const fits = longestWindow(budget, @min(model.config.context, fl.state.max_capacity));
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Spark2.5 caches fit {d} tokens under its load limit (75% of RAM, or SPARK_LOAD_LIMIT_GB)", .{ window, fits });
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
+    const served = try admittedWindow(a, budget, o, @intCast(window), problem) orelse {
+        model.deinit();
+        return null;
+    };
     std.log.info("spark2_5: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -72,7 +89,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.io = io;
     h.model = model;
     h.resident = null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), fl.state.window_rows, fl.state.window_rows - 1);
@@ -80,7 +97,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -181,4 +198,37 @@ test "spark metal host: cache callback with no configured cache leaves no state 
     h.cache = null;
     fitCache(&h, 0, null, &.{});
     try std.testing.expect(h.cache == null);
+}
+
+test "Metal capabilities: Spark25 admission fits automatic 64 and refuses explicit over-capacity" {
+    const a = std.testing.allocator;
+    const auto: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 64 };
+    const exact: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 3, .lanes_fixed = true };
+    const over: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 64, .lanes_fixed = true };
+    var why: []const u8 = "";
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, auto, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, exact, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 11, over, 4096, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+}
+
+test "Metal capabilities: Spark25 default windows price the backend's extra position" {
+    const budget = fl.state.cacheBytes(64);
+    try std.testing.expectEqual(@as(usize, 63), longestWindow(budget, 4096));
+    try std.testing.expect(fl.state.cacheBytes(longestWindow(budget, 4096) + 1) <= budget);
+}
+
+test "Metal capabilities: Spark25 admission reduces automatic streams and refuses explicit streams at window + 1" {
+    const a = std.testing.allocator;
+    const left = 2 * fl.state.cacheBytes(64) + 1;
+    const auto: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 64 };
+    const exact: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 2, .lanes_fixed = true };
+    var why: []const u8 = "";
+    const automatic = try admittedWindow(a, left, auto, 64, &why);
+    const explicit = try admittedWindow(a, left, exact, 64, &why);
+    defer if (why.len > 0) a.free(why);
+    try std.testing.expectEqual(@as(?u32, 1), automatic);
+    try std.testing.expectEqual(@as(?u32, null), explicit);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 2") != null);
 }

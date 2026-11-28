@@ -7,7 +7,7 @@ const fl = tf.llama;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
 const mem_ctrl = @import("memory_controller.zig");
-
+const metal_admit = @import("metal_admit.zig");
 const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -100,9 +100,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = "LLAMA_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
     };
-    const streams: u32 = @max(o.lanes, 1);
-    const drafted: ?fl.budget.Drafted = if (drafter_model) |dm| .{ .c = &dm.config, .streams = streams } else null;
-    const fits = fl.budget.longestWith(&model.config, drafted, budget, most);
+    const fits = if (drafter_model) |dm| longestWindow(&model.config, &dm.config, budget, most, o) else fl.budget.longest(&model.config, budget, most);
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Llama caches fit {d} tokens under its load limit (75% of RAM, or LLAMA_LOAD_LIMIT_GB){s}", .{ window, fits, if (drafter_model != null) ", the drafter's caches and trained window counted" else "" });
@@ -110,6 +108,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
+    var per_stream: u64 = @intCast(fl.state.cacheBytes(&model.config, @intCast(window + 1)));
+    if (drafter_model) |dm| per_stream += @intCast(fl.state.cacheBytes(&dm.config, @intCast(window + fl.state.window_rows)));
+    const streams = try admitStreams(a, per_stream, budget, o, @intCast(window), problem) orelse {
+        if (drafter_model) |dm| dm.deinit();
+        model.deinit();
+        return null;
+    };
     std.log.info("llama: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -135,7 +140,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = streams, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -180,6 +185,18 @@ fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
         names = names ++ (if (names.len == 0) "" else ", ") ++ q.name;
     };
     return names;
+}
+
+fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    return metal_admit.streams(a, "llama", per_stream, left, o, window, problem);
+}
+
+fn longestWindow(c: *const fl.config.Config, dc: *const fl.config.Config, budget: u64, most: usize, o: api.Open) usize {
+    const drafted: fl.budget.Drafted = .{ .c = dc, .streams = 1 };
+    if (!o.lanes_fixed or o.context != null) return fl.budget.longestWith(c, drafted, budget, most);
+    // A fixed default needs every target+drafter pair and every other lane's pool byte.
+    const pairs: u64 = @max(o.lanes, 1);
+    return fl.budget.longestWith(c, drafted, (budget -| (pairs - 1)) / pairs, most);
 }
 
 /// --drafter's refusal for a target its drafts were not measured to pay for (Nanbeige4.3-33B-INT4 on the M5 Ultra).
@@ -309,4 +326,62 @@ test "llama host: cache callback with no configured cache leaves no state to mut
     h.cache = null;
     fitCache(&h, 0, null, &.{});
     try std.testing.expect(h.cache == null);
+}
+
+test "llama host: automatic 64 fits cache memory before advertisement" {
+    const a = std.testing.allocator;
+    const per_stream: u64 = 3 << 30;
+    const left: u64 = 10 << 30;
+    var why: []const u8 = "";
+    const auto: api.Open = .{ .dir = "", .model_type = "llama", .lanes = 64 };
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, auto, 8192, &why));
+    var three = auto;
+    three.lanes = 3;
+    three.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, three, 8192, &why));
+    var fixed = auto;
+    fixed.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, null), try admitStreams(a, per_stream, left, fixed, 8192, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "; 3 fit") != null);
+}
+
+test "llama host: drafted window prices one stream before automatic lanes are fitted" {
+    const c: fl.config.Config = .{ .hidden = 256, .intermediate = 512, .layers = 2, .heads = 4, .kv_heads = 2, .vocab = 1024, .eps = 0.00001, .theta = 10000, .context = 4096 };
+    const one: fl.budget.Drafted = .{ .c = &c, .streams = 1 };
+    const sixty_four: fl.budget.Drafted = .{ .c = &c, .streams = 64 };
+    const budget = fl.budget.needed(&c, one, 4096);
+    try std.testing.expect(fl.budget.needed(&c, sixty_four, 4096) > budget);
+    const auto: api.Open = .{ .dir = "", .model_type = "llama", .lanes = 64 };
+    try std.testing.expectEqual(@as(usize, 4096), longestWindow(&c, &c, budget, 4096, auto));
+}
+
+test "llama host: explicit 13 omitted context admits every pair at the default window" {
+    const a = std.testing.allocator;
+    const c: fl.config.Config = .{ .hidden = 256, .intermediate = 512, .layers = 2, .heads = 4, .kv_heads = 2, .vocab = 1024, .eps = 0.00001, .theta = 10000, .context = 4096 };
+    const fixed: api.Open = .{ .dir = "", .model_type = "llama", .lanes = 13, .lanes_fixed = true };
+    const short: usize = 256;
+    const short_pair = fl.state.cacheBytes(&c, short + 1) + fl.state.cacheBytes(&c, short + fl.state.window_rows);
+    const exact_budget = 13 * @as(u64, @intCast(short_pair)) + 12;
+    const one: fl.budget.Drafted = .{ .c = &c, .streams = 1 };
+    const one_pair_max = fl.budget.longestWith(&c, one, exact_budget, 4096);
+    try std.testing.expect(one_pair_max > short);
+    const window = longestWindow(&c, &c, exact_budget, 4096, fixed);
+    const pair = fl.state.cacheBytes(&c, window + 1) + fl.state.cacheBytes(&c, window + fl.state.window_rows);
+    var why: []const u8 = "";
+    defer if (why.len > 0) a.free(why);
+    const admitted = try admitStreams(a, @intCast(pair), exact_budget, fixed, @intCast(window), &why);
+    try std.testing.expectEqual(@as(?u32, 13), admitted);
+    try std.testing.expectEqual(short, window);
+    const lower_budget = exact_budget - 1;
+    const lower_window = longestWindow(&c, &c, lower_budget, 4096, fixed);
+    try std.testing.expectEqual(@as(usize, 255), lower_window);
+    const lower_pair = fl.state.cacheBytes(&c, lower_window + 1) + fl.state.cacheBytes(&c, lower_window + fl.state.window_rows);
+    const lower_admitted = try admitStreams(a, @intCast(lower_pair), lower_budget, fixed, @intCast(lower_window), &why);
+    try std.testing.expectEqual(@as(?u32, 13), lower_admitted);
+    var explicit = fixed;
+    explicit.context = @intCast(short);
+    try std.testing.expect((try admitStreams(a, @intCast(short_pair), lower_budget, explicit, short, &why)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 13") != null);
 }

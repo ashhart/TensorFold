@@ -1,6 +1,7 @@
 //! Nemotron and LFM3 on the XPU server: their lane host (a family behind the lane core, one stream, host sampling).
 const std = @import("std");
 const xpu = @import("xpu");
+const admit = @import("xpu_admit.zig");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const lane = @import("xpu_lane.zig");
@@ -58,6 +59,15 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 fn freeMemory(ctx: *xpu.Context) u64 {
     const mem = ctx.gpu.memory() catch return 0;
     return @min(mem.free, mem.size -| xpu.rt.alloc_now);
+}
+
+/// Streams whose complete sequences fit after the activation margin and intended prompt cache.
+fn admittedStreams(o: api.Open, memory: admit.Memory, sequence_bytes: u64, cache_reserve: u64) !u32 {
+    const want = @max(1, o.lanes);
+    const fitting = admit.streamsThatFit(memory, 2 << 30, cache_reserve, sequence_bytes, want, want);
+    if (o.lanes_fixed and fitting != want) return error.ParallelPastMemory;
+    if (fitting == 0) return error.StreamDoesNotFit;
+    return fitting;
 }
 
 /// One loaded model behind the lane host: the device, the engine, the lane backend and the round loop.
@@ -149,11 +159,17 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend.halt = &stopping;
     h.backend.started = chainStopHandlers;
     try h.backend.measure();
+    // Reserve the cache before sizing sequences, as the other admitted XPU engines do.
+    const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
     if (@hasDecl(S.Engine, "copy_only")) {
         if (@hasDecl(S, "copy_match")) h.backend.copy_match = S.copy_match;
         if (getenv("XPU_COPY_MATCH")) |v| h.backend.copy_match = std.fmt.parseInt(i64, v, 10) catch 4;
         h.backend.streams = @min(@max(1, o.lanes), 8); // one sequence each (the engine holds up to 8)
-    } else if (h.backend.facts().exact_width > 1) h.backend.streams = @max(1, o.lanes); // drafted windows: up to --parallel streams a round
+    } else if (h.backend.facts().exact_width > 1) {
+        const mem = try h.ctx.gpu.memory();
+        const memory: admit.Memory = .{ .free = mem.free, .size = mem.size, .allocated = xpu.rt.alloc_now };
+        h.backend.streams = try admittedStreams(o, memory, h.engine.sequenceBytes(), want);
+    }
     const facts = h.backend.facts();
     h.cfg = try lanes.Config.init(gpa, facts, facts.exact_width, facts.exact_width - 1);
     h.clock = .{ .io = io };
@@ -162,9 +178,7 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; {d} stream(s) a round on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note, h.backend.streams });
     const drafted = facts.exact_width > 1;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted and !@hasDecl(S.Engine, "copy_only")) S.promptRows(h.engine) else 0 });
-    // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
-    const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
-    // Sysman only when a cache can use it: zesInit faults inside the driver under WSL2 (Iris Xe, NEO 23.43)
+    // --prompt-cache-gib defaults to 4 GiB past 2 GiB; Sysman with a cache only: zesInit faults under WSL2
     const free = if (drafted) freeMemory(&h.ctx) else 0;
     const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
     h.cache = null;
@@ -179,4 +193,20 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.host.explain = .{ .text = lane.explain };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host(S).close, .ctx = h };
+}
+
+const gib: u64 = 1 << 30;
+
+test "draft sources: XPU MTP admission automatic 64 degrades to the complete sequences that fit" {
+    const memory: admit.Memory = .{ .free = 20 * gib, .size = 32 * gib, .allocated = 12 * gib };
+    const o: api.Open = .{ .dir = "", .model_type = "nemotron_h", .lanes = 64 };
+    try std.testing.expectEqual(@as(u32, 5), try admittedStreams(o, memory, 3 * gib, 4 * gib));
+}
+
+test "draft sources: XPU MTP admission fixed requests stay exact and refuse over-capacity" {
+    const memory: admit.Memory = .{ .free = 20 * gib, .size = 32 * gib, .allocated = 12 * gib };
+    const exact: api.Open = .{ .dir = "", .model_type = "nemotron_h", .lanes = 5, .lanes_fixed = true };
+    try std.testing.expectEqual(@as(u32, 5), try admittedStreams(exact, memory, 3 * gib, 4 * gib));
+    const excess: api.Open = .{ .dir = "", .model_type = "nemotron_h", .lanes = 6, .lanes_fixed = true };
+    try std.testing.expectError(error.ParallelPastMemory, admittedStreams(excess, memory, 3 * gib, 4 * gib));
 }

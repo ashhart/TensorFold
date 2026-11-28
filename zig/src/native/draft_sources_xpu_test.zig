@@ -7,6 +7,7 @@ comptime {
     _ = @import("xpu_dflash2_test.zig"); // its tests run under this file's "draft sources:" filter
     _ = @import("xpu_dflash2_depth_test.zig"); // the core depth sweep on the XPU adapter
     _ = @import("xpu_logrow.zig"); // the logprob row's own test
+    _ = @import("xpu_nem.zig"); // the MTP stream-admission host tests
 }
 
 test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
@@ -47,6 +48,41 @@ test "draft sources: XPU Nemotron follows the checkpoint head, with no copy wind
     try check(b.facts(), null, false, false);
     e.head = present(@TypeOf(e.head.?));
     try check(b.facts(), null, true, true);
+}
+
+test "draft sources: XPU MTP sequence pricing covers newSeq's complete allocation list" {
+    const std = @import("std");
+    const n = @import("nemotron_xpu");
+    var e: n.Engine = undefined;
+    e.cfg = undefined;
+    e.cfg.conv_kernel = 4;
+    e.cfg.mamba_num_heads = 2;
+    e.cfg.mamba_head_dim = 3;
+    e.cfg.ssm_state_size = 5;
+    e.cfg.n_groups = 7;
+    e.cfg.num_key_value_heads = 11;
+    e.cfg.head_dim = 13;
+    e.cfg.hidden_size = 17;
+    e.m = undefined;
+    e.m.cap = 19;
+    e.own = undefined;
+    var cstate: [2]@import("xpu").rt.Buffer = undefined;
+    var kc: [3]@import("xpu").rt.Buffer = undefined;
+    e.own.cstate = &cstate;
+    e.own.kc = &kc;
+    const head: n.mtp.Mtp = undefined;
+    e.head = head;
+
+    const c = e.cfg;
+    const conv = @as(u64, c.conv_kernel - 1) * c.convDim() * 2;
+    const ssm = @as(u64, c.mamba_num_heads) * c.mamba_head_dim * c.ssm_state_size * 4;
+    const kv = @as(u64, e.m.cap) * c.num_key_value_heads * c.head_dim * 2;
+    const rows: u64 = n.win.max_rows;
+    const mamba = 2 * conv + 2 * ssm + rows * (@as(u64, c.projDim()) + c.convDim()) * 2;
+    const complete = cstate.len * mamba + 2 * kc.len * kv + 2 * kv + (rows + 1) * @as(u64, c.hidden_size) * 2;
+    try std.testing.expectEqual(complete, e.sequenceBytes());
+    e.head = null;
+    try std.testing.expectEqual(complete - 2 * kv - (rows + 1) * @as(u64, c.hidden_size) * 2, e.sequenceBytes());
 }
 
 test "slide admission: XPU refuses every family before device access" {

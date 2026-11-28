@@ -11,7 +11,7 @@ pub const GiB: u64 = 1 << 30;
 pub const runtime_margin = @import("sys").memory_policy.margin;
 
 /// A start `info` prices: --context and --parallel as `serve` reads them.
-pub const Start = struct { context: ?i64 = null, streams: u32 = 8, fixed: bool = false };
+pub const Start = struct { context: ?i64 = null, streams: u32 = 64, fixed: bool = false };
 
 /// `[--context N] [--parallel N|auto]`; null on anything else.
 pub fn parseStart(args: []const []const u8) ?Start {
@@ -25,7 +25,7 @@ pub fn parseStart(args: []const []const u8) ?Start {
         } else if (!std.mem.eql(u8, args[i], "--parallel")) {
             return null;
         } else if (std.ascii.eqlIgnoreCase(v, "auto")) {
-            s.streams = 8;
+            s.streams = 64;
             s.fixed = false;
         } else {
             const n = std.fmt.parseInt(i64, v, 10) catch return null;
@@ -327,11 +327,11 @@ test "issue 934: info reads the same large config and reports an oversized confi
 
 test "info --context and --parallel parse as serve reads them" {
     const t = std.testing;
-    try t.expectEqualDeep(Start{}, parseStart(&.{}).?);
+    try t.expectEqualDeep(Start{ .streams = 64 }, parseStart(&.{}).?);
     try t.expectEqualDeep(Start{ .context = 65536 }, parseStart(&.{ "--context", "65536" }).?);
     try t.expectEqualDeep(Start{ .context = 8192, .streams = 2, .fixed = true }, parseStart(&.{ "--parallel", "2", "--context", "8192" }).?);
     try t.expectEqualDeep(Start{ .streams = 1, .fixed = true }, parseStart(&.{ "--parallel", "0" }).?);
-    try t.expectEqualDeep(Start{}, parseStart(&.{ "--parallel", "AUTO" }).?);
+    try t.expectEqualDeep(Start{ .streams = 64 }, parseStart(&.{ "--parallel", "AUTO" }).?);
     for ([_][]const []const u8{ &.{"--context"}, &.{ "--context", "lots" }, &.{ "--parallel", "two" }, &.{ "--drafter", "x" } }) |bad| try t.expect(parseStart(bad) == null);
 }
 
@@ -373,7 +373,16 @@ test "info prices a Qwen3.8-27B start from serve's charge: context, streams and 
     const tight = try price27(a, io, dir, 8, .{ .context = 8192, .streams = 1, .fixed = true });
     try std.testing.expect(has(tight.text, "not one stream fits its 8.0 GiB Metal working set with an 8 GiB margin; serve refuses"));
     const auto = try price27(a, io, dir, 4096, .{ .context = 8192 });
-    try std.testing.expect(has(auto.text, "8 streams of KV and state"));
+    try std.testing.expect(has(auto.text, "64 streams of KV and state"));
+    const partial = try price27(a, io, dir, 16, .{ .context = 8192 });
+    const fitted = fitted64Of(partial.text);
+    try std.testing.expect(fitted >= 1 and fitted < 64);
+    try std.testing.expect(has(partial.text, try std.fmt.allocPrint(a, "weights, {d} streams of KV and state", .{fitted})));
+    try std.testing.expect(has(partial.text, try std.fmt.allocPrint(a, "this Mac: {d} of 64 streams fit its 16.0 GiB Metal working set with an 8 GiB margin; serve starts {d}", .{ fitted, fitted })));
+    const explicit = try price27(a, io, dir, 16, .{ .context = 8192, .streams = 64, .fixed = true });
+    try std.testing.expect(has(explicit.text, "weights, 64 streams of KV and state"));
+    try std.testing.expect(has(explicit.text, "serve refuses"));
+    try std.testing.expect(!has(explicit.text, "serve starts"));
     const past = try price27(a, io, dir, 4096, .{ .context = 300000 });
     try std.testing.expectEqual(@as(u8, 1), past.code);
     try std.testing.expect(has(past.text, "--context 300000 is outside this Qwen checkpoint's 1 to 262,144 tokens"));
@@ -392,4 +401,13 @@ fn gibOf(text: []const u8) f64 {
     const at = (std.mem.indexOf(u8, text, "startup budget: ") orelse return 0) + "startup budget: ".len;
     const end = std.mem.indexOfScalarPos(u8, text, at, ' ') orelse return 0;
     return std.fmt.parseFloat(f64, text[at..end]) catch 0;
+}
+
+/// The fitted automatic count from the real Qwen pricing output; zero if its partial-fit line is absent.
+fn fitted64Of(text: []const u8) u32 {
+    const prefix = "this Mac: ";
+    const at = (std.mem.indexOf(u8, text, prefix) orelse return 0) + prefix.len;
+    const suffix = " of 64 streams fit";
+    const end = std.mem.indexOfPos(u8, text, at, suffix) orelse return 0;
+    return std.fmt.parseInt(u32, text[at..end], 10) catch 0;
 }

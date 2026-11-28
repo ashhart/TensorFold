@@ -319,8 +319,8 @@ test "an engine is asked for what the flags say, and the defaults of the flags n
     defer arena.deinit();
     const a = arena.allocator();
     const plain = try request(a, "d", "t", .{});
-    const want: api.Open = .{ .dir = "d", .model_type = "t", .learn = null };
-    inline for (.{ "mtp_drafts", "mtp_confidence", "keep", "tp", "rank", "master_port", "lanes", "drafts", "device", "segments" }) |field| try std.testing.expectEqual(@field(want, field), @field(plain, field));
+    const want: api.Open = .{ .dir = "d", .model_type = "t", .learn = null, .lanes = cli.parallel("auto").? };
+    inline for (.{ "mtp_drafts", "mtp_confidence", "keep", "tp", "rank", "master_port", "lanes", "lanes_fixed", "drafts", "device", "segments" }) |field| try std.testing.expectEqual(@field(want, field), @field(plain, field));
     try std.testing.expectEqualStrings("", plain.policy);
     try std.testing.expectEqualStrings("", plain.master);
     const gpu = try request(a, "d", "t", .{ .tp = 4, .rank = 1, .master = "node0", .master_port = 29600, .mtp_drafts = 2, .mtp_confidence = 0.5, .checkpoint_slots = 3, .policy = "matrix=off" });
@@ -356,7 +356,7 @@ test "--device and --segments: CUDA builds serve them, values checked; --speed-u
     try std.testing.expect(try cudaFlag(a, &out, "--loops", "4", &u));
     try std.testing.expectEqual(@as(?u32, 4), (try request(a, "d", "dory", out)).loops);
     try std.testing.expectError(error.Usage, cudaFlag(a, &out, "--loops", "-1", &u));
-    try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x"));
+    try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x") and (try request(a, "d", "t", .{ .parallel = "auto" })).lanes == 64);
     // --rope-yarn: a factor that reaches the engine's request; the families and engines that lack YaRN refuse it
     try std.testing.expect(try cudaFlag(a, &out, "--rope-yarn", "4", &u));
     try std.testing.expectEqual(@as(?f64, 4), (try request(a, "d", "qwen3_5_moe", out)).rope_yarn);

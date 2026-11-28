@@ -66,7 +66,7 @@ See [the web launcher](web.md) for manual installation and unattended use.
 ## Parallel requests
 
 `--parallel N` caps active requests at N; extra requests wait for a free slot.
-Omitting the flag uses `--parallel auto`, which asks for up to eight streams as memory and the engine allow.
+Omitting the flag uses `--parallel auto`, which asks for up to 64 streams as memory and the engine allow.
 An explicit number is refused if the engine cannot fit that many streams.
 Read the engine's startup capacity line, such as `8 streams at once` on CUDA, for the count it accepted.
 With API authentication off, `/health` reports `live.connections` as active plus waiting requests and
@@ -173,7 +173,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--register-redraw-st ST` | Drama speech only: draw a whole reply once more when a phrase after the first opens ST semitones above the other phrases' median opening; needs the two flags below. Unset by default: off, with no default for any of the three. See [speech redraws](speech-redraws.md#register). |
 | `--register-redraw-high PERCENT` | The share of that phrase's voiced frames that must lie above `--register-high-hz`. |
 | `--register-high-hz HZ` | The pitch line, 75 to 600 Hz, that marks a high register; calibrate it on your own voice. |
-| `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 8 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
+| `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 64 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
 | `--prompt-cache-gib GIB` | Retained-prefix budget; by default half the room left after streams on Metal and unified-memory CUDA (16 GiB floor where room permits), 8 GiB host snapshots on discrete CUDA, 16 GiB for Flash Next's batch host. An explicit value overrides it; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
 | `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |

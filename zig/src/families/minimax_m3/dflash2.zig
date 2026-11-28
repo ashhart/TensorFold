@@ -182,6 +182,8 @@ pub const Drafter = struct {
     config: Config,
     w: Weights,
     pipes: [names.len]mtl.Pipeline,
+    fixed: u64 = 0, // the scratch buffers below, whose checkpoint weights are already resident
+
     lanes: std.AutoHashMapUnmanaged(*Stream, *Lane) = .empty,
     follow: ?mtl.ResidencySet.Follow = null,
     step_ms: f64 = 0,
@@ -225,6 +227,9 @@ pub const Drafter = struct {
             d.s[i] = try target.device.buffer(n, mtl.ResourceOptions.shared);
             made += 1;
         }
+        var fixed: u64 = 0;
+        for (d.s) |x| fixed += x.length();
+        d.fixed = fixed;
         try d.warm();
         return d;
     }
@@ -271,6 +276,10 @@ pub const Drafter = struct {
     pub fn laneBytes(d: *const Drafter) usize {
         const c = &d.config;
         return @as(usize, c.layers) * 2 * c.ring() * c.kv_heads * 128 * 2;
+    }
+    /// Device buffers besides the checkpoint's weights and each stream's ring.
+    pub fn fixedBytes(d: *const Drafter) u64 {
+        return d.fixed;
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {

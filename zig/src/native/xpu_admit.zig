@@ -6,7 +6,7 @@ pub const Memory = struct { free: u64, size: u64, allocated: u64 };
 /// Streams of `slot_bytes` that fit beside `margin` and `reserve`, at most `want` and `max`; 0 when the first does not.
 pub fn streamsThatFit(m: Memory, margin: u64, reserve: u64, slot_bytes: u64, want: u32, max: u32) u32 {
     const free = @min(m.free, m.size -| m.allocated);
-    if (free < margin + reserve) return 0;
+    if (free < margin or free - margin < reserve) return 0;
     const more: u32 = @intCast(@min((free - margin - reserve) / slot_bytes, max - 1));
     return @min(want, 1 + more);
 }
@@ -27,6 +27,12 @@ test "streams follow the free memory, not the card's size" {
 test "the size less what the engine allocated caps an over-reported free" {
     const m: Memory = .{ .free = 30 * gib, .size = 32 * gib, .allocated = 24 * gib };
     try std.testing.expectEqual(@as(u32, 3), streamsThatFit(m, 2 * gib, 2 * gib, 2 * gib, 8, 8));
+}
+
+test "a cache reserve near the CLI limit cannot overflow the activation reserve" {
+    const reserve = 17_179_869_183 * gib;
+    const m: Memory = .{ .free = std.math.maxInt(u64), .size = std.math.maxInt(u64), .allocated = 0 };
+    try std.testing.expectEqual(@as(u32, 0), streamsThatFit(m, 2 * gib, reserve, gib, 8, 8));
 }
 
 test "at most the wanted streams and the engine's maximum" {
