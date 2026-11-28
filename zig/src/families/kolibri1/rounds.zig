@@ -34,10 +34,14 @@ pub const Rounds = struct {
             r.cache.?.name = "kolibri1 rounds";
         }
         const key: Key = .{ .rows = @intCast(st.n), .streams = @intCast(chains.len), .groups = @intCast(st.ng) };
-        const fp = gc.fingerprintOf(&.{ out, m.origin, m.table, m.s.x });
-        _ = try r.cache.?.run(key, o.s, fp, .{ .ctx = &body, .run = Body.run });
+        _ = try r.cache.?.run(key, o.s, fingerprint(m, out), .{ .ctx = &body, .run = Body.run });
     }
 };
+
+/// The addresses a round's graph holds: a drafter's tap copies (their rows, their count) among them.
+pub fn fingerprint(m: *const fwd.Model, out: u64) u64 {
+    return gc.fingerprintOf(&.{ out, m.origin, m.table, m.s.x, m.tap_rows, m.taps.len });
+}
 
 /// A round's launches as the eager forward makes them, on the stream the cache runs them on.
 const Body = struct {
@@ -67,4 +71,17 @@ test "kolibri rounds: a plan's offsets follow its rows and streams alone, which 
     const c = try tree.build(gpa, &.{ .{ .rows = 2, .committed = 9 }, .{ .rows = 1, .committed = 9 }, .{ .rows = 1, .committed = 9 } });
     defer gpa.free(c.flat);
     try std.testing.expect(c.parentsAt() != a.parentsAt()); // a third stream moves the parents: the key holds streams
+}
+
+test "kolibri rounds: naming a drafter's taps changes the fingerprint, so no round graph without tap copies replays" {
+    var m: fwd.Model = undefined;
+    m.origin = 0x1000;
+    m.table = 0x2000;
+    m.s.x = 0x3000;
+    m.tap_rows = 0;
+    m.taps = &.{};
+    const before = fingerprint(&m, 0x4000);
+    m.tap_rows = 0x5000;
+    m.taps = &.{ 1, 3 };
+    try std.testing.expect(fingerprint(&m, 0x4000) != before);
 }

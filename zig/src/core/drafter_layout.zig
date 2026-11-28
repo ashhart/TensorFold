@@ -1,4 +1,4 @@
-//! A block-drafter release's tensors: the names and shapes its config.json implies, and a release folder read whole.
+//! A drafter release's tensors: the names and shapes its config.json implies, and a release folder read whole.
 
 const std = @import("std");
 const Io = std.Io;
@@ -25,14 +25,17 @@ pub fn expected(a: std.mem.Allocator, c: *const Config) ![]Want {
     if (t.head_bias) try out.append(a, one("target.head_bias", v));
     try out.append(a, two("fuse.weight", d, c.taps.ids.len * @as(usize, t.hidden))); // the taps, concatenated
     try out.append(a, two("fc.weight", d, @as(usize, t.hidden) + d)); // cat(embed(token after the row), fused row)
-    try out.append(a, one("mask", d)); // block rows 1.. start from it
+    const block = c.architecture == .@"block-drafter"; // eagle3: a row's keys come from its own q/k/v, no mask row
+    if (block) try out.append(a, one("mask", d)); // block rows 1.. start from it
+    const projections: []const []const u8 = if (block) &.{ "q", "k", "v", "ck", "cv" } else &.{ "q", "k", "v" };
+    const norms: []const []const u8 = if (block) &.{ "n1", "n2", "nc" } else &.{ "n1", "n2" };
     for (0..s.layers) |i| {
-        for ([_][]const u8{ "q", "k", "v", "ck", "cv" }) |p| try out.append(a, two(try layer(a, i, p, "weight"), att, d));
+        for (projections) |p| try out.append(a, two(try layer(a, i, p, "weight"), att, d));
         try out.append(a, two(try layer(a, i, "o", "weight"), d, att));
         try out.append(a, two(try layer(a, i, "gate", "weight"), s.ffn, d));
         try out.append(a, two(try layer(a, i, "up", "weight"), s.ffn, d));
         try out.append(a, two(try layer(a, i, "down", "weight"), d, s.ffn));
-        for ([_][]const u8{ "n1", "n2", "nc" }) |p| try out.append(a, one(try layer(a, i, p, "w"), d));
+        for (norms) |p| try out.append(a, one(try layer(a, i, p, "w"), d));
     }
     try out.append(a, one("out_norm.w", d));
     if (s.pred_rank > 0) {
@@ -48,19 +51,41 @@ pub fn expected(a: std.mem.Allocator, c: *const Config) ![]Want {
     return out.items;
 }
 
+/// How a file names the format's tensors: the format's own names, or a layout published before it.
+pub const Names = struct {
+    layers: []const u8 = "layers", // prefix of layer i's tensors ("blocks" in an eagle3 release published before v1)
+    own_target: bool = false, // the target's embed and head come from the loaded target, not from the file
+    unused: []const []const u8 = &.{}, // tensors the file may hold that no drafter reads (named, never guessed)
+
+    /// The file's name for the format's `name` (`a` owns it).
+    pub fn of(n: Names, a: std.mem.Allocator, name: []const u8) ![]const u8 {
+        if (!std.mem.startsWith(u8, name, "layers.") or std.mem.eql(u8, n.layers, "layers")) return name;
+        return std.fmt.allocPrint(a, "{s}{s}", .{ n.layers, name["layers".len..] });
+    }
+};
+
 /// The weights' header holds exactly the tensors `c` implies, each float (bf16, f16 or f32) at its shape.
 pub fn checkWeights(a: std.mem.Allocator, c: *const Config, header: safetensors.Header, why: *Why) !void {
-    const want = try expected(a, c);
-    for (want) |w| {
-        const e = header.get(w.name) orelse return refuse(why, "{s} has no {s}", .{ c.weights, w.name });
-        if (e.dtype != .bf16 and e.dtype != .f16 and e.dtype != .f32) return refuse(why, "{s} is {s}; the format stores bf16, f16 or f32", .{ w.name, @tagName(e.dtype) });
-        if (e.rank != w.rank or !std.mem.eql(usize, e.shape[0..e.rank], w.shape[0..w.rank])) return refuse(why, "{s} is {any}; config.json implies {any}", .{ w.name, e.shape[0..e.rank], w.shape[0..w.rank] });
+    return checkWeightsNamed(a, c, header, .{}, why);
+}
+
+/// checkWeights under `names`: the target's tensors left out when it supplies them, `unused` ones admitted by name.
+pub fn checkWeightsNamed(a: std.mem.Allocator, c: *const Config, header: safetensors.Header, names: Names, why: *Why) !void {
+    var held: std.StringHashMapUnmanaged(void) = .empty;
+    for (try expected(a, c)) |w| {
+        if (names.own_target and std.mem.startsWith(u8, w.name, "target.")) continue;
+        const name = try names.of(a, w.name);
+        try held.put(a, name, {});
+        const e = header.get(name) orelse return refuse(why, "{s} has no {s}", .{ c.weights, name });
+        if (e.dtype != .bf16 and e.dtype != .f16 and e.dtype != .f32) return refuse(why, "{s} is {s}; the format stores bf16, f16 or f32", .{ name, @tagName(e.dtype) });
+        if (e.rank != w.rank or !std.mem.eql(usize, e.shape[0..e.rank], w.shape[0..w.rank])) return refuse(why, "{s} is {any}; config.json implies {any}", .{ name, e.shape[0..e.rank], w.shape[0..w.rank] });
     }
-    if (header.count() != want.len) for (header.keys()) |name| {
-        for (want) |w| {
-            if (std.mem.eql(u8, w.name, name)) break;
+    for (header.keys()) |name| {
+        if (held.contains(name)) continue;
+        for (names.unused) |u| {
+            if (std.mem.eql(u8, u, name)) break;
         } else return refuse(why, "{s} holds {s}, which the format does not name", .{ c.weights, name });
-    };
+    }
 }
 
 /// A release folder read and checked whole: config.json, the draft vocabulary and the weights' header.
@@ -92,7 +117,7 @@ pub const Release = struct {
 };
 
 /// A safetensors file's header, read without mapping its data.
-fn readHeader(a: std.mem.Allocator, io: Io, dir: Io.Dir, name: []const u8, why: *Why) !safetensors.Header {
+pub fn readHeader(a: std.mem.Allocator, io: Io, dir: Io.Dir, name: []const u8, why: *Why) !safetensors.Header {
     var f = try dir.openFile(io, name, .{});
     defer f.close(io);
     const len = try f.length(io);

@@ -10,6 +10,7 @@ const snap = @import("snap.zig");
 const limits = @import("context.zig");
 const kv = @import("core").kv_pool;
 const cfg = @import("config.zig");
+const eagle = @import("drafter.zig");
 
 pub const model_type = "kolibri1";
 /// Kolibri 1.1 (config_v11.zig): the same family, its dense layers, shared caches and window read from config.json.
@@ -18,11 +19,10 @@ pub const formats: []const []const u8 = &.{"fp8-block"};
 pub const default_context: i64 = 65536;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
-/// A kept state is the caches through its position and nothing past it (no draft head reads a token on).
+/// A kept state is the caches through its position and nothing past it (a drafter reads the target's taps).
 pub const snap_lookahead: u32 = 0;
-/// No drafter yet: --drafter is refused before the load.
-pub const takes_drafter = false;
-pub const drafter_refusal = "--drafter: Kolibri-1 on CUDA loads no drafter yet; serve it without --drafter";
+/// --drafter: a published EAGLE-3 release (drafter.zig), off unless named.
+pub const takes_drafter = true;
 
 /// `explain` words this family's open refusals too.
 pub const explains_open = true;
@@ -78,7 +78,7 @@ pub const Loaded = struct {
     engine_paged: bool = true,
 };
 
-const Owned = struct { gpa: std.mem.Allocator, w: weights.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, kb: be.Kolibri };
+const Owned = struct { gpa: std.mem.Allocator, w: weights.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, kb: be.Kolibri, room: ?Room = null, window: usize = 0, lanes: ?u32 = null };
 
 /// Streams to allocate in `room`: as asked, else (auto) the most that fit; a fixed count past them or a round refuses.
 fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
@@ -148,6 +148,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
+    own.room = o.room;
+    own.window = o.context;
+    own.lanes = if (o.lanes_fixed) o.lanes else null;
     own.w = try weights.load(gpa, io, ctx.d, dir, null);
     errdefer own.w.deinit();
     own.k = try kern.Kernels.load(ctx);
@@ -180,6 +183,36 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .target = &own.kb,
         .layout = if (paged) own.m.layout() else null,
     };
+}
+
+/// --drafter's release over the loaded model, before any stream: refused by name, nothing served on a refusal.
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
+    if (bits != 4 and bits != 0) return error.DrafterBitsUnsupported; // the releases are bf16: default or 0 only
+    const own: *Owned = @ptrCast(@alignCast(p));
+    if (own.kb.lanes.count() != 0) return error.TapsAfterStreams;
+    const left = if (own.room) |r| r.read(r.ctx) else null; // the release's own bytes refuse before any is allocated
+    const d = try eagle.Drafter.open(gpa, io, &own.kb, &own.k, dir, drafterLoad(own, left));
+    errdefer d.deinit();
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
+}
+
+/// What the drafter's load holds that the server's stream plan does not count (linear: every stream's slot).
+fn drafterLoad(own: *const Owned, left: ?u64) eagle.Drafter.Load {
+    const tap_rows = @import("taps.zig").heldRows(own.m.max_rows, own.m.slotCap()); // prepare_features allocates them
+    if (!own.m.paged) return .{ .slots = own.m.slots, .now = own.m.slots + 1, .left = left, .tap_rows = tap_rows };
+    const l = own.m.layout(); // pages: the plan pays each later stream's slot; the first's, timing slot, window here
+    const first = l.pages(own.window + window_rows) * l.pageBytes();
+    return .{ .slots = own.lanes orelse 1, .first = first, .now = 2, .left = left, .tap_rows = tap_rows };
+}
+
+fn closeDrafter(p: *anyopaque) void {
+    const d: *eagle.Drafter = @ptrCast(@alignCast(p));
+    d.deinit();
+}
+
+fn reserveDrafter(p: *anyopaque, streams: u32) anyerror!void {
+    const d: *eagle.Drafter = @ptrCast(@alignCast(p));
+    try d.reserve(streams);
 }
 
 fn gib(bytes: u64) f64 {
@@ -226,7 +259,11 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PastContext => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream's caches are in use: retry once another request ends",
-        error.NoDraftHead => "Kolibri-1 on CUDA has no draft head yet: drafts come from the prompt's own text only",
+        error.NoDraftHead => "Kolibri-1 on CUDA drafts from the prompt's own text, or from a drafter named by --drafter",
+        error.BadDrafterRelease, error.AdapterMismatch => "--drafter: the folder is not a drafter release for Kolibri-1 (the log line names what is wrong)",
+        error.DrafterArchitectureNotServed => "--drafter: Kolibri-1 on CUDA serves the EAGLE-3 release (josch15366/Kolibri-1-EAGLE3-drafter) only",
+        error.DrafterBitsUnsupported => "--drafter-bits: Kolibri-1's drafter releases are bf16; serve without --drafter-bits",
+        error.DrafterPastMemory => "--drafter: the CUDA memory budget leaves too little for the drafter's weights, scratch and caches (the log line names the bytes): lower --parallel or --context",
         error.StructuresUnsupported => "structured output is not built for Kolibri-1 on CUDA yet",
         error.CapturedKernels => "Kolibri-1 runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: Kolibri-1 on CUDA holds at most {d} streams (a round's rows): serve --parallel {d} or fewer, or auto", .{ be.round_rows, be.round_rows }),
@@ -252,7 +289,7 @@ test "the prompt cache's hooks compile against the store's vtable" {
 }
 
 test "every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.ParallelPastRound, error.ParallelPastMemory, error.NoStreamFits, error.BadDrafterRelease, error.AdapterMismatch, error.DrafterArchitectureNotServed, error.DrafterBitsUnsupported, error.DrafterPastMemory }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);

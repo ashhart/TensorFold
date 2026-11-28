@@ -2,7 +2,7 @@
 
 This page describes the native engine. `kolibri1` serves Aleph Alpha's Kolibri-1, a research checkpoint, on one
 NVIDIA GPU through the lane host. It is a draft family: plain decoding and copy drafts from the prompt's own text are
-in; the EAGLE-3 drafter is the next step and is not loaded here.
+in, and `--drafter` loads the published EAGLE-3 drafter (off unless asked).
 
 ## Checkpoint
 
@@ -44,8 +44,8 @@ rounds run eager. Both give a row the same bits.
   stream: at a 32k window 1.29 GiB a stream, at 64k 1.92 GiB. Each sliding layer's ring holds a pass and its window
   (8,768 keys).
 - The prompt cache keeps a stream's state at any row: full layers' keys up to it and each sliding layer's last 512.
-- Drafts: the lane core's copy drafts verify in windows of up to 16 rows. There is no draft head yet, so a request
-  for head drafts and `--drafter` are refused by name.
+- Drafts: the lane core's copy drafts verify in windows of up to 16 rows. `--drafter DIR` adds the EAGLE-3 drafter
+  (below); a request for the model's own draft head is refused by name, as it has none.
 - Refused at load: other quantizations, `norm_topk_prob`, other layer kinds, a config with a vision tower, shapes the
   shared kernels do not take, `--vision`, `--precision` and a captured kernel set (`TENSORFOLD_CUDA_KERNELS`).
 
@@ -82,6 +82,38 @@ GB10, greedy, served by `tensorfold-native` with copy drafts on:
 Cold prompts (`bench_cache.py --require-cold --repeats 3`, `--prompt-cache-gib 0`, median of the cold requests):
 2,048 tokens 0.97 s, 8,192 tokens 3.72 s, 32,768 tokens 16.8 s, 64,000 tokens 37.8 s to the first token.
 
-## Next
+## EAGLE-3 drafter
 
-- The EAGLE-3 drafter through the lane core's drafter interface.
+`--drafter DIR` loads `josch15366/Kolibri-1-EAGLE3-drafter` at revision `6430e5dc7453dd4ea57022a4cde46178afe89094`
+(`model.safetensors` sha256 `5f1f38bf3d303faa119e7348f1a6ba4128db9d4febfc23eaaf9310e7a3c7187e`). Its model card
+releases the weights under Apache-2.0 and notes that part of its German training text (`mayflowergmbh/alpaca-gpt4_de`)
+states no licence and derives from CC BY-NC 4.0 data; TensorFold's licence does not cover the weights. It is one
+decoder layer over Kolibri's layers 45, 48 and 50, a 32,768-token draft vocabulary, bf16. It runs on the shared CUDA
+operators (no kernels of its own) through the lane core's drafter interface, two drafts a round. Every draft is
+verified by the target, so replies are the same tokens as without it, greedy and seeded, at any stream count.
+`--drafter-bits` takes 0 or 4 (the default); both serve the release as published.
+
+Refused at load, by name, before any request is queued: a release of another architecture (the block drafter
+`josch15366/Kolibri-1-block-drafter` is not served on CUDA), a release for another target, a draft vocabulary or
+tensor shape that does not match the release's config, a stream opened before the drafter, and a CUDA memory budget
+that leaves less than the drafter's weights, scratch and caches need (computed from its config before anything is
+allocated: about 0.44 GiB with one stream, plus a 23 MiB slot for each further stream a fixed `--parallel` asks, plus
+the first stream's paged window). `--parallel 1`, `2` and `3` time the rounds their slots can take.
+
+GB10, 24 prompts of 256 tokens, a distinct prompt per stream. Each stream count ran alone, every run on a freshly
+started server (page cache dropped before each start): a noise floor from 3 rounds of main against itself, then 5
+rounds of A-B-B-A with main's copy drafts as A. Every run of both arms gave the same replies.
+
+| cell | copy drafts | with `--drafter` | median gap | noise floor | rounds worse |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 stream, greedy, tok/s | 51.3 | 65.4 | +27.9 % | 0.6 % | 0 of 5 |
+| 1 stream, default sampling, tok/s | 52.6 | 69.5 | +32.1 % | 0.8 % | 0 of 5 |
+| 4 streams, tok/s | 108.7 | 113.2 | +4.1 % | 0.4 % | 0 of 5 |
+| 8 streams, tok/s | 139.1 | 136.5 | -1.9 % | 1.4 % | 5 of 5 |
+| cold 7,900-token prompt, first token, s | 3.64 | 5.16 | -41.8 % | 0.5 % | 5 of 5 |
+
+Tokens a round: 1.07 with copy drafts; with the drafter about 2.0, 1.63 and 1.66 at 1, 4 and 8 streams.
+
+Two cells are slower. At 8 streams, the drafter's absorb pass (it reads the drafter's weights every round, about
+1 ms) costs more than the drafts gain. On a cold prompt, the drafter absorbs every prompt row in 32-row
+`dense_rows` tiles, about 0.19 ms a row (1.4 of the 1.5 s, by nsys).

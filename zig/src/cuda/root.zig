@@ -85,6 +85,7 @@ pub const window_attention = @import("window_attention.zig");
 pub const moe_glue = @import("moe_glue.zig");
 pub const mla = @import("mla.zig");
 pub const dense_rows = @import("dense_rows.zig");
+pub const eagle3 = @import("eagle3.zig");
 pub const exl3 = @import("exl3.zig");
 pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
@@ -124,6 +125,7 @@ test {
     _ = @import("vit.zig");
     _ = @import("tree_round.zig");
     _ = @import("act_rows.zig");
+    _ = @import("eagle3.zig");
     _ = @import("gdn_prep.zig");
     _ = @import("qk_rows.zig");
     _ = @import("exl3_candidate.zig");
