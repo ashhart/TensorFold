@@ -1,0 +1,1 @@
+- Flash Next on CUDA: with `TF_FLASHNEXT_KV_PAGES`, the load plan no longer holds part of the prompt cache back for snapshot slots the family never makes, so the cache is its full size (#5502).
