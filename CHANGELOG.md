@@ -14,7 +14,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CLI: `tensorfold tfq3 MODEL` pulls, converts and inspects TFQ3 checkpoints for the dedicated families and any Safetensors architecture, encoding natively in Zig when the external `tfq3` GPU binary is not installed; serving paths are unchanged (#5018).
 
-- CUDA: drafted Qwen3.8-27B gains opt-in `TF_QWEN_DRAFT_FULL_HEAD=1`, which sends a draft hold with any wide stream through the full head in one pass; on one GB10 it wins back the 1.3.7 loss at 4 greedy streams (+3.1%) with identical tokens. Default off, as are the `TF_DFLASH_GRAPH` mixed-width graph keys and `TF_QWEN_GRAPH_STATS` counters added with it (#5481, refs #4439).
+- CUDA: drafted Qwen3.8-27B sends a draft hold with any wide stream through the full head in one pass by default; `TF_QWEN_DRAFT_FULL_HEAD=0` restores the split path. On one GB10 this wins back the 1.3.7 loss at 4 greedy streams (+3.1%) with identical tokens. The `TF_DFLASH_GRAPH` mixed-width graph keys and `TF_QWEN_GRAPH_STATS` counters remain opt-in (#5481, refs #4439).
 
 - Server: `serve --confidential` disables prompt retention without requesting checkpoint slots and omits generated OCR text from error logs; CUDA families that keep no prompts accept a zero cache budget (#5426).
 

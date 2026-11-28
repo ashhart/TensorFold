@@ -95,7 +95,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
     .{ .name = "TF_DFLASH_QL_SPAN", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 drafts a ModelOpt NVFP4 or FP8 head over the DFlash2 spans)" },
     .{ .name = "TF_DFLASH_GRAPH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 replays DFlash2 holds and live absorbs from CUDA graphs)" },
-    .{ .name = "TF_QWEN_DRAFT_FULL_HEAD", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 uses one full head for any DFlash2 hold with a wide stream)" },
+    .{ .name = "TF_QWEN_DRAFT_FULL_HEAD", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 restores the split head for a mixed-width DFlash2 hold)" },
     .{ .name = "TF_QWEN_GRAPH_STATS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 prints per-width DFlash2 hold graph counters at shutdown)" },
     .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; opt in to sampled MTP tree drafting)" },
     .{ .name = "TF_MTP_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 keeps one stream at a time)" },
