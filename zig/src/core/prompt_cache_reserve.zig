@@ -34,7 +34,7 @@ fn newBytes(s: *const pc.Store, prompt: []const u32, at: u32, spans: []const mod
 fn exists(s: *const pc.Store, prompt: []const u32, at: u32, spans: []const modes.Span) bool {
     const n = @as(usize, at) + s.rules.lookahead;
     for (s.entries.items) |e| {
-        if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and
+        if (!e.expired and e.salt == s.salt and e.at == at and e.tokens.len == n and n <= prompt.len and
             std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e))
             return true;
     }
@@ -135,23 +135,64 @@ const KeepRewinds = struct {
 fn reserveOne(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, place: ?u32, spans: []const modes.Span, ahead: u64) void {
     const at = place orelse return;
     if (exists(s, prompt, at, spans)) return;
-    const need = s.family.vtable.bytes(s.family.ptr, at) + ahead;
-    if (need > s.budget or s.most == 0) return;
-    const credit = reclaimable(s, from, prompt, born);
+    makeRoom(s, prompt, born, from, .{ .bytes = s.family.vtable.bytes(s.family.ptr, at) + ahead, .slots = if (ahead > 0) 2 else 1 }, reclaimable(s, from, prompt, born));
+}
+
+fn makeRoom(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, need: Room, credit: Room) void {
+    if (need.bytes > s.budget or need.slots > s.most) return;
     const promised = s.reservation_guard.?.promised;
-    const new_slots: i128 = if (ahead > 0) 2 else 1;
     // Preserve deficits: freeing a state must pay the other jobs' promises before this state can fit.
     var bytes: i128 = @as(i128, s.budget) - s.held + credit.bytes - promised.bytes;
     var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots - promised.slots;
     const can = evictable(s, from, prompt);
-    if (bytes + can.bytes < need or slots + can.slots < new_slots) return;
-    while (bytes < need or slots < new_slots) {
-        const i = others.victim(s, from, prompt, born, need, @intCast(new_slots)) orelse return;
+    if (bytes + can.bytes < need.bytes or slots + can.slots < need.slots) return;
+    while (bytes < need.bytes or slots < need.slots) {
+        // The proof above includes restore credit and promises; the save-side fits check does not.
+        const i = policy.victimIn(s, from, prompt, born, s.keep_others) orelse return;
         bytes += s.entries.items[i].bytes;
         slots += 1;
         s.remove(i);
         s.counts.evicted += 1;
     }
+}
+
+// An extension may be evicted for the fallback. Only this request itself can guarantee its restore stays redundant.
+fn fallbackCredit(s: *const pc.Store, from: ?*pc.Entry, prompt: []const u32, born: u32) Room {
+    const e = from orelse return .{};
+    if (born < e.born or (born == e.born and e.rewind) or prompt.len <= e.tokens.len) return .{};
+    return reclaimable(s, from, prompt, born);
+}
+
+/// Additional copies after admitted marks, protected restores, promises and unreusable spare storage.
+pub fn fallbackRoom(s: *const pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span) Room {
+    const reusable = s.family.vtable.reuses != null and s.family.vtable.charged != null;
+    const fixed_spare = s.family.vtable.trim == null and !reusable;
+    const credit = fallbackCredit(s, from, prompt, born);
+    const can = evictable(s, from, prompt);
+    const promised: Room = if (s.reservation_guard) |g| g.promised else .{};
+    const freeable = !fixed_spare or s.family.vtable.spare == null;
+    var bytes: i128 = @as(i128, s.budget) - s.held - promised.bytes;
+    var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots + can.slots - promised.slots;
+    if (freeable) bytes += credit.bytes + can.bytes;
+    if (fixed_spare) bytes -= s.spare();
+    for (marks) |at| {
+        const n = newBytes(s, prompt, at, spans);
+        bytes -= n;
+        slots -= @intFromBool(n > 0);
+    }
+    return .{ .bytes = @intCast(@max(0, bytes)), .slots = @intCast(@max(0, slots)) };
+}
+
+/// A fallback never removes an admitted cold cut: reserve their combined copies before fitting again.
+pub fn reserveFallback(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span) void {
+    if (s.reservation_guard == null) return reserve(s, prompt, born, from, marks, spans, 0);
+    var need: Room = .{};
+    for (marks) |at| {
+        const n = newBytes(s, prompt, at, spans);
+        need.bytes +|= n;
+        need.slots +|= @intFromBool(n > 0);
+    }
+    makeRoom(s, prompt, born, from, need, fallbackCredit(s, from, prompt, born));
 }
 
 /// Plan the mark at `at` if it is kept already or fits the room left.

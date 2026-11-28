@@ -25,6 +25,7 @@ pub const Fixture = struct {
         f.seq.more = &.{};
         f.e.cur = &f.seq;
         f.e.local = &.{};
+        f.e.share_pages = false;
         f.e.gpa = t.allocator;
         f.e.d = d;
         f.e.stream = .{ .d = d, .handle = null };

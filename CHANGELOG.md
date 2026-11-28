@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Prompt cache: when the newest history checkpoint does not fit the cache budget, the largest earlier checkpoint that fits is kept, so the next turn of a long session resumes from it instead of refilling the whole prompt; tokens are unchanged (#5466).
+
 - Inkling 2 CUDA gains grouped-expert and vision kernels, shared core attention/gamma operations, explicit orientation handling and exact arithmetic comparisons (#4127). Thanks to @ajensenwaud.
 
 - Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.

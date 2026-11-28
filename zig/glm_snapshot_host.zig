@@ -4,20 +4,7 @@ const glm = @import("glm");
 const cuda = @import("cuda");
 const t = std.testing;
 
-const Sizing = struct {
-    var next: u64 = 1 << 30;
-    fn alloc(out: *u64, bytes: usize) callconv(.c) cuda.abi.Result {
-        out.* = next;
-        next += std.mem.alignForward(usize, bytes, 256);
-        return 0;
-    }
-    fn free(_: u64) callconv(.c) cuda.abi.Result {
-        return 0;
-    }
-    fn zero(_: u64, _: u8, _: usize) callconv(.c) cuda.abi.Result {
-        return 0;
-    }
-};
+const Sizing = @import("glm_snapshot_budget_host.zig").Virtual;
 
 test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configured window" {
     var d: cuda.Driver = undefined;
@@ -41,6 +28,7 @@ test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configur
     defer seq.st.deinit();
     e.cur = &seq;
     e.local = &.{};
+    e.share_pages = false;
     e.c = w.config;
     e.mtp = true;
     e.capacity = seq.st.capacity;
@@ -60,6 +48,7 @@ const rec = @import("test_support/glm_snap_driver.zig").Driver;
 const Fixture = @import("test_support/glm_snap_fixture.zig").Fixture;
 
 test {
+    _ = @import("glm_snapshot_budget_host.zig");
     _ = @import("glm_snapshot_host_ram.zig");
 }
 const pc = @import("engine_api").prompt_cache;
