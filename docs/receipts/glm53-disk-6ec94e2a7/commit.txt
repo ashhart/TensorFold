@@ -1,0 +1,21 @@
+# Commit and binaries
+
+Tested implementation: `6ec94e2a771acf0dc69d68fc7abd96f13cc00735`, tree
+`cfbe5393a827b465c933d4f4f1f0e5df7f1a1fa0`, parent
+`8b1eaff2c71de7770bd3561bffb49861ae17f81a`. The binary was built from that
+commit (`-Dgpu=spark -Doptimize=fast`). No FP8 cache code is in that tree.
+
+PR head of the code: `91e4975cf326b66221b84d0a5579935af6fc6505`, tree
+`96d79fa6e6009ca35561cf958d6644d619f28285`, parent
+`c464c9128b857ccc02f072c3a75c16bae2f54f4f` (main at the rebase). Four of the
+five files match the tested commit. `cuda.zig` also contains main's
+env-reader migration (`2b76e782fb`): `TENSORFOLD_CUDA_KERNELS` is read
+through the registry, and the local `getenv` is gone. That line is not on
+the disk path. `git diff 6ec94e2a7 91e4975cf3` on the other four files is
+empty.
+
+Host tests: focused GLM suite `25/25 steps, 100/100 tests passed` on the
+tested commit and again on the previous rebase of this change
+(`9fd37df44`), whose five files matched the tested commit. ARM64 CUDA
+cross-build `21/21 steps succeeded` (zig 0.17.0, `-Dfixed-cpu -j4`) on the
+tested commit. Neither was repeated after the rebase onto `c464c9128b`.

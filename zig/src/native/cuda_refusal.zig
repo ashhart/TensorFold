@@ -134,7 +134,11 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 only on CUDA: serve this model without it";
     // GLM's disk store writes every rank's part between passes and stages nothing at eviction (cuda_glm_disk.attach)
-    if (F == @import("glm_cuda").native and (o.spill != .off or o.keep != null)) return "--spill-gib and --checkpoint-slots: GLM-5.3-Flash on CUDA keeps states on disk with --learn-conversations alone; serve it without them";
+    if (@import("cuda_glm_disk.zig").serves(F) and (o.spill != .off or o.keep != null)) {
+        const name = if (F == @import("glm_cuda").native_dsa) "full GLM-5.3" else "GLM-5.3-Flash";
+        return std.fmt.comptimePrint("--spill-gib and --checkpoint-slots: {s} on CUDA keeps states on disk " ++
+            "with --learn-conversations alone; serve it without them", .{name});
+    }
     // a live-half keep holds one KDA half, and GLM's disk image holds both (cuda_disk_image.zig)
     if (F == @import("glm_cuda").native and o.learn_conversations and @import("glm_cuda").snapshots.layout.liveHalfEnabled())
         return "--learn-conversations and TF_GLM_KV_LIVE_HALF=1: GLM-5.3-Flash's disk image holds both KDA halves and a live-half keep one; serve without one of them";
@@ -142,7 +146,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     }
-    if (o.learn_conversations and F != nemotron.native and F != @import("glm_cuda").native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, GLM-5.3-Flash, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 only on CUDA: serve this model without it";
+    if (o.learn_conversations and F != nemotron.native and !@import("cuda_glm_disk.zig").serves(F) and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, GLM-5.3 (Flash and full), the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 only on CUDA: serve this model without it";
     if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
@@ -370,6 +374,7 @@ test "--learn-conversations opens Nemotron, GLM-5.3-Flash and a family whose sta
     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
     try std.testing.expect(family(@import("glm_cuda").native, .{ .dir = "d", .model_type = "glm5_next", .learn_conversations = true }) == null);
+    try std.testing.expect(family(@import("glm_cuda").native_dsa, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn_conversations = true }) == null);
 }
 
 test "CUDA MTP controls respect window and probability bounds" {
@@ -438,10 +443,28 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; GL
     const glm = @import("glm_cuda").native; // its states go to disk with --learn-conversations alone
     try std.testing.expectStringStartsWith(family(glm, spilled) orelse "", "--spill-gib keeps evicted states");
     const finish: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .spill = .finish };
-    try std.testing.expectStringStartsWith(family(glm, finish) orelse "", "--spill-gib and --checkpoint-slots: GLM");
     const slots: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .keep = 2 };
-    try std.testing.expectStringStartsWith(family(glm, slots) orelse "", "--spill-gib and --checkpoint-slots: GLM");
+    const flash = "--spill-gib and --checkpoint-slots: GLM-5.3-Flash ";
+    try std.testing.expectStringStartsWith(family(glm, finish) orelse "", flash);
+    try std.testing.expectStringStartsWith(family(glm, slots) orelse "", flash);
     try std.testing.expect(family(glm, .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true }) == null);
+    const full = @import("glm_cuda").native_dsa; // the same store, named apart from Flash
+    try std.testing.expectStringStartsWith(family(full, spilled) orelse "", "--spill-gib keeps evicted states");
+    const full_open: api.Open = .{
+        .dir = "d",
+        .model_type = "glm_moe_dsa",
+        .learn = "/s",
+        .learn_conversations = true,
+    };
+    var full_finish = full_open;
+    full_finish.spill = .finish;
+    var full_slots = full_open;
+    full_slots.keep = 2;
+    const named = family(full, full_finish) orelse "";
+    try std.testing.expectStringStartsWith(named, "--spill-gib and --checkpoint-slots: full GLM-5.3 ");
+    try std.testing.expect(std.mem.indexOf(u8, named, "Flash") == null);
+    try std.testing.expectEqualStrings(named, family(full, full_slots) orelse "");
+    try std.testing.expect(family(full, full_open) == null);
     const Other = struct {};
     try std.testing.expectStringStartsWith(family(Other, spilled) orelse "", "--spill-gib keeps evicted states");
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "m", .keep = 2 }) orelse "", "--checkpoint-slots sets how many");
