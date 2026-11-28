@@ -4,7 +4,12 @@ const q = tf.qwen27;
 const cache_fit = @import("cache_fit.zig");
 const reserve = @import("qwen27_reserve.zig");
 
-/// Room left beside the weights and an 8 GiB margin.
+/// The margin startup keeps beside the model: an eighth of the working set it counts (prompt_memory.margin).
+pub fn margin(dev: anytype) usize {
+    return q.prompt_memory.margin(q.prompt_memory.workingSet(dev.maxWorkingSet(), reserve.cap()) catch dev.maxWorkingSet());
+}
+
+/// Room left beside the weights and the working set's margin.
 pub fn room(model: *const q.model.Model) usize {
     const dev = model.device;
     return q.prompt_memory.room(dev.maxWorkingSet(), dev.allocated(), reserve.cap()) catch 0;

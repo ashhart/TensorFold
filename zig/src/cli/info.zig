@@ -130,14 +130,15 @@ fn qwen27(a: Allocator, io: std.Io, out: *std.Io.Writer, model_type: []const u8,
     const charged = if (b.slots == 0) b.streams else b.slots;
     try out.print("startup budget: {d:.2} GiB at --context {d}: weights, {d} stream{s} of KV and state, {d}-row prompt scratch (no drafter or images)\n", .{ gib(b.total), b.context, charged, if (charged == 1) "" else "s", b.rows });
     const set = gib(b.working_set);
-    const margin = engines.qwen27_margin >> 30;
+    const margin = gib(engines.qwen27_margin(b.working_set));
+    const an = if (margin >= 8) "an" else "a"; // only the clamped 8.0 GiB margin starts with a vowel sound
     if (b.slots == b.streams) {
-        try out.print("this Mac: fits beside its {d:.1} GiB Metal working set and an {d} GiB margin\n", .{ set, margin });
+        try out.print("this Mac: fits beside its {d:.1} GiB Metal working set and {s} {d:.1} GiB margin\n", .{ set, an, margin });
     } else if (b.slots == 0) {
-        try out.print("this Mac: not one stream fits its {d:.1} GiB Metal working set with an {d} GiB margin; serve refuses: lower --context\n", .{ set, margin });
+        try out.print("this Mac: not one stream fits its {d:.1} GiB Metal working set with {s} {d:.1} GiB margin; serve refuses: lower --context\n", .{ set, an, margin });
     } else if (s.fixed) {
-        try out.print("this Mac: {d} of --parallel {d} fit its {d:.1} GiB Metal working set with an {d} GiB margin; serve refuses: lower --parallel or --context\n", .{ b.slots, b.streams, set, margin });
-    } else try out.print("this Mac: {d} of {d} streams fit its {d:.1} GiB Metal working set with an {d} GiB margin; serve starts {d}\n", .{ b.slots, b.streams, set, margin, b.slots });
+        try out.print("this Mac: {d} of --parallel {d} fit its {d:.1} GiB Metal working set with {s} {d:.1} GiB margin; serve refuses: lower --parallel or --context\n", .{ b.slots, b.streams, set, an, margin });
+    } else try out.print("this Mac: {d} of {d} streams fit its {d:.1} GiB Metal working set with {s} {d:.1} GiB margin; serve starts {d}\n", .{ b.slots, b.streams, set, an, margin, b.slots });
     return 0;
 }
 
@@ -370,8 +371,8 @@ test "info prices a Qwen3.8-27B start from serve's charge: context, streams and 
     const two = try price27(a, io, dir, 4096, .{ .context = 8192, .streams = 2, .fixed = true });
     try std.testing.expect(has(two.text, "2 streams of KV and state"));
     try std.testing.expect(gibOf(two.text) > gibOf(small.text));
-    const tight = try price27(a, io, dir, 8, .{ .context = 8192, .streams = 1, .fixed = true });
-    try std.testing.expect(has(tight.text, "not one stream fits its 8.0 GiB Metal working set with an 8 GiB margin; serve refuses"));
+    const tight = try price27(a, io, dir, 2, .{ .context = 8192, .streams = 1, .fixed = true });
+    try std.testing.expect(has(tight.text, "not one stream fits its 2.0 GiB Metal working set with a 1.0 GiB margin; serve refuses"));
     const auto = try price27(a, io, dir, 4096, .{ .context = 8192 });
     try std.testing.expect(has(auto.text, "8 streams of KV and state"));
     const past = try price27(a, io, dir, 4096, .{ .context = 300000 });
