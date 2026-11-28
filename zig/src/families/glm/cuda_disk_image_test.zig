@@ -260,12 +260,18 @@ const Fake = struct {
     d: *const cuda.Driver,
     stream: cuda.Stream,
     c: @import("config.zig").Config,
-    cur: struct { st: State, in_head: usize = 0 },
+    cur: *@import("cuda_engine_types.zig").Seq,
+    share: shard.Share,
+    pages: ?*@import("cuda_pages.zig").Pages = null,
+    announce: u64 = 0,
+    dropped: std.ArrayList(u32) = .empty,
     capacity: usize = capacity,
     mtp: bool = true,
     snaps: std.AutoHashMapUnmanaged(u64, @import("cuda_engine_types.zig").Snap) = .empty,
     snap_pages: ?pages.Pool = null,
     share_pages: bool = false,
+
+    pub const dropState = @import("cuda_snapshots.zig").drop;
 };
 
 test "GLM disk image: a disk read's blank state is refused until sealed, and its seal checks the words" {
@@ -274,7 +280,9 @@ test "GLM disk image: a disk read's blank state is refused until sealed, and its
     try m.init();
     var d = H.driver();
     const a = std.testing.allocator;
-    var e: Fake = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .c = m.w.config, .cur = .{ .st = try State.initFormat(a, &d, &m.w, capacity, false) } };
+    var seq: @import("cuda_engine_types.zig").Seq = .{ .st = try State.initFormat(a, &d, &m.w, capacity, false) };
+    var e: Fake = .{ .gpa = a, .d = &d, .stream = .{ .d = &d, .handle = null }, .c = m.w.config, .cur = &seq, .share = m.w.share };
+    defer e.dropped.deinit(a);
     defer e.cur.st.deinit();
     e.snap_pages = try pages.Pool.init(a, &d, 256 << 20, false);
     defer e.snap_pages.?.deinit();
