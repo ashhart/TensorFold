@@ -2,12 +2,13 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const dl = @import("dspark_lanes.zig");
-const metal_state = @import("metal/dspark_state.zig");
+const macos = @import("builtin").os.tag == .macos;
+const metal_state = if (macos) @import("metal/dspark_state.zig") else struct {};
 
 const testing = std.testing;
 const dr = lanes.drafter;
 
-test "one tokenBytes prices the opener's fit, a lane and the score scratch, as Metal's state does today" {
+test "one tokenBytes prices shared fit, lanes and scratch; lane prices match Metal" {
     const t = dl.tokenBytes();
     try testing.expectEqual(@as(u64, 4096), t.lane);
     try testing.expectEqual(@as(u64, 768), t.shared);
@@ -16,23 +17,30 @@ test "one tokenBytes prices the opener's fit, a lane and the score scratch, as M
     try testing.expectEqual(dl.laneFixedBytes() + 128 * 4096, dl.laneBytes(1));
     try testing.expectEqual(dl.laneFixedBytes() + 1152 * 4096, dl.laneBytes(1025));
     try testing.expectEqual(@as(u64, 768 * 1032), dl.scoreBytes(1024));
-    try testing.expectEqual(metal_state.laneTokenBytes(), t.lane);
-    try testing.expectEqual(metal_state.laneFixedBytes(), dl.laneFixedBytes());
-    try testing.expectEqual(metal_state.local_ring, dl.local_ring);
+    if (macos) {
+        try testing.expectEqual(metal_state.laneTokenBytes(), t.lane);
+        try testing.expectEqual(metal_state.laneFixedBytes(), dl.laneFixedBytes());
+        try testing.expectEqual(metal_state.local_ring, dl.local_ring);
+    }
     for ([_]usize{ 1, 127, 128, 129, 1025, 4096, 262143, 1 << 20 }) |n| {
-        try testing.expectEqual(metal_state.laneBytes(n), dl.laneBytes(n));
-        try testing.expectEqual(metal_state.scoreBytes(n), dl.scoreBytes(n));
-        try testing.expectEqual(metal_state.globalRing(n), dl.rings(n)[1]);
+        if (macos) {
+            try testing.expectEqual(metal_state.laneBytes(n), dl.laneBytes(n));
+            try testing.expectEqual(metal_state.globalRing(n), dl.rings(n)[1]);
+        }
+        // Metal no longer holds score scratch; the shared host price is checked on its own terms.
+        try testing.expectEqual(t.shared * (n + dl.block), dl.scoreBytes(n));
         // The fit never prices a stream under its lane, and over it by at most the ring's slack.
         const f = dl.fit();
         const bound = f.fixed + n * f.lane;
         try testing.expect(bound >= dl.laneBytes(n) and bound - dl.laneBytes(n) <= dl.ring_slack * f.lane);
         try testing.expectEqual(dl.scoreBytes(0) + n * f.shared, dl.scoreBytes(n));
     }
-    try testing.expectEqual(@as(u32, metal_state.block), dl.block);
-    try testing.expectEqual(@as(u32, metal_state.absorb_rows), dl.absorb_rows);
-    try testing.expectEqual(@as(u32, metal_state.vocabulary), dl.vocabulary);
-    try testing.expectEqual(@as(u32, metal_state.hidden), dl.hidden);
+    if (macos) {
+        try testing.expectEqual(@as(u32, metal_state.block), dl.block);
+        try testing.expectEqual(@as(u32, metal_state.absorb_rows), dl.absorb_rows);
+        try testing.expectEqual(@as(u32, metal_state.vocabulary), dl.vocabulary);
+        try testing.expectEqual(@as(u32, metal_state.hidden), dl.hidden);
+    }
 }
 
 /// Records what the shared host asks of a backend; its drafts are `pending + 1 + step`, or one past the vocabulary.
