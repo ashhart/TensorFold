@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "342"
+    ]
+   ],
+   "body": "{\"type\": \"error\", \"error\": {\"type\": \"invalid_request_error\", \"message\": \"this request enables thinking, and a reply that opens in a reasoning block cannot continue the final assistant message: leave thinking unset or send chat_template_kwargs {\\\"enable_thinking\\\": false} (on /v1/messages, no thinking or thinking {\\\"type\\\": \\\"disabled\\\"})\"}}",
+   "interim": ""
+  }
+ ]
+}
