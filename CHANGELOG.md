@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Prompt cache: each finished request's done line names why its prompt resumed no further (`cache=<reason>` of 18, with `at=<N> lost=<L>`), and /metrics adds `tensorfold:prompt_cache_lookups_total{reason}` and `tensorfold:prompt_cache_lost_tokens_total{reason}`; opt-in `TF_CACHE_WHY=1` also adds `tensorfold.prompt_cache` to each reply, off by default because the reason is measured against every client's kept prompts, so it suits a single-user server. The paged radix store and DeepSeek-V4.1's session store follow in step 2 (#3703, for #3686).
+
 - Server: `--confidential` refuses existing Linux tracers and, where whole-process locking is supported, locks current and future process memory against swap or refuses startup; Darwin currently refuses because this locking is unavailable.
 
 - HIP, Qwen 3.5 and Nemotron on one GPU: long prompt chunks keep the next layer queued while they poll for a cancel, rather than draining the GPU at every layer; tokens unchanged, and a cancel still drains before the pass ends (#4887).
