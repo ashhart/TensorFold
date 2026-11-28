@@ -165,6 +165,82 @@ test "GLM prefill ledger: off hooks preserve operation bytes, on hooks add only 
     try t.expectEqual(count, Fake.creates);
 }
 
+test "GLM prefill ledger: the batched pass's second fresh stream enters no scope, so one request carries the pass" {
+    Fake.failure = .none;
+    Fake.clock = 0;
+    Fake.creates = 0;
+    Fake.live = 0;
+    Fake.ready = false;
+    Fake.bad_time = false;
+    defer Fake.calls.deinit(t.allocator);
+    var d = Fake.driver();
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try prefix(tmp);
+    defer t.allocator.free(dir);
+    const path = try std.fmt.allocPrint(t.allocator, "{s}/batched", .{dir});
+    defer t.allocator.free(path);
+    const trace = try ledger.Trace.init(&d, t.io, path, 1, 2, &.{ .{ .kind = .dsa, .ffn = .dense }, .{ .kind = .kda, .ffn = .moe } });
+    defer trace.deinit();
+    const first = ledger.enter(trace, stream, 7, 0, 4096, 4096, false);
+    const second = ledger.enter(trace, stream, 8, 0, 2048, 2048, false);
+    try t.expect(first.trace != null);
+    try t.expect(second.trace == null);
+    try Fake.work(stream);
+    first.end();
+    second.end();
+    try t.expect(!trace.written);
+    Fake.ready = true;
+    ledger.poll(trace);
+    try t.expect(trace.written);
+    const data = try tmp.dir.readFileAlloc(t.io, "batched.rank1.json", t.allocator, .limited(65536));
+    defer t.allocator.free(data);
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, data, .{});
+    defer parsed.deinit();
+    try t.expectEqual(@as(i64, 7), parsed.value.object.get("slot").?.integer);
+    try t.expectEqual(@as(i64, 4096), parsed.value.object.get("prompt_tokens").?.integer);
+    try t.expect(parsed.value.object.get("complete").?.bool);
+}
+
+test "GLM prefill ledger: one poll after several shared windows moves every pending event to ready" {
+    Fake.failure = .none;
+    Fake.clock = 0;
+    Fake.creates = 0;
+    Fake.live = 0;
+    Fake.ready = false;
+    Fake.bad_time = false;
+    defer Fake.calls.deinit(t.allocator);
+    var d = Fake.driver();
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try prefix(tmp);
+    defer t.allocator.free(dir);
+    const path = try std.fmt.allocPrint(t.allocator, "{s}/windows", .{dir});
+    defer t.allocator.free(path);
+    const trace = try ledger.Trace.init(&d, t.io, path, 1, 2, &.{ .{ .kind = .dsa, .ffn = .dense }, .{ .kind = .kda, .ffn = .moe } });
+    defer trace.deinit();
+    const first = ledger.enter(trace, stream, 7, 0, 8192, 16384, false);
+    try Fake.work(stream);
+    first.end();
+    const second = ledger.enter(trace, stream, 7, 8192, 8192, 16384, false);
+    try Fake.work(stream);
+    second.end();
+    try t.expect(!trace.written);
+    Fake.ready = true;
+    ledger.poll(trace);
+    try t.expect(trace.written);
+    const data = try tmp.dir.readFileAlloc(t.io, "windows.rank1.json", t.allocator, .limited(65536));
+    defer t.allocator.free(data);
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, data, .{});
+    defer parsed.deinit();
+    try t.expect(parsed.value.object.get("complete").?.bool);
+    for (parsed.value.object.get("rows").?.array.items) |row| {
+        try t.expectEqualStrings("complete", row.object.get("event_status").?.string);
+    }
+}
+
 test "GLM prefill ledger: no cold prompt or nonfinite timing cannot produce a complete receipt" {
     Fake.ready = true;
     Fake.bad_time = true;
