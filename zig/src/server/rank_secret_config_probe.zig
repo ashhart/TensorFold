@@ -3,6 +3,10 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const config = @import("cli_config.zig");
 
+test {
+    _ = @import("cli_capabilities.zig");
+}
+
 pub const serves: []const []const u8 = &.{"--tp"};
 
 pub fn main(init: std.process.Init) !void {

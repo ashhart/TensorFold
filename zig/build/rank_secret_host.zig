@@ -25,7 +25,7 @@ pub fn cliTests(b: *std.Build, host: std.Build.ResolvedTarget, server: *std.Buil
     for (server.import_table.keys(), server.import_table.values()) |name, module| root.addImport(name, module);
     const config = b.addRunArtifact(b.addExecutable(.{ .name = "rank-secret-config", .root_module = root }));
     config.expectExitCode(0);
-    const capabilities = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"capability audit: environment declares every variable serve reads"} }));
+    const capabilities = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"capability audit: environment declares every variable serve reads"} }));
     const owner = b.step("test-rank-secret-cli-host", "Rank-capable CLI metadata and configuration-relative key paths");
     owner.dependOn(&capabilities.step);
     owner.dependOn(&config.step);
