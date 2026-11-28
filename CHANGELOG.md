@@ -5,7 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5400). Thanks @cwschroeder. Thanks @cwschroeder for the report.
-
+- Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5371). Thanks @cwschroeder.
 - TFQ3: CUDA prompt projections use a tiled BM=64, BN=128 prefill kernel (Qwen3.8-27B-TFQ3 prefill about 3.2x faster on a GB10); TFQ3 pack sections are checked with XXH64 at load; Inkling 2 TFQ3 routed experts load on CUDA and Metal with softcapped SwiGLU; and GLM `--keep-nonmoe-bf16` loads BF16 or block-FP8 non-MoE weights on CUDA (#5350).
 
 - Tests: a config and a metadata-only model header for the tiny Inkling 2 Mini test checkpoint (`hf-internal-testing/tiny-inkling2-mini`), with host tests for parsing, the weight map and the 30-visit plan (#5369). Thanks @AbrahamCete.
@@ -27,9 +27,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: Inkling 2 and LFM2 generated libraries are guarded against repeated or conflicting threadgroup-size attributes, and the checked Inkling Metal sources have one module owner (#5405).
 
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#5353, fixes #5308). Thanks to @jojomondag for the report.
-- Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5371). Thanks @cwschroeder.
-
-- CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
 
