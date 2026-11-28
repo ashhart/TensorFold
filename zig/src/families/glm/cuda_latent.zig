@@ -164,7 +164,7 @@ pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache:
 }
 
 /// The partials and out hold the latent alone (the roped columns score, the values are the latent's).
-fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64, rows: usize, heads: usize, lw: usize, nch: usize, sparse: bool) !void {
+pub fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64, rows: usize, heads: usize, lw: usize, nch: usize, sparse: bool) !void {
     _ = try ropeOf(lw);
     var a: cuda.Args = .{};
     inline for (.{ p.po, p.pm, p.pl, out, counts, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(c_int, @intCast(nch)), @as(c_int, @intFromBool(sparse)) }) |v| a.add(v);

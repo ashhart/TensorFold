@@ -110,6 +110,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
     .{ .name = "TF_ROCE_HCA", .scope = .cuda, .kind = .names, .max = 2, .forms = "one or two RDMA device names, comma-separated (the RoCE all-gather stripes over at most two)" },
+    .{ .name = "TF_LING_RANK", .scope = .cuda, .kind = .u32, .max = 1, .forms = "0 or 1 (this rank of TF_LING_WORLD)" },
+    .{ .name = "TF_LING_WORLD", .scope = .cuda, .kind = .u32, .min = 1, .max = 2, .forms = "1 or 2 (Ling's ranks)" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_GEMMA4_ARGMAX_GRAPH", .scope = .gemma4, .kind = .flag, .forms = "0 or 1 (1 puts a greedy round's argmax in the target graph; default 0)" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },

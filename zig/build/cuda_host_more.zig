@@ -44,6 +44,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     const q4_pdl_run = b.addRunArtifact(b.addTest(.{ .root_module = q4_pdl }));
     b.step("test-glm-q4-pdl-host", "GLM Q4 draft-head launch honors TF_GLM_PDL without a GPU").dependOn(&q4_pdl_run.step);
     if (@import("builtin").os.tag != .windows) step.dependOn(&q4_pdl_run.step); // its test sets env through libc setenv, which Windows lacks
+    engines_build.lingHost(b, host, cuda, mods.core, mods.lanes, glm, step);
     @import("kolibri.zig").host(b, kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), native_modules.api, step);
     const gemma = @import("gemma4_cuda.zig").module(b, host, .debug, cuda, mods.core, mods.lanes);
     b.step("test-gemma-grants-host", "Gemma assistant and DFlash head-cost grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gemma, .filters = &.{"shared head costs:"} })).step);

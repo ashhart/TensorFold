@@ -132,6 +132,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_FN_GX_SHARED", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "8192", .n = 8192 },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "6144", .n = 6144 },
+    .{ .name = "TF_LING_RANK", .raw = "1", .n = 1 },
+    .{ .name = "TF_LING_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_FLASHNEXT_WINDOW_CHECK", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_WINDOW_CHECK", .raw = "1", .n = 1 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "2048", .n = 2048 },

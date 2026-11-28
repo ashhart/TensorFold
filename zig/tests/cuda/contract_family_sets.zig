@@ -1,4 +1,4 @@
-//! The CUDA contract's family sets, Clef's joint schema head and ZONOS3's kernels.
+//! The CUDA contract's family sets (Ling's among them), Clef's joint schema head and ZONOS3's kernels.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -41,6 +41,7 @@ pub const Sets = struct {
     sparse_attn: *@import("contract_sparse_attn.zig").Set,
     hy4_route_rows: *@import("contract_hy4_route_rows.zig").Set,
     hy4_engram_fp8: *@import("contract_hy4_engram_fp8.zig").Set,
+    ling: *@import("contract_ling.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -101,6 +102,7 @@ pub const Sets = struct {
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
         const zonos3, const hy4_ihc_hc = try initPair(
             @import("contract_zonos3.zig").Set,
@@ -125,6 +127,9 @@ pub const Sets = struct {
             a,
             list,
         );
+        errdefer sparse_attn.deinit();
+        errdefer hy4_route_rows.deinit();
+        const ling = try @import("contract_ling.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -157,6 +162,7 @@ pub const Sets = struct {
             .sparse_attn = sparse_attn,
             .hy4_route_rows = hy4_route_rows,
             .hy4_engram_fp8 = hy4_engram_fp8,
+            .ling = ling,
         };
     }
 
@@ -173,6 +179,7 @@ pub const Sets = struct {
         sets.idol.deinit();
         sets.joint_schema.deinit();
         sets.muse.destroy(sets.a);
+        sets.ling.deinit();
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
         sets.shared_down.deinit();

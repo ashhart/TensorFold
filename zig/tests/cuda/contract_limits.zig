@@ -35,6 +35,8 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (std.mem.eql(u8, name, "joint_schema")) return kk.joint_schema;
     if (std.mem.eql(u8, name, "fp8_experts")) return kk.fp8_experts;
     if (std.mem.eql(u8, name, "mla")) return kk.mla;
+    if (std.mem.eql(u8, name, "ling_glue")) return kk.ling_glue;
+    if (std.mem.eql(u8, name, "ling_act")) return kk.ling_act;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
     if (std.mem.eql(u8, name, "flashnext_hcn")) return kk.flashnext_hcn;
     if (std.mem.eql(u8, name, "h3_image_decoder")) return &h3_image_decoder.bytes;

@@ -330,6 +330,9 @@ These follow a model's release code or a library's model code for their math, ro
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
 - `zig/kernels/metal/idol.metal`, `zig/kernels/cuda/idol.cu` and `zig/kernels/cuda/idol_attention.cuh`: the rounding points of Idol's denoiser in [speridlabs/idol-sdk](https://github.com/speridlabs/idol-sdk) at `4702a7f0`. Copyright speridlabs, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+- `zig/kernels/cuda/ling_glue.cu`: the bf16 rounding points of the residual add and of `moe_infer`'s sum in `modeling_bailing_moe_v3.py` in [inclusionAI/Ling-3.1-flash-1019](https://huggingface.co/inclusionAI/Ling-3.1-flash-1019) at revision `2109a6863fb14361eecc346ef98b3db88b8cdaee`. Copyright Antgroup and The HuggingFace Inc. team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+- `zig/kernels/cuda/ling_pattn.cuh`: the causal attention of `BailingMoeV3MultiLatentAttention` in the same file, over queries and keys that join their no-RoPE and RoPE parts.
+- `zig/kernels/cuda/ling_act.cu`: the SwiGLU clamp order, min(silu(gate), L) * clamp(up, -L, L), of `exllamav3/architecture/bailing_hybrid.py` in [exllamav3](https://github.com/turboderp-org/exllamav3) at `bd1f519172406a9560bd5c90e61000691bb69a07`; the release's modeling file does not apply the clamp. Copyright Turboderp, MIT License; see [the license text](#mit-license-text).
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
