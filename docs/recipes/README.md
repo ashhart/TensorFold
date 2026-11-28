@@ -42,6 +42,20 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 
 [Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 
+## Hexagon GGUF inspection
+
+```sh
+tensorfold info --hexagon ./gemma-4-E4B_q4_0-it.gguf
+```
+
+This host-only command checks the GGUF version, selected architecture and geometry metadata, and the names,
+shapes, kinds and file ranges of all 666 text tensors in
+[Google's Gemma 4 E4B IT Q4_0 export](https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/blob/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B_q4_0-it.gguf).
+The expected kinds are Q4_0 for the block matrices, Q6_K for the embeddings, F16 for the per-layer input
+projection, and F32 for the remaining tensors. The check reads the index and metadata and validates tensor
+ranges. It does not verify weight contents. An accepted file is a match for this layout. Device execution is
+unverified.
+
 ## Capability floor
 
 The native release includes CUDA kernels for sm_80, sm_86, sm_120 and sm_121. This is a build target list, not
