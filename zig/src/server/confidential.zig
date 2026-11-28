@@ -95,8 +95,7 @@ pub fn harden() !void {
 const deny_attach: c_int = 31;
 extern "c" fn ptrace(request: c_int, pid: c_int, addr: ?[*]u8, data: c_int) c_int;
 
-/// LD_PRELOAD/LD_AUDIT/DYLD_INSERT_LIBRARIES precede main; refusal stops serving but cannot prevent or undo injection.
-/// The refusal, then `harden` and the loader policy once it may start: every serving entry point calls it first.
+/// LD_*/DYLD_* injection precedes main and cannot be undone; refusal, hardening and loader confinement follow.
 pub fn enforce(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map) !?[]const u8 {
     if (!args.confidential) return null;
     const empty: std.process.Environ.Map = .init(a);
