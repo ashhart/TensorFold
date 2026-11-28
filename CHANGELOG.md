@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA can keep request-start snapshots with shared KV pages (`TF_GLM_REQUEST_STARTS=1` with `TF_KV_SHARE`): the snapshot owns only its tail, shared prefix pages stay untouched, and a resumed request matches a cold run (#5377). Thanks to @laidick for the request. Thanks @laidick for the report.
+
 - Tests: the prompt-imprint key-index test starts from an empty temporary directory, so a run interrupted on Windows (which reuses process IDs) no longer leaves a later run a stale starting state (#5406).
 
 - CLI: `tensorfold log` also reads the request log `TENSORFOLD_REQUEST_LOG` writes: `list`, `show ID`, `follow` and `--json` show each reply beside its request, and a bare body is numbered by reader order, never keyed by fields inside it (#5246, refs #3666). Thanks to @devopsfortunato.
