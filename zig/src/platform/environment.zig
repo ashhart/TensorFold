@@ -47,18 +47,6 @@ pub fn isReal(kind: Kind) bool {
 }
 
 const stock_prefix_rules = [_]Rule{
-    .{ .name = "TF_CUDA_PREFILL_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; one CUDA Qwen prompt stage ledger)" },
-    .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
-    .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
-    .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
-    .{ .name = "TF_Q27_FLAT_GLUE", .scope = .metal, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_Q27_QK", .scope = .metal, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
-    .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
-    .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 runs exact all-length BF16 rows for multi-row Qwen decode windows)" },
-    .{ .name = "TF_STARTUP_RECEIPT", .scope = .common, .kind = .flag, .forms = "0 or 1 (opt-in startup and first completion receipts)" },
-    .{ .name = "TF_SHARED_PRICE_LOG", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 logs the shared plain price, a line a round)" },
-    .{ .name = "TENSORFOLD_DEVICE_CHECK", .scope = .common, .kind = .flag, .forms = "0 or 1 (0 skips serve's device-profile check; default 1)" },
     .{ .name = "TENSORFOLD_REQUEST_LOG_REPLIES", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 also records each finished reply in TENSORFOLD_REQUEST_LOG's file; default 0)" },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (capped by --vision-max-images)" },
@@ -360,7 +348,7 @@ const stock_suffix_rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 };
 
-pub const rules = stock_prefix_rules ++ @import("environment_exl3_rules.zig").rules ++ stock_suffix_rules ++ @import("environment_safe_rules.zig").rules;
+pub const rules = @import("environment_stock_leading_rules.zig").rules ++ stock_prefix_rules ++ @import("environment_exl3_rules.zig").rules ++ stock_suffix_rules ++ @import("environment_safe_rules.zig").rules;
 
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
