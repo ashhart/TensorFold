@@ -137,6 +137,7 @@ pub const Web = struct {
     searches: usize = 0,
     observer: ?Observer = null,
     empty: bool = false,
+    distinct_results: bool = false,
     on_search: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     pub fn web(w: *Web) tools.Web {
         return .{ .ctx = w, .search = searchFn, .fetch = fetchFn };
@@ -148,7 +149,11 @@ pub const Web = struct {
         if (w.on_search) |f| f.call(f.ctx);
         if (w.empty) return .{ .engine = "Stand-in", .results = &.{} };
         const rs = try a.alloc(search.Result, 1);
-        rs[0] = .{ .title = try std.fmt.allocPrint(a, "Docs for {s}", .{query}), .url = "https://docs.example/x", .snippet = "about x" };
+        const url = if (w.distinct_results)
+            try std.fmt.allocPrint(a, "https://docs.example/{d}", .{w.searches})
+        else
+            "https://docs.example/x";
+        rs[0] = .{ .title = try std.fmt.allocPrint(a, "Docs for {s}", .{query}), .url = url, .snippet = "about x" };
         return .{ .engine = "Stand-in", .results = rs };
     }
     fn fetchFn(_: *anyopaque, _: Allocator, url: []const u8, _: usize, _: []const u8) anyerror!tools.Page {
@@ -297,16 +302,16 @@ test "the model's own search runs on the server and only the answer reaches the 
 }
 
 test "a fresh question on current facts is researched before the model starts" {
-    var rig: Rig = .{ .eng = .{ .script = &.{ "1. Zig latest release notes\n2. Zig 0.17 changelog\n", "The latest is 0.17." } } };
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes", "The latest is 0.17." } } };
     try rig.start(true);
     defer rig.stop();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const got = try rig.ask(arena.allocator(), "{\"messages\": [{\"role\": \"user\", \"content\": \"What is the latest release of Zig?\"}]}");
-    try std.testing.expect(rig.eng.saw(0, "You write web search queries"));
-    try std.testing.expectEqual(@as(usize, 2), rig.web.searches);
+    try std.testing.expect(rig.eng.saw(0, "Write one concise web search query"));
+    try std.testing.expectEqual(@as(usize, 1), rig.web.searches);
     try std.testing.expect(rig.eng.saw(1, "Web results for \"Zig latest release notes\""));
-    try std.testing.expect(rig.eng.saw(1, "Web results for \"Zig 0.17 changelog\""));
+    try std.testing.expect(!rig.eng.saw(1, "Web results for \"Zig 0.17 changelog\""));
     try std.testing.expect(rig.eng.saw(1, "Page: https://docs.example/x (HTTP 200"));
     const s = got.body.?.get("cortheon").?;
     try std.testing.expect(s.get("research_first").?.bool);
@@ -317,14 +322,30 @@ test "a fresh question on current facts is researched before the model starts" {
     try std.testing.expectEqualStrings("The latest is 0.17.\n\nOK", message(got.body.?).strField("content").?);
 }
 
+test "a larger context restores the full automatic pre-research budget" {
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes\nZig 0.17 changelog\nZig official announcement", "The latest is 0.17." } } };
+    try rig.start(true);
+    defer rig.stop();
+    rig.srv.info.context_window = 16384;
+    rig.web.distinct_results = true;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const got = try rig.ask(arena.allocator(), "{\"messages\":[{\"role\":\"user\",\"content\":\"What is the latest release of Zig?\"}]}");
+    try std.testing.expect(rig.eng.saw(0, "Write up to three concise, distinct web search queries"));
+    try std.testing.expectEqual(@as(usize, 3), rig.web.searches);
+    const research = got.body.?.get("cortheon").?;
+    try std.testing.expectEqual(@as(?i64, 3), research.get("pages_read").?.int64());
+    try std.testing.expectEqual(@as(usize, 3), research.get("sources").?.array.len);
+}
+
 test "a salted research turn salts the planner's own request as well as the turn's" {
-    var rig: Rig = .{ .eng = .{ .script = &.{ "1. Zig latest release notes\n2. Zig 0.17 changelog\n", "The latest is 0.17." } } };
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes", "The latest is 0.17." } } };
     try rig.start(true);
     defer rig.stop();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     _ = try rig.ask(arena.allocator(), "{\"messages\": [{\"role\": \"user\", \"content\": \"What is the latest release of Zig?\"}], \"cache_salt\": \"tenant-a\"}");
-    try std.testing.expect(rig.eng.saw(0, "You write web search queries")); // the planner's request came first
+    try std.testing.expect(rig.eng.saw(0, "Write one concise web search query")); // the planner's request came first
     try std.testing.expect(rig.eng.salted.items.len == rig.eng.prompts.items.len and rig.eng.salted.items.len >= 2);
     for (rig.eng.salted.items) |salted| try std.testing.expect(salted);
 }
@@ -445,7 +466,7 @@ test "the research task keeps a character that straddles the goal cap whole" {
     const content = try json.quote(a, words.items, .{});
     const body = try std.fmt.allocPrint(a, "{{\"messages\":[{{\"role\":\"user\",\"content\":{s}}}]}}", .{content});
     _ = try rig.ask(a, body);
-    try std.testing.expect(rig.eng.saw(0, "You write web search queries"));
+    try std.testing.expect(rig.eng.saw(0, "Write one concise web search query"));
     const prompt = rig.eng.prompts.items[0];
     try std.testing.expect(std.unicode.utf8ValidateSlice(prompt));
     try std.testing.expect(std.mem.indexOf(u8, prompt, "What is the latest release of Zig?") != null);
