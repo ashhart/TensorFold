@@ -152,6 +152,12 @@ pub const ComputeEncoder = struct {
     }
     pub fn dispatchIndirect(_: ComputeEncoder, _: Buffer, _: usize, _: Size) void {}
     pub fn barrier(_: ComputeEncoder) void {}
+    pub fn updateFence(_: ComputeEncoder, _: objc.Id) void {
+        fsr_fence_updates += 1;
+    }
+    pub fn waitForFence(_: ComputeEncoder, _: objc.Id) void {
+        fsr_fence_waits += 1;
+    }
     pub fn end(_: ComputeEncoder) void {}
 };
 pub const Queue = struct {

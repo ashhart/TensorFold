@@ -8,7 +8,7 @@ const Timeline = @import("metal4_timeline.zig").Timeline;
 const Id = objc.Id;
 const heap = std.heap.c_allocator;
 
-/// In only where the root declares `tf_metal4 = true` (the DeepSeek server) and in tests; elsewhere compiled out.
+/// Compiled in for tests and server roots that declare `tf_metal4 = true`.
 pub const enabled = @import("builtin").is_test or (@hasDecl(@import("root"), "tf_metal4") and @import("root").tf_metal4);
 
 pub const stage_dispatch: usize = 1 << 27;

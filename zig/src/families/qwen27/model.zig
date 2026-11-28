@@ -139,7 +139,7 @@ pub const Model = struct {
             return err;
         };
         validation.end();
-        m.queue = try m.device.queue();
+        m.queue = try @import("submission.zig").open(m.device, later and ranks == 1);
         errdefer m.queue.deinit();
         m.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer m.checkpoint.deinit();

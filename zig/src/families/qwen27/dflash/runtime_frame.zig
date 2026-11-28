@@ -90,14 +90,14 @@ pub const Frame = struct {
     pub fn part(f: *Frame) !void {
         if (!f.active or f.completed or f.borrowed or f.part_count == f.parts.len) return;
         if (f.fence == null) f.fence = mtl.objc.msg(?mtl.objc.Id, f.device.id, "newFence", .{}) orelse return error.NoFence;
-        mtl.objc.msg(void, f.encoder.id, "updateFence:", .{f.fence.?});
+        f.encoder.updateFence(f.fence.?);
         f.encoder.end();
         f.cb.commit();
         f.parts[f.part_count] = f.cb;
         f.part_count += 1;
         f.cb = f.queue.commandBuffer();
         f.encoder = f.cb.compute(.serial);
-        mtl.objc.msg(void, f.encoder.id, "waitForFence:", .{f.fence.?});
+        f.encoder.waitForFence(f.fence.?);
     }
     pub fn finish(f: *Frame) !void {
         if (!f.active or f.completed or f.borrowed) return error.DraftFrameNotActive;
