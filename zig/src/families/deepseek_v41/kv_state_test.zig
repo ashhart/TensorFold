@@ -97,3 +97,37 @@ test "Snapshot state: a failed rollback retains the transaction and retries befo
     try t.expectEqualSlices(u8, &before, &f.live);
     try t.expectError(error.NoCacheTransaction, f.state.keep(&f.regions(), copier, 1));
 }
+
+fn ringBackupCost(comptime rows: u32) !usize {
+    var live: [rows * 2]u8 = @splat(0x6b);
+    var backup: [rows * 2]u8 = @splat(0xa5);
+    var copied: usize = 0;
+    const Count = struct {
+        fn copy(ptr: *anyopaque, dst: u64, src: u64, bytes: usize) !void {
+            const n: *usize = @ptrCast(@alignCast(ptr));
+            n.* += bytes;
+            try Fixture.copy(ptr, dst, src, bytes);
+        }
+    };
+    const regions = [_]kv.Region{.{ .live = @intFromPtr(&live), .backup = @intFromPtr(&backup), .row_bytes = 2, .rows = rows, .kind = .ring }};
+    const copier: kv.Copy = .{ .ctx = &copied, .run = Count.copy };
+    var state: kv.State = .{ .position = rows - 1 };
+    const before = live;
+    try state.begin(&regions, copier, 2);
+    const cost = copied;
+    for (0..2) |i| {
+        const off = (@as(usize, rows - 1) + i) % rows * 2;
+        live[off] = @truncate(0xf0 + i);
+        live[off + 1] = @truncate(0x0f + i);
+    }
+    try state.rollback(&regions, copier);
+    try t.expectEqualSlices(u8, &before, &live);
+    return cost;
+}
+
+test "Snapshot state: pending ring rows bound backup cost, poisoned spare rows stay unread" {
+    const small = try ringBackupCost(8);
+    const large = try ringBackupCost(512);
+    try t.expectEqual(@as(usize, 4), small);
+    try t.expectEqual(small, large);
+}

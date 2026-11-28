@@ -4,11 +4,14 @@ const cuda = @import("cuda");
 const prompt = @import("cuda_prompt.zig");
 const t = std.testing;
 const Fake = struct {
+    const Fill = struct { ptr: u64, len: usize, value: u8 };
     var allocations: usize = 0;
     var frees: usize = 0;
     var early: usize = 0;
     var syncs: usize = 0;
     var fills: usize = 0;
+    var recorded: [256]Fill = undefined;
+    var canaries: [256]u8 = @splat(0xa5);
     var deny_after: usize = 0;
     var fill_failure: usize = 0;
     var pending: [256]bool = @splat(false);
@@ -49,11 +52,14 @@ const Fake = struct {
             const u = cuda.usage(false);
             _ = cuda.memory.setAllocationLimit(u.device + u.host + len) catch unreachable;
         }
+        canaries[allocations] = 0xa5;
         return 0;
     }
-    fn fill(ptr: u64, _: u8, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+    fn fill(ptr: u64, value: u8, len: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         pending[ptr / 256] = true;
+        recorded[fills] = .{ .ptr = ptr, .len = len, .value = value };
         fills += 1;
+        canaries[ptr / 256] = value;
         return if (fills == fill_failure) cuda.abi.error_not_ready else 0;
     }
     fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
@@ -88,7 +94,7 @@ test "Flash Next completion: allocation refusals drain fills before every constr
     const old_limit = try cuda.memory.setAllocationLimit(null);
     defer _ = cuda.memory.setAllocationLimit(old_limit) catch unreachable;
     const before = cuda.usage(false);
-    // Cover failures inside each array and between arrays, including after the last pooled fill.
+    // Cover failures inside each fixed-state array and between arrays, including after the final tail fill.
     for ([_]usize{ 1, 2, 35, 36, 37, 71, 72, 73, 83, 84, 85, 95, 96, 97, 107, 108, 109, 119, 120 }) |deny| {
         var d = Fake.init(deny, 0);
         var stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(325) };
@@ -111,7 +117,7 @@ test "Flash Next completion: allocation refusals drain fills before every constr
 }
 
 test "Flash Next completion: failed asynchronous fill and an interrupted prefill both drain before release" {
-    for ([_]usize{ 1, 37, 73, 121 }) |fail_fill| {
+    for ([_]usize{ 1, 36, 37, 72, 73 }) |fail_fill| {
         var d = Fake.init(0, fail_fill);
         var stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(326) };
         var e: prompt.Engine = undefined;
@@ -143,22 +149,93 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
     try t.expectEqual(@as(usize, 0), Fake.early);
 }
 
-test "Flash Next completion: draft constructor fill failures and queued window writes drain before release" {
+test "Flash Next completion: fixed draft-block fill failures and queued window writes drain before release" {
     const Draft = @import("cuda_mtp_draft.zig").Draft;
-    for ([_]usize{ 1, 2, 3, 4 }) |fail_fill| {
-        var d = Fake.init(0, fail_fill);
-        const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(328) };
-        try t.expectError(error.NotReady, Draft.init(t.allocator, &d, stream, 4, 8, 1, .full));
-        try t.expectEqual(Fake.allocations, Fake.frees);
+    var d = Fake.init(0, 1);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(328) };
+    {
+        var block = try cuda.DeviceBuffer.alloc(&d, Draft.partsBytes(8, 1, .full));
+        defer block.free();
+        try t.expectError(error.NotReady, Draft.initParts(t.allocator, &d, stream, 4, 8, 1, .full, block));
+        try t.expectEqual(Fake.allocations, Fake.frees + 1); // the caller still owns the fixed block
         try t.expectEqual(@as(usize, 0), Fake.early);
     }
-    var d = Fake.init(0, 0);
-    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(329) };
+    d = Fake.init(0, 0);
     var draft = try Draft.init(t.allocator, &d, stream, 4, 8, 1, .full);
     @memset(Fake.pending[1 .. Fake.allocations + 1], true);
     draft.deinit();
     try t.expectEqual(Fake.allocations, Fake.frees);
     try t.expectEqual(@as(usize, 0), Fake.early);
+}
+
+fn expectCacheCanaries(bs: []const cuda.DeviceBuffer) !void {
+    for (bs) |b| {
+        try t.expectEqual(@as(u8, 0xa5), Fake.canaries[b.ptr / 256]);
+        for (Fake.recorded[0..Fake.fills]) |f| {
+            if (f.ptr == b.ptr) return error.UnexpectedCacheClear;
+        }
+    }
+}
+
+fn expectCleared(bs: []const cuda.DeviceBuffer) !void {
+    for (bs) |b| try t.expectEqual(@as(u8, 0), Fake.canaries[b.ptr / 256]);
+}
+
+test "Flash Next completion: cache construction preserves poison capacity and snapshots use only live rows" {
+    const wt = @import("cuda_prompt_wt.zig");
+    const Draft = @import("cuda_mtp_draft.zig").Draft;
+    const snap = @import("cuda_snap.zig");
+    var d = Fake.init(0, 0);
+    var stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(329) };
+    var e: prompt.Engine = undefined;
+    e.gpa = t.allocator;
+    e.driver = &d;
+    e.stream = &stream;
+    e.eos = 1;
+    e.round_graph = .{};
+    e.heads = .full;
+    {
+        var seq = try e.newSeq(8);
+        defer seq.deinit(t.allocator);
+        try expectCleared(seq.conv);
+        try expectCleared(seq.state);
+        try expectCleared((&seq.tail)[0..1]);
+        try expectCacheCanaries(seq.kc);
+        try expectCacheCanaries(seq.vc);
+        try expectCacheCanaries(seq.ikc);
+        try expectCacheCanaries(seq.pooled);
+        try t.expectEqual(@as(usize, 2 * wt.linear_n + 1), Fake.fills);
+    }
+
+    d = Fake.init(0, 0);
+    var draft = try Draft.init(t.allocator, &d, stream, 8, 8, 1, .full);
+    try t.expectEqual(@as(usize, 0), Fake.fills);
+    try expectCacheCanaries((&draft.kc)[0..1]);
+    try expectCacheCanaries((&draft.vc)[0..1]);
+    try expectCacheCanaries((&draft.ikc)[0..1]);
+    try expectCacheCanaries((&draft.pooled)[0..1]);
+    draft.deinit();
+
+    d = Fake.init(0, 0);
+    var block = try cuda.DeviceBuffer.alloc(&d, Draft.partsBytes(8, 1, .full));
+    var parts = try Draft.initParts(t.allocator, &d, stream, 8, 8, 1, .full, block);
+    try t.expectEqual(@as(usize, 1), Fake.fills);
+    try t.expectEqual(Fake.Fill{ .ptr = block.ptr, .len = block.len, .value = 0 }, Fake.recorded[0]);
+    try t.expectEqual(@as(u8, 0), Fake.canaries[block.ptr / 256]);
+    try expectCacheCanaries((&parts.kc)[0..1]);
+    try expectCacheCanaries((&parts.vc)[0..1]);
+    try expectCacheCanaries((&parts.ikc)[0..1]);
+    try expectCacheCanaries((&parts.pooled)[0..1]);
+    parts.deinit();
+    block.free();
+
+    // The snapshot's used-state copy spans exclude every unread tail row, whatever canary it holds.
+    const used = 4;
+    const order = snap.order(used, true, .full);
+    for (order.p[2..6], order.p[7..11]) |own, head| {
+        try t.expectEqual(own.n, used / own.per * own.row);
+        try t.expectEqual(head.n, used / head.per * head.row);
+    }
 }
 
 test "Flash Next completion: scratch growth refusal after queued inverse-frequency upload drains before rollback" {

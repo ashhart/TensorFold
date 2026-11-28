@@ -476,9 +476,9 @@ pub const Buffers = struct {
         }
     }
 
-    /// Engine.reset: every cache and state buffer zeroed, as a fresh request starts (pages: written before any read).
+    /// Engine.reset: fixed state zeroed as a fresh request starts; KV capacity is written before any read.
     pub fn reset(b: *const Buffers, ops: kern.Ops) !void {
-        for (b.planes(), b.state_bytes, 0..) |p, n, i| if (i >= 2 or b.table == 0) try ops.fill32(p, 0, n / 4);
+        for (b.planes()[2..], b.state_bytes[2..]) |p, n| try ops.fill32(p, 0, n / 4);
     }
 
     /// Bytes of the own sequence's planes in the display carveout.
@@ -569,4 +569,8 @@ test "wide rounds: with the switch off the shared plans are main's, in bytes and
     try std.testing.expectEqual(@as(usize, (2 * 32 + 14 * 32) * 4), sharedBytes(c));
     b.wide_plans = true;
     try std.testing.expectEqual(@as(u64, 0x1000 + (2 * 32 + 14 * 16) * 4), b.sharedPlan(17).items);
+}
+
+test {
+    _ = @import("cuda_state_reset_test.zig");
 }

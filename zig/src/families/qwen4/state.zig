@@ -46,7 +46,7 @@ pub fn State(comptime B: type) type {
         }
         pub fn reset(s: *Self) !void {
             s.poison();
-            try s.backend.zero(s.buffer, 0, s.bytes);
+            try s.backend.zero(s.buffer, s.layout.kv_bytes, s.bytes - s.layout.kv_bytes);
             s.pos = 0;
             s.base_pos = 0;
             s.rows = 0;

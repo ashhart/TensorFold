@@ -30,7 +30,17 @@ pub const State = struct {
             _ = std.math.mul(usize, r.row_bytes, r.rows) catch return error.BadRegion;
             if (r.row_bytes == 0 or r.rows == 0 or (r.kind == .ring and n > r.rows)) return error.BadRegion;
         }
-        for (regions) |r| try c.copy(r.backup, r.live, r.bytes());
+        for (regions) |r| {
+            if (r.kind == .carry) {
+                try c.copy(r.backup, r.live, r.bytes());
+                continue;
+            }
+            // A ring transaction writes only its next n physical rows; the other backup rows are never read.
+            for (0..n) |i| {
+                const off = ((s.position + i) % r.rows) * r.row_bytes;
+                try c.copy(r.backup + off, r.live + off, r.row_bytes);
+            }
+        }
         s.pending = n;
     }
     // Carries are selected from the accepted projection before keep. A full rollback restores them here.
@@ -38,14 +48,14 @@ pub const State = struct {
         const n = s.pending orelse return error.NoCacheTransaction;
         if (count > n) return error.BadWindow;
         for (regions) |r| {
-            if (count == 0) {
-                try c.copy(r.live, r.backup, r.bytes());
-            } else if (r.kind == .ring) {
-                // Only rejected positions were overwritten. Accepted rows stay in their physical ring slots.
+            if (r.kind == .ring) {
+                // Only pending positions were overwritten. Accepted rows stay in their physical ring slots.
                 for (count..n) |i| {
                     const off = ((s.position + i) % r.rows) * r.row_bytes;
                     try c.copy(r.live + off, r.backup + off, r.row_bytes);
                 }
+            } else if (count == 0) {
+                try c.copy(r.live, r.backup, r.bytes());
             }
         }
         s.position += count;
