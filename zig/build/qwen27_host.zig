@@ -114,14 +114,26 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
         const mods = @import("metal_targets.zig").metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const no_shaders = b.addWriteFiles().add("no-shaders.metallib", "");
         mods.sources.addImport("nemotron_packed_metallib", @import("metal_targets.zig").embedded(b, no_shaders, "nemotron_packed.metallib"));
+        const speed_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .macos });
+        const speed_mods = @import("metal_targets.zig").metalEngineModules(b, speed_target, .Debug, draft_ids);
+        // The object checks Darwin declarations only; no SDK libraries or frameworks are linked on Linux.
+        speed_mods.metal.frameworks.clearRetainingCapacity();
+        speed_mods.metal.link_objects.clearRetainingCapacity();
+        speed_mods.sources.addImport("nemotron_packed_metallib", @import("metal_targets.zig").embedded(b, no_shaders, "nemotron_packed.metallib"));
         const api = b.createModule(.{
             .root_source_file = b.path("zig/src/core/engine_api.zig"),
             .target = b.graph.host,
             .link_libc = true,
             .imports = &.{.{ .name = "lanes", .module = mods.lanes }},
         });
-        const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "engine_api", .module = api }, .{ .name = "living", .module = mods.living } } });
-        speedCompile(b, mods.metal, mods.engine, api, host);
+        const speed_api = b.createModule(.{
+            .root_source_file = b.path("zig/src/core/engine_api.zig"),
+            .target = speed_target,
+            .link_libc = true,
+            .imports = &.{.{ .name = "lanes", .module = speed_mods.lanes }},
+        });
+        const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = speed_target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = speed_mods.metal }, .{ .name = "tensorfold", .module = speed_mods.engine }, .{ .name = "engine_api", .module = speed_api }, .{ .name = "living", .module = speed_mods.living } } });
+        speedCompile(b, speed_mods.metal, speed_mods.engine, speed_api, host, speed_target);
         fullCacheHost(b, mods.engine, api, mods.metal, mods.living);
     }
 }
@@ -169,13 +181,13 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen27-grants-host", "Native shared draft policy counts granted and proposed nodes without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = grants })).step);
     const tree_host = b.addTest(.{ .root_module = engine, .filters = &.{"qwen27 window:"} });
     b.step("test-qwen27-draft-tree-host", "Real selector 31-node tree and verify parents without a GPU").dependOn(&b.addRunArtifact(tree_host).step);
-    speedCompile(b, metal, engine, api, host);
+    speedCompile(b, metal, engine, api, host, b.graph.host);
 }
 
-fn speedCompile(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, api: *std.Build.Module, host: *std.Build.Module) void {
+fn speedCompile(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, api: *std.Build.Module, host: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     const object = b.addObject(.{ .name = "qwen27-speed-compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/qwen27_speed_compile.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = .debug,
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } },
