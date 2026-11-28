@@ -123,6 +123,7 @@ test {
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_cfg_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_tempo_http_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_zonos_tempo_http_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("images_generations_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_lane_release_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voices_test.zig");
