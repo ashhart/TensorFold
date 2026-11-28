@@ -18,7 +18,7 @@ const usage = "usage: tf-inkling2-engine graphs|greedy <model dir> <ids.json> <o
     "  --graphed: greedy's decode rows replayed from CUDA graphs\n" ++
     "  two ranks: TF_INKLING2_RANK, TF_INKLING2_WORLD and NCCL_COMM_ID on both\n";
 
-const Text = struct { name: []const u8, ids: []u32 };
+const Text = check.Text;
 
 /// What every rank runs: the texts, the run's shape and an optional picture (prepared on every rank for its size).
 const Run = struct {
@@ -45,18 +45,7 @@ pub fn main(init: std.process.Init) !u8 {
         run.picture = try ink.image.prepare(io, a, bytes, ink.pictures.picture_tokens);
         run.image_sha = sha(bytes);
     }
-    var doc = try std.json.parseFromSlice(std.json.Value, a, text, .{});
-    defer doc.deinit();
-    var list: std.ArrayList(Text) = .empty;
-    var it = doc.value.object.iterator();
-    while (it.next()) |e| {
-        const v = e.value_ptr.array.items;
-        var ids = try a.alloc(u32, v.len);
-        for (v, ids) |x, *id| id.* = @intCast(x.integer);
-        if (run.picture) |p| ids = try check.widen(a, ids, p.tokens());
-        try list.append(a, .{ .name = e.key_ptr.*, .ids = ids });
-    }
-    run.texts = list.items;
+    run.texts = try check.texts(a, text, if (run.picture) |p| p.tokens() else null);
 
     var driver = try cuda.Driver.open();
     defer driver.close();

@@ -54,6 +54,29 @@ pub fn parse(args: []const []const u8) !Options {
     return o;
 }
 
+/// One named prompt of the ids file.
+pub const Text = struct { name: []const u8, ids: []u32 };
+
+/// The ids file's prompts (`{"name": [ids]}`), widened to `widen_to` visual tokens a picture; empty or bad: refused.
+pub fn texts(a: std.mem.Allocator, json: []const u8, widen_to: ?u32) ![]Text {
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{});
+    if (doc != .object or doc.object.count() == 0) return error.NoTexts;
+    var list: std.ArrayList(Text) = .empty;
+    var it = doc.object.iterator();
+    while (it.next()) |e| {
+        if (e.value_ptr.* != .array or e.value_ptr.array.items.len == 0) return error.NoTexts;
+        const v = e.value_ptr.array.items;
+        var ids = try a.alloc(u32, v.len);
+        for (v, ids) |x, *id| {
+            if (x != .integer) return error.BadId;
+            id.* = std.math.cast(u32, x.integer) orelse return error.BadId;
+        }
+        if (widen_to) |n| ids = try widen(a, ids, n);
+        try list.append(a, .{ .name = e.key_ptr.*, .ids = ids });
+    }
+    return list.items;
+}
+
 /// Each run of image placeholders widened to `n` of them, as the server expands a picture's one placeholder.
 pub fn widen(a: std.mem.Allocator, ids: []const u32, n: u32) ![]u32 {
     var out: std.ArrayList(u32) = .empty;
@@ -121,4 +144,15 @@ test "engine check: the last row is the last call's last row, as prefillChunk wa
         while (at < len) : (at += n) n = @min(len - at, most); // prefillChunk's loop over the last chunk
         try std.testing.expectEqual(n - 1, lastRow(len, most));
     };
+}
+
+test "engine check: the ids file needs at least one non-empty prompt of token ids" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try texts(a, "{\"a\": [1, 2], \"b\": [3]}", null);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, got[0].ids);
+    for ([_][]const u8{ "{}", "[]", "{\"a\": []}", "{\"a\": 3}" }) |j| try std.testing.expectError(error.NoTexts, texts(a, j, null));
+    for ([_][]const u8{ "{\"a\": [-1]}", "{\"a\": [1.5]}", "{\"a\": [4294967296]}" }) |j| try std.testing.expectError(error.BadId, texts(a, j, null));
 }
