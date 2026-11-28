@@ -11,6 +11,22 @@ fn project(ops: op.Ops, frame: u64, x: op.View, weight: w.Tensor, mode: op.Mode)
     try y.check(x.rows, @intCast(weight.shape[0]), .bf16);
     return y;
 }
+fn overlaps(ops: op.Ops) bool {
+    return if (ops.vtable.overlaps) |f| f(ops.ptr) else false;
+}
+/// Linears of one input into their own outputs; overlapped only with distinct weights, the last closes the group.
+fn projectAll(comptime n: usize, ops: op.Ops, frame: u64, x: op.View, weights: [n]w.Tensor, mode: op.Mode) ![n]op.View {
+    var apart = overlaps(ops);
+    for (weights, 0..) |a, i| for (weights[i + 1 ..]) |b| {
+        if (a.bytes.ptr == b.bytes.ptr) apart = false;
+    };
+    var out: [n]op.View = undefined;
+    for (weights, &out, 0..) |weight, *y, i| {
+        if (apart and i + 1 < n) try ops.vtable.overlap_next.?(ops.ptr, frame);
+        y.* = try project(ops, frame, x, weight, mode);
+    }
+    return out;
+}
 fn norm(ops: op.Ops, frame: u64, x: op.View, weight: w.Tensor, eps: f32, heads: u32, dim: u32) !op.View {
     if (weight.rank != 1 or weight.shape[0] != dim or x.width != heads * dim) return error.DraftOperatorShape;
     const y = try ops.vtable.norm(ops.ptr, frame, x, .{ .weight = weight, .eps = eps, .heads = heads, .head_dim = dim });
@@ -141,9 +157,10 @@ pub fn encodeStreams(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation
         const xn = try norm(ops, frame, hidden, layer.input_norm, c.eps, 1, c.hidden);
         const dynamic = try project(ops, frame, xn, layer.attention_conv.projection, preparation.mode);
         const input = try convolve(ops, frame, xn, dynamic, layer.attention_conv, 0, null, c, block);
-        const query = try rotate(ops, frame, try norm(ops, frame, try project(ops, frame, input, layer.attention.q, preparation.mode), layer.attention.q_norm, c.eps, c.heads, c.head_dim), positions[0..rows], c.heads, c);
-        const keys = try rotate(ops, frame, try norm(ops, frame, try project(ops, frame, input, layer.attention.k, preparation.mode), layer.attention.k_norm, c.eps, c.kv_heads, c.head_dim), positions[0..rows], c.kv_heads, c);
-        const values = try project(ops, frame, input, layer.attention.v, preparation.mode);
+        const qkv: ?[3]op.View = if (overlaps(ops)) try projectAll(3, ops, frame, input, .{ layer.attention.q, layer.attention.k, layer.attention.v }, preparation.mode) else null;
+        const query = try rotate(ops, frame, try norm(ops, frame, if (qkv) |t| t[0] else try project(ops, frame, input, layer.attention.q, preparation.mode), layer.attention.q_norm, c.eps, c.heads, c.head_dim), positions[0..rows], c.heads, c);
+        const keys = try rotate(ops, frame, try norm(ops, frame, if (qkv) |t| t[1] else try project(ops, frame, input, layer.attention.k, preparation.mode), layer.attention.k_norm, c.eps, c.kv_heads, c.head_dim), positions[0..rows], c.kv_heads, c);
+        const values = if (qkv) |t| t[2] else try project(ops, frame, input, layer.attention.v, preparation.mode);
         const attended = try ops.vtable.attention(ops.ptr, frame, .{ .context = streams[0].context, .config = c, .layer = @intCast(i), .query = query, .keys = keys, .values = values, .positions = positions[0..rows], .streams = if (n > 1) contexts[0..n] else &.{}, .block = block });
         try attended.check(rows, c.qWidth(), .bf16);
         hidden = try convolve(ops, frame, try project(ops, frame, attended, layer.attention.o, preparation.mode), dynamic, layer.attention_conv, 1, residual, c, block);
@@ -151,9 +168,8 @@ pub fn encodeStreams(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation
         const post = try norm(ops, frame, hidden, layer.post_norm, c.eps, 1, c.hidden);
         const dyn_mlp = try project(ops, frame, post, layer.mlp_conv.projection, preparation.mode);
         const mlp_input = try convolve(ops, frame, post, dyn_mlp, layer.mlp_conv, 0, null, c, block);
-        const gate = try project(ops, frame, mlp_input, layer.mlp.gate, preparation.mode);
-        const up = try project(ops, frame, mlp_input, layer.mlp.up, preparation.mode);
-        const activated = try ops.vtable.swiglu(ops.ptr, frame, gate, up);
+        const gate_up = try projectAll(2, ops, frame, mlp_input, .{ layer.mlp.gate, layer.mlp.up }, preparation.mode);
+        const activated = try ops.vtable.swiglu(ops.ptr, frame, gate_up[0], gate_up[1]);
         try activated.check(rows, c.intermediate, .bf16);
         hidden = try convolve(ops, frame, try project(ops, frame, activated, layer.mlp.down, preparation.mode), dyn_mlp, layer.mlp_conv, 1, residual, c, block);
     }
@@ -162,6 +178,7 @@ pub fn encodeStreams(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation
     const headed = if (n == 1) block - 1 else rows;
     try masks.check(headed, c.hidden, .bf16);
     const final = try norm(ops, frame, masks, g.norm, c.eps, 1, c.hidden);
+    if (overlaps(ops)) try ops.vtable.overlap_next.?(ops.ptr, frame); // the head and hidden projection read `final` alone
     const head = try ops.vtable.head(ops.ptr, frame, final);
     if (head.logits.handle == 0 or head.logits.rows != headed or head.logits.dtype != .bf16 or head.logits.width == 0 or head.logits.width > c.vocab or head.logits.stride < head.logits.width) return error.DraftOperatorShape;
     if (head.token_ids) |mapping| try mapping.check(1, head.logits.width, .u32) else if (head.logits.width != c.vocab) return error.DraftCandidateId;

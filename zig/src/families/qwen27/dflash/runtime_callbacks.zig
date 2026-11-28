@@ -12,6 +12,7 @@ fn backend(ptr: *anyopaque) *Backend {
 fn begin(ptr: *anyopaque) !u64 {
     const b = backend(ptr);
     if (b.failed) return error.DraftBackendFailed;
+    b.overlap = false;
     return b.frame.begin();
 }
 fn release(ptr: *anyopaque, epoch: u64) void {
@@ -39,7 +40,7 @@ fn project(ptr: *anyopaque, epoch: u64, x: op.View, w: ck.Tensor, mode: op.Mode)
             try adapter.encode(e, .{ .buf = input.buf, .off = input.off + @as(usize, first) * x.stride * 2 }, .{ .buf = output.buf, .off = output.off + @as(usize, first) * y.stride * 2 }, @min(x.rows - first, 16));
         }
     }
-    e.barrier();
+    b.closeOp(e);
     return y;
 }
 fn norm(ptr: *anyopaque, epoch: u64, x: op.View, p: op.Norm) !op.View {
@@ -115,7 +116,7 @@ fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
     const input = try b.frame.ref(x);
     const output = try b.frame.ref(y);
     try b.target.kernels.quant(e, b.head.linear, .{ .buffer = input.buf, .offset = input.off }, null, b.target.dims, .{ .buffer = output.buf, .offset = output.off }, x.rows);
-    e.barrier();
+    b.closeOp(e);
     return .{ .logits = y, .token_ids = if (b.head.ids) |ids| try b.frame.add(.{ .buf = ids }, 1, b.head.linear.n, b.head.linear.n, .u32) else null };
 }
 fn lattice(ptr: *anyopaque, epoch: u64, h: op.Head, projected: op.View, c: Config) !op.Lattice {
@@ -152,6 +153,7 @@ fn lattices(ptr: *anyopaque, epoch: u64, h: op.Head, projected: op.View, c: Conf
         const logits = try b.frame.ref(hs.logits);
         const rows = try b.frame.ref(pick.*);
         try b.topk.encode(b.frame.encoder, .{ .buf = logits.buf, .off = logits.off }, .{ .buf = rows.buf, .off = rows.off }, .{ .rows = block - 1, .vocab = hs.logits.width, .k = c.topk, .stride = hs.logits.stride });
+        if (b.frame.concurrent) b.frame.encoder.barrier(); // each stream's top-k reuses one scratch buffer
     }
     b.frame.encoder.barrier();
     b.frame.finish() catch |err| {
@@ -165,4 +167,12 @@ fn lattices(ptr: *anyopaque, epoch: u64, h: op.Head, projected: op.View, c: Conf
         made += 1;
     }
 }
-pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort, .stream_append = context.streamAppend, .add = add };
+fn overlaps(ptr: *anyopaque) bool {
+    return backend(ptr).frame.concurrent;
+}
+fn overlapNext(ptr: *anyopaque, epoch: u64) !void {
+    const b = backend(ptr);
+    try b.frame.require(epoch);
+    b.overlap = b.frame.concurrent;
+}
+pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort, .stream_append = context.streamAppend, .add = add, .overlaps = overlaps, .overlap_next = overlapNext };

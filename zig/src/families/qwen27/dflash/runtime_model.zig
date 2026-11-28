@@ -87,6 +87,7 @@ pub const Model = struct {
         const later: ?core.checkpoint_metal.Later = if (mode == .prepared_q4_reference) Backend.linear else null;
         for (shards) |file| try model.checkpoint.addFileSplit(target.device, file, "", null, later);
         model.backend = try Backend.initBound(a, target, &model.checkpoint, c);
+        model.backend.frame.concurrent = try @import("sys").environment.read(bool, "TF_Q27_DRAFT_CONCURRENT", false);
         errdefer model.backend.deinit();
         model.graph = try loadGraph(a, &model.backend);
         errdefer model.graph.deinit();
