@@ -506,6 +506,7 @@ pub const Engine = struct {
             e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
             try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
         }
+        @import("cuda_prefill_trace.zig").poll(e.prefill_trace);
     }
 
     /// DFlash2's round (every rank, the same `reqs`): each stream's kept rows into its context, then the block pass.
