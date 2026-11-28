@@ -207,7 +207,7 @@ try {
     assert.ok(calls.length >= 1, `${file}: the Readiness screen still calls getModelReadiness`)
     for (const flags of calls) assert.equal(flags.checkEndpoint, true, `${file}: its readiness call must opt into the live model-list check`)
   }
-  for (const file of ['src/components/Composer.tsx', 'src/components/Onboarding.tsx']) {
+  for (const file of ['src/components/composer/useComposerState.ts', 'src/components/Onboarding.tsx']) {
     const calls = readinessCallsites(file)
     assert.ok(calls.length >= 1, `${file}: its readiness calls are still present`)
     for (const flags of calls) assert.ok(!('checkEndpoint' in flags), `${file}: non-Readiness surfaces stay presence-based`)
