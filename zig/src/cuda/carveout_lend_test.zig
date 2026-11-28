@@ -504,7 +504,7 @@ test "a daemon that accepts and never answers is DaemonSilent, and the client le
     try t.expectEqual(before, openFds());
 }
 
-test "a request to a daemon that has gone away is DaemonRefused" {
+test "a request to a closed daemon peer is DaemonRefused without SIGPIPE" {
     const t = std.testing;
     var fds: [2]linux.fd_t = undefined;
     try t.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.SEQPACKET, 0, &fds)));

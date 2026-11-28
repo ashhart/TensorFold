@@ -130,7 +130,7 @@ pub fn send(sock: linux.fd_t, key: []const u8, want: usize) Error!void {
     const Request = struct { key: []const u8, op: []const u8, size: usize };
     std.json.Stringify.value(Request{ .key = key, .op = "alloc", .size = want }, .{}, &w) catch return error.DaemonRefused;
     const text = w.buffered();
-    const rc = linux.sendto(sock, text.ptr, text.len, 0, null, 0);
+    const rc = linux.sendto(sock, text.ptr, text.len, linux.MSG.NOSIGNAL, null, 0);
     if (linux.errno(rc) != .SUCCESS or rc != text.len) return error.DaemonRefused;
 }
 
