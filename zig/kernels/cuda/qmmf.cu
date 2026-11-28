@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 
 #include "common/qmm_frag.cuh"
+#include "qmmf_fp4_wide_layout.h"
 
 namespace tf_qmmf {
 
@@ -117,6 +118,7 @@ TF_QMMF_MANY(tf_qmmf_many32c, 32, true)
 TF_QMMF_MANY(tf_qmmf_many64, 64, false)
 TF_QMMF_MANY(tf_qmmf_many64c, 64, true)
 #undef TF_QMMF_MANY
+#include "qmmf_fp4_wide.cuh"
 
 // The shared down has one K slice; only the output address changes from the existing BF16-weight product.
 #define TF_SHARED_DOWN(NAME, BM, BN) \
