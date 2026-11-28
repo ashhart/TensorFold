@@ -51,6 +51,7 @@ pub fn targets(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) voi
         .{ "test-h3-metadata", "h3 metadata:", "H3 CUDA projection shapes refused before any allocation" },
         .{ "test-h3-arithmetic", "h3 arithmetic:", "H3 CUDA byte products, sizes and offsets checked for overflow" },
         .{ "test-h3-blocks", "h3 blocks:", "H3 CUDA checkpoints with missing, gapped or partial blocks refused" },
+        .{ "test-h3-dit-cuda", "h3 cuda loop:", "H3 CUDA denoising loop on the runtime fake against a float64 reference" },
     };
     for (groups) |g| {
         b.step(g[0], g[2]).dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{g[1]} })).step);
@@ -67,6 +68,16 @@ pub fn targets(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) voi
         const lib = b.addLibrary(.{ .name = if (cross) "tf_h3_linux_compile_only" else "tf_h3_host_compile_only", .linkage = .dynamic, .root_module = module(b, target, runtime) });
         compile_step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = "host-checks" } } }).step);
     }
+    const linux = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
+    const dit = ditTool(b, linux, .debug, @import("cuda.zig").runtime(b, linux, .debug, &.{}), b.addWriteFiles().add("h3-compile-only.fatbin", ""));
+    b.step("compile-h3-dit-cuda", "Cross-compile tf-h3-dit-cuda for Linux without NVCC or running it").dependOn(&b.addInstallArtifact(dit, .{ .dest_dir = .{ .override = .{ .custom = "host-checks" } } }).step);
+}
+
+/// tf-h3-dit-cuda (zig/tests/h3_dit_cuda.zig): the denoising loop around the library's blocks, over `image`.
+fn ditTool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, image: std.Build.LazyPath) *std.Build.Step.Compile {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/cuda_loop.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = coreModule(b, target) } } });
+    m.addAnonymousImport("fatbin_h3", .{ .root_source_file = image });
+    return b.addExecutable(.{ .name = "tf-h3-dit-cuda", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_dit_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "h3_cuda_loop", .module = m }} }) });
 }
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module) *std.Build.Module {
@@ -93,6 +104,7 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     }) });
     lib.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = image });
     step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+    b.step("tf-h3-dit-cuda", "tf-h3-dit's denoising loop over the H3 CUDA blocks: a case file's steps to float32 rows").dependOn(&b.addInstallArtifact(ditTool(b, target, optimize, cuda, image), .{}).step);
 }
 
 /// The core module for the CUDA side's checkpoint (h3/checkpoint.zig).

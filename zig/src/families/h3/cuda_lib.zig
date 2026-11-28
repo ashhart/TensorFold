@@ -128,6 +128,7 @@ test "h3 library: timing uses the host monotonic clock" {
 
 test {
     _ = @import("cuda_runtime_test.zig");
+    _ = @import("cuda_loop.zig");
 }
 
 test "h3 library: exported host and device refusals need no CUDA dependencies or caller reads" {
