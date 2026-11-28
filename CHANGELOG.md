@@ -5,10 +5,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Metal: the Qwen4 QSA, Flash Next hybrid HC and Qwen4 PLE source rewrites validate threadgroup reservations across the whole original declaration and refuse conflicts and duplicates; generated shader bytes are unchanged (#5441).
-
+- Metal: Qwen4 QSA, HC and PLE source rewrites validate reservations across the whole original declaration, refusing conflicts and duplicates without changing generated shader bytes.
 - HIP: Inkling 2 Mini's HIP family refuses the serve options it does not support before any load, with host tests; nothing serves Inkling 2 Mini on HIP yet (#5034). Thanks to @AbrahamCete.
-
-
 
 - Tests: the prompt-imprint key-index test starts from an empty temporary directory, so a run interrupted on Windows (which reuses process IDs) no longer leaves a later run a stale starting state (#5406).
 
@@ -34,7 +32,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## 1.3.7
 
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
-- Metal: Qwen4 QSA, HC and PLE source rewrites validate reservations across the whole original declaration, refusing conflicts and duplicates without changing generated shader bytes.
 
 - Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
 
