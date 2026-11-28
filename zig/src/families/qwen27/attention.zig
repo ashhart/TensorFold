@@ -229,8 +229,7 @@ fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
 }
 /// The prompt kernel's threads a group: eight simdgroups, both kernels (attention_prompt*.metal's SG = 8).
 const prompt_threads = 256;
-/// M-RoPE planes are `plane` rows apart; key_row_stride 0 reads mixed K/V, an explicit pitch reads strided K.
-/// Main's looped family may still supply separately unstaged K/V; Qwen27's fused path leaves them in mixed.
+/// M-RoPE planes are `plane` rows apart; explicit key pitches are strided, and loop-only K/V stays separate.
 pub const Preprocess = struct { qg: Ref, mixed: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{}, key_row_stride: u32 = 0, shift: bool = false, rope: @import("yarn.zig").Rope = .plain, key: ?Ref = null, value: ?Ref = null };
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
@@ -314,27 +313,30 @@ pub const Attention = struct {
             for (inputs) |src| try disjoint(dst.ref, dst.bytes, src.ref, src.bytes);
             for (outputs[0..i]) |prior| try disjoint(dst.ref, dst.bytes, prior.ref, prior.bytes);
         }
-        const legacy_prepare = p.key != null or p.shift or switch (p.rope) { .plain => false, .yarn => true };
+        const legacy_prepare = p.key != null or p.shift or switch (p.rope) {
+            .plain => false,
+            .yarn => true,
+        };
         if (legacy_prepare) {
-        e.setPipeline(a.io[7]);
-        bind(e, .{ p.qg, p.q_gain });
-        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.heads, .stride = 2 * g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
-        e.setBuffer(p.norm_q.buffer, p.norm_q.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * g.heads, 1, 1), mtl.Size.of(64, 1, 1));
-        e.setPipeline(a.io[7]);
-        bind(e, .{ key, p.k_gain });
-        e.setValue(if (p.key != null) glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) } else glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .heads = g.kv_heads, .row_stride = keyStride(p), .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
-        e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * g.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
-        e.barrier();
-        for ([_]struct { x: Ref, y: Ref, heads: u32 }{ .{ .x = p.norm_q, .y = p.query, .heads = g.heads }, .{ .x = p.norm_k, .y = p.rotated_key, .heads = g.kv_heads } }) |r| {
-            e.setPipeline(a.io[8]);
-            bind(e, .{ r.x, p.positions });
-            e.setValue(p.rope.apply(.{ .width = g.dim, .heads = r.heads, .rows = p.rows, .rotary = g.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }), 2);
-            e.setBuffer(r.y.buffer, r.y.offset, 3);
-            e.dispatchThreads(mtl.Size.of(g.dim, r.heads, p.rows), mtl.Size.of(32, 1, 1));
-        }
-        e.barrier();
+            e.setPipeline(a.io[7]);
+            bind(e, .{ p.qg, p.q_gain });
+            e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.heads, .stride = 2 * g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
+            e.setBuffer(p.norm_q.buffer, p.norm_q.offset, 3);
+            e.dispatchGroups(mtl.Size.of(p.rows * g.heads, 1, 1), mtl.Size.of(64, 1, 1));
+            e.setPipeline(a.io[7]);
+            bind(e, .{ key, p.k_gain });
+            e.setValue(if (p.key != null) glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) } else glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .heads = g.kv_heads, .row_stride = keyStride(p), .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
+            e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
+            e.dispatchGroups(mtl.Size.of(p.rows * g.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
+            e.barrier();
+            for ([_]struct { x: Ref, y: Ref, heads: u32 }{ .{ .x = p.norm_q, .y = p.query, .heads = g.heads }, .{ .x = p.norm_k, .y = p.rotated_key, .heads = g.kv_heads } }) |r| {
+                e.setPipeline(a.io[8]);
+                bind(e, .{ r.x, p.positions });
+                e.setValue(p.rope.apply(.{ .width = g.dim, .heads = r.heads, .rows = p.rows, .rotary = g.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }), 2);
+                e.setBuffer(r.y.buffer, r.y.offset, 3);
+                e.dispatchThreads(mtl.Size.of(g.dim, r.heads, p.rows), mtl.Size.of(32, 1, 1));
+            }
+            e.barrier();
         } else {
             @import("attention_prepare.zig").encode(mtl.Size, e, a.io[11], p, false);
         }
@@ -377,19 +379,23 @@ pub const Attention = struct {
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
         const e = timing.encoder;
+        const legacy_prepare = p.key != null or p.shift or switch (p.rope) {
+            .plain => false,
+            .yarn => true,
+        };
         if (legacy_prepare) {
-        e.setPipeline(a.io[7]);
-        bind(e, .{ key, p.k_gain });
-        e.setValue(if (p.key != null) glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) } else glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .heads = pg.kv_heads, .row_stride = keyStride(p), .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
-        e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * pg.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
-        e.barrier();
-        e.setPipeline(a.io[8]);
-        bind(e, .{ p.norm_k, p.positions });
-        e.setValue(p.rope.apply(.{ .width = pg.dim, .heads = pg.kv_heads, .rows = p.rows, .rotary = pg.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }), 2);
-        e.setBuffer(p.rotated_key.buffer, p.rotated_key.offset, 3);
-        e.dispatchThreads(mtl.Size.of(pg.dim, pg.kv_heads, p.rows), mtl.Size.of(32, 1, 1));
-        e.barrier();
+            e.setPipeline(a.io[7]);
+            bind(e, .{ key, p.k_gain });
+            e.setValue(if (p.key != null) glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) } else glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .heads = pg.kv_heads, .row_stride = keyStride(p), .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
+            e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
+            e.dispatchGroups(mtl.Size.of(p.rows * pg.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
+            e.barrier();
+            e.setPipeline(a.io[8]);
+            bind(e, .{ p.norm_k, p.positions });
+            e.setValue(p.rope.apply(.{ .width = pg.dim, .heads = pg.kv_heads, .rows = p.rows, .rotary = pg.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }), 2);
+            e.setBuffer(p.rotated_key.buffer, p.rotated_key.offset, 3);
+            e.dispatchThreads(mtl.Size.of(pg.dim, pg.kv_heads, p.rows), mtl.Size.of(32, 1, 1));
+            e.barrier();
         } else {
             @import("attention_prepare.zig").encode(mtl.Size, e, a.io[11], p, true);
         }

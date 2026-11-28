@@ -35,8 +35,8 @@ const Recording = struct {
     pub fn quant(s: *Recording, _: *Recording, weight: Weight, _: Ref, _: ?Ref, _: Ref, _: Ref, _: u32) !void {
         s.add(weight.event);
     }
-    pub fn get(_: *Recording, f: Field) Ref {
-        return .{ .buffer = f };
+    pub fn get(_: *Recording, _: anytype) Ref {
+        return .{};
     }
     pub fn barrier(s: *Recording) void {
         s.add(.barrier);

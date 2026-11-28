@@ -1,6 +1,22 @@
 //! Resolve each specialized Qwen27 stack record to the source its production loader compiles.
 const std = @import("std");
 const sources = @import("kernel_sources");
+const mtl = @import("metal");
+const tf = @import("tensorfold");
+
+pub const Resolved = struct { here: []const u8, pre_m5: []const u8 };
+
+pub fn resolve(a: std.mem.Allocator, device: mtl.Device, name: []const u8, offline: bool) !Resolved {
+    if (std.mem.startsWith(u8, name, "q27 stack ")) {
+        const body = try source(a, name);
+        return .{ .here = body, .pre_m5 = if (offline) body else "" };
+    }
+    const qk = std.mem.startsWith(u8, name, "q27 qk ");
+    const norm = std.mem.indexOf(u8, name, " norm ") != null;
+    const paged = std.mem.indexOf(u8, name, " paged ") != null;
+    const body = if (qk or norm) try a.dupe(u8, tf.qwen27.runtime_sources.glue) else try tf.qwen27.simd_attention.grouped(a, device.tensorUnits(), true, 6, 4, paged);
+    return .{ .here = body, .pre_m5 = if (qk or norm) body else "" };
+}
 pub fn source(a: std.mem.Allocator, name: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, name, "q27 stack qk ")) {
         var words = std.mem.tokenizeScalar(u8, name[13..], ' ');
