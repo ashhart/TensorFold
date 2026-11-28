@@ -128,7 +128,7 @@ pub const Mix = struct {
         return if (j < nb) ref.bf(self.blocks[(j * self.shape.rows + r) * W + col]) else self.part[r * W + col];
     }
 
-    /// tf_ink2_mix_rows' sums: each block's RMS and query dots, a softmax a query, the weighted sum, left in fp32.
+    /// tf_ink2_mix_rows' sums: each block's RMS, query dots of the normed block, a softmax a query, the weighted sum.
     pub fn solve(self: *const Mix, a: std.mem.Allocator, s: Sums, out: []Iv) !void {
         const rows = self.shape.rows;
         const n = self.shape.k;
@@ -146,8 +146,8 @@ pub const Mix = struct {
                 for (terms, 0..) |*t, col| t.* = Iv.of(self.at(j, r, col)).mul(Iv.of(self.at(j, r, col)));
                 rr[j] = ref.rms(s.sum(terms, d, scratch), W, 1e-6);
                 for (0..q) |qi| {
-                    for (terms, 0..) |*t, col| t.* = Iv.of(self.at(j, r, col)).mul(Iv.of(self.query[qi * W + col]));
-                    w[qi][j] = s.sum(terms, d, scratch).mul(rr[j]).mul(root);
+                    for (terms, 0..) |*t, col| t.* = Iv.of(self.at(j, r, col)).mul(rr[j]).mul(Iv.of(self.query[qi * W + col]));
+                    w[qi][j] = s.sum(terms, d, scratch).mul(root);
                 }
             }
             for (0..q) |qi| softmax(w[qi][0..n]);
@@ -313,3 +313,17 @@ pub const Bank = struct {
         };
     }
 };
+
+test "loop mix: a normed source keeps the query dot finite where the raw dot overflows fp32" {
+    const x: f32 = 1e17; // a finite bf16-sized entry, repeated across 64 columns
+    const q: f32 = 1e20;
+    const r = 1 / @sqrt(x * x + 1e-6); // that source's inverse RMS
+    var raw: f32 = 0;
+    var normed: f32 = 0;
+    for (0..64) |_| {
+        raw += x * q; // the old order: the raw dot, normed after
+        normed += q * (x * r); // this order
+    }
+    try std.testing.expect(std.math.isInf(raw));
+    try std.testing.expect(std.math.isFinite(normed));
+}

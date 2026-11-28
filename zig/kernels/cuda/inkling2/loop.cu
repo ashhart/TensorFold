@@ -327,19 +327,26 @@ extern "C" __global__ void __launch_bounds__(kRowThreads) tf_ink2_loop_mix(const
         return a.partial_bf16 ? bf(static_cast<const uint16_t*>(a.partial)[row * C + c])
                               : static_cast<const float*>(a.partial)[row * C + c];
     };
+    // each source's RMS first, then the query dots of the normalized source, as tf_ink2_mix_rows sums them
     for (int j = 0; j < n; ++j) {
-        float v[1 + kMaxQueries] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float s = 0.0f;
         for (int c = threadIdx.x; c < C; c += blockDim.x) {
             const float x = entry(j, c);
-            v[0] += x * x;
-            for (int q = 0; q < a.nq; ++q) v[1 + q] += x * a.query[static_cast<size_t>(q) * C + c];
+            s += x * x;
         }
-        for (int q = 0; q < 1 + kMaxQueries; ++q) v[q] = tf_common::block_sum_tree(v[q], sh, groups);
-        const float r = rsqrtf(v[0] / C + 1e-6f);
-        if (threadIdx.x == 0) {
-            rr[j] = r;
-            for (int q = 0; q < a.nq; ++q) wts[q][j] = v[1 + q] * r * rsqrtf(static_cast<float>(C));
+        s = tf_common::block_sum_tree(s, sh, groups);
+        if (threadIdx.x == 0) rr[j] = rsqrtf(s / C + 1e-6f);
+    }
+    __syncthreads();
+    for (int j = 0; j < n; ++j) {
+        float v[kMaxQueries] = {0.0f, 0.0f, 0.0f};
+        for (int c = threadIdx.x; c < C; c += blockDim.x) {
+            const float normalized = entry(j, c) * rr[j];
+            for (int q = 0; q < a.nq; ++q) v[q] += a.query[static_cast<size_t>(q) * C + c] * normalized;
         }
+        for (int q = 0; q < kMaxQueries; ++q) v[q] = tf_common::block_sum_tree(v[q], sh, groups);
+        if (threadIdx.x == 0)
+            for (int q = 0; q < a.nq; ++q) wts[q][j] = v[q] * rsqrtf(static_cast<float>(C));
     }
     __syncthreads();
     if (threadIdx.x < a.nq) {
