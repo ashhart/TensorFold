@@ -1,10 +1,10 @@
-//! DFlash2 must keep main's single-pass argmax; chunked picks cost an extra launch and scratch round trip.
+//! DFlash2 keeps main's chunked argmax dispatch for large vocabularies.
 const std = @import("std");
 const core = @import("core");
 const metal = @import("metal");
 const Matcher = @import("src/families/qwen27/dflash/round_gpu.zig").Matcher;
 
-test "DFlash2 matcher: its drafted tree keeps one argmax dispatch" {
+test "DFlash2 matcher: its drafted tree keeps main's chunked argmax dispatch" {
     const contract = core.tree_round;
     var ids_storage: [contract.max_rows * 4]u8 align(8) = undefined;
     var parents_storage: [contract.max_rows * 4]u8 align(8) = undefined;
@@ -46,7 +46,8 @@ test "DFlash2 matcher: its drafted tree keeps one argmax dispatch" {
         &.{},
     );
     try std.testing.expectEqual(@as(u32, rows), shape.rows);
-    try std.testing.expectEqual(@as(usize, 2), record.n);
-    try std.testing.expectEqual(@as(metal.Pipeline, 1), record.passes[0].pipe);
-    try std.testing.expectEqual(@as(metal.Pipeline, 2), record.passes[1].pipe);
+    try std.testing.expectEqual(@as(usize, 3), record.n);
+    try std.testing.expectEqual(@as(metal.Pipeline, 3), record.passes[0].pipe);
+    try std.testing.expectEqual(@as(metal.Pipeline, 4), record.passes[1].pipe);
+    try std.testing.expectEqual(@as(metal.Pipeline, 2), record.passes[2].pipe);
 }
