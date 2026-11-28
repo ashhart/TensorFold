@@ -63,7 +63,11 @@ pub const Quiet = struct {
         return false;
     }
 };
-
+fn keyedDraft(s: lanes.Sampling, position: u32, vocab: u32) fwd.Draws {
+    var d: fwd.Draws = .{ .n = 1 };
+    d.rules[0] = @import("draw_rule.zig").draftRule(s, position, vocab);
+    return d;
+}
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -103,6 +107,7 @@ pub const Engine = struct {
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
     dflash: ?*@import("metal_dflash_load.zig").Drafter = null, // --drafter: DFlash2 drafts in place of the MTP head
+    keyed_drafts: bool = true, // a sampled stream's MTP drafts drawn by its keyed rule (TF_GLM_KEYED_DRAFTS=0: argmax)
 
     /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32) !*Engine {
@@ -127,6 +132,7 @@ pub const Engine = struct {
         e.draft_vocab = if (platform.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.committed = 0;
         e.dflash = null;
+        e.keyed_drafts = try platform.environment.read(bool, "TF_GLM_KEYED_DRAFTS", true);
         e.ep = null;
         e.pr = null;
         e.trace_last = null;
@@ -445,7 +451,7 @@ pub const Engine = struct {
             try e.finish(b.cb, b.enc);
             at += n;
         }
-        x.draws = null; // the decode loop re-arms the sampled draw each round; the MTP head drafts greedily
+        x.draws = null; // the decode loop re-arms the target's sampled draw and each MTP draft's rule each round
         e.s.pos = P;
         const t_prompt = platform.c.mach_absolute_time();
         out.prefilled(out.ctx);
@@ -517,11 +523,18 @@ pub const Engine = struct {
             }
             if (d > 0) {
                 const next = if (window == 0) e.sc.next else e.sc.picks;
+                // a sampled reply's draft j drawn by its keyed rule at the row it fills (position pos + j), else argmax
+                const keyed = e.keyed_drafts and e.ep == null and e.sampling != null and e.sampling.?.temperature > 0;
+                var dd: fwd.Draws = .{};
+                if (keyed) x.draft_draws = &dd;
+                defer x.draft_draws = null;
+                if (keyed) dd = keyedDraft(e.sampling.?, e.s.pos + 1, e.draft_vocab);
                 mtp.run(&x, b.enc, e.sc.hidden.at(@as(usize, h0) * D * 2), next, keep, e.s.mtp_pos, if (copied > 0) null else e.sc.ids.at(4));
                 const base = e.s.mtp_pos + keep;
                 if (copied == 0) for (1..d) |j| {
                     const h = if (j == 1) e.sc.m_x.at(@as(usize, keep - 1) * D * 2) else e.sc.m_x;
                     if (e.rank_log) x.m_row = @intCast(j);
+                    if (keyed) dd = keyedDraft(e.sampling.?, e.s.pos + 1 + @as(u32, @intCast(j)), e.draft_vocab);
                     mtp.chain(&x, b.enc, h, e.sc.ids.at(j * 4), base + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
                 };
                 x.m_row = 0;
@@ -529,7 +542,7 @@ pub const Engine = struct {
             }
             const R = if (copied > 0) copied + 1 else d + 1;
             fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
-            // The decode rows draw keyed at their context positions; the MTP head's drafts drew greedily.
+            // The target draws keyed at its context positions; draft_draws already carries each MTP draft's rule.
             x.draws = if (e.sampling) |p| if (p.temperature > 0) blk: {
                 round_draws = fwd.rulesFor(p, e.s.pos + 1, c.vocab, R);
                 break :blk &round_draws;

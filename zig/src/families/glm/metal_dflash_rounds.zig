@@ -494,7 +494,7 @@ pub fn draft(b: *host.Backend, r_: *Rounds, requests: []const be.DraftRequest) a
                 head_of[head_n] = mtp_n;
                 head_n += 1;
             };
-            mtp[mtp_n] = .{ .slot = slots[k], .prompt = req.rows == null, .follow = follow, .depth = d };
+            mtp[mtp_n] = .{ .slot = slots[k], .prompt = req.rows == null, .follow = follow, .depth = d, .sampling = req.stream.sampling };
             mtp_of[k] = mtp_n;
             mtp_n += 1;
         }

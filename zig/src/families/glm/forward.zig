@@ -38,6 +38,7 @@ pub const Ctx = struct {
     draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
     moe_branch: bool = false, // the pending branch is the last MoE block's ye and wts: the next expand combines them
     q_normed: bool = false, // mlaKeys normed the rows' queries into qr (with the cache writes): mlaAttend's projection next
+    draft_draws: ?*const Draws = null, // the MTP head's rows' rules, each keyed where its draft lands (null: argmax)
 };
 
 pub const Inject = struct { rows: Ref, spans: []const Span }; // tower rows: [at,at+n) -> [row,row+n)
@@ -569,7 +570,6 @@ pub fn headWith(x: *const Ctx, e: mtl.ComputeEncoder, hw: wts.Affine, in: Ref, l
     }
     if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
 }
-
 /// A judged window's first `keep` of `rows` in each KDA layer, replayed from the round's entry state on a rejection.
 pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
     keepKdaAt(x, e, 0, rows, keep);

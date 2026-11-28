@@ -12,6 +12,7 @@ const kept_mod = @import("kept.zig");
 const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
 const Fence = @import("../../core/fence.zig").Fence;
+const draw_rule = @import("draw_rule.zig");
 const lanes = @import("lanes");
 const rp = @import("round_prof.zig");
 
@@ -28,7 +29,7 @@ pub const Follow = struct {
 };
 
 /// One stream's head: it absorbs the prompt's last row or the last window's first rows (a next token each), drafts.
-pub const Draft = struct { slot: u32, prompt: bool, follow: []const u32, depth: u32 };
+pub const Draft = struct { slot: u32, prompt: bool, follow: []const u32, depth: u32, sampling: ?lanes.Sampling = null };
 
 pub const Slot = struct {
     s: st.State,
@@ -495,7 +496,9 @@ pub const Slots = struct {
         x.s = lasts[0].s;
         x.segs = lasts[0..drafting];
         mtp.finish(&x, enc, sl.lasts, sl.rows, drafting, 0, true);
-        const y = e.ctx();
+        var y = e.ctx();
+        var dd: fwd.Draws = .{};
+        y.draft_draws = sl.draftDraws(&dd, order[0..drafting], reqs, 0);
         mtp.drafts(&y, enc, e.sc.m_x, drafting, sl.picks);
         sl.hold(enc, order[0..drafting], reqs, 0);
         var level: u32 = 1;
@@ -509,9 +512,25 @@ pub const Slots = struct {
             x.s = segs[0].s;
             x.segs = segs[0..n];
             mtp.layer(&x, enc, e.sc.m_x, sl.picks, n, 0); // the level before's outputs, a prefix
+            y.draft_draws = sl.draftDraws(&dd, order[0..n], reqs, level);
             mtp.drafts(&y, enc, e.sc.m_x, n, sl.picks);
             sl.hold(enc, order[0..n], reqs, level);
         }
+    }
+
+    /// Level `level`'s rules in `order`: a sampled stream's keyed draw at the row its draft fills, else the argmax.
+    fn draftDraws(sl: *const Slots, d: *fwd.Draws, order: []const u32, reqs: []const Draft, level: u32) ?*const fwd.Draws {
+        const e = sl.e;
+        if (!e.keyed_drafts or e.ep != null) return null;
+        var any = false;
+        d.n = order.len;
+        for (order, d.rules[0..order.len]) |k, *rule| { // the window's row keys: the cache's length + 1 + level
+            const r = reqs[k];
+            const p = r.sampling orelse lanes.Sampling{ .seed = 0, .temperature = 0 };
+            rule.* = if (p.temperature > 0) draw_rule.draftRule(p, sl.length(r.slot) + 1 + level, e.draft_vocab) else draw_rule.Rule.greedy(e.draft_vocab);
+            any = any or p.temperature > 0;
+        }
+        return if (any) d else null;
     }
 
     /// Level `level`'s picks (one a stream, in `order`) into each stream's held drafts.

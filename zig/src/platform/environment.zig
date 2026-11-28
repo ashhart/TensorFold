@@ -135,6 +135,7 @@ const stock_rules = [_]Rule{
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "GLM_ROUND_PROF", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: GLM-5.3-Flash's server logs a window and host-phase summary when streams end)" },
     .{ .name = "GLM_DRAFT_HEAD_Q4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 quantizes an 8-bit/64 GLM lm_head into an in-memory 4-bit/64 MTP draft head at load)" },
+    .{ .name = "TF_GLM_KEYED_DRAFTS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 drafts a sampled GLM-5.3-Flash stream's MTP tokens by argmax; default 1, its keyed draw at half its temperature)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
     .{ .name = "TF_FN_GX_GATEUP_MB2", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's grouped gate/up decodes an expert's weights once for two rows; same output bits)" },
     .{ .name = "TF_FN_GX_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next shared rounds use eligible grouped experts with the per-row kernels' bits)" },
