@@ -137,11 +137,13 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (own.ranks) |r| try load_cache.finishAfter(.{ r, std.math.maxInt(u64) }, ranks.Session.room) else load_cache.finish();
     // the weights are in: the n-gram table into the page cache behind them, so the first prompt finds its rows in RAM
     own.engine.ngram.warm();
+    var facts = own.facts();
+    if (own.head != null) facts.draft_kv = .{ .bytes = 2 * @import("cuda_seq_bytes.zig").kvBytes(window, .full), .dtype = .bf16, .scope = .stream_limit };
     return .{
         .layout = own.kv.layout,
         .vision = own.vision,
         .backend = own.backend(),
-        .facts = own.facts(),
+        .facts = facts,
         .rows = if (own.head != null) @intCast(mtp.window()) else 2,
         .prompt_rows = @intCast(own.engine.chunk),
         .stream_bytes = stream_bytes,

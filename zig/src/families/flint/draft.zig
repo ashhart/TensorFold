@@ -99,7 +99,9 @@ pub const Drafter = struct {
     }
     fn facts(ptr: *anyopaque) dr.Facts {
         const d = self(ptr);
-        return .{ .depth = 7, .step_ms = d.step_ms, .batched = true, .stream_bytes = d.streamBytes() };
+        const c = d.model.graph.config;
+        const kv = @as(usize, c.layers) * (c.window + 16) * c.kvWidth() * 4;
+        return .{ .depth = 7, .step_ms = d.step_ms, .batched = true, .draft_kv = .{ .bytes = kv, .dtype = .bf16 }, .stream_bytes = d.streamBytes() };
     }
     fn open(ptr: *anyopaque, s: *lanes.Stream) !void {
         const d = self(ptr);

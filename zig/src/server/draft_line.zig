@@ -3,12 +3,13 @@ const std = @import("std");
 const api = @import("engine_api");
 
 pub fn shown(no_drafts: bool, info: api.Info) Shown {
-    return .{ .off = no_drafts or info.plain_only, .sources = info.draft_sources };
+    return .{ .off = no_drafts or info.plain_only, .sources = info.draft_sources, .kv = info.draft_kv };
 }
 
 const Shown = struct {
     off: bool,
     sources: api.DraftSources,
+    kv: ?api.DraftKv,
 
     pub fn format(s: Shown, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (s.off) return w.writeAll("off");
@@ -25,6 +26,14 @@ const Shown = struct {
         }
         if (s.sources.copies) try w.writeAll(if (head) " + copies" else "copies only");
         if (!head and !s.sources.copies) try w.writeAll("none");
+        if (s.kv) |kv| {
+            const scope = switch (kv.scope) {
+                .stream => "per stream",
+                .stream_limit => "per stream at maximum context",
+                .rank => "per rank",
+            };
+            try w.print(", draft KV {d} bytes, {s}, {s}", .{ kv.bytes, @tagName(kv.dtype), scope });
+        }
     }
 };
 
@@ -33,12 +42,12 @@ fn oneLine(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
 }
 
 test "draft sources: serving line text reflects engine info and off overrides" {
-    const cases = [_]struct { sources: api.DraftSources, no_drafts: bool = false, plain_only: bool = false, text: []const u8 }{
+    const cases = [_]struct { sources: api.DraftSources, no_drafts: bool = false, plain_only: bool = false, kv: ?api.DraftKv = null, text: []const u8 }{
         .{ .sources = .{ .copies = true }, .text = "copies only" },
         .{ .sources = .{ .copies = true, .mtp = true }, .text = "MTP + copies" },
         .{ .sources = .{ .mtp = true }, .text = "MTP" },
         .{ .sources = .{ .copies = true, .drafter = .{ .kind = "DFlash2", .name = "z-lab/Qwen3.8-27B-DFlash2" } }, .text = "DFlash2 (z-lab/Qwen3.8-27B-DFlash2) + copies" },
-        .{ .sources = .{ .drafter = .{ .kind = "DSpark" } }, .text = "DSpark" },
+        .{ .sources = .{ .drafter = .{ .kind = "DSpark" } }, .kv = .{ .bytes = 8192, .dtype = .bf16 }, .text = "DSpark, draft KV 8192 bytes, bf16, per stream" },
         .{ .sources = .{ .drafter = .{ .kind = "EAGLE", .name = "example/draft" } }, .text = "EAGLE (example/draft)" },
         .{ .sources = .{}, .text = "none" },
         .{ .sources = .{ .copies = true, .mtp = true }, .no_drafts = true, .text = "off" },
@@ -47,7 +56,7 @@ test "draft sources: serving line text reflects engine info and off overrides" {
     };
     for (cases) |c| {
         var buf: [256]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buf, "{f}", .{shown(c.no_drafts, .{ .plain_only = c.plain_only, .draft_sources = c.sources })});
+        const text = try std.fmt.bufPrint(&buf, "{f}", .{shown(c.no_drafts, .{ .plain_only = c.plain_only, .draft_sources = c.sources, .draft_kv = c.kv })});
         try std.testing.expectEqualStrings(c.text, text);
     }
 }

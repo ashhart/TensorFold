@@ -287,7 +287,7 @@ pub const Drafter = struct {
 
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = d.config.block - 1, .step_ms = d.step_ms, .plain_guard = true, .batched = true, .stream_bytes = d.laneBytes() };
+        return .{ .depth = d.config.block - 1, .step_ms = d.step_ms, .plain_guard = true, .batched = true, .draft_kv = .{ .bytes = d.laneBytes(), .dtype = .bf16 }, .stream_bytes = d.laneBytes() };
     }
 
     fn newLane(d: *Drafter) !*Lane {

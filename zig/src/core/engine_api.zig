@@ -108,8 +108,11 @@ pub const CudaPoolSizing = struct {
     page_tokens: u32,
 };
 
+pub const DraftKv = lanes.config.DraftKv;
+
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
+    draft_kv: ?DraftKv = null,
     /// The loaded world; multi-rank engines override the local engine's one before publication.
     benchmark_ranks: ?u32 = 1,
     /// Frozen public startup inventory, owned by the engine; never invokes an HTTP-thread collective.

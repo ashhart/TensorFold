@@ -1,6 +1,7 @@
 //! The DFlash2 drafter for slot 0 of the lane backend, which borrows the target model and its runner.
 const std = @import("std");
 const mtl = @import("metal");
+const api = @import("engine_api");
 const q = @import("tensorfold").qwen27;
 const df = q.dflash;
 pub const Draft = struct {
@@ -78,3 +79,12 @@ pub const Draft = struct {
         d.gpa.destroy(d);
     }
 };
+
+/// Draft-model KV metadata for startup and status routes; reads only loaded dimensions.
+pub fn draftKv(draft: ?*df.runtime_model.Model, mtp: bool, head_kv: usize) ?api.DraftKv {
+    if (draft) |d| {
+        const c = d.graph.config;
+        return .{ .bytes = @as(usize, c.layers) * (c.window + 16) * c.kvWidth() * 4, .dtype = .bf16 };
+    }
+    return if (mtp) .{ .bytes = head_kv, .dtype = .bf16 } else null;
+}

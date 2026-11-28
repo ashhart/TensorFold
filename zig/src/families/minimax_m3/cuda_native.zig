@@ -249,9 +249,11 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (own.link) |*l| l.asleep = cuda.tp_watch.open();
     own.lanes = .{ .x = .{ .e = own.e, .link = if (own.link) |*l| l else null } };
     own.lanes.priority_copies = priority_copies;
+    var facts = own.lanes.facts();
+    facts.draft_kv = if (own.e.drafter) |d| .{ .bytes = @import("cuda_dspark.zig").Caches.bytes(d.w.c.layers, own.e.share.kv.len(), own.e.capacity), .dtype = .bf16 } else null;
     return .{
         .backend = own.lanes.backend(),
-        .facts = own.lanes.facts(),
+        .facts = facts,
         .rows = mm_lanes.max_rows,
         .stream_bytes = own.e.seqBytes(),
         .free_streams = 1,

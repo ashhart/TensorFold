@@ -16,7 +16,7 @@ pub fn Adapter(comptime Mtp: type) type {
 
         pub fn facts(p: *anyopaque) dr.Facts {
             const d = cast(p);
-            return .{ .limit_shared_drafts = true, .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .stream_bytes = d.stream_bytes, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
+            return .{ .limit_shared_drafts = true, .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .draft_kv = .{ .bytes = d.ringBytes(), .dtype = .bf16 }, .stream_bytes = d.stream_bytes, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
         }
     };
 }

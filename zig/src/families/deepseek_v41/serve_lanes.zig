@@ -58,6 +58,7 @@ pub const Model = struct {
     close: *const fn (ptr: *anyopaque) void,
     /// image input (the lanes' Info.vision); null: text only
     vision: ?api.Vision = null,
+    draft_kv: ?api.DraftKv = null,
     /// the device and weights a stored cost table is specific to (0: none named)
     calib_id: u64 = 0,
     /// the calibration knobs (null: TF_DSV41_CALIB / _DIR / _FILE and HOME, as read at open)
@@ -173,7 +174,7 @@ pub const Served = struct {
         s.clock = .{ .io = io };
         s.core = lanes.Engine.init(gpa, &s.cfg, s.x.backend(), s.clock.clock());
         s.x.attach(&s.core);
-        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = backend.name, .lanes = backend.slots, .context_window = @intCast(window), .prefill_step = backend.prefill_step, .vision = backend.vision, .decode_share = backend.decode_share });
+        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = backend.name, .draft_kv = backend.draft_kv, .lanes = backend.slots, .context_window = @intCast(window), .prefill_step = backend.prefill_step, .vision = backend.vision, .decode_share = backend.decode_share });
         applyShare(&s.host, backend);
         if (backend.steps) std.log.info("dsv41 prompts: {d} rows a step between the other streams' rounds, prompts {d:.2} of wall time beside replies", .{ backend.prefill_step, s.host.share.p });
         s.host.info_.draft_sources = draftSources(dspark_on, s.cfg.max_copy > 0);

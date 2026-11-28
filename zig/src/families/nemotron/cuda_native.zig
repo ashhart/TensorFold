@@ -166,10 +166,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
     own.taps = .{engine.finalTap(e.c)};
+    var facts = own.lanes.facts();
+    facts.draft_kv = if (head) |h| .{ .bytes = 2 * h.kvBytes(), .dtype = .bf16 } else null;
     return .{
         .backend = own.lanes.backend(),
-        .facts = own.lanes.facts(),
-        .rows = own.lanes.facts().exact_width,
+        .facts = facts,
+        .rows = facts.exact_width,
         .stream_bytes = e.seqBytes(),
         .ctx = own,
         .deinit = release,

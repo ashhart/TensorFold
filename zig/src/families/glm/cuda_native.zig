@@ -118,9 +118,10 @@ pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32, planned: ?kv.Bud
 pub fn priceWindows(p: *anyopaque, io: std.Io, ctx: *const cuda.Context, dir: []const u8, facts: lanes.Model) !lanes.Model {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.lanes.costs = try @import("cuda_lane_costs.zig").price(own.gpa, io, ctx, dir, own.lanes.x) orelse return facts;
-    return own.lanes.factsWithCopies(own.copies);
+    var repriced = own.lanes.factsWithCopies(own.copies);
+    repriced.draft_kv = facts.draft_kv;
+    return repriced;
 }
-
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const own: *Owned = @ptrCast(@alignCast(p));
@@ -360,10 +361,12 @@ fn finishRank(a: OpenArgs) !Loaded {
         own.e.share_pages = true;
         l.snap_bytes = pages_mod.shareSlot(own.e);
     };
+    var facts = own.lanes.factsWithCopies(own.copies);
+    facts.draft_kv = if (own.e.drafter != null) .{ .bytes = dflash.ring_bytes, .dtype = .bf16 } else if (own.e.mtp) @import("cuda_state.zig").mtpKv(own.e.capacity, own.e.w.config.latentRow(), own.e.settings.kv8) else null;
     return .{
         .draft_kind = if (own.e.drafter != null) "DFlash2" else null,
         .backend = @import("cuda_prompt_cuts.zig").declared(own.lanes.backend(), own.e.c.dsa),
-        .facts = own.lanes.factsWithCopies(own.copies),
+        .facts = facts,
         .rows = glm_lanes.max_rows,
         .stream_bytes = own.e.seqBytes() + extra, // each stream past the first makes its own sequence on every rank
         .free_streams = 1, // the first is the sequence the engine made
