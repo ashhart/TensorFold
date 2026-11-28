@@ -132,9 +132,10 @@ pub fn matScales(r: usize, c: usize) Error!usize {
     return try mul(r / 128, c / 128);
 }
 
-/// One dense tensor's record: a 4 or 5 bit width, whole 128 blocks, 4-bit words uint4-aligned, inside both sections.
-pub fn tensor(m: NonMoeTensorMeta, words: usize, halfs: usize) Error!void {
-    if (m.b_bits != 4 and m.b_bits != 5) return error.Tfq3Bits;
+/// One dense tensor's record and extents. Generic inspection also admits 3-bit; the GLM loader stays 4/5-bit.
+pub fn tensorPolicy(m: NonMoeTensorMeta, words: usize, halfs: usize, allow_3bit: bool) Error!void {
+    const min_bits: u32 = if (allow_3bit) 3 else 4;
+    if (m.b_bits < min_bits or m.b_bits > 5) return error.Tfq3Bits;
     if (m.R == 0 or m.C == 0 or m.R % 128 != 0 or m.C % 128 != 0) return error.Tfq3Geometry;
     if (m.nameSlice().len == 0) return error.Tfq3Geometry;
     if (try cast(m.word_count) != try matWords(m.R, m.C, m.b_bits)) return error.Tfq3Geometry;
@@ -144,35 +145,56 @@ pub fn tensor(m: NonMoeTensorMeta, words: usize, halfs: usize) Error!void {
     if (try add(m.sc_off, try matScales(m.R, m.C)) > halfs) return error.Tfq3Truncated;
 }
 
-/// nonmoe.tffpw: its header, records, and both GPU sections, before any of them is read through a pointer.
-pub fn nonMoe(bytes: []const u8) Error!NonMoeLayout {
-    const h = try read(NonMoeHeader, bytes, 0);
+/// The GLM loader's dense record policy, deliberately unchanged: only 4 and 5-bit matrices.
+pub fn tensor(m: NonMoeTensorMeta, words: usize, halfs: usize) Error!void {
+    return tensorPolicy(m, words, halfs, false);
+}
+
+/// The dense shard header and sections, without requiring the shard body to be resident in memory.
+pub fn nonMoeHeader(head: []const u8, file_len: usize, words_out: *usize, halfs_out: *usize) Error!NonMoeLayout {
+    const h = try read(NonMoeHeader, head, 0);
     if (h.magic != magic_nonmoe or h.version != format_version) return error.UnsupportedQuantization;
     if (h.num_tensors == 0) return error.Tfq3Geometry;
-    const metas = try span(bytes.len, h.off_meta, try mul(h.num_tensors, @sizeOf(NonMoeTensorMeta)), false);
+    const metas = try span(file_len, h.off_meta, try mul(h.num_tensors, @sizeOf(NonMoeTensorMeta)), false);
     if (metas.off % @alignOf(NonMoeTensorMeta) != 0) return error.Tfq3Misaligned;
     const halfs = try cast(h.total_scale_halfs);
     const words = try cast(h.total_weight_words);
+    words_out.* = words;
+    halfs_out.* = halfs;
     const out: NonMoeLayout = .{
         .metas = metas,
         .count = h.num_tensors,
-        .scales = try span(bytes.len, h.off_scales, try mul(halfs, 2), true),
-        .weights = try span(bytes.len, h.off_weights, try mul(words, 4), true),
+        .scales = try span(file_len, h.off_scales, try mul(halfs, 2), true),
+        .weights = try span(file_len, h.off_weights, try mul(words, 4), true),
     };
     try disjoint(@sizeOf(NonMoeHeader), &.{ out.metas, out.scales, out.weights });
-    for (0..out.count) |i| try tensor(try read(NonMoeTensorMeta, bytes, metas.off + i * @sizeOf(NonMoeTensorMeta)), words, halfs);
+    return out;
+}
+
+/// Every dense metadata record, selected by either the generic inspector's or the GLM loader's bit policy.
+pub fn nonMoeRecords(meta: []const u8, l: NonMoeLayout, words: usize, halfs: usize, allow_3bit: bool) Error!void {
+    if (meta.len < l.metas.len) return error.Tfq3Truncated;
+    for (0..l.count) |i| try tensorPolicy(try read(NonMoeTensorMeta, meta, i * @sizeOf(NonMoeTensorMeta)), words, halfs, allow_3bit);
+}
+
+/// nonmoe.tffpw: its header, records, and both GPU sections, before any of them is read through a pointer.
+pub fn nonMoe(bytes: []const u8) Error!NonMoeLayout {
+    var words: usize = undefined;
+    var halfs: usize = undefined;
+    const out = try nonMoeHeader(bytes, bytes.len, &words, &halfs);
+    try nonMoeRecords(bytes[out.metas.off..][0..out.metas.len], out, words, halfs, false);
     return out;
 }
 
 /// What the checkpoint expects of layer `layer`'s file.
 pub const LayerWant = struct { layer: usize, experts: usize, hidden: usize, inter: usize };
 
-/// layer_NN.tffpw's checked layout, and whether any expert is 5-bit (the routed kernels' specialization).
-pub const LayerLayout = struct { meta: Span, scales: Span, weights: Span, has_5b: bool };
+/// layer_NN.tffpw's checked layout and section extents.
+pub const LayerLayout = struct { meta: Span, scales: Span, weights: Span, words: usize, halfs: usize, has_5b: bool };
 
-/// layer_NN.tffpw: index, experts and widths against `want`; every expert's three projections inside both sections.
-pub fn layer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
-    const h = try read(LayerHeader, bytes, 0);
+/// The routed header and sections, checked against a filename-selected layer without loading the shard body.
+pub fn layerHeader(head: []const u8, file_len: usize, want: LayerWant) Error!LayerLayout {
+    const h = try read(LayerHeader, head, 0);
     if (h.magic != magic_layer or h.version != format_version) return error.UnsupportedQuantization;
     if (h.layer_idx != want.layer or h.num_experts != want.experts or h.hidden_size != want.hidden or h.moe_inter != want.inter) return error.Tfq3Layer;
     if (h.num_experts == 0 or h.num_tensors != try mul(h.num_experts, 3)) return error.Tfq3Geometry;
@@ -180,30 +202,41 @@ pub fn layer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
     const words = try cast(h.stream_words);
     const halfs = try cast(h.scale_halfs);
     const out: LayerLayout = .{
-        .meta = try span(bytes.len, h.off_meta, try mul(h.num_experts, @sizeOf(ExpertMeta)), false),
-        .scales = try span(bytes.len, h.off_scales, try mul(halfs, 2), true),
-        .weights = try span(bytes.len, h.off_weights, try mul(words, 4), true),
+        .meta = try span(file_len, h.off_meta, try mul(h.num_experts, @sizeOf(ExpertMeta)), false),
+        .scales = try span(file_len, h.off_scales, try mul(halfs, 2), true),
+        .weights = try span(file_len, h.off_weights, try mul(words, 4), true),
+        .words = words,
+        .halfs = halfs,
         .has_5b = false,
     };
     if (out.meta.off % @alignOf(ExpertMeta) != 0) return error.Tfq3Misaligned;
     try disjoint(@sizeOf(LayerHeader), &.{ out.meta, out.scales, out.weights });
-    var has_5b = false;
-    for (0..h.num_experts) |e| {
-        const m = try read(ExpertMeta, bytes, out.meta.off + e * @sizeOf(ExpertMeta));
+    return out;
+}
+
+/// Every routed expert record in a streamed metadata section.
+pub fn layerExperts(meta: []const u8, l: *LayerLayout, experts: usize, hidden: usize, inter: usize) Error!void {
+    if (meta.len < l.meta.len) return error.Tfq3Truncated;
+    for (0..experts) |e| {
+        const m = try read(ExpertMeta, meta, e * @sizeOf(ExpertMeta));
         if (m.b_bits < 3 or m.b_bits > 5) return error.Tfq3Bits;
-        has_5b = has_5b or m.b_bits == 5;
-        const io = [3][2]usize{ .{ h.moe_inter, h.hidden_size }, .{ h.moe_inter, h.hidden_size }, .{ h.hidden_size, h.moe_inter } };
+        l.has_5b = l.has_5b or m.b_bits == 5;
+        const io = [3][2]usize{ .{ inter, hidden }, .{ inter, hidden }, .{ hidden, inter } };
         const w_offs = [3]u64{ m.gate_word_off, m.up_word_off, m.down_word_off };
         const s_offs = [3]u32{ m.gate_sc_off, m.up_sc_off, m.down_sc_off };
         for (io, w_offs, s_offs) |rc, wo, so| {
-            if (m.b_bits == 4 and wo % 4 != 0) return error.Tfq3Misaligned; // moe_mv and prefill read 4-bit as uint4
-            if (try add(try cast(wo), try matWords(rc[0], rc[1], m.b_bits)) > words) return error.Tfq3Truncated;
-            if (try add(so, try matScales(rc[0], rc[1])) > halfs) return error.Tfq3Truncated;
+            if (m.b_bits == 4 and wo % 4 != 0) return error.Tfq3Misaligned;
+            if (try add(try cast(wo), try matWords(rc[0], rc[1], m.b_bits)) > l.words) return error.Tfq3Truncated;
+            if (try add(so, try matScales(rc[0], rc[1])) > l.halfs) return error.Tfq3Truncated;
         }
     }
-    var with = out;
-    with.has_5b = has_5b;
-    return with;
+}
+
+/// layer_NN.tffpw: index, experts and widths against `want`; every expert's three projections inside both sections.
+pub fn layer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
+    var out = try layerHeader(bytes, bytes.len, want);
+    try layerExperts(bytes[out.meta.off..][0..out.meta.len], &out, want.experts, want.hidden, want.inter);
+    return out;
 }
 
 /// Whether a named record serves the model's [all, k] tensor read whole from row lo, x rows: else a named refusal.

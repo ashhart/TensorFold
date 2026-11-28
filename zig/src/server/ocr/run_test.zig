@@ -7,6 +7,7 @@ const run = @import("run.zig");
 const types = @import("types.zig");
 const budget = @import("budget.zig");
 const harness = @import("harness_test.zig");
+const log = @import("../log.zig");
 const picture = @import("core").picture;
 const t = std.testing;
 const Allocator = std.mem.Allocator;
@@ -436,4 +437,54 @@ test "ocr mistral: a page past the decoded-pixel limit answers 400 with the deco
     try t.expectEqual(@as(u16, 400), status);
     try t.expectEqualStrings(picture.problem(error.Oversized), r.get("detail").?.array[0].strField("msg").?);
     try t.expectEqual(@as(usize, 0), h.next);
+}
+
+const private_marker = "CONFIDENTIAL-OCR-DOCUMENT-MARKER";
+const LogCapture = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    fn line(ctx: *anyopaque, message: []const u8) void {
+        const c: *LogCapture = @ptrCast(@alignCast(ctx));
+        c.bytes.appendSlice(t.allocator, message) catch {};
+    }
+    fn start(c: *LogCapture) void {
+        log.Test.sink = .{ .ctx = c, .call = line };
+    }
+    fn deinit(c: *LogCapture) void {
+        log.Test.sink = null;
+        c.bytes.deinit(t.allocator);
+    }
+};
+
+fn expectGeneratedLog(script: harness.Script, message: []const u8, suffix: []const u8, confidential: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: Harness = .{ .replies = &.{script} };
+    try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .confidential = confidential });
+    defer h.stop();
+    var capture: LogCapture = .{};
+    defer capture.deinit();
+    capture.start();
+    var seen: Seen = .{};
+    var fault: types.Fault = undefined;
+    try t.expectError(error.Faulted, run.run(h.srv, a, &.{try imageSource(a, 8, 8)}, seen.sink(), &fault, Gone{}));
+    try t.expectEqual(types.Class.unreadable, fault.class);
+    try t.expectEqualStrings(message, fault.message);
+    const logged = capture.bytes.items;
+    if (confidential) {
+        try t.expect(std.mem.indexOf(u8, logged, private_marker) == null);
+        try t.expect(std.mem.endsWith(u8, logged, suffix));
+    } else try t.expect(std.mem.indexOf(u8, logged, private_marker) != null);
+}
+
+test "ocr confidential logging: generated document text never appears, ordinary diagnostics stay detailed" {
+    const cases = [_]struct { script: harness.Script, message: []const u8, suffix: []const u8 }{
+        .{ .script = .{ .text = "!" ++ private_marker }, .message = "page 0: the model's output does not follow its format", .suffix = ": page 0: the model's output does not follow its format\n" },
+        .{ .script = .{ .text = "text nan 0 0 1 1\n" ++ private_marker }, .message = "page 0: the model's output has a box that is not finite", .suffix = ": page 0: a box is not finite\n" },
+        .{ .script = .{ .text = private_marker, .reason = .length }, .message = "page 0: the model's output was cut at the context limit", .suffix = ": page 0: the model's output was cut at the context limit\n" },
+    };
+    for (cases) |c| {
+        try expectGeneratedLog(c.script, c.message, c.suffix, true);
+        try expectGeneratedLog(c.script, c.message, c.suffix, false);
+    }
 }
