@@ -28,7 +28,7 @@ pub fn run(h: *LaneHost) void {
 fn loop(comptime memory: bool, h: *LaneHost) void {
     while (true) {
         @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
-        var activity = @import("lane_activity.zig").Activity.enter(h.activity);
+        var activity = @import("lane_activity.zig").Work.enter(h);
         defer activity.end();
         ends.takeCancels(h);
         pressure.step(h);

@@ -43,6 +43,8 @@ pub const inkling2_dspark_host = @import("families/inkling2/metal/dspark_kernels
 pub const inkling2_dflash2_host = @import("families/inkling2/metal/dflash2_kernels.zig");
 pub const segments = @import("core/segments.zig");
 pub const prompt_tail = @import("core/prompt_tail.zig");
+/// A lane host's stall sentinel (--stall-seconds): the server reaches it as core.stall_timeout here too.
+pub const stall_timeout = @import("core/stall_timeout.zig");
 pub const row_projection = @import("core/row_projection.zig");
 pub const frags = @import("core/frags.zig");
 pub const rope_yarn = @import("core/rope_yarn.zig");

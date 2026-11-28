@@ -114,6 +114,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     salts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "salts:", "salts per key:", "two salts never", "a salted text prompt", "the routes:", "cache salt isolation:" } })).step);
     salts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{ "one salt keeps", "the disk store keeps salted", "a salted request neither" } })).step);
     b.step("test-ocr-host", "OCR route readers, shared page steps and dialects without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"ocr "} })).step);
+    const stall = b.step("test-lane-stall-host", "--stall-seconds: blocked lane health, admission, recovery and exit, and SSE keepalives, without a device");
+    stall.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "lane sentinel", "a silent engine" } })).step);
+    stall.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"lane sentinel"} })).step);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     // the 512 KiB grammar limit: a sent grammar by its text, tools by the grammar for one call (#3038)
     b.step("test-grammar-size-host", "Grammar and tool size limits before compiling, with the fake grammar library").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "a grammar over the size limit", "tools count once" } })).step);

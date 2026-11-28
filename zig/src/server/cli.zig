@@ -40,6 +40,8 @@ pub const flags = [_]Flag{
     .{ .name = "--allowed-host", .kind = .append, .native = true },
     .{ .name = "--allowed-origin", .kind = .append, .native = true },
     .{ .name = "--cors-origin", .kind = .append, .native = true },
+    .{ .name = "--stall-seconds", .native = true },
+    .{ .name = "--stall-exit", .kind = .store_true, .native = true },
     .{ .name = "--allowed-controls", .native = true },
     .{ .name = "--port", .native = true },
     .{ .name = "--config", .native = true }, // a TOML file of these flags, read first (cli_config.zig)
@@ -234,13 +236,13 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});
     try ranks(u, a, out);
-    out.silence.validate() catch |err|
-        return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
+    out.silence.validate() catch |err| return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
     out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     if (out.vision_pdf and !out.vision) return fail(u, a, "--vision-pdf needs --vision", .{});
     if (out.vision_image_share != .request and !out.vision) return fail(u, a, "--vision-image-share needs --vision", .{});
     try @import("cli_late.zig").check(a, out, &repeated, u);
+    if (out.stall_exit and out.stall_ns == 0) return fail(u, a, "--stall-exit needs --stall-seconds greater than 0", .{});
     out.alias = repeated.alias.items;
     out.name_priority = repeated.priorities.items;
     out.api_key = repeated.keys.items;
@@ -344,8 +346,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     if (is(name, "--profile")) {
         if (is(v, "fast-exact")) return fail(u, a, "argument --profile: fast-exact is not yet qualified: it needs solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower", .{});
         if (is(v, "fast")) return fail(u, a, "argument --profile: fast is not planned: a speed mode that changes output tokens is not shipped, so the arithmetic class has no profile to join", .{});
-        out.profile = std.meta.stringToEnum(api.profile.Profile, v) orelse
-            return fail(u, a, "argument --profile: unknown profile '{s}': stable is the only served profile", .{v});
+        out.profile = std.meta.stringToEnum(api.profile.Profile, v) orelse return fail(u, a, "argument --profile: unknown profile '{s}': stable is the only served profile", .{v});
         return;
     }
     if (is(name, "--max-frames")) {
@@ -360,7 +361,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--listen-fd")) out.listen_fd = try int(u, a, name, v) else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--log-json")) out.log_json = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
+    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--listen-fd")) out.listen_fd = try int(u, a, name, v) else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--stall-exit")) out.stall_exit = true else if (is(name, "--stall-seconds")) out.stall_ns = @import("core").stall_timeout.timeoutNs(v) catch return fail(u, a, "argument --stall-seconds: expected whole seconds from 0 (off) without overflow: '{s}'", .{v}) else if (is(name, "--log-json")) out.log_json = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
     } else if (is(name, "--prompt-cache-disk")) {
