@@ -3,6 +3,7 @@ const std = @import("std");
 const nemo = @import("tensorfold").nemotron;
 const living = @import("living");
 const registration = @import("metal_slide.zig");
+const api = @import("engine_api");
 
 test "Metal learner: Nemotron keeps its backend, adapter hooks and initial lesson mode" {
     const a = std.testing.allocator;
@@ -56,4 +57,43 @@ test "Metal learner: descriptor widths match Nemotron's existing mixed-width adm
     const got = (try living.widths.other(a, living.families.nemotron_h, doc.object)).?;
     try std.testing.expectEqualStrings("backbone.embeddings", got.name);
     try std.testing.expectEqual(@as(u8, 8), got.quant.bits);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+/// `name` set to `value` (null: unset); what it was, copied first, so a deferred call puts it back.
+fn setTo(a: std.mem.Allocator, name: [:0]const u8, value: ?[:0]const u8) !?[:0]const u8 {
+    const before: ?[:0]const u8 = if (std.c.getenv(name)) |v| try a.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    _ = if (value) |v| setenv(name, v, 1) else unsetenv(name);
+    return before;
+}
+
+test "slide admission: TF_KV_SHARE refuses Nemotron's --learn by name before any load or learned folder" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const open = @import("metal.zig").open;
+    const refusal = @import("tensorfold").kv_prompts.learnRefusal;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const learned = try std.fs.path.join(a, &.{ try tmp.dir.realPathFileAlloc(io, ".", a), "learned" });
+    const share_was = try setTo(a, "TF_KV_SHARE", "4");
+    defer _ = setTo(a, "TF_KV_SHARE", share_was) catch null;
+    const pages_was = try setTo(a, "TF_NEMOTRON_METAL_KV_PAGES", "1");
+    defer _ = setTo(a, "TF_NEMOTRON_METAL_KV_PAGES", pages_was) catch null;
+    const missing = "missing-kv-share-checkpoint";
+    for ([_]bool{ false, true }) |talks| {
+        var why: []const u8 = "";
+        const o: api.Open = .{ .dir = missing, .model_type = "nemotron_h", .learn = learned, .learn_conversations = talks };
+        try std.testing.expect((try open(a, std.testing.allocator, io, o, &why)) == null);
+        try std.testing.expectEqualStrings(refusal(true, talks).?, why); // not the load's failure: no load ran
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "learned", .{}));
+    }
+    // control: without TF_KV_SHARE the same start reaches the load, which fails on the missing checkpoint
+    _ = try setTo(a, "TF_KV_SHARE", null);
+    var why: []const u8 = "";
+    try std.testing.expect((try open(a, std.testing.allocator, io, .{ .dir = missing, .model_type = "nemotron_h", .learn = learned }, &why)) == null);
+    try std.testing.expectStringStartsWith(why, "the native engine cannot load " ++ missing);
 }

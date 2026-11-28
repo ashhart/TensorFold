@@ -107,6 +107,8 @@ pub const Query = struct {
         return q;
     }
 };
+/// What a `clear` dropped: the states and the bytes of their pages and snapshots.
+pub const Cleared = struct { states: usize, bytes: u64 };
 /// A paged store's `keep`: whether the mark holds a state, and how many leading ids the stream swaps for the store's.
 pub const Kept = struct { held: bool, shared: usize };
 
@@ -196,6 +198,24 @@ pub const Store = struct {
     pub fn deinit(s: *Store) void {
         s.shared_keys.deinit(s.tree.gpa);
         s.tree.deinit();
+    }
+
+    /// Every kept state and page dropped (a flush, or weights that moved): what it held, as `report` counts it.
+    pub fn clear(s: *Store) Cleared {
+        return s.flush(0) catch unreachable;
+    }
+
+    pub fn canFlush(s: *const Store, retain: u32) bool {
+        return retain == 0 or !s.page_only;
+    }
+
+    /// A flush keeps the newest complete states and every prefix page they need; called only between passes.
+    pub fn flush(s: *Store, retain: u32) error{UnsupportedRetain}!Cleared {
+        if (!s.canFlush(retain)) return error.UnsupportedRetain;
+        const before: Cleared = .{ .states = s.tree.snaps, .bytes = s.tree.held() };
+        @import("prompt_radix_flush.zig").retain(&s.tree, retain);
+        s.shared_keys.clearRetainingCapacity();
+        return .{ .states = before.states - s.tree.snaps, .bytes = before.bytes - s.tree.held() };
     }
 
     /// The tree may hold `limits` from now on: what passes them goes first.

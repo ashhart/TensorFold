@@ -54,6 +54,9 @@ pub fn step(h: *LaneHost) void {
     }
     const s = learner.step(learner.ctx);
     if (s.changed) if (h.cache) |store| store.clear();
+    if (s.changed) if (h.disk.shared) |store| {
+        _ = store.clear(); // TF_KV_SHARE's pages and states, from the old weights
+    };
     h.lesson_open = !s.done;
     // learn requests still come in, so the learner can try the put-back again; replies wait for it
     h.mutex.lockUncancelable(h.io);

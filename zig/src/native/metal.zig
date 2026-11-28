@@ -19,14 +19,14 @@ const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
-const nemo_disk = @import("nemotron_disk.zig");
+const prompt_pages = @import("cuda_prompt_pages.zig"); // the family-side store adapter, over the core pool as on CUDA
 const fsr_options = @import("fsr_options.zig");
 const linkProblem = @import("metal_link.zig").problem;
 const metal_shared = @import("metal_shared.zig");
 pub const chip = metal_shared.chip;
 pub const deviceName = metal_shared.deviceName;
 const prefillStep = metal_shared.prefillStep;
-const modelContext = metal_shared.modelContext;
+const modelContext = @import("cuda_window.zig").modelContext; // the window from config.json, as CUDA reads it
 const gibBytes = metal_shared.gibBytes;
 pub const backends: []const []const u8 = &.{"metal"};
 /// `tensorfold device`: the share of RAM the load limit grants (cache_fit's ceiling).
@@ -97,6 +97,7 @@ const Host = struct {
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
+    prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: prompts kept as the pool's pages (no `cache` then)
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?metal_slide.Registration = null, // Sliding Weights' learner, with --slide
     folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v3 controller
@@ -124,6 +125,7 @@ const Host = struct {
         if (h.cache) |*store| store.deinit();
         if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
         if (h.learned) |*m| m.deinit();
+        if (h.prompts) |x| x.close(); // the store's pages back before the pool goes
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         nemotron.residency.drop(h);
@@ -182,6 +184,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (o.slide and mem_ctrl.useLegacyPocket()) if (try metal_slide.refusal(nemotron, a, io, o)) |why| {
+        problem.* = why;
+        return null;
+    };
+    if (nemotron.kv_pages.on() and try tf.kv_prompts.sharing() > 0) if (tf.kv_prompts.learnRefusal(o.learn != null, o.learn_conversations)) |why| {
         problem.* = why;
         return null;
     };
@@ -246,14 +252,21 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return e;
     };
     h.host.info_.prompt_cache_plan = plan;
-    if (plan.budget_bytes > 0) {
+    const share = paged != null and try tf.kv_prompts.sharing() > 0; // TF_KV_SHARE: prompts kept as pool pages
+    h.prompts = null;
+    if (share and plan.budget_bytes > 0) {
+        h.prompts = try prompt_pages.Adapter.openOnGrid(nemotron.snapshot.Shared, gpa, h.metal, @intCast(paged.?.layout.page_tokens), @intCast(h.metal.o.chunk), a, problem);
+        h.host.disk.shared = &h.prompts.?.store; // flushes, imprint asks and moved weights reach its states
+        h.host.info_.prompt_cache = true;
+    } else if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
         const L = nemotron.learned_prompts;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &nemo_disk.image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &@import("nemotron_disk.zig").image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
+    errdefer if (h.prompts) |x| x.close();
     h.learned = null;
     if (o.learn) |root| {
         const id = @import("metal_identity.zig").learned(a, io, o.dir, h.metal) catch |e| {
@@ -328,16 +341,10 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
 }
 
-pub const Qwen27Budget = @import("qwen27_reserve.zig").Budget;
-/// What a Qwen3.8-27B-class start keeps free of its working set.
-pub const qwen27_margin = tf.qwen27.prompt_memory.margin;
-
-/// `serve`'s startup charge for a Qwen3.8-27B-class `dir` (no drafter or images); null for others or a refused context.
-pub fn qwen27Budget(a: Allocator, io: std.Io, t: []const u8, dir: []const u8, weights: u64, context: ?i64, streams: u32, fixed: bool, problem: *[]const u8) !?Qwen27Budget {
-    if (!q27_eng.ownsQwen27(a, io, t, dir)) return null;
-    const n = try q27_eng.qwen27Context(a, context, problem) orelse return null;
-    return try @import("qwen27_reserve.zig").budget(a, io, dir, weights, n, streams, fixed);
-}
+const metal_qwen27 = @import("metal_qwen27.zig");
+pub const Qwen27Budget = metal_qwen27.Qwen27Budget;
+pub const qwen27_margin = metal_qwen27.qwen27_margin;
+pub const qwen27Budget = metal_qwen27.qwen27Budget;
 
 /// Qwen3.8-27B, Qwen3.5-MoE and SenseNova-Loop-9B on the lane host.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {

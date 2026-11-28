@@ -34,17 +34,6 @@ pub fn prefillStep(device: mtl.Device) u32 {
     return if (gen >= 5 and device.maxWorkingSet() >= 48 << 30) 8192 else 2048;
 }
 
-/// The model's window (config.json's max_position_embeddings, text_config's first), 0 when it names none.
-pub fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
-    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return 0;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return 0;
-    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return 0;
-    if (doc != .object) return 0;
-    const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
-    const limit = text.object.get("max_position_embeddings") orelse doc.object.get("max_position_embeddings") orelse return 0;
-    return if (limit == .integer and limit.integer > 0) limit.integer else 0;
-}
-
 /// A GiB count's bytes (the flags allow 0 up to below 2^34).
 pub fn gibBytes(g: f64) u64 {
     return @intFromFloat(g * (1 << 30));

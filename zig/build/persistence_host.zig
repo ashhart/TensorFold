@@ -18,6 +18,8 @@ pub fn steps(b: *std.Build, draft_ids: *std.Build.Module) void {
     mods.sources.addImport("nemotron_packed_metallib", @import("metal_targets.zig").embedded(b, empty, "nemotron_packed.metallib"));
     const target_api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
     mods.engine.addImport("engine_api", target_api);
+    const memory = b.createModule(.{ .root_source_file = b.path("zig/nemotron_memory_adapter_host.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "tensorfold", .module = mods.engine }} });
+    b.step("compile-nemotron-memory-adapter-host", "Compile the actual Metal learner snapshot hooks without a device").dependOn(&b.addObject(.{ .name = "nemotron-memory-adapter-host", .root_module = memory }).step);
     const compile = b.createModule(.{ .root_source_file = b.path("zig/flashnext_persistence_compile.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "engine_api", .module = target_api } } });
     b.step("compile-persistence-host", "Compile actual Metal persistence startup consumers as a Darwin object").dependOn(&b.addObject(.{ .name = "persistence-host-compile", .root_module = compile }).step);
 }
