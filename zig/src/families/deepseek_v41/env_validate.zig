@@ -29,6 +29,7 @@ pub fn refusal(a: std.mem.Allocator, env: anytype) !?[]const u8 {
 
 pub fn startup() !void {
     try check(environment.Process{});
+    _ = try @import("graphs.zig").Settings.fromEnv();
 }
 
 /// Model admission retains the experimental gate's exact public refusal.
@@ -49,6 +50,12 @@ pub fn modelAdmission() !void {
 pub fn stallTimeoutNs() !u64 {
     const seconds = environment.read(u64, "TF_DSV41_STALL_EXIT_S", 0) catch return error.BadStallTimeout;
     return std.math.mul(u64, seconds, std.time.ns_per_s) catch return error.BadStallTimeout;
+}
+
+/// Engram's present blank cache count was invalid whenever its directory reader opened it; unset keeps 65536.
+pub fn engramCache(raw: ?[]const u8) !u32 {
+    if (raw != null and std.mem.trim(u8, raw.?, " \t\r\n").len == 0) return error.InvalidEnvironment;
+    return environment.value(u32, "TF_DSV41_ENGRAM_CACHE", raw, 65536);
 }
 
 /// Empty and spaces-only profiling rows stay no-ops; other whitespace-only text keeps the legacy parse refusal.

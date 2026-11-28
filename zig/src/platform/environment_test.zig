@@ -46,7 +46,7 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
     }
     for (e.rules) |r| {
         for ([_][]const u8{ "", " ", "\t \n" }) |raw| {
-            if (r.blank_default) try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw)) else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
+            if (r.blank_default and (!r.empty_default_only or raw.len == 0)) try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw)) else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
         }
         // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
         if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;

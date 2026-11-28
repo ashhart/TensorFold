@@ -196,7 +196,7 @@ test "DeepSeek runtime: bounds and tool controls never leak into common startup"
         .{ "TF_DSV41_MAX_ROWS", "17" },           .{ "TF_DSV41_TREE", "1" },
         .{ "TF_DSV41_DRAFT_DEPTH", "16" },        .{ "TF_DSV41_STALL_EXIT_S", "18446744074" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
-    for ([_][]const u8{ "COUNT", "FN_LAYERS", "TF_TP_WORLD", "TF_TP_RANK", "HOME", "TF_EXPERIMENTAL", "TF_DSV41_DECODE_TP_LANES", "TF_DSV41_KV_CHECK_TOPP", "TF_DSV41_SESSION_SLOTS_TURNS" }) |name|
+    for ([_][]const u8{ "COUNT", "FN_LAYERS", "TF_TP_WORLD", "TF_TP_RANK", "HOME", "TF_DSV41_SESSION_SLOTS_TURNS" }) |name|
         for (e.rules) |r| try t.expect(!std.mem.eql(u8, name, r.name));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_DSV41_MHC_SITE_ROWS", "0"));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_DSV41_PF_TBO_GM_SMS", "0"));

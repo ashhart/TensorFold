@@ -17,6 +17,8 @@ pub const Rule = struct {
     trim: []const u8 = "",
     first_digit: bool = false,
     blank_default: bool = true,
+    /// True where only exact empty defaults; other whitespace-only text is malformed.
+    empty_default_only: bool = false,
     /// A whole number's own bounds inside its kind's; a real kind applies `max` too when it is set.
     min: u64 = 0,
     max: u64 = std.math.maxInt(u64),
@@ -375,8 +377,12 @@ pub fn registered(comptime name: []const u8) void {
 /// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
-    if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return if (r.blank_default) null else error.InvalidEnvironment;
-    const text = std.mem.trim(u8, raw.?, r.trim);
+    const raw_text = raw orelse return null;
+    if (std.mem.trim(u8, raw_text, " \t\r\n").len == 0) {
+        if (!r.blank_default or (r.empty_default_only and raw_text.len != 0)) return error.InvalidEnvironment;
+        return null;
+    }
+    const text = std.mem.trim(u8, raw_text, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
     if (r.kind == .word) {
         for (r.words, 0..) |v, i| if (words.equal(r, text, v)) return if (r.word_values.len == 0) i else r.word_values[i];

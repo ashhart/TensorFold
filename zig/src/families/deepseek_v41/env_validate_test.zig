@@ -55,8 +55,11 @@ test "DeepSeek strict env: the shared table holds every runtime setting in its f
 
 test "DeepSeek strict env: unset and each rule's permitted blank settings read as the caller's default" {
     for (e.rules) |r| if (r.scope == .dsv41) for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {
-        if (raw) |v| try check(r.name, v, r.blank_default);
-        if (raw != null and !r.blank_default) continue;
+        if (raw) |v| {
+            const valid_blank = r.blank_default and (!r.empty_default_only or v.len == 0);
+            try check(r.name, v, valid_blank);
+            if (!valid_blank) continue;
+        }
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
@@ -170,4 +173,20 @@ test "DeepSeek strict env: copy-drafter lookup-off refusal names TF_DSV41_COPY_D
     }
     try env_validate.check(Pair{ .lookup = "1" });
     try t.expect(try env_validate.refusal(t.allocator, Pair{ .lookup = "1" }) == null);
+}
+
+test "DeepSeek strict env: exact-empty readers reject nonempty whitespace but retain their defaults" {
+    for ([_][:0]const u8{ "TF_DSV41_LOOKUP_MIN", "TF_DSV41_MAX_ROWS", "TF_DSV41_SESSION_DISK_GIB", "TF_DSV41_SESSION_DISK_MIN", "TF_DSV41_SESSION_RAM_MIB" }) |name| {
+        try t.expectEqual(@as(?u64, null), try e.parse(name, null));
+        try check(name, "", true);
+        for ([_][]const u8{ " ", "\t", " \t\r\n" }) |raw| try check(name, raw, false);
+    }
+}
+
+test "DeepSeek strict env: opening an Engram directory rejects a present blank cache count only" {
+    try t.expectEqual(@as(u32, 65536), try env_validate.engramCache(null));
+    try t.expectEqual(@as(u32, 4096), try env_validate.engramCache("4096"));
+    for ([_][]const u8{ "", " ", "\t", " \t\r\n" }) |raw| try t.expectError(error.InvalidEnvironment, env_validate.engramCache(raw));
+    // Without ENGRAM_DIR the cache reader is not called and the shared startup blank default remains unchanged.
+    try t.expectEqual(@as(?u64, null), try e.parse("TF_DSV41_ENGRAM_CACHE", ""));
 }
