@@ -13,6 +13,7 @@ pub const loop = owner.loop;
 pub const loop_mma = owner.loop_mma;
 pub const runtime = owner.runtime;
 pub const tree = owner.tree;
+pub const small_ops = owner.small_ops;
 pub const inkling2_dspark = owner.inkling2_dspark;
 pub const inkling2_dspark_pre_m5 = owner.inkling2_dspark_pre_m5;
 pub const vision = owner.vision;

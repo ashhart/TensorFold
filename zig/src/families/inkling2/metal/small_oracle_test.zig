@@ -548,28 +548,27 @@ test "inkling2 small: disk loader admits single_dense and split_dense, matches i
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", t.allocator);
     defer t.allocator.free(root);
-
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     try writeSyntheticPackPair(a, io, tmp.dir);
-
     const single_path = try std.fs.path.join(a, &.{ root, "single" });
     const split_path = try std.fs.path.join(a, &.{ root, "split" });
     const prompt = [_]u32{ 3, 17, 42, 7, 55, 12, 1, 29, 8, 60, 14, 33, 22, 5, 49, 19 };
     const decode_steps: usize = 3;
-
     var cap = try oracle.capture(t.allocator, io, single_path, &prompt, decode_steps);
     defer cap.deinit();
-
-    const m_single = try model_file.Model.loadForTest(t.allocator, io, single_path);
-    defer m_single.deinit();
-    try verifyAgainstOracle(m_single, &cap, &prompt, decode_steps);
-    try verifyPlantedCompositionFault(m_single, &cap, &prompt);
-
-    const m_split = try model_file.Model.loadForTest(t.allocator, io, split_path);
-    defer m_split.deinit();
-    try verifyAgainstOracle(m_split, &cap, &prompt, decode_steps);
+    {
+        const m_single = try model_file.Model.loadForTest(t.allocator, io, single_path);
+        defer m_single.deinit();
+        try verifyAgainstOracle(m_single, &cap, &prompt, decode_steps);
+        try verifyPlantedCompositionFault(m_single, &cap, &prompt);
+    }
+    {
+        const m_split = try model_file.Model.loadForTest(t.allocator, io, split_path);
+        defer m_split.deinit();
+        try verifyAgainstOracle(m_split, &cap, &prompt, decode_steps);
+    }
 }
 
 test "inkling2 small: real 48-layer pack via Model.load matches independent serial oracle bit-for-bit and rejects planted composition fault (TF_INKLING2_EXL3_DIR)" {
@@ -579,15 +578,14 @@ test "inkling2 small: real 48-layer pack via Model.load matches independent seri
     const io = t.io;
     const prompt = [_]u32{ 1, 791, 6864, 315, 9822, 374, 279, 2115, 315, 12366, 13, 198, 791, 1401, 374, 220 };
     const decode_steps: usize = 4;
-
     var cap = try oracle.capture(t.allocator, io, dir, &prompt, decode_steps);
     defer cap.deinit();
-
-    const m = try model_file.Model.load(t.allocator, io, dir);
-    defer m.deinit();
-    try verifyAgainstOracle(m, &cap, &prompt, decode_steps);
-    try verifyPlantedCompositionFault(m, &cap, &prompt);
-
+    {
+        const m = try model_file.Model.load(t.allocator, io, dir);
+        defer m.deinit();
+        try verifyAgainstOracle(m, &cap, &prompt, decode_steps);
+        try verifyPlantedCompositionFault(m, &cap, &prompt);
+    }
     if (std.c.getenv("TF_INKLING2_EXL3_ALT_DIR")) |alt_c| {
         const m_alt = try model_file.Model.load(t.allocator, io, std.mem.span(alt_c));
         defer m_alt.deinit();

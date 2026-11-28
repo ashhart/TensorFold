@@ -108,32 +108,14 @@ fn makeExl3Matrix(device: mtl.Device, list: *std.ArrayList(mtl.Buffer), gpa: std
     });
 }
 
-fn buildSyntheticModel(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !*model_file.Model {
-    const n_layers: u32 = 6; // Layers 0..4 local + layer 5 global (tests block boundary, dynamic conv, tap 0 & final).
-    const vocab: u32 = 64;
-    var prng = std.Random.DefaultPrng.init(0x5094_2026);
-    const rng = prng.random();
-
-    const m = try gpa.create(model_file.Model);
-    errdefer gpa.destroy(m);
-    m.gpa = gpa;
-    m.device = device;
-    m.queue = queue;
-    m.checkpoint = ck.Checkpoint.init(gpa);
-    errdefer m.checkpoint.deinit();
-    m.expert_buffers = .empty;
-    errdefer {
-        for (m.expert_buffers.items) |b| b.deinit();
-        m.expert_buffers.deinit(gpa);
-    }
-
-    m.config = .{
+fn syntheticConfig() cfg.Config {
+    return .{
         .quant = .exl3_kortexa_v1,
         .text = .{
             .hidden = state.hidden,
-            .layers = n_layers,
-            .vocab = vocab,
-            .unpadded_vocab = vocab,
+            .layers = 6,
+            .vocab = 64,
+            .unpadded_vocab = 64,
             .local = .{ .q = state.heads, .kv = state.kv_heads, .dim = 128 },
             .global = .{ .q = state.heads, .kv = state.kv_heads, .dim = 128 },
             .window = 1024,
@@ -171,6 +153,28 @@ fn buildSyntheticModel(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Qu
         .eos = 0,
         .image_token = 1,
     };
+}
+
+fn buildSyntheticModel(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !*model_file.Model {
+    const n_layers: u32 = 6; // Layers 0..4 local + layer 5 global (tests block boundary, dynamic conv, tap 0 & final).
+    const vocab: u32 = 64;
+    var prng = std.Random.DefaultPrng.init(0x5094_2026);
+    const rng = prng.random();
+
+    const m = try gpa.create(model_file.Model);
+    errdefer gpa.destroy(m);
+    m.gpa = gpa;
+    m.device = device;
+    m.queue = queue;
+    m.checkpoint = ck.Checkpoint.init(gpa);
+    errdefer m.checkpoint.deinit();
+    m.expert_buffers = .empty;
+    errdefer {
+        for (m.expert_buffers.items) |b| b.deinit();
+        m.expert_buffers.deinit(gpa);
+    }
+
+    m.config = syntheticConfig();
 
     var precs: [n_layers]layer_plan.Precision = @splat(.exl3);
     m.weight_plan = try layer_plan.build(&m.config.text, &precs);
@@ -388,4 +392,40 @@ test "inkling2 small: 6-layer EXL3 GPU forward chunk == decode, commit/rollback,
     try t.expectEqualSlices(u32, &seq_logits[3], batch_out[3 * vocab ..][0..vocab]);
     try t.expectEqualSlices(u32, &seq_logits[4], batch_out[4 * vocab ..][0..vocab]);
     try t.expectEqualSlices(u32, &seq_logits[5], batch_out[5 * vocab ..][0..vocab]);
+}
+
+test "inkling2 small: runShared refuses oversized combined segments before writing metadata" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var p_precs: [6]layer_plan.Precision = @splat(.exl3);
+    const text = syntheticConfig().text;
+    const wp = try layer_plan.build(&text, &p_precs);
+
+    var s = try state.Scratch.initFor(device, 1, 64);
+    defer s.deinit();
+    var c0 = try state.Cache.initFor(device, 16, &wp, 1, 64);
+    defer c0.deinit();
+    var c1 = try state.Cache.initFor(device, 16, &wp, 1, 64);
+    defer c1.deinit();
+    c0.len = 3;
+    c1.len = 5;
+
+    const ap = @import("attention_plan.zig");
+    s.pos.slice(i32, 1)[0] = -77;
+    s.seg_of.slice(i32, 1)[0] = -88;
+    s.ids.slice(u32, 1)[0] = 0xdeadbeef;
+    s.segs.slice(ap.Seg, state.max_segments)[0] = .{ .row0 = 9, .n = 9, .p0 = 9, .off = 9 };
+    s.segs.slice(ap.Seg, state.max_segments)[1] = .{ .row0 = 8, .n = 8, .p0 = 8, .off = 8 };
+
+    var dummy: model_file.Model = undefined;
+    dummy.config = syntheticConfig();
+    try t.expectError(
+        error.Inkling2Segments,
+        fwd.runShared(&dummy, &s, &.{ .{ .cache = &c0, .rows = 1 }, .{ .cache = &c1, .rows = 1 } }, &.{1}, .{ .all = true }),
+    );
+    try t.expectEqual(@as(i32, -77), s.pos.slice(i32, 1)[0]);
+    try t.expectEqual(@as(i32, -88), s.seg_of.slice(i32, 1)[0]);
+    try t.expectEqual(@as(u32, 0xdeadbeef), s.ids.slice(u32, 1)[0]);
+    try t.expectEqual(@as(i32, 9), s.segs.slice(ap.Seg, state.max_segments)[0].p0);
+    try t.expectEqual(@as(i32, 8), s.segs.slice(ap.Seg, state.max_segments)[1].p0);
 }
