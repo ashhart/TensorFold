@@ -11,6 +11,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: a streamed chat, completion or Responses request with `return_progress: true` receives `tensorfold.progress` counts (prompt tokens done, total and cached) while its prompt pass runs, before the first token; off by default, and a stream without it is byte for byte what it was (#3216).
 
 - `tensorfold info --hexagon FILE.gguf` checks a Gemma 4 E4B IT Q4_0 GGUF export against the Hexagon layout (architecture, text geometry and all 666 tensors) without the Qualcomm SDK; a match reports device execution as unverified, and a mismatch names the reason and exits with status 2 (#5475, thanks @tgerighty).
+- Tests: the rows regular-file test no longer shares a temporary path with the block-file test, which made it fail on Windows about one run in three.
 
 - Qwen3.8-27B on Metal: Q and K head norm and RoPE run as one `q27_qk_norm_rope` dispatch instead of two head-norm launches, the barrier between them and two RoPE launches, on every chip and pass, keys-only prompt tails included; on an M5 Ultra every cache row and `qa` byte and the served replies match the previous path (#2955, part of #2940).
 
