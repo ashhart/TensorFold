@@ -84,6 +84,7 @@ fn cutDepths(m: lanes.Model, shared: bool) !std.ArrayList(u32) {
 test "zero grant: a GLM DFlash2 stream cut to none drafts again within a few rounds while its peers decode" {
     var e: engine.Engine = undefined;
     e.mtp = true;
+    e.m.priced_windows = false;
     e.drafter = @ptrFromInt(16);
     var b: @import("cuda_lanes.zig").Lanes = undefined;
     b.x.e = &e;
@@ -136,6 +137,7 @@ test "zero grant: GLM DFlash2 skips the actual block pass and transmits a stable
 test "shared head costs: GLM CUDA MTP is unpriced and DFlash2 already uses node budgets" {
     var e: engine.Engine = undefined;
     e.mtp = true;
+    e.m.priced_windows = false;
     var b: @import("cuda_lanes.zig").Lanes = undefined;
     b.x.e = &e;
     b.alone = false;

@@ -18,6 +18,7 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
 
 /// What drafting the counted nodes costs: a head step each, or the deepest stream's steps when one batch drafts all.
 pub const HeadCost = struct {
+    token_rate: ?f64 = null, // tokens/ms: maximize surplus after drafting is sunk; null keeps throughput scoring
     block_ms: f64 = 0.0, // one fixed pass if any neural head runs; copies alone do not pay it
     step_ms: f64 = 0.0,
     plain_ms: ?f64 = null, // fixed residual for the zero-draft option, independently measured
@@ -51,7 +52,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     var live: u64 = 0;
     for (fixed) |f| live += @intFromBool(f > 0);
     const least = @min(head.least_rows, max_rows);
-    var best = if (rows >= least) rate(costs, timed, rows, expected, (head.plain_ms orelse overhead_ms) + rowTerm(costs, timed, head, rows, live)) else -std.math.inf(f64);
+    var best = if (rows >= least) rate(costs, timed, rows, expected, (head.plain_ms orelse overhead_ms) + rowTerm(costs, timed, head, rows, live), head.token_rate) else -std.math.inf(f64);
     while (rows < max_rows) {
         // the likeliest next node, ties to the lowest stream (Python's heapq of (-p, stream))
         var pick: ?usize = null;
@@ -76,7 +77,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         const extra_steps: f64 = @floatFromInt(if (head.batched) deepest -| 1 else drafts - firsts);
         if (rows < least) continue;
         const block_ms = if (drafts > 0) head.block_ms else 0;
-        const now = rate(costs, timed, rows, expected, overhead_ms + block_ms + head.step_ms * steps + head.extra_step_ms * extra_steps + rowTerm(costs, timed, head, rows, live));
+        const now = rate(costs, timed, rows, expected, overhead_ms + block_ms + head.step_ms * steps + head.extra_step_ms * extra_steps + rowTerm(costs, timed, head, rows, live), head.token_rate);
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;
             @memcpy(best_counts, counts);
@@ -96,10 +97,11 @@ pub fn rowTerm(costs: *const Table, timed: bool, head: HeadCost, rows: u64, live
     return @max(term, plain - at);
 }
 
-fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64) f64 {
+fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64, token_rate: ?f64) f64 {
     var cost: f64 = 1.0;
     if (timed) cost = costs.get(@intCast(total)) orelse return -1.0;
     if (cost + overhead_ms <= 0) return -1;
+    if (timed) if (token_rate) |lambda| return expected - lambda * (cost + overhead_ms);
     return expected / (cost + overhead_ms);
 }
 

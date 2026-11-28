@@ -12,6 +12,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
+    priced_windows: bool = false, // post-block chain calibration and surplus pricing; false keeps existing policies
     fixed_draft_block: bool = false, // a positive draft depth runs one fixed block pass
     learn_row_costs: bool = false, // shared_costs came from another machine: learn what a row costs here
     allocate_shared_drafts: bool = false, // reserve useful shared head rows before a proposal pass
@@ -66,6 +67,7 @@ pub const Model = struct {
 };
 
 pub const Config = struct {
+    priced_windows: bool = false,
     allocate_shared_drafts: bool = false, // reserve useful shared head rows before a proposal pass
     limit_shared_drafts: bool = false, // retain the cost rule's depth cap before reserving shared rows
     root_copies: bool = false,
@@ -152,6 +154,7 @@ pub const Config = struct {
         const depth_prior = try gpa.dupe(f64, prior);
         errdefer gpa.free(depth_prior);
         return .{
+            .priced_windows = m.priced_windows,
             .allocate_shared_drafts = m.allocate_shared_drafts,
             .limit_shared_drafts = m.limit_shared_drafts,
             .root_copies = m.root_copies and m.copy_drafts,

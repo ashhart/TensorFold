@@ -56,21 +56,22 @@ pub fn tableFor(k: Kept, block: bool) ?Table {
     return if (block) null else table(k);
 }
 
-/// Rank 0 chooses expert forms; prices are null for DFlash2, no drafts, or too little scratch context.
+/// Rank 0 chooses forms; priced DFlash2 also publishes a measured table, with seed prices on refusal.
 pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, x: follow.Leader) !?Table {
     const e = x.e;
     const pin = try pinnedForm();
-    if (!e.mtp or e.capacity < prefix + 2 * fw.window_rows + 2) return untimed(x, pin);
+    const block = e.drafter != null;
+    const priced = block and e.m.priced_windows;
+    if (!wantsTiming(e.mtp, block, priced, e.capacity)) return untimed(x, pin);
     var name: [256]u8 = undefined;
     var shape: [512]u8 = undefined;
-    const block = e.drafter != null;
     const parts = try keyParts(e, ctx, &name, &shape, pin);
     const key = if (parts) |v| cache.key(gpa, io, &v) catch null else null;
-    if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (reuses(kept, block, pin)) {
+    if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (reuses(kept, block and !priced, pin)) {
         try x.expertForm(measurements.rows(kept.fact));
         try x.idle();
-        report(kept, "kept", block, pin != null);
-        return tableFor(kept, block);
+        report(kept, "kept", block and !priced, pin != null);
+        return tableForMode(kept, block, priced);
     };
     const path = try std.fs.path.join(gpa, &.{ dir, "tokenizer.json" });
     defer gpa.free(path);
@@ -78,18 +79,25 @@ pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     defer tok.deinit();
     const ids = try tok.encode(gpa, rule.text);
     defer gpa.free(ids);
-    if (ids.len < prefix + fw.window_rows + 1) return error.CostTextTooShort;
-    var s: Scratch = .{ .x = x, .io = io, .ids = ids, .most = @min(room, e.capacity - fw.window_rows - prefix - 2), .drafting = !block };
+    if (ids.len < prefix + fw.window_rows + 1) {
+        if (priced) return untimed(x, pin);
+        return error.CostTextTooShort;
+    }
+    var s: Scratch = .{ .x = x, .io = io, .ids = ids, .most = @min(room, e.capacity - fw.window_rows - prefix - 2), .drafting = !block or priced };
     try s.begin();
-    var kept = try measurements.measure(&s, block, pin);
+    const measured = if (priced) try attempt(&s, block, pin) else try measurements.measure(&s, block, pin);
+    var kept = measured orelse {
+        std.log.warn("glm: window timing failed; using seed prices", .{});
+        return fallback(x, pin);
+    };
     const reference = if (!block and parts != null) cache.referenceKey(&parts.?) else null;
     if (reference) |key_ref| if (cache.load(Kept, gpa, io, key_ref)) |r| if (rule.drifted(&kept.ms, &r.ms)) try rule.again(Windows{ .s = &s }, &kept.ms);
     try x.release(0);
     try x.idle();
     if (key) |k| cache.save(Kept, gpa, io, k, kept);
     if (reference) |key_ref| cache.save(Kept, gpa, io, key_ref, kept);
-    report(kept, "timed", block, pin != null);
-    return tableFor(kept, block);
+    report(kept, "timed", block and !priced, pin != null);
+    return tableForMode(kept, block, priced);
 }
 
 /// A kept record stands for this load when it holds prices and, under a named form, was kept at that form.
@@ -170,14 +178,14 @@ fn keyShape(e: *const engine.Engine, sm: usize, driver: c_int, shape: []u8, pin:
     const hex = std.fmt.bytesToHex(e.checkpoint_digest, .lower);
     const draft_hex = std.fmt.bytesToHex(if (e.drafter) |dr| dr.checkpoint_digest else @as([32]u8, @splat(0)), .lower);
     const tail: []const u8 = if (pin) |f| (if (f) " form factored" else " form classic") else "";
-    return std.fmt.bufPrint(shape, "sm{d} cuda{d} ranks{d} {s} drafter{d}/{d}/{s} layers{d} l2{d}/{d}/{d}/{d}/{d} warps{d} kda{d} mm{d} bits{d}/{d} kv8{d} pages{d} host{d} roce{d} p2p{s}/{s}/{s} pad{d} pdl{d} dsel{d} wide{d}{s}{s}", .{
-        sm,                                          driver,                       e.share.world,                          hex[0..],                                   @intFromBool(e.drafter != null),
-        if (e.drafter) |dr| dr.bits else @as(u8, 0), draft_hex[0..],               set.layers,                             @intFromBool(set.l2pf.on),                  @intFromBool(set.l2pf.named),
-        set.l2pf.mb,                                 set.l2pf.ctas,                set.l2pf.pace_gbps,                     e.m.experts.nvfp4.warps,                    @intFromBool(set.kda_wide),
-        @intFromBool(set.tiled),                     set.dense_bits,               set.head_bits,                          @intFromBool(set.kv8),                      @intFromBool(set.pages),
-        set.kv_host,                                 @intFromBool(set.roce_multi), sys.getenv("NCCL_P2P_LEVEL") orelse "", sys.getenv("NCCL_MIN_NCHANNELS") orelse "", sys.getenv("NCCL_MAX_NCHANNELS") orelse "",
-        @intFromBool(set.kda_pad),                   @intFromBool(e.m.mm.pdl),     @intFromBool(e.m.dsel),                 @intFromBool(set.roce_wide),                if (e.m.experts.wide_tile) " expertTile64" else "",
-        tail,
+    return std.fmt.bufPrint(shape, "sm{d} cuda{d} ranks{d} {s} drafter{d}/{d}/{s} layers{d} l2{d}/{d}/{d}/{d}/{d} warps{d} kda{d} mm{d} bits{d}/{d} kv8{d} pages{d} host{d} roce{d} p2p{s}/{s}/{s} pad{d} pdl{d} dsel{d} wide{d}{s}{s}{s}", .{
+        sm,                                                                     driver,                       e.share.world,                          hex[0..],                                   @intFromBool(e.drafter != null),
+        if (e.drafter) |dr| dr.bits else @as(u8, 0),                            draft_hex[0..],               set.layers,                             @intFromBool(set.l2pf.on),                  @intFromBool(set.l2pf.named),
+        set.l2pf.mb,                                                            set.l2pf.ctas,                set.l2pf.pace_gbps,                     e.m.experts.nvfp4.warps,                    @intFromBool(set.kda_wide),
+        @intFromBool(set.tiled),                                                set.dense_bits,               set.head_bits,                          @intFromBool(set.kv8),                      @intFromBool(set.pages),
+        set.kv_host,                                                            @intFromBool(set.roce_multi), sys.getenv("NCCL_P2P_LEVEL") orelse "", sys.getenv("NCCL_MIN_NCHANNELS") orelse "", sys.getenv("NCCL_MAX_NCHANNELS") orelse "",
+        @intFromBool(set.kda_pad),                                              @intFromBool(e.m.mm.pdl),     @intFromBool(e.m.dsel),                 @intFromBool(set.roce_wide),                if (e.m.experts.wide_tile) " expertTile64" else "",
+        if (e.drafter != null and e.m.priced_windows) " pricedWindows" else "", tail,
     });
 }
 
@@ -267,13 +275,14 @@ test "GLM cost identity: the consumed key includes drafter precision and all tim
     e.m.mm.pdl = true;
     e.m.dsel = true;
     e.m.experts.wide_tile = false;
+    e.m.priced_windows = false;
     var dr: dflash.Drafter = undefined;
     dr.bits = 4;
     dr.checkpoint_digest = @splat(2);
     e.drafter = &dr;
     var base: [512]u8 = undefined;
     const before = try keyShape(&e, 121, 13000, &base, null);
-    for (0..16) |which| {
+    for (0..17) |which| {
         const original = e.settings;
         switch (which) {
             0 => dr.bits = 0,
@@ -292,6 +301,7 @@ test "GLM cost identity: the consumed key includes drafter precision and all tim
             13 => e.m.dsel = false,
             14 => e.settings.roce_wide = true,
             15 => e.m.experts.wide_tile = true,
+            16 => e.m.priced_windows = true,
             else => unreachable,
         }
         var changed: [512]u8 = undefined;
@@ -305,6 +315,7 @@ test "GLM cost identity: the consumed key includes drafter precision and all tim
         e.m.mm.pdl = true;
         e.m.dsel = true;
         e.m.experts.wide_tile = false;
+        e.m.priced_windows = false;
     }
     // a named form only ends the identity, so the race's key stays as it was
     var classic: [512]u8 = undefined;
@@ -362,6 +373,7 @@ test "GLM cost identity: a record kept at one named form is not reused at the ot
     e.m.mm.pdl = true;
     e.m.dsel = true;
     e.m.experts.wide_tile = false;
+    e.m.priced_windows = false;
     e.drafter = null;
     var shapes: [2][512]u8 = undefined;
     var keys: [2][32]u8 = undefined;
@@ -397,4 +409,38 @@ test "GLM cost identity: a raced line names the more common form and the widths 
     try std.testing.expectEqualStrings("classic, factored at 1 row", words(1, &buf));
     try std.testing.expectEqualStrings("classic, factored at 1, 2 and 32 rows", words(0b10_0000_0011, &buf));
     try std.testing.expectEqualStrings("classic, factored at 8, 12, 16, 24 and 32 rows", words(0b11_1110_0000, &buf));
+}
+
+/// Strict opt-in read once by Modules.load; startup's GLM scope validates it before device work.
+pub fn pricedWindows() !bool {
+    return sys.environment.read(bool, "TF_GLM_PRICED_WINDOWS", false);
+}
+
+pub fn tableForMode(k: Kept, block: bool, priced: bool) ?Table {
+    if (block and !priced) return null;
+    if (priced and !measurements.reusable(k, false)) return null;
+    return table(k);
+}
+
+/// A failed priced race can use seeds; allocation failure and failed caller cleanup remain fatal.
+pub fn attempt(timer: anytype, block: bool, pin: ?bool) !?Kept {
+    const kept = measurements.measureMode(timer, block, pin, true) catch |err| {
+        const failure: anyerror = err;
+        if (failure == error.OutOfMemory) return failure;
+        return null;
+    };
+    return if (measurements.reusable(kept, false)) kept else null;
+}
+
+/// A block drafter can price the target without an MTP head; scratch still needs two full windows after its prefix.
+pub fn wantsTiming(mtp: bool, block: bool, priced: bool, capacity: usize) bool {
+    return (mtp or (block and priced)) and capacity >= prefix + 2 * fw.window_rows + 2;
+}
+
+/// An interrupted race cannot leave its last form selected or scratch stream live before serving on seed prices.
+pub fn fallback(x: anytype, pin: ?bool) !?Table {
+    try x.release(0);
+    try x.expertForm(measurements.rows(measurements.every(pin orelse false)));
+    try x.idle();
+    return null;
 }

@@ -23,7 +23,7 @@ pub fn apply(base: lanes.Model, enabled: bool, measured: bool) lanes.Model {
     m.plain_guard = true;
     if (!measured) m.window_costs = &window_costs;
     if (!measured) m.shared_costs = &shared_costs;
-    m.window_costs_lone = false; // every copy pays for its rows, in shared rounds too
+    m.window_costs_lone = if (base.priced_windows) base.window_costs_lone else false; // every copy pays for its rows, in shared rounds too
     m.shared_drafts = 0;
     // Keep head confidence in the backend's probabilities so every copy still pays its target-window cost.
     m.draft_confidence = null;
@@ -48,4 +48,20 @@ pub fn held(ptr: *anyopaque, s: *lanes.Stream, _: @import("std").mem.Allocator) 
     const b = self.backend();
     if (!try b.vtable.probabilities.?(ptr, s, out)) return error.NoDraftProbabilities;
     return .{ .count = @intCast((lanes.mtp_policy.Controls{ .floor = self.mtp_confidence }).prefix(out)) };
+}
+
+/// A priced parallel block leaves raw chances for the shared calibrator; off preserves the original product cut.
+pub fn blockChances(requests: anytype, records: anytype, priced: bool) !void {
+    const dflash = @import("dflash.zig");
+    const cut = if (priced) @as(f64, 0) else try dflash.confidence();
+    for (requests, records) |r, l| {
+        l.held_n = @min(r.depth, dflash.BLOCK - 1);
+        if (priced) continue;
+        var chain: f64 = 1;
+        for (l.chances[0..l.held_n], 0..) |*c, j| {
+            chain *= c.*;
+            if (j > 0 and chain < cut) c.* = 0;
+            if (c.* == 0) chain = 0;
+        }
+    }
 }

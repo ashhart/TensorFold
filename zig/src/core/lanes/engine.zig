@@ -48,6 +48,7 @@ pub const Engine = struct {
     late: @import("late_draft.zig").State = .{},
     alone: bool = true, // this step has one live stream: its copies may take their ramp
     lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
+    priced_states: std.AutoHashMapUnmanaged(*Stream, @import("window_price.zig").State) = .empty,
     steps: u64 = 0,
     grammar_round: @import("grammar_time.zig").Round = .{},
     grammar_workers: @import("grammar_parallel.zig").State = .{},
@@ -84,6 +85,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        @import("window_price.zig").deinit(e);
         e.grammar_workers.deinit(e.gpa);
         e.live.deinit(e.gpa);
         e.unread.deinit(e.gpa);
@@ -217,6 +219,7 @@ pub const Engine = struct {
         const tokens = try win.tokens(e, windows[0], out[0]);
         const parents = try win.rowParents(e, windows[0]);
         const o = try e.conclude(s, plan, out[0].sampled, out[0].rows, tokens, parents, windows[0].positions);
+        if (e.cfg.priced_windows) @import("window_price.zig").observe(e, s, rows - 1, o.path.len -| 1, o.cut == null);
         if (o.path.len < rows or plan.parents != null or e.backend.keep_full_lone) try e.backend.keep(&windows, &.{o.path});
         const held_levels = s.held_levels;
         const timed_copy = e.cfg.family_mtp and s.drafts and @import("lone_copy.zig").records(e, s, plan.kind);
@@ -530,6 +533,7 @@ pub const Engine = struct {
     }
 
     pub fn release(e: *Engine, s: *Stream) void {
+        @import("window_price.zig").release(e, s);
         e.late.cancel(s);
         if (e.cfg.lone_cost_tile > 0) lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
         if (e.cfg.copy_guard) @import("lone_copy.zig").keep(e, s);

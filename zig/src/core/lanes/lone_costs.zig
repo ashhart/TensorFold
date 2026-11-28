@@ -43,8 +43,9 @@ pub fn prices(e: anytype, p: anytype) !Table {
     var out: Table = .{};
     const overhead = e.rule.overheadMs(1, p.stream.sampling != null);
     const samples = observed(p.stream);
+    const startup = if (e.cfg.priced_windows and !e.cfg.family_costs.empty()) e.cfg.family_costs else e.cfg.shared_costs;
     for (1..p.count() + 2) |rows| {
-        if (estimate(e.cfg.shared_costs, samples, rows, overhead)) |ms|
+        if (estimate(startup, samples, rows, overhead)) |ms|
             try out.put(e.arena.allocator(), @intCast(rows), ms);
     }
     return out;
