@@ -110,7 +110,7 @@ struct MeAttn {
     constant uint& width [[buffer(3)]], uint2 at [[thread_position_in_grid]]) {
   const ulong i = ulong(at.y) * width + at.x;
   const float gv = float(g[i]);
-  o[i] = bfloat(mi_bf(gv / (1.0f + metal::precise::exp(-gv))) * float(u[i]));
+  o[i] = bfloat(tf_silu_bf(gv) * float(u[i]));
 }
 
 // y = bf16(silu(bf16(the 4-tap causal depthwise conv of x))) by channel, the taps in order, rows before 0 zero.

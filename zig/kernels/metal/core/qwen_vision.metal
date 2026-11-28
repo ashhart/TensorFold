@@ -127,8 +127,7 @@ struct QwvAct {
     uint2 at [[thread_position_in_grid]]) {
   const ulong i = ulong(at.y) * p.width + at.x;
   const float v = float(y[i]) + float(b[at.x]);
-  const float inner = p.exact != 0 ? qwv_erf(v * 0.70710678118654752f)
-                                   : metal::precise::tanh(0.79788456080286536f * (v + 0.044715f * v * v * v));
+  const float inner = p.exact != 0 ? qwv_erf(v * 0.70710678118654752f) : TF_GELU_TANH_INNER(v);
   y[i] = bfloat(0.5f * v * (1.0f + inner));
 }
 

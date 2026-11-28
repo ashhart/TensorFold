@@ -101,7 +101,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
                           constant uint& n [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
   if (p.x >= n) return;
   const float g = float(gu[ulong(p.y) * 2 * n + p.x]), u = float(gu[ulong(p.y) * 2 * n + n + p.x]);
-  const float a = tf_vis_bf(0.5f * g * (1.0f + metal::precise::tanh(0.7978845608028654f * (g + 0.044715f * g * g * g))));
+  const float a = tf_vis_bf(0.5f * g * (1.0f + TF_GELU_TANH_INNER(g)));
   act[ulong(p.y) * n + p.x] = bfloat(a * u);
 }
 

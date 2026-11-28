@@ -250,7 +250,7 @@ const controls = [_]?Control{
     .{ .kernel = "me_head q", .what = "drops bf16(q cos)", .from = "o = mi_bf(v[i] * cs[ulong(r) * 32 + j]) + mi_bf(pv * sn[ulong(r) * 32 + j]);", .to = "o = (v[i] * cs[ulong(r) * 32 + j]) + mi_bf(pv * sn[ulong(r) * 32 + j]);" },
     .{ .kernel = "me_gated_norm", .what = "drops bf16(x inv)", .from = "mi_bf(float(w[lane * 4 + i]) * mi_bf(v[i] * inv))", .to = "mi_bf(float(w[lane * 4 + i]) * (v[i] * inv))" },
     .{ .kernel = "me_gate", .what = "drops bf16(sigmoid(g))", .from = "o[i] = bfloat(float(a[i]) * mi_bf(1.0f / (1.0f + metal::precise::exp(-g))));", .to = "o[i] = bfloat(float(a[i]) * (1.0f / (1.0f + metal::precise::exp(-g))));" },
-    .{ .kernel = "me_silu_mul", .what = "drops bf16(silu(g))", .from = "o[i] = bfloat(mi_bf(gv / (1.0f + metal::precise::exp(-gv))) * float(u[i]));", .to = "o[i] = bfloat((gv / (1.0f + metal::precise::exp(-gv))) * float(u[i]));" },
+    .{ .kernel = "me_silu_mul", .what = "drops bf16(silu(g))", .from = "o[i] = bfloat(tf_silu_bf(gv) * float(u[i]));", .to = "o[i] = bfloat((gv / (1.0f + metal::precise::exp(-gv))) * float(u[i]));" },
     .{ .kernel = "me_conv", .what = "drops bf16(the taps' sum)", .from = "const float c = mi_bf(s);", .to = "const float c = s;" },
     .{ .kernel = "me_gdn_prep", .what = "drops bf16(beta)", .from = "beta[at] = mi_bf(1.0f / (1.0f + metal::precise::exp(-float(b[at]))));", .to = "beta[at] = (1.0f / (1.0f + metal::precise::exp(-float(b[at]))));" },
     .{ .kernel = "me_gdn", .what = "adds bf16(the state)", .from = "s[i] += kq[i] * delta;", .to = "s[i] = mi_bf(s[i] + kq[i] * delta);" },
