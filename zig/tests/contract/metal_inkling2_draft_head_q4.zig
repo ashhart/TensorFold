@@ -181,13 +181,15 @@ pub const Suite = struct {
         const probe = try s.a.create(Probe);
         errdefer s.a.destroy(probe);
         switch (mode) {
-            .dspark_q4 => if (control) {
-                const text = try controls.source(s.a, sources.inkling2_dspark, .logits_q4);
-                defer s.a.free(text);
-                probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, text, name, true);
-            } else {
+            .dspark_q4 => {
                 const raw = if (s.device.tensorUnits()) sources.inkling2_dspark else sources.inkling2_dspark_pre_m5;
-                probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, raw, name, false);
+                if (control) {
+                    const text = try controls.source(s.a, raw, .logits_q4);
+                    defer s.a.free(text);
+                    probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, text, name, true);
+                } else {
+                    probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, raw, name, false);
+                }
             },
             .batch_q4 => {
                 const raw = if (s.device.tensorUnits()) sources.inkling2_dflash2_fast else sources.inkling2_dflash2_fast_pre_m5;
@@ -220,7 +222,7 @@ pub const Suite = struct {
     }
 };
 
-test "32-row Q4 draft head control anchor applies once and rejects duplicates" {
+test "32-row Q4 draft head and pre-M5 planted controls apply once and reject duplicates" {
     const a = std.testing.allocator;
     const prod = sources.inkling2_dflash2_fast;
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prod, batch_from));
@@ -231,4 +233,10 @@ test "32-row Q4 draft head control anchor applies once and rejects duplicates" {
     const twice = try std.mem.concat(a, u8, &.{ prod, prod });
     defer a.free(twice);
     try std.testing.expectError(error.ControlEditMissing, batchControlSource(a, twice));
+    const pre_batch = try batchControlSource(a, sources.inkling2_dflash2_fast_pre_m5);
+    defer a.free(pre_batch);
+    try std.testing.expect(std.mem.startsWith(u8, pre_batch, "#define TF_SIMD_FRAGS 1\n"));
+    const pre_dspark = try controls.source(a, sources.inkling2_dspark_pre_m5, .logits_q4);
+    defer a.free(pre_dspark);
+    try std.testing.expect(std.mem.startsWith(u8, pre_dspark, "#define TF_SIMD_FRAGS 1\n"));
 }

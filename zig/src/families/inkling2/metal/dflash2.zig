@@ -5,9 +5,11 @@ const lanes = @import("lanes");
 const sys = @import("sys");
 const ck = @import("../../../core/checkpoint_metal.zig");
 const Model = @import("model.zig").Model;
+const fwd = @import("forward.zig");
 const w = @import("dflash2_weights.zig");
 const k = @import("dflash2_kernels.zig");
 const bf16 = @import("dflash2_bf16.zig");
+const prepared = @import("dflash2_prepared.zig");
 const q4 = @import("draft_head_q4.zig");
 const st = @import("dflash2_state.zig");
 
@@ -48,7 +50,7 @@ pub const Drafter = struct {
     target: *const Model,
     loaded: w.Loaded,
     pipelines: k.Pipelines,
-    fast: bf16.Pipelines,
+    fast: ?bf16.Pipelines = null,
     scratch: st.Scratch,
     max_batch: usize,
     contexts: std.AutoHashMapUnmanaged(*Stream, st.Lane) = .empty,
@@ -84,11 +86,9 @@ pub const Drafter = struct {
         defer pool.pop();
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .target = target, .loaded = loaded, .pipelines = undefined, .fast = undefined, .scratch = undefined, .max_batch = max_streams };
+        d.* = .{ .gpa = gpa, .target = target, .loaded = loaded, .pipelines = undefined, .scratch = undefined, .max_batch = max_streams };
         d.pipelines = try k.Pipelines.load(target.device);
         errdefer d.pipelines.deinit();
-        d.fast = try bf16.Pipelines.load(target.device);
-        errdefer d.fast.deinit();
         d.scratch = try st.Scratch.init(target.device, max_streams);
         errdefer d.scratch.deinit();
         try d.warm();
@@ -98,7 +98,18 @@ pub const Drafter = struct {
     pub fn enableDraftHeadQ4(d: *Drafter, used_bytes: u64, limit_bytes: u64) !void {
         if (d.loaded.draft_head_q4 != null) return;
         try d.loaded.enableDraftHeadQ4(d.target, used_bytes, limit_bytes);
-        if (d.loaded.draft_head_q4 != null) try d.warm();
+        if (d.loaded.draft_head_q4 == null) return;
+        errdefer if (d.loaded.draft_head_q4) |*head| {
+            head.deinit();
+            d.loaded.draft_head_q4 = null;
+        };
+        const loaded_fast = d.fast == null;
+        if (loaded_fast) d.fast = try bf16.Pipelines.load(d.target.device);
+        errdefer if (loaded_fast) if (d.fast) |*fast| {
+            fast.deinit();
+            d.fast = null;
+        };
+        try d.warm();
     }
 
     pub fn deinit(d: *Drafter) void {
@@ -107,14 +118,14 @@ pub const Drafter = struct {
         while (it.next()) |lane| lane.deinit();
         d.contexts.deinit(d.gpa);
         d.scratch.deinit();
-        d.fast.deinit();
+        if (d.fast) |*fast| fast.deinit();
         d.pipelines.deinit();
         d.loaded.deinit();
         d.gpa.destroy(d);
     }
 
     pub fn fixedBytes(d: *const Drafter) u64 {
-        return d.loaded.fixedBytes() + scratchBytes(d.max_batch);
+        return d.loaded.fixedBytes() + d.scratch.bytes();
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
@@ -124,6 +135,25 @@ pub const Drafter = struct {
     pub const testing = if (@import("builtin").is_test) struct {
         pub fn init(gpa: std.mem.Allocator, target: *const Model, loaded: w.Loaded, max_streams: usize) !*Drafter {
             return initWithLoaded(gpa, target, loaded, max_streams);
+        }
+        pub fn hasFast(d: *const Drafter) bool {
+            return d.fast != null;
+        }
+        pub fn dispatchMode(d: *const Drafter) mtl.DispatchType {
+            return d.encoderMode();
+        }
+        pub fn enableFast(d: *Drafter) !void {
+            if (d.fast == null) d.fast = try bf16.Pipelines.load(d.target.device);
+        }
+        pub fn enableDraftHeadQ4Direct(d: *Drafter) !void {
+            if (d.loaded.draft_head_q4 == null) {
+                d.loaded.draft_head_q4 = try q4.init(d.target.device, d.target.weights.unembed.host(u16), d.target.config.text.unpadded_vocab, @intCast(w.hidden));
+            }
+            errdefer if (d.loaded.draft_head_q4) |*head| {
+                head.deinit();
+                d.loaded.draft_head_q4 = null;
+            };
+            try enableFast(d);
         }
         pub fn ring(d: *const Drafter, s: *Stream, layer: usize, is_v: bool) ?mtl.Buffer {
             const lane = d.contexts.getPtr(s) orelse return null;
@@ -146,12 +176,12 @@ pub const Drafter = struct {
                 const pool = mtl.objc.Pool.push();
                 defer pool.pop();
                 const cb = d.target.queue.commandBuffer();
-                const e = cb.compute(.concurrent);
+                const e = cb.compute(d.encoderMode());
                 var ended = false;
                 errdefer if (!ended) e.end();
                 for (0..reps) |_| {
                     try d.encodeBlocks(e, blocks[0..blocks_count]);
-                    e.barrier();
+                    d.sync(e);
                 }
                 e.end();
                 ended = true;
@@ -210,20 +240,54 @@ pub const Drafter = struct {
         }
     }
 
+    const ProjOut = struct { linear: w.Linear, output: Ref };
+
+    fn encoderMode(d: *const Drafter) mtl.DispatchType {
+        return if (d.fast != null) .concurrent else .serial;
+    }
+
+    fn sync(d: *const Drafter, e: mtl.ComputeEncoder) void {
+        if (d.fast != null) e.barrier();
+    }
+
     fn project(d: *const Drafter, e: mtl.ComputeEncoder, linear: w.Linear, input: Ref, output: Ref, rows: usize) !void {
         if (d.loaded.copies) |*copies| {
-            return copies.encodeProject(e, linear.key, linear.n, linear.k, input, output, rows);
+            if (d.fast != null) return copies.encodeProject(e, linear.key, linear.n, linear.k, input, output, rows);
+            return copies.project(e, linear.key, linear.n, linear.k, input, output, rows);
         }
-        d.fast.dispatch(d.target, e, linear.bf16 orelse return error.DraftPreparationUnqualified, input, output, rows, false);
+        const weight = linear.bf16 orelse return error.DraftPreparationUnqualified;
+        if (d.fast) |*fast| {
+            fast.dispatch(d.target, e, weight, input, output, rows, false);
+        } else {
+            fwd.dense(d.target, e, weight, input, output, rows);
+        }
+    }
+
+    fn projectGroup(d: *const Drafter, e: mtl.ComputeEncoder, input: Ref, rows: usize, outs: []const ProjOut) !void {
+        if (d.fast == null) {
+            for (outs) |item| try d.project(e, item.linear, input, item.output, rows);
+            return;
+        }
+        if (d.loaded.copies) |*copies| {
+            var group: [3]prepared.Copies.GroupItem = undefined;
+            std.debug.assert(outs.len > 0 and outs.len <= group.len);
+            const k_dim = outs[0].linear.k;
+            for (outs, 0..) |item, i| {
+                std.debug.assert(item.linear.k == k_dim);
+                group[i] = .{ .key = item.linear.key, .n = item.linear.n, .output = item.output };
+            }
+            return copies.encodeProjectGroup(e, k_dim, input, group[0..outs.len], rows);
+        }
+        for (outs) |item| try d.project(e, item.linear, input, item.output, rows);
     }
 
     fn absorbBatch(d: *Drafter, e: mtl.ComputeEncoder, taps: Ref, segs: []const st.AbsorbSeg, total_rows: usize) !void {
         const c = &d.loaded.config;
         const s = &d.scratch;
         try d.project(e, d.loaded.weights.fc, taps, at(s.fcx, 0), total_rows);
-        e.barrier();
+        d.sync(e);
         k.norm16(&d.pipelines, e, at(s.fcx, 0), r(d.loaded.weights.hidden_norm), at(s.hctx, 0), .{ .rows = @intCast(total_rows), .width = c.hidden, .eps = c.eps, .add = 0 });
-        e.barrier();
+        d.sync(e);
         var ctx_segs: [max_batch_streams]k.CtxSeg = undefined;
         var row_off: u32 = 0;
         for (segs, 0..) |seg, bi| {
@@ -232,13 +296,15 @@ pub const Drafter = struct {
         }
         const ctx_args: k.CtxArgs = .{ .rows = @intCast(total_rows), .segs = @intCast(segs.len), .ring = @intCast(w.ring_size), .eps = c.eps, .theta = c.theta };
         for (d.loaded.weights.layers, 0..) |layer, i| {
-            try d.project(e, layer.k_proj, at(s.hctx, 0), at(s.ck, 0), total_rows);
-            try d.project(e, layer.v_proj, at(s.hctx, 0), at(s.cv, 0), total_rows);
-            e.barrier();
+            try d.projectGroup(e, at(s.hctx, 0), total_rows, &.{
+                .{ .linear = layer.k_proj, .output = at(s.ck, 0) },
+                .{ .linear = layer.v_proj, .output = at(s.cv, 0) },
+            });
+            d.sync(e);
             var rings: [max_batch_streams]k.Ring = undefined;
             for (segs, 0..) |seg, bi| rings[bi] = .{ .k = at(seg.lane.k[i], 0), .v = at(seg.lane.v[i], 0) };
             k.ctxKv(&d.pipelines, e, at(s.ck, 0), at(s.cv, 0), r(layer.k_norm), rings[0..segs.len], ctx_args, ctx_segs[0..segs.len]);
-            if (i + 1 < d.loaded.weights.layers.len) e.barrier();
+            if (i + 1 < d.loaded.weights.layers.len) d.sync(e);
         }
     }
 
@@ -327,7 +393,7 @@ pub const Drafter = struct {
                     active_blit = null;
                     break :blk at(d.scratch.taps, 0);
                 };
-                const e = cb.compute(.concurrent);
+                const e = cb.compute(d.encoderMode());
                 active_compute = e;
                 try d.absorbBatch(e, taps_ref, segs[0..seg_count], total_rows);
                 e.end();
@@ -364,7 +430,7 @@ pub const Drafter = struct {
             .use_norm = @intFromBool(d.use_embed_norm),
             .eps = c.eps,
         });
-        e.barrier();
+        d.sync(e);
         var block_qkv_args: k.BlockQkvArgs = .{ .rows = @intCast(rows), .block = @intCast(n), .eps = c.eps, .theta = c.theta, .pos0 = @splat(0) };
         var streams: [max_batch_streams]k.AttendStream = @splat(.{ .anchor = 0, .from = 0, .lo = 0, .retained = 0, .keys = 0, .chunks = 0 });
         var max_stream_chunks: u32 = 1;
@@ -387,57 +453,66 @@ pub const Drafter = struct {
         const attend_args: k.AttendArgs = .{ .rows = @intCast(rows), .block = @intCast(n), .window = c.window, .ring = @intCast(w.ring_size), .max_chunks = max_stream_chunks, .scale = 1.0 / @sqrt(128.0) };
         for (d.loaded.weights.layers, 0..) |layer, i| {
             k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.in_norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = @intFromBool(i > 0) });
-            e.barrier();
+            d.sync(e);
             try d.project(e, layer.attn_conv.proj, at(s.x, 0), at(s.dyn, 0), rows);
-            e.barrier();
+            d.sync(e);
             k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.xc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
-            e.barrier();
-            try d.project(e, layer.q_proj, at(s.xc, 0), at(s.q_raw, 0), rows);
-            try d.project(e, layer.k_proj, at(s.xc, 0), at(s.k_raw, 0), rows);
-            try d.project(e, layer.v_proj, at(s.xc, 0), at(s.v_raw, 0), rows);
-            e.barrier();
+            d.sync(e);
+            try d.projectGroup(e, at(s.xc, 0), rows, &.{
+                .{ .linear = layer.q_proj, .output = at(s.q_raw, 0) },
+                .{ .linear = layer.k_proj, .output = at(s.k_raw, 0) },
+                .{ .linear = layer.v_proj, .output = at(s.v_raw, 0) },
+            });
+            d.sync(e);
             k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), block_qkv_args);
-            e.barrier();
+            d.sync(e);
             var rings: [max_batch_streams]k.Ring = undefined;
             for (blocks, 0..) |blk, bi| rings[bi] = .{ .k = at(blk.lane.k[i], 0), .v = at(blk.lane.v[i], 0) };
             k.attendPart(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), rings[0..blocks.len], at(s.part, 0), attend_args, streams[0..blocks.len]);
-            e.barrier();
+            d.sync(e);
             k.attendMerge(&d.pipelines, e, at(s.part, 0), at(s.attn, 0), attend_args, streams[0..blocks.len]);
-            e.barrier();
+            d.sync(e);
             try d.project(e, layer.o_proj, at(s.attn, 0), at(s.y, 0), rows);
-            e.barrier();
+            d.sync(e);
             k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.yc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
-            e.barrier();
+            d.sync(e);
             k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.post_norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = 1 });
-            e.barrier();
+            d.sync(e);
             try d.project(e, layer.mlp_conv.proj, at(s.x, 0), at(s.dyn, 0), rows);
-            e.barrier();
+            d.sync(e);
             k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.xc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
-            e.barrier();
-            try d.project(e, layer.gate_proj, at(s.xc, 0), at(s.gate, 0), rows);
-            try d.project(e, layer.up_proj, at(s.xc, 0), at(s.up, 0), rows);
-            e.barrier();
+            d.sync(e);
+            try d.projectGroup(e, at(s.xc, 0), rows, &.{
+                .{ .linear = layer.gate_proj, .output = at(s.gate, 0) },
+                .{ .linear = layer.up_proj, .output = at(s.up, 0) },
+            });
+            d.sync(e);
             k.siluMul(&d.pipelines, e, at(s.gate, 0), at(s.up, 0), at(s.act, 0), @intCast(rows * w.intermediate));
-            e.barrier();
+            d.sync(e);
             try d.project(e, layer.down_proj, at(s.act, 0), at(s.y, 0), rows);
-            e.barrier();
+            d.sync(e);
             k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.yc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
-            e.barrier();
+            d.sync(e);
         }
         k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(d.loaded.weights.norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = 1 });
-        e.barrier();
-        const logits_stride: u32 = if (d.loaded.draft_head_q4) |*head| blk: {
-            std.debug.assert(head.n >= w.valid_vocab and head.n <= w.padded_vocab);
-            q4.encodeBatchHead(d.fast.head_q4, e, head, at(s.x, 0), at(s.logits, 0), @intCast(rows), false);
-            break :blk head.n;
+        d.sync(e);
+        const logits_stride: u32 = if (d.fast) |*fast| blk: {
+            try d.project(e, d.loaded.weights.hidden_proj, at(s.x, 0), at(s.hid, 0), rows);
+            if (d.loaded.draft_head_q4) |*head| {
+                std.debug.assert(head.n >= w.valid_vocab and head.n <= w.padded_vocab);
+                q4.encodeBatchHead(fast.head_q4, e, head, at(s.x, 0), at(s.logits, 0), @intCast(rows), false);
+                break :blk head.n;
+            }
+            fast.dispatch(d.target, e, d.target.weights.unembed, at(s.x, 0), at(s.logits, 0), rows, true);
+            break :blk @intCast(w.padded_vocab);
         } else blk: {
-            d.fast.dispatch(d.target, e, d.target.weights.unembed, at(s.x, 0), at(s.logits, 0), rows, true);
+            fwd.dense(d.target, e, d.target.weights.unembed, at(s.x, 0), at(s.logits, 0), rows);
+            try d.project(e, d.loaded.weights.hidden_proj, at(s.x, 0), at(s.hid, 0), rows);
             break :blk @intCast(w.padded_vocab);
         };
-        try d.project(e, d.loaded.weights.hidden_proj, at(s.x, 0), at(s.hid, 0), rows);
-        e.barrier();
+        d.sync(e);
         k.topk16(&d.pipelines, e, at(s.logits, 0), at(s.tval, 0), at(s.tid, 0), .{ .rows = @intCast(rows), .vocab = w.valid_vocab, .k = c.top_k, .stride = logits_stride });
-        e.barrier();
+        d.sync(e);
         k.walk(&d.pipelines, e, at(s.tval, 0), at(s.tid, 0), at(s.hid, 0), r(d.loaded.weights.pred_cb), r(d.loaded.weights.succ_cb), at(s.seq, 0), .{ .slots = n - 1, .rank = c.rank, .top = c.top_k, .vocab = w.valid_vocab, .stride = n, .row0 = 1, .softcap = c.softcap }, @intCast(blocks.len));
     }
 
@@ -461,7 +536,7 @@ pub const Drafter = struct {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
-            const e = cb.compute(.concurrent);
+            const e = cb.compute(d.encoderMode());
             var ended = false;
             errdefer if (!ended) e.end();
             try d.encodeBlocks(e, blocks[0..count]);
@@ -493,7 +568,7 @@ pub const Drafter = struct {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
-            const e = cb.compute(.concurrent);
+            const e = cb.compute(d.encoderMode());
             var ended = false;
             errdefer if (!ended) e.end();
             try d.encodeBlocks(e, &.{.{ .lane = &lane, .pending = 2, .anchor = 0 }});

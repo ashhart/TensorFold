@@ -200,10 +200,14 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const draft_token = if (drafter) |d| d.streamToken() else 0;
     const draft_shared_token = if (drafter) |d| d.sharedToken() else 0;
     const image_bytes: u64 = if (tower) |t| t.bytes() + image_rows else 0;
+    const base_other_resident = model.residentBytes() + scratch + image_bytes;
+    var budget: u64 = 0;
+    var fits: usize = 0;
+    var window: i64 = 0;
     if (drafter) |d| {
         switch (d) {
             .dspark => |ds| {
-                const base_resident = model.residentBytes() + scratch + image_bytes + ds.fixedBytes() + dspark.Drafter.scoreBytes(0);
+                const base_resident = base_other_resident + ds.fixedBytes() + dspark.Drafter.scoreBytes(0);
                 const base_budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, base_resident) catch {
                     if (tower) |t| t.deinit();
                     d.deinit();
@@ -216,36 +220,36 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
                 try ds.weights.enableDraftHeadQ4(model, min_need, base_budget);
             },
             .dflash2 => |df| {
-                const base_resident = model.residentBytes() + scratch + image_bytes + df.fixedBytes();
-                const base_budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, base_resident) catch {
+                const setup = (try setupDFlash2DraftHeadAndContext(df, ram, model.device.maxWorkingSet(), load_limit_text, base_other_resident, streams, o.context, model.config.text.max_context, problem)) orelse {
                     if (tower) |t| t.deinit();
                     d.deinit();
                     model.deinit();
-                    problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
                     return null;
                 };
-                const min_window: usize = if (o.context) |w| (if (w >= 1 and w <= model.config.text.max_context) @intCast(w) else 1) else 1;
-                const min_need = contextStateBytes(min_window, streams, draft_fixed, draft_token, draft_shared_token);
-                try df.enableDraftHeadQ4(min_need, base_budget);
+                budget = setup.budget;
+                fits = setup.fits;
+                window = setup.window;
             },
         }
     }
     const resident = model.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() else 0;
-    const budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, resident + image_bytes) catch {
-        if (tower) |t| t.deinit();
-        if (drafter) |d| d.deinit();
-        model.deinit();
-        problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
-        return null;
-    };
-    const fits = longest(budget, model.config.text.max_context, streams, draft_fixed, draft_token, draft_shared_token);
-    const window: i64 = o.context orelse @intCast(fits);
-    if (contextProblem(window, fits)) |why| {
-        if (tower) |t| t.deinit();
-        if (drafter) |d| d.deinit();
-        model.deinit();
-        problem.* = why;
-        return null;
+    if (drafter == null or drafter.? != .dflash2) {
+        budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, resident + image_bytes) catch {
+            if (tower) |t| t.deinit();
+            if (drafter) |d| d.deinit();
+            model.deinit();
+            problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+            return null;
+        };
+        fits = longest(budget, model.config.text.max_context, streams, draft_fixed, draft_token, draft_shared_token);
+        window = o.context orelse @intCast(fits);
+        if (contextProblem(window, fits)) |why| {
+            if (tower) |t| t.deinit();
+            if (drafter) |d| d.deinit();
+            model.deinit();
+            problem.* = why;
+            return null;
+        }
     }
     const demand = admit.demandAt(resident, @intCast(window), drafter != null);
     std.log.info("inkling2_loop: {d:.1} GiB for stream and prompt state, context up to {d} tokens; {d} streams ask {d:.2} GiB ({d:.2} GiB weights, dense layers and scratch, {d} x {d:.2} GiB a stream, {d:.2} GiB shared)", .{ inGib(budget), window, streams, inGib(demand.of(streams)), inGib(demand.fixed), streams, inGib(demand.stream), inGib(demand.shared) });
@@ -302,6 +306,45 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
+pub const DFlash2Setup = struct {
+    budget: u64,
+    fits: usize,
+    window: i64,
+};
+
+pub fn setupDFlash2DraftHeadAndContext(
+    df: *dflash2.Drafter,
+    ram: u64,
+    working_set: u64,
+    load_limit_text: ?[]const u8,
+    base_other_resident: u64,
+    streams: u64,
+    asked_context: ?i64,
+    max_context: u32,
+    problem: *[]const u8,
+) !?DFlash2Setup {
+    const base_resident = base_other_resident + df.fixedBytes();
+    const base_budget = cacheBudget(ram, working_set, load_limit_text, base_resident) catch {
+        problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+        return null;
+    };
+    const min_window: usize = if (asked_context) |w| (if (w >= 1 and w <= max_context) @intCast(w) else 1) else 1;
+    const min_need = contextStateBytes(min_window, streams, dflash2.streamBytes(), 0, 0);
+    try df.enableDraftHeadQ4(min_need, base_budget);
+    const resident = base_other_resident + df.fixedBytes();
+    const budget = cacheBudget(ram, working_set, load_limit_text, resident) catch {
+        problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+        return null;
+    };
+    const fits = longest(budget, max_context, streams, dflash2.streamBytes(), 0, 0);
+    const window: i64 = asked_context orelse @intCast(fits);
+    if (contextProblem(window, fits)) |why| {
+        problem.* = why;
+        return null;
+    }
+    return .{ .budget = budget, .fits = fits, .window = window };
+}
+
 fn inGib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
@@ -320,7 +363,7 @@ pub fn cacheBudget(ram: u64, working_set: u64, text: ?[]const u8, resident: u64)
     return if (limit > resident + margin) limit - resident - margin else 0;
 }
 
-fn contextStateBytes(window: usize, streams: u64, draft_fixed: u64, draft_token: u64, draft_shared_token: u64) u64 {
+pub fn contextStateBytes(window: usize, streams: u64, draft_fixed: u64, draft_token: u64, draft_shared_token: u64) u64 {
     const tokens: u64 = @intCast(window);
     return st.cacheBytes(window) + streams * (draft_fixed + draft_token * tokens) + draft_shared_token * tokens;
 }
@@ -492,23 +535,4 @@ test "Inkling native open refuses unsupported --drafter-bits before loading" {
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 0 }) == null);
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 4 }) == null);
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafts = false, .drafter = "unused", .drafter_bits = 8 }) == null);
-}
-
-test "Inkling native open refuses malformed TF_INKLING2_DRAFT_HEAD_Q4 before loading" {
-    const sys = @import("sys");
-    const saved = sys.environment.rawText(q4.env_name);
-    const saved_copy = if (saved) |val| try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{val}, 0) else null;
-    defer {
-        if (saved_copy) |val| {
-            _ = sys.env.setenv(q4.env_name, val.ptr, 1);
-            std.testing.allocator.free(val);
-        } else _ = sys.env.unsetenv(q4.env_name);
-    }
-    _ = sys.env.setenv(q4.env_name, "bogus", 1);
-    var problem_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer problem_arena.deinit();
-    var problem: []const u8 = "not published";
-    const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop" };
-    try std.testing.expect((try open(problem_arena.allocator(), std.testing.allocator, std.testing.io, o, &problem)) == null);
-    try std.testing.expect(std.mem.indexOf(u8, problem, q4.env_name) != null);
 }

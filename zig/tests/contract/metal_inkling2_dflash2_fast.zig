@@ -1,7 +1,6 @@
 //! Contract probes, red controls, and FailingAllocator OOM tests for DFlash 2 fast BF16 NAX/MMA kernels.
 const std = @import("std");
 const mtl = @import("metal");
-const controls = @import("metal_inkling2_dspark_controls.zig");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const bf16 = @import("tensorfold").inkling2_dflash2_bf16;
@@ -214,4 +213,7 @@ test "DFlash2 fast BF16 control anchor applies once and rejects duplicates" {
     const twice = try std.mem.concat(a, u8, &.{ prod, prod });
     defer a.free(twice);
     try std.testing.expectError(error.ControlEditMissing, controlSource(a, twice));
+    const pre = try controlSource(a, sources.inkling2_dflash2_fast_pre_m5);
+    defer a.free(pre);
+    try std.testing.expect(std.mem.startsWith(u8, pre, "#define TF_SIMD_FRAGS 1\n"));
 }

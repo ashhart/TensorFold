@@ -147,8 +147,68 @@ pub const Copies = struct {
         }
     }
 
-    /// Projects contiguous BF16 `rows` from `input` through `key`'s 4-bit copy without a barrier.
+    pub const GroupItem = struct { key: usize, n: usize, output: Ref };
+
+    /// Projects shared `input` across independent `items` without barriers between outputs; caller synchronizes after.
+    pub fn encodeProjectGroup(c: *const Copies, e: mtl.ComputeEncoder, k: usize, input: Ref, items: []const GroupItem, rows: usize) !void {
+        if (rows == 0 or rows > std.math.maxInt(u32)) return error.InvalidRows;
+        if (items.len == 0) return;
+        if (c.tiled.count() > 0) {
+            for (items) |item| {
+                const t = c.tiled.get(item.key) orelse return error.DraftPreparationUnqualified;
+                if (t.n != item.n or t.k != k) return error.DraftPreparationUnqualified;
+                simd.encode(e, try simd.call(&c.simd.?, t.n, t.k, rows, false, false, 0), t.matrix(), input.buf, input.off, item.output.buf, item.output.off);
+            }
+            return;
+        }
+        const first_adapter = c.adapters.get(items[0].key) orelse return error.DraftPreparationUnqualified;
+        const most = first_adapter.projection.max_rows;
+        const sums_pipe = first_adapter.projection.sums_pipe orelse return error.DraftPreparationUnqualified;
+        const sums_buf = first_adapter.projection.sums_buffer orelse return error.DraftPreparationUnqualified;
+        const groups = first_adapter.projection.group_count;
+        for (items) |item| {
+            const adapter = c.adapters.get(item.key) orelse return error.DraftPreparationUnqualified;
+            if (adapter.projection.n != item.n or adapter.projection.k != k or adapter.projection.max_rows != most) {
+                return error.DraftPreparationUnqualified;
+            }
+        }
+        const total: u32 = @intCast(rows);
+        var first: u32 = 0;
+        while (first < total) : (first += most) {
+            if (first > 0) e.barrier();
+            const take = @min(total - first, most);
+            const stride: u32 = 16 * ((take + 15) / 16);
+            const x_off = input.off + @as(usize, first) * k * 2;
+            e.setPipeline(sums_pipe);
+            e.setBuffer(input.buf, x_off, 0);
+            e.setValue(@as(i32, @intCast(take)), 1);
+            e.setBuffer(sums_buf, 0, 2);
+            e.setValue(@as(i32, @intCast(stride)), 3);
+            e.dispatchThreads(.{ .width = stride * groups }, .{ .width = 256 });
+            e.barrier();
+            const sums: core.lane_projection.Sums = .{ .ref = .{ .buf = sums_buf }, .stride = stride };
+            for (items) |item| {
+                const adapter = c.adapters.get(item.key).?;
+                try adapter.projection.encodeSums(
+                    e,
+                    .{ .buf = input.buf, .off = x_off },
+                    .{ .buf = adapter.words },
+                    .{ .buf = adapter.metadata },
+                    sums,
+                    .{ .buf = item.output.buf, .off = item.output.off + @as(usize, first) * item.n * 2 },
+                    take,
+                );
+            }
+        }
+    }
+
+    /// Projects contiguous BF16 `rows` from `input` through `key`'s 4-bit copy without a trailing barrier.
     pub fn encodeProject(c: *const Copies, e: mtl.ComputeEncoder, key: usize, n: usize, k: usize, input: Ref, output: Ref, rows: usize) !void {
+        return c.encodeProjectGroup(e, k, input, &.{.{ .key = key, .n = n, .output = output }}, rows);
+    }
+
+    /// Projects contiguous BF16 `rows` from `input` through `key`'s 4-bit copy on the pre-change serial path.
+    pub fn project(c: *const Copies, e: mtl.ComputeEncoder, key: usize, n: usize, k: usize, input: Ref, output: Ref, rows: usize) !void {
         if (rows == 0 or rows > std.math.maxInt(u32)) return error.InvalidRows;
         if (c.tiled.get(key)) |t| {
             if (t.n != n or t.k != k) return error.DraftPreparationUnqualified;
@@ -168,11 +228,6 @@ pub const Copies = struct {
                 );
             }
         }
-    }
-
-    /// Projects contiguous BF16 `rows` from `input` through `key`'s 4-bit copy into `output`.
-    pub fn project(c: *const Copies, e: mtl.ComputeEncoder, key: usize, n: usize, k: usize, input: Ref, output: Ref, rows: usize) !void {
-        try c.encodeProject(e, key, n, k, input, output, rows);
         e.barrier();
     }
 };
@@ -383,5 +438,41 @@ test "DFlash2 Q4 prepared copies project within tolerance on tensor-unit and SIM
         try std.testing.expectError(error.InvalidRows, copies.project(enc, k_hproj, 256, 2304, .{ .buf = empty_x }, .{ .buf = empty_y }, 0));
         try std.testing.expectError(error.DraftPreparationUnqualified, copies.project(enc, 0xdeadbeef, 256, 2304, .{ .buf = empty_x }, .{ .buf = empty_y }, 1));
         enc.end();
+
+        // Concurrent group overlap (shared sums, zero inter-projection barriers) must match serial project bit-for-bit.
+        for ([_]usize{ 8, 160 }) |rows_n| {
+            const x_g = try device.buffer(rows_n * 2304 * 2, opts);
+            defer x_g.deinit();
+            fillRandomBf16(prng.random(), x_g.slice(u16, rows_n * 2304), 0.4);
+            const y0_s = try device.buffer(rows_n * 576 * 2, opts);
+            defer y0_s.deinit();
+            const y1_s = try device.buffer(rows_n * 256 * 2, opts);
+            defer y1_s.deinit();
+            const y0_c = try device.buffer(rows_n * 576 * 2, opts);
+            defer y0_c.deinit();
+            const y1_c = try device.buffer(rows_n * 256 * 2, opts);
+            defer y1_c.deinit();
+            const cb_s = queue.commandBuffer();
+            const es = cb_s.compute(.serial);
+            try copies.project(es, k_conv, 576, 2304, .{ .buf = x_g }, .{ .buf = y0_s }, rows_n);
+            try copies.project(es, k_hproj, 256, 2304, .{ .buf = x_g }, .{ .buf = y1_s }, rows_n);
+            es.end();
+            cb_s.commit();
+            cb_s.wait();
+            try std.testing.expect(cb_s.failure() == null);
+            const cb_c = queue.commandBuffer();
+            const ec = cb_c.compute(.concurrent);
+            try copies.encodeProjectGroup(ec, 2304, .{ .buf = x_g }, &.{
+                .{ .key = k_conv, .n = 576, .output = .{ .buf = y0_c } },
+                .{ .key = k_hproj, .n = 256, .output = .{ .buf = y1_c } },
+            }, rows_n);
+            ec.barrier();
+            ec.end();
+            cb_c.commit();
+            cb_c.wait();
+            try std.testing.expect(cb_c.failure() == null);
+            try std.testing.expectEqualSlices(u16, y0_s.slice(u16, rows_n * 576), y0_c.slice(u16, rows_n * 576));
+            try std.testing.expectEqualSlices(u16, y1_s.slice(u16, rows_n * 256), y1_c.slice(u16, rows_n * 256));
+        }
     }
 }

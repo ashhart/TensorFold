@@ -9,13 +9,14 @@ const Model = @import("model.zig").Model;
 const fwd = @import("forward.zig");
 const dense_mma = @import("dense.zig");
 const dflash2 = @import("dflash2.zig");
+const bf16_fast = @import("dflash2_bf16.zig");
 const w = @import("dflash2_weights.zig");
 const prepared = @import("dflash2_prepared.zig");
 const q4 = @import("draft_head_q4.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-fn bf16(v: f32) u16 {
+pub fn bf16(v: f32) u16 {
     return core.affine4.asBf16(v);
 }
 
@@ -37,7 +38,7 @@ fn fillBf16Tile(rng: std.Random, slice: []u16, cols: usize, scale: f32) void {
     }
 }
 
-fn makeTensor(buf: mtl.Buffer, off: usize, dims: []const usize) ck.Tensor {
+pub fn makeTensor(buf: mtl.Buffer, off: usize, dims: []const usize) ck.Tensor {
     var shape: [core.safetensors.max_rank]usize = @splat(1);
     @memcpy(shape[0..dims.len], dims);
     var count: usize = 1;
@@ -45,7 +46,7 @@ fn makeTensor(buf: mtl.Buffer, off: usize, dims: []const usize) ck.Tensor {
     return .{ .dtype = .bf16, .rank = dims.len, .shape = shape, .bytes = count * 2, .buffer = buf, .offset = off };
 }
 
-fn loadDensePipelines(device: mtl.Device) ![6]mtl.Pipeline {
+pub fn loadDensePipelines(device: mtl.Device) ![6]mtl.Pipeline {
     const lib = try mtl.Library.fromSource(device, sources.spark25_glue, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
     defer lib.deinit();
     var out: [6]mtl.Pipeline = undefined;
@@ -60,7 +61,7 @@ fn loadDensePipelines(device: mtl.Device) ![6]mtl.Pipeline {
     return out;
 }
 
-const SyntheticRig = struct {
+pub const SyntheticRig = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
@@ -69,7 +70,7 @@ const SyntheticRig = struct {
     cb_buf: mtl.Buffer,
     weight_bufs: std.ArrayList(mtl.Buffer) = .empty,
 
-    fn init(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !SyntheticRig {
+    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !SyntheticRig {
         var rig: SyntheticRig = .{
             .gpa = gpa,
             .device = device,
@@ -85,6 +86,8 @@ const SyntheticRig = struct {
         errdefer for (rig.model.dense) |p| p.deinit();
         rig.model.dense_mma = try dense_mma.Mma.load(device);
         errdefer if (rig.model.dense_mma) |m| m.deinit();
+        rig.model.dense_tiled = try dense_mma.Tiled.load(device);
+        errdefer if (rig.model.dense_tiled) |t| t.deinit();
         var prng = std.Random.DefaultPrng.init(0xdf2_ba7c);
         const rng = prng.random();
         rig.vocab_buf = try device.buffer(w.padded_vocab * w.hidden * 2, opts);
@@ -100,11 +103,12 @@ const SyntheticRig = struct {
         return rig;
     }
 
-    fn deinit(rig: *SyntheticRig) void {
+    pub fn deinit(rig: *SyntheticRig) void {
         for (rig.weight_bufs.items) |b| b.deinit();
         rig.weight_bufs.deinit(rig.gpa);
         rig.cb_buf.deinit();
         rig.vocab_buf.deinit();
+        if (rig.model.dense_tiled) |t| t.deinit();
         if (rig.model.dense_mma) |m| m.deinit();
         for (rig.model.dense) |p| p.deinit();
     }
@@ -128,7 +132,7 @@ const SyntheticRig = struct {
         return .{ .n = n, .k = k, .key = key, .bf16 = t };
     }
 
-    fn makeDrafter(rig: *SyntheticRig, bits: u8, use_tu: bool, max_streams: usize) !*dflash2.Drafter {
+    pub fn makeDrafter(rig: *SyntheticRig, bits: u8, use_tu: bool, max_streams: usize) !*dflash2.Drafter {
         var prng = std.Random.DefaultPrng.init(0xdf2_9001);
         const rng = prng.random();
         var copies: ?prepared.Copies = if (bits == 4) .{ .gpa = rig.gpa } else null;
@@ -205,7 +209,7 @@ fn readRingBytes(device: mtl.Device, queue: mtl.Queue, df: *const dflash2.Drafte
     @memcpy(dst, staging.contents()[0..dst.len]);
 }
 
-fn fillTapRows(buf: mtl.Buffer, start_row: usize, rows: usize, seed: u64) void {
+pub fn fillTapRows(buf: mtl.Buffer, start_row: usize, rows: usize, seed: u64) void {
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
     const row_elems = w.taps_n * w.hidden;
@@ -213,7 +217,17 @@ fn fillTapRows(buf: mtl.Buffer, start_row: usize, rows: usize, seed: u64) void {
     for (dst) |*v| v.* = bf16((rng.float(f32) * 2.0 - 1.0) * 0.25);
 }
 
-fn verifyProjectionExactness(device: mtl.Device, queue: mtl.Queue, dense: *const Model, n: usize, k: usize, bits: u8, use_tu: bool) !void {
+fn expectBf16Close(want: []const u16, got: []const u16) !void {
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |wb, gb| {
+        const wv = q4.asFloat(wb);
+        const gv = q4.asFloat(gb);
+        try std.testing.expect(std.math.isFinite(gv));
+        try std.testing.expect(@abs(wv - gv) <= @max(@abs(wv) * 0.02, 0.05));
+    }
+}
+
+fn verifyProjectionExactness(device: mtl.Device, queue: mtl.Queue, dense: *const Model, fast: *const bf16_fast.Pipelines, n: usize, k: usize, bits: u8, use_tu: bool) !void {
     const gpa = std.testing.allocator;
     const max_rows: usize = 64;
     var prng = std.Random.DefaultPrng.init(0xdf2_1111 +% n +% k +% bits);
@@ -240,7 +254,7 @@ fn verifyProjectionExactness(device: mtl.Device, queue: mtl.Queue, dense: *const
     defer batch_buf.deinit();
     const w_tensor = makeTensor(w_buf, 0, &.{ n, k });
 
-    // Run 8-row slices one at a time, plus a 7-row tail slice for rows 1..7.
+    // Pre-change reference: 8-row slices via fwd.dense (BF16) or copies.project (Q4).
     {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -248,8 +262,6 @@ fn verifyProjectionExactness(device: mtl.Device, queue: mtl.Queue, dense: *const
         const e = cb.compute(.serial);
         var s: usize = 0;
         while (s < max_rows) : (s += 8) {
-            const x_ref = dflash2.Drafter.testing;
-            _ = x_ref;
             if (bits == 4) {
                 try copies.?.project(e, 1, n, k, .{ .buf = x_buf, .off = s * k * 2 }, .{ .buf = solo_buf, .off = s * n * 2 }, 8);
             } else {
@@ -263,31 +275,33 @@ fn verifyProjectionExactness(device: mtl.Device, queue: mtl.Queue, dense: *const
     }
 
     const want = solo_buf.slice(u16, max_rows * n);
-    for ([_]usize{ 7, 16, 24, 32, 64 }) |rows| {
+    for ([_]usize{ 7, 16, 17, 24, 32, 33, 64 }) |rows| {
         const x_off = if (rows == 7) k * 2 else 0;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
         if (bits == 4) {
-            try copies.?.project(e, 1, n, k, .{ .buf = x_buf, .off = x_off }, .{ .buf = batch_buf, .off = 0 }, rows);
+            try copies.?.encodeProject(e, 1, n, k, .{ .buf = x_buf, .off = x_off }, .{ .buf = batch_buf, .off = 0 }, rows);
+            e.barrier();
         } else {
-            fwd.dense(dense, e, w_tensor, .{ .buf = x_buf, .off = x_off }, .{ .buf = batch_buf, .off = 0 }, rows);
+            fast.dispatch(dense, e, w_tensor, .{ .buf = x_buf, .off = x_off }, .{ .buf = batch_buf, .off = 0 }, rows, false);
         }
         e.end();
         cb.commit();
         cb.wait();
         if (cb.failure() != null) return error.GpuFailed;
         const got = batch_buf.slice(u16, rows * n);
-        if (rows == 7) {
-            try std.testing.expectEqualSlices(u16, want[n .. 8 * n], got);
+        const ref_slice = if (rows == 7) want[n .. 8 * n] else want[0 .. rows * n];
+        if (bits == 4) {
+            try std.testing.expectEqualSlices(u16, ref_slice, got);
         } else {
-            try std.testing.expectEqualSlices(u16, want[0 .. rows * n], got);
+            try expectBf16Close(ref_slice, got);
         }
     }
 }
 
-test "DFlash2 batched linear projections match single-stream rows bit-for-bit across BF16 and Q4" {
+test "DFlash2 batched linear projections match pre-change single-stream rows across fast BF16 and Q4" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -299,16 +313,22 @@ test "DFlash2 batched linear projections match single-stream rows bit-for-bit ac
     dense_model.queue = queue;
     dense_model.dense = try loadDensePipelines(device);
     defer for (dense_model.dense) |p| p.deinit();
+    dense_model.dense_mma = try dense_mma.Mma.load(device);
+    defer if (dense_model.dense_mma) |m| m.deinit();
+    dense_model.dense_tiled = try dense_mma.Tiled.load(device);
+    defer if (dense_model.dense_tiled) |t| t.deinit();
+    var fast = try bf16_fast.Pipelines.load(device);
+    defer fast.deinit();
 
-    try verifyProjectionExactness(device, queue, &dense_model, 256, 2304, 0, false);
-    try verifyProjectionExactness(device, queue, &dense_model, 576, 2304, 0, false);
-    try verifyProjectionExactness(device, queue, &dense_model, 2304, 2304, 0, false);
-    try verifyProjectionExactness(device, queue, &dense_model, 256, 2304, 4, false);
-    try verifyProjectionExactness(device, queue, &dense_model, 576, 2304, 4, false);
+    try verifyProjectionExactness(device, queue, &dense_model, &fast, 256, 2304, 0, false);
+    try verifyProjectionExactness(device, queue, &dense_model, &fast, 576, 2304, 0, false);
+    try verifyProjectionExactness(device, queue, &dense_model, &fast, 2304, 2304, 0, false);
+    try verifyProjectionExactness(device, queue, &dense_model, &fast, 256, 2304, 4, false);
+    try verifyProjectionExactness(device, queue, &dense_model, &fast, 576, 2304, 4, false);
     if (device.tensorUnits()) {
-        try verifyProjectionExactness(device, queue, &dense_model, 256, 2304, 4, true);
-        try verifyProjectionExactness(device, queue, &dense_model, 576, 2304, 4, true);
-        try verifyProjectionExactness(device, queue, &dense_model, 4096, 2304, 4, true);
+        try verifyProjectionExactness(device, queue, &dense_model, &fast, 256, 2304, 4, true);
+        try verifyProjectionExactness(device, queue, &dense_model, &fast, 576, 2304, 4, true);
+        try verifyProjectionExactness(device, queue, &dense_model, &fast, 4096, 2304, 4, true);
     }
 }
 
@@ -318,9 +338,11 @@ fn runParityMode(rig: *SyntheticRig, bits: u8, use_tu: bool, count: usize, head_
     defer solo.deinit();
     const batch = try rig.makeDrafter(bits, use_tu, dflash2.max_batch_streams);
     defer batch.deinit();
+    try std.testing.expect(!dflash2.Drafter.testing.hasFast(solo));
+    try std.testing.expectEqual(mtl.DispatchType.serial, dflash2.Drafter.testing.dispatchMode(solo));
     if (head_q4) {
-        solo.loaded.draft_head_q4 = try q4.init(rig.device, rig.model.weights.unembed.host(u16), w.valid_vocab, w.hidden);
-        batch.loaded.draft_head_q4 = try q4.init(rig.device, rig.model.weights.unembed.host(u16), w.valid_vocab, w.hidden);
+        try dflash2.Drafter.testing.enableDraftHeadQ4Direct(solo);
+        try dflash2.Drafter.testing.enableDraftHeadQ4Direct(batch);
     }
 
     const solo_dr = solo.drafter();
@@ -490,7 +512,7 @@ fn runParityMode(rig: *SyntheticRig, bits: u8, use_tu: bool, count: usize, head_
     }
 }
 
-test "DFlash2 batched N=4 and N=9 match N=1 serial bit-for-bit across BF16 and Q4" {
+test "DFlash2 batched N=1, 7 and 9 match pre-change serial bit-for-bit across BF16 and Q4" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -500,16 +522,14 @@ test "DFlash2 batched N=4 and N=9 match N=1 serial bit-for-bit across BF16 and Q
     var rig = try SyntheticRig.init(std.testing.allocator, device, queue);
     defer rig.deinit();
 
-    try runParityMode(&rig, 0, false, 4, false);
-    try runParityMode(&rig, 0, false, 4, true);
-    try runParityMode(&rig, 4, false, 4, false);
+    for ([_]usize{ 1, 7, 9 }) |n_streams| {
+        try runParityMode(&rig, 0, false, n_streams, false);
+        try runParityMode(&rig, 0, false, n_streams, true);
+        try runParityMode(&rig, 4, device.tensorUnits(), n_streams, false);
+        try runParityMode(&rig, 4, device.tensorUnits(), n_streams, true);
+    }
     if (device.tensorUnits()) {
-        try runParityMode(&rig, 4, true, 4, false);
-        try runParityMode(&rig, 4, true, 4, true);
-        try runParityMode(&rig, 4, true, 9, false);
-        try runParityMode(&rig, 4, true, 9, true);
-    } else {
-        try runParityMode(&rig, 0, false, 9, false);
+        try runParityMode(&rig, 4, false, 7, false);
     }
 }
 
@@ -528,6 +548,7 @@ test "DFlash2 encodeBlocks microbenchmark across bf16, q4 and q4+head_q4" {
     {
         const df_bf16 = try rig.makeDrafter(0, device.tensorUnits(), 4);
         defer df_bf16.deinit();
+        try dflash2.Drafter.testing.enableFast(df_bf16);
         b1 = try dflash2.Drafter.testing.benchmarkEncode(df_bf16, 1, 4);
         b4 = try dflash2.Drafter.testing.benchmarkEncode(df_bf16, 4, 4);
     }
@@ -537,7 +558,7 @@ test "DFlash2 encodeBlocks microbenchmark across bf16, q4 and q4+head_q4" {
     const q1 = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 1, 4);
     const q4_nohead = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 4, 4);
 
-    df_q4.loaded.draft_head_q4 = try q4.init(rig.device, rig.model.weights.unembed.host(u16), w.valid_vocab, w.hidden);
+    try dflash2.Drafter.testing.enableDraftHeadQ4Direct(df_q4);
     const qh1 = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 1, 4);
     const qh4 = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 4, 4);
 

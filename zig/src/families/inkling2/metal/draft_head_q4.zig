@@ -117,7 +117,8 @@ fn loadNamedPipeline(device: mtl.Device, text: []const u8, sym: [:0]const u8, mi
 }
 
 pub fn loadPipeline(device: mtl.Device) !mtl.Pipeline {
-    const lib = try mtl.Library.fromSource(device, sources.inkling2_dspark, mtl.CompileOptions.mlx());
+    const text = if (device.tensorUnits()) sources.inkling2_dspark else sources.inkling2_dspark_pre_m5;
+    const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer lib.deinit();
     return try mtl.Pipeline.init(device, lib, symbol, false);
 }
