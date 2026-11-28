@@ -48,6 +48,8 @@ pub const Link = struct {
     }
 
     pub fn deinit(l: *Link) void {
+        // the last step's broadcast (rank 0's end) may still read buf
+        cuda.completion.drain(l.stream.d, l.stream, "the step link's last broadcast did not drain before its buffer was freed");
         l.gpa.free(l.ids);
         l.buf.free();
     }
