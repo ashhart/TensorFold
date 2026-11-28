@@ -1,0 +1,126 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Single-step gated-delta decode. Same 32-row workgroup shape as the prefill
+// oracle; flag bit 3 computes the raw gates from a/b/a_log/dt, bit 9 unpacks
+// F32 A_log from the paired uint16 halfwords.
+//   g    = exp(-exp(A_log) * bf16_round(softplus(bf16_round(a + dt))))
+//   beta = bf16_round(sigmoid(b))
+// then the shared prefill recurrence once for T = 1.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+    uint dims;
+    uint shape[4];
+    uint in_strides[4];
+    uint out_strides[4];
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+float bf16_round(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return bf16_to_f32((u >> 16u) | 0x0040u);
+    }
+    return bf16_to_f32((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+layout(set = 0, binding = 0, std430) readonly buffer Q { uint16_t v[]; } qbuf;
+layout(set = 0, binding = 1, std430) readonly buffer K { uint16_t v[]; } kbuf;
+layout(set = 0, binding = 2, std430) readonly buffer V { uint16_t v[]; } vbuf;
+layout(set = 0, binding = 3, std430) readonly buffer A { uint16_t v[]; } abuf;
+layout(set = 0, binding = 4, std430) readonly buffer B { uint16_t v[]; } bbuf;
+layout(set = 0, binding = 5, std430) readonly buffer SIn { float v[]; } sibuf;
+layout(set = 0, binding = 6, std430) writeonly buffer Y { uint16_t v[]; } ybuf;
+layout(set = 0, binding = 7, std430) writeonly buffer SOut { float v[]; } sobuf;
+layout(set = 0, binding = 8, std430) readonly buffer ALog { uint16_t v[]; } albuf;
+layout(set = 0, binding = 9, std430) readonly buffer DT { uint16_t v[]; } dtbuf;
+
+shared float part[256];
+
+void main() {
+    const uint Dk = params.matrix_m;
+    const uint Dv = params.matrix_n;
+    const uint h = gl_WorkGroupID.x;
+    const uint lid = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.y * 32u + lid / 8u;
+    const uint lane = lid % 8u;
+    const uint state_base = (h * Dv + row) * Dk;
+
+    // Gate prologue; every thread derives the same per-head scalars.
+    uint h_idx = h % params.in_strides[2];
+    float g = 1.0;
+    float bta = bf16_to_f32(uint(bbuf.v[h_idx]));
+    if ((params.flags & 8u) != 0u) {
+        float s = bf16_round(bf16_to_f32(uint(abuf.v[h_idx])) + bf16_to_f32(uint(dtbuf.v[h_idx])));
+        float sp = bf16_round(max(s, 0.0) + log(1.0 + exp(-abs(s))));
+        float a_log;
+        if ((params.flags & 512u) != 0u) {
+            a_log = uintBitsToFloat(uint(albuf.v[2u * h_idx]) | (uint(albuf.v[2u * h_idx + 1u]) << 16u));
+        } else {
+            a_log = bf16_to_f32(uint(albuf.v[2u * h_idx]));
+        }
+        g = exp(-exp(a_log) * sp);
+        bta = bf16_round(1.0 / (1.0 + exp(-bf16_to_f32(uint(bbuf.v[h_idx])))));
+    }
+
+    float s[16];
+    for (uint j = 0u; j < 16u; ++j) s[j] = sibuf.v[state_base + lane * 16u + j];
+
+    uint qk_base = h * Dk + lane * 16u;
+    float kk[16];
+    float qq[16];
+    for (uint j = 0u; j < 16u; ++j) {
+        kk[j] = bf16_to_f32(uint(kbuf.v[qk_base + j]));
+        qq[j] = bf16_to_f32(uint(qbuf.v[qk_base + j]));
+    }
+    float p = 0.0;
+    for (uint j = 0u; j < 16u; ++j) p += s[j] * g * kk[j];
+    part[lid] = p;
+    barrier();
+    float kv = 0.0;
+    for (uint l = 0u; l < 8u; ++l) kv += part[(lid / 8u) * 8u + l];
+    float delta = (bf16_to_f32(uint(vbuf.v[h * Dv + row])) - kv) * bta;
+    barrier();
+    for (uint j = 0u; j < 16u; ++j) {
+        s[j] = s[j] * g + delta * kk[j];
+        sobuf.v[state_base + lane * 16u + j] = s[j];
+    }
+    float p2 = 0.0;
+    for (uint j = 0u; j < 16u; ++j) p2 += s[j] * qq[j];
+    part[lid] = p2;
+    barrier();
+    if (lane == 0u) {
+        float o = 0.0;
+        for (uint l = 0u; l < 8u; ++l) o += part[(lid / 8u) * 8u + l];
+        ybuf.v[h * Dv + row] = f32_to_bf16(o);
+    }
+}
