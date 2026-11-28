@@ -1,78 +1,14 @@
 //! Record real profiler hooks through a driver whose event calls cannot wait.
 const std = @import("std");
+const t = std.testing;
 const cuda = @import("cuda");
 const ledger = @import("cuda_prefill_trace.zig");
-const prof = @import("cuda_prof.zig");
-const t = std.testing;
-const Fake = struct {
-    var creates: usize = 0;
-    var live: usize = 0;
-    var ready = false;
-    var failure: enum { none, create, record, elapsed } = .none;
-    var bad_time = false;
-    var clock: f32 = 0;
-    var times: [4096]f32 = undefined;
-    var calls: std.ArrayList(u64) = .empty;
-    fn create(out: *cuda.abi.Event, _: c_uint) callconv(.c) c_int {
-        if (failure == .create) return 2;
-        creates += 1;
-        live += 1;
-        out.* = @ptrFromInt(creates);
-        return 0;
-    }
-    fn destroy(_: cuda.abi.Event) callconv(.c) c_int {
-        live -= 1;
-        return 0;
-    }
-    fn record(event: cuda.abi.Event, _: cuda.abi.Stream) callconv(.c) c_int {
-        if (failure == .record) return 1;
-        times[@intFromPtr(event)] = clock;
-        return 0;
-    }
-    fn query(_: cuda.abi.Event) callconv(.c) c_int {
-        return if (ready) 0 else 600;
-    }
-    fn elapsed(out: *f32, first: cuda.abi.Event, last: cuda.abi.Event) callconv(.c) c_int {
-        if (failure == .elapsed) return 1;
-        out.* = if (bad_time) std.math.nan(f32) else times[@intFromPtr(last)] - times[@intFromPtr(first)];
-        return 0;
-    }
-    fn driver() cuda.Driver {
-        var d: cuda.Driver = undefined;
-        d.api.cuEventCreate = create;
-        d.api.cuEventDestroy_v2 = destroy;
-        d.api.cuEventRecord = record;
-        d.api.cuEventQuery = query;
-        d.api.cuEventElapsedTime = elapsed;
-        d.api.cuLaunchKernel = launch;
-        d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(launch);
-        // Synchronization and wait function pointers remain undefined: any added call fails this test.
-        return d;
-    }
-    fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, shared: c_uint, stream: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
-        calls.appendSlice(t.allocator, &.{ @intFromPtr(f), gx, gy, gz, bx, by, bz, shared, @intFromPtr(stream) }) catch unreachable;
-        for ("88888844", 0..) |size, i| {
-            const at = args.?[i].?;
-            const value: u64 = if (size == '8') @as(*const u64, @ptrCast(@alignCast(at))).* else @as(*const u32, @ptrCast(@alignCast(at))).*;
-            calls.append(t.allocator, value) catch unreachable;
-        }
-        clock += 2;
-        return 0;
-    }
-    fn work(stream: cuda.Stream) !void {
-        const glue = @import("cuda_glue.zig");
-        var kernels: glue.Kernels = undefined;
-        kernels.rmsnorm_4096 = .{ .d = stream.d, .handle = @ptrFromInt(0xabc) };
-        prof.context(null, 1, 2, .mixer);
-        const kda = prof.span(null, stream, .kda);
-        defer kda.end();
-        try glue.rmsnorm(.{ .glue = &kernels }, stream, 0x100, 4096, 0x200, 0x300, 4096, 0x400, 1e-6, 8192, 4096);
-    }
-};
+const Fake = @import("cuda_prefill_production_test.zig").Fake;
 fn prefix(tmp: std.testing.TmpDir) ![:0]u8 {
     return tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
 }
 test "GLM prefill ledger: off hooks preserve operation bytes, on hooks add only pollable events" {
+    Fake.calls = .empty;
     Fake.failure = .none;
     Fake.clock = 0;
     Fake.creates = 0;
@@ -163,82 +99,6 @@ test "GLM prefill ledger: off hooks preserve operation bytes, on hooks add only 
     second.end();
     try Fake.work(stream);
     try t.expectEqual(count, Fake.creates);
-}
-
-test "GLM prefill ledger: the batched pass's second fresh stream enters no scope, so one request carries the pass" {
-    Fake.failure = .none;
-    Fake.clock = 0;
-    Fake.creates = 0;
-    Fake.live = 0;
-    Fake.ready = false;
-    Fake.bad_time = false;
-    defer Fake.calls.deinit(t.allocator);
-    var d = Fake.driver();
-    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try prefix(tmp);
-    defer t.allocator.free(dir);
-    const path = try std.fmt.allocPrint(t.allocator, "{s}/batched", .{dir});
-    defer t.allocator.free(path);
-    const trace = try ledger.Trace.init(&d, t.io, path, 1, 2, &.{ .{ .kind = .dsa, .ffn = .dense }, .{ .kind = .kda, .ffn = .moe } });
-    defer trace.deinit();
-    const first = ledger.enter(trace, stream, 7, 0, 4096, 4096, false);
-    const second = ledger.enter(trace, stream, 8, 0, 2048, 2048, false);
-    try t.expect(first.trace != null);
-    try t.expect(second.trace == null);
-    try Fake.work(stream);
-    first.end();
-    second.end();
-    try t.expect(!trace.written);
-    Fake.ready = true;
-    ledger.poll(trace);
-    try t.expect(trace.written);
-    const data = try tmp.dir.readFileAlloc(t.io, "batched.rank1.json", t.allocator, .limited(65536));
-    defer t.allocator.free(data);
-    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, data, .{});
-    defer parsed.deinit();
-    try t.expectEqual(@as(i64, 7), parsed.value.object.get("slot").?.integer);
-    try t.expectEqual(@as(i64, 4096), parsed.value.object.get("prompt_tokens").?.integer);
-    try t.expect(parsed.value.object.get("complete").?.bool);
-}
-
-test "GLM prefill ledger: one poll after several shared windows moves every pending event to ready" {
-    Fake.failure = .none;
-    Fake.clock = 0;
-    Fake.creates = 0;
-    Fake.live = 0;
-    Fake.ready = false;
-    Fake.bad_time = false;
-    defer Fake.calls.deinit(t.allocator);
-    var d = Fake.driver();
-    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try prefix(tmp);
-    defer t.allocator.free(dir);
-    const path = try std.fmt.allocPrint(t.allocator, "{s}/windows", .{dir});
-    defer t.allocator.free(path);
-    const trace = try ledger.Trace.init(&d, t.io, path, 1, 2, &.{ .{ .kind = .dsa, .ffn = .dense }, .{ .kind = .kda, .ffn = .moe } });
-    defer trace.deinit();
-    const first = ledger.enter(trace, stream, 7, 0, 8192, 16384, false);
-    try Fake.work(stream);
-    first.end();
-    const second = ledger.enter(trace, stream, 7, 8192, 8192, 16384, false);
-    try Fake.work(stream);
-    second.end();
-    try t.expect(!trace.written);
-    Fake.ready = true;
-    ledger.poll(trace);
-    try t.expect(trace.written);
-    const data = try tmp.dir.readFileAlloc(t.io, "windows.rank1.json", t.allocator, .limited(65536));
-    defer t.allocator.free(data);
-    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, data, .{});
-    defer parsed.deinit();
-    try t.expect(parsed.value.object.get("complete").?.bool);
-    for (parsed.value.object.get("rows").?.array.items) |row| {
-        try t.expectEqualStrings("complete", row.object.get("event_status").?.string);
-    }
 }
 
 test "GLM prefill ledger: no cold prompt or nonfinite timing cannot produce a complete receipt" {
