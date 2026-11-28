@@ -384,7 +384,7 @@ pub const Buffers = struct {
     }
 
     /// Words one row count's latent shared plan takes: the pairs of a window's rows, then their items and counts.
-    fn latentPlanWords(c: Config) usize {
+    pub fn latentPlanWords(c: Config) usize {
         return latentPlanAt(c).counts + 2;
     }
 
@@ -401,9 +401,14 @@ pub const Buffers = struct {
 
     /// A latent MoE's (or Bolt's) shared plan at `rows` rows (1 to windowRows), as initShared wrote it.
     pub fn latentPlan(b: *const Buffers, c: Config, rows: usize) kern.Plan {
+        return latentPlanFrom(b.shared, c, rows, b.plan.rank, b.plan.hist);
+    }
+
+    /// The shared plan at `rows` rows of plans laid out from `base` as initShared lays them; `rank`, `hist` build them.
+    pub fn latentPlanFrom(base: u64, c: Config, rows: usize, rank: u64, hist: u64) kern.Plan {
         const at = latentPlanAt(c);
-        const members = b.shared + (rows - 1) * latentPlanWords(c) * 4;
-        return .{ .members = members, .items = members + at.items * 4, .counts = members + at.counts * 4, .rank = b.plan.rank, .hist = b.plan.hist };
+        const members = base + (rows - 1) * latentPlanWords(c) * 4;
+        return .{ .members = members, .items = members + at.items * 4, .counts = members + at.counts * 4, .rank = rank, .hist = hist };
     }
 
     /// Writes every row count's shared plan: a latent MoE's (row, share) pairs by Ops.plan, else pairs in row order.
@@ -501,6 +506,29 @@ test "each row count's latent shared plan holds its pairs and items, apart from 
             const end = p.counts + 8;
             try std.testing.expect(if (rows < max_rows) end <= b.latentPlan(c, rows + 1).members else end <= sharedBytes(c));
         }
+    }
+}
+
+test "an expert rank's latent shared plans from its own base sit as rank 0's do, inside the words it allocates" {
+    var c: Config = undefined;
+    c.latent = 1024;
+    c.bolt = false;
+    c.shares = 2;
+    c.world = 2;
+    var b: Buffers = undefined;
+    b.shared = 0x10000;
+    b.plan.rank = 0x20000;
+    b.plan.hist = 0x30000;
+    const base: u64 = 0x40000;
+    const bytes = windowRows(c) * Buffers.latentPlanWords(c) * 4; // cuda_worker.serve's slot
+    for (1..windowRows(c) + 1) |rows| {
+        const r0 = b.latentPlan(c, rows);
+        const r1 = Buffers.latentPlanFrom(base, c, rows, b.plan.rank, b.plan.hist);
+        try std.testing.expectEqual(r0.members - b.shared, r1.members - base);
+        try std.testing.expectEqual(r0.items - r0.members, r1.items - r1.members);
+        try std.testing.expectEqual(r0.counts - r0.members, r1.counts - r1.members);
+        try std.testing.expect(r1.items - r1.members >= rows * c.ownShares() * 4);
+        try std.testing.expect(r1.counts + 8 <= base + bytes);
     }
 }
 

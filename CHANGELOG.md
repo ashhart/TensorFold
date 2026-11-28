@@ -7,6 +7,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek-V4.1 on Metal: an EXL3 group that also keeps a dense sibling is read as its trellis, and the routed
   experts quantize each 32-value activation block to E4M3 before the down projection, as the FP8 path does, so a
   routed activation's down inputs match the reference bit for bit (#5113, refs #5063). Thanks to @BlivionIaG.
+- Nemotron 3.5 Super on CUDA at TP=2: the expert rank runs a window's shared expert on a side stream beside its routed experts, with the same plans and kernels, so tokens are unchanged (#4886).
+
+- Qwen 3.5/3.6/3.8 on CUDA with MTP drafts: cold prompt chunks that end before the MTP head's first tapped row skip the last layer's unread rows and the head, as chunks without taps already did; tokens unchanged (#4882).
+
+
+
 - CLI: `tensorfold tfq3 MODEL` pulls, converts and inspects TFQ3 checkpoints for the dedicated families and any Safetensors architecture, encoding natively in Zig when the external `tfq3` GPU binary is not installed; serving paths are unchanged (#5018).
 
 - CUDA: drafted Qwen3.8-27B gains opt-in `TF_QWEN_DRAFT_FULL_HEAD=1`, which sends a draft hold with any wide stream through the full head in one pass; on one GB10 it wins back the 1.3.7 loss at 4 greedy streams (+3.1%) with identical tokens. Default off, as are the `TF_DFLASH_GRAPH` mixed-width graph keys and `TF_QWEN_GRAPH_STATS` counters added with it (#5481, refs #4439).
