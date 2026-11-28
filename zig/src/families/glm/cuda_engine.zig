@@ -30,13 +30,11 @@ pub const max_drafts = 15;
 /// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
 const pair_bytes = 16;
 const pick_rows = @import("cuda_engine_pick.zig").pick_rows;
-
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
 pub const solo_rows = fw.solo_rows;
 pub const max_together = @import("cuda_state.zig").prompt_heads;
 pub const Prompt = struct { slot: u32, ids: []const u32 };
-
 /// A shared verify's max rows and streams: under hc_pre's 64-row block change; 16 streams take 2 rows each.
 pub const shared_rows = 32;
 pub const max_shared = 16;
@@ -84,6 +82,7 @@ pub const Engine = struct {
     bm: fw.Buffers, // the MTP head's rows
     bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
     pairs: cuda.DeviceBuffer, // every rank's (value, id) of a greedy draw
+    waiter: cuda.host_wait.Waiter = .{}, // TF_CUDA_HOST_WFE: the greedy picks' parked waits
     smp: sampler.Sampler,
     seqs: std.ArrayList(?*Seq) = .empty, // every stream's sequence by slot (the lane backend's), slot 0 made at init
     cur: *Seq = undefined, // the bound slot's: every step below runs on it
@@ -261,6 +260,7 @@ pub const Engine = struct {
         e.prompt_out.free();
         e.smp.deinit();
         e.pairs.free();
+        e.waiter.deinit();
         if (e.bs) |*b| b.deinit();
         e.bm.deinit();
         e.bd.deinit();
