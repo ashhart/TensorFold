@@ -212,6 +212,12 @@ pub const Stream = struct {
         s.mtp_len = 0;
     }
 
+    /// Resumed from a kept state at `from`: the head's rows too, the last absorbed with the token the cache keyed.
+    pub fn resumeAt(s: *Stream, from: usize) void {
+        s.len = from;
+        s.mtp_len = from;
+    }
+
     /// The page table's device address (int32 ids), as the attention kernels read it.
     pub fn table(s: *const Stream) u64 {
         return s.desc.base() + s.table_at;
@@ -253,11 +259,18 @@ pub const Stream = struct {
 
     /// The leading pages replaced by `ids` (held once more by this stream when `retain`; the old ones released).
     pub fn adopt(s: *Stream, pool: *Pool, ids: []const u32, retain: bool) !void {
+        try s.ids.ensureTotalCapacity(s.gpa, ids.len);
+        try s.desc.upload(s.table_at, std.mem.sliceAsBytes(ids));
         if (retain) for (ids) |id| pool.retain(id);
         for (s.ids.items[0..@min(ids.len, s.ids.items.len)]) |id| pool.release(id);
-        if (ids.len > s.ids.items.len) try s.ids.resize(s.gpa, ids.len);
+        if (ids.len > s.ids.items.len) s.ids.items.len = ids.len;
         @memcpy(s.ids.items[0..ids.len], ids);
-        try s.put();
+    }
+
+    /// The lane's rollback list becomes empty once its references move into the table.
+    pub fn adoptRollback(s: *Stream, pool: *Pool, rollback: *std.ArrayList(u32)) !void {
+        try s.adopt(pool, rollback.items, false);
+        rollback.clearRetainingCapacity();
     }
 };
 

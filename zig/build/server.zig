@@ -3,6 +3,7 @@ const std = @import("std");
 
 /// The web launcher uses fake PATH tools and no model, network or device.
 pub fn webHostTests(b: *std.Build, all: *std.Build.Step) void {
+    @import("request_access_host.zig").steps(b, all);
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/web_cli.zig"),
         .target = b.graph.host,
@@ -52,6 +53,16 @@ pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     });
 }
 
+pub fn startModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, checkpoint: *std.Build.Module, api: *std.Build.Module, core: *std.Build.Module, j: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("zig/src/server/start_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "checkpoint_cli", .module = checkpoint }, .{ .name = "engine_api", .module = api }, .{ .name = "core", .module = core }, .{ .name = "json", .module = j } },
+    });
+}
+
 /// Attach a server's shared JSON module (tests run apart), and Living Weights' families where the build gave none.
 pub fn addTo(
     b: *std.Build,
@@ -69,6 +80,22 @@ pub fn addTo(
         .imports = &.{.{ .name = "json", .module = j }},
     }));
     m.addImport("uocr_chat", b.createModule(.{ .root_source_file = b.path("zig/src/families/uocr/chat.zig"), .target = target, .optimize = optimize }));
+    // the engines' own ZONOS3 family when the build has one (a file belongs to one module), else its host half alone
+    if (if (m.import_table.get("native_engines")) |engines| engines.import_table.get("zonos3") else null) |zonos3| {
+        const source = b.addWriteFiles().add("zonos_request.zig",
+            \\const r = @import("zonos3").request;
+            \\pub const config = r.config;
+            \\pub const prompt = r.prompt;
+            \\pub const release = r.release;
+            \\pub const voices = r.voices;
+            \\pub const temperature = r.temperature;
+            \\pub const top_p = r.top_p;
+            \\pub const top_k = r.top_k;
+            \\pub const silence_frames = r.silence_frames;
+            \\pub const reference_frames = r.reference_frames;
+        );
+        m.addImport("zonos_request", b.createModule(.{ .root_source_file = source, .target = target, .optimize = optimize, .imports = &.{.{ .name = "zonos3", .module = zonos3 }} }));
+    } else m.addImport("zonos_request", b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/request.zig"), .target = target, .optimize = optimize }));
     const family = if (m.import_table.get("native_engines")) |engines| engines.import_table.get("drama3") else null;
     if (family) |drama3| {
         const source = b.addWriteFiles().add("drama_prompt.zig",
@@ -102,15 +129,23 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 
 /// Tool parsing and actual chat visibility checks share the aggregate's real modules.
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
-    b.step("test-images-host", "Image route counts, seeds, refusals and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence:", "images_generations_test." } })).step);
+    const pool_after_warmup = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "CUDA pool after warmup:", "profile line:", "stable profile:", "capability audit: environment" } }));
+    pool_after_warmup.has_side_effects = true;
+    b.step("test-cuda-pool-report-host", "CUDA sizing device report and counted profile without devices").dependOn(&pool_after_warmup.step);
+    const memory_pressure = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"memory pressure: /memory"} }));
+    b.step("test-memory-pressure-status-host", "Prompt-cache memory-pressure fields in /memory without devices").dependOn(&memory_pressure.step);
+    const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
+    b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-token-stream-host", "Native token streams, semantic anchors and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"token stream:"} })).step);
     b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
+    const background = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"background Responses:"} }));
+    b.step("test-responses-background-host", "Background response completion, cancellation and ownership without sockets").dependOn(&background.step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
-    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));
-    b.step("test-logprob-offers-host", "Logprob refusals before submission, and entries with tools, stops, reasoning and Responses").dependOn(&logprobs.step);
+    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "kept_probs", "logprob combinations:", "completions echo:" } }));
+    b.step("test-logprob-offers-host", "Logprob and kept-set refusals, entries across reply channels, and echo").dependOn(&logprobs.step);
     const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
     b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
     const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));
@@ -132,6 +167,11 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const scopes = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"auth scopes"} }));
     scopes.has_side_effects = true;
     b.step("test-key-scopes-host", "Key-file scopes: exact route grants, stateless Responses and refusals over sockets").dependOn(&scopes.step);
+    const witnessed = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"execution witness"} }));
+    witnessed.has_side_effects = true;
+    b.step("test-execution-witness-host", "The opt-in execution witness: parts, scopes, reload epochs and refusals over sockets").dependOn(&witnessed.step);
+    const confidential = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"confidential"} }));
+    b.step("test-confidential-host", "--confidential: the flags and variables it refuses, and no core dumps").dependOn(&confidential.step);
     const profile_line = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"profile line:"} }));
     profile_line.has_side_effects = true;
     b.step("test-profile-line-host", "Profile start-up line scoping against the tree's real backend names").dependOn(&profile_line.step);
@@ -144,6 +184,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const http = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool visibility HTTP:"} }));
     http.has_side_effects = true;
     b.step("test-tool-visibility-http-host", "Rejected tool envelopes survive actual chat JSON and SSE replies").dependOn(&http.step);
+    const finish = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool finish:"} }));
+    b.step("test-tool-finish-host", "A capped tool reply's finish_reason, whole and streamed, without devices").dependOn(&finish.step);
     const windows = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Nemotron window:", "model discovery", "thinking reserve" } }));
     b.step("test-nemotron-window-host", "Nemotron advertised capacity and unchanged chat admission without devices").dependOn(&windows.step);
     b.step("test-thinking-request-host", "Client refusals and internal note and lesson requests without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking request:"} })).step);
@@ -152,6 +194,10 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    const inkling = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Inkling 2 reply:", "Inkling 2 parse:" } }));
+    inkling.has_side_effects = true;
+    all.dependOn(&inkling.step);
+    b.step("test-server-inkling2-reply-host", "Inkling 2 native reply split, tools and default-model isolation without devices").dependOn(&inkling.step);
     const quoted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"quoted markers:"} }));
     quoted.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
     b.step("test-quoted-markers-host", "Quoted added-token spellings through the chat route with TF_TOKENIZER_DIRS' tokenizers").dependOn(&quoted.step);

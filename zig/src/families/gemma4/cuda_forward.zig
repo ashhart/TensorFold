@@ -63,6 +63,10 @@ pub const Model = struct {
     prompt_most: usize = prompt_rows, // rows a prompt chunk takes at most: TF_GEMMA4_CHUNK_SOLO's, else prompt_rows
     /// Decode forwards of n rows as CUDA graphs, captured at their first use ([n]; null: not yet, or graphs off).
     graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
+    /// TF_GEMMA4_ARGMAX_GRAPH: the same forwards with a greedy round's argmax into `argmax_to` captured after them.
+    argmax_graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
+    argmax_to: u64 = 0, // the picks the next decode forward's argmax writes (0: none in it, the caller draws)
+    lean: ?@import("cuda_argmax_graph.zig").Lean = null, // the switch on: forwards stage their uploads here, pinned
     graphed: bool = true,
     /// A drafter's tapped layers: each one's output rows (before the next norm) at taps_buf [rows, taps, hidden].
     taps: [8]u32 = undefined,
@@ -109,7 +113,7 @@ pub const Model = struct {
     }
 
     pub fn dropGraphs(m: *Model) void {
-        for (&m.graphs) |*g| if (g.*) |*e| {
+        for ([_]*[round_rows + 1]?cuda.graph.Exec{ &m.graphs, &m.argmax_graphs }) |set| for (set) |*g| if (g.*) |*e| {
             e.deinit();
             g.* = null;
         };
@@ -209,7 +213,8 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
-        for (&m.graphs) |*g| if (g.*) |*e| e.deinit();
+        m.dropGraphs();
+        if (m.lean) |*l| l.deinit();
         if (m.taps_buf) |*b| b.free();
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
@@ -232,10 +237,7 @@ pub const Model = struct {
         m.taps_buf = try DeviceBuffer.alloc(m.d, prompt_rows * taps.len * m.geo.hidden * 2);
         @memcpy(m.taps[0..taps.len], taps);
         m.tap_count = taps.len;
-        for (&m.graphs) |*g| if (g.*) |*e| { // captured without the tap copies
-            e.deinit();
-            g.* = null;
-        };
+        m.dropGraphs(); // captured without the tap copies
     }
 
     /// x [rows, k] through `l` into out [rows, n]: a prompt chunk's GEMM, or decode rows on their group sums `xs`.
@@ -287,8 +289,9 @@ pub const Model = struct {
         }
         if (rows > @as(usize, if (prompt) m.prompt_most else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
         if (heads > round_rows or head0 + heads > rows) return error.BadWindow;
-        const ids = try m.gpa.alloc(i32, 3 * rows);
-        defer m.gpa.free(ids);
+        const staged = if (m.lean) |*l| try l.take(3 * rows) else null;
+        const ids = staged orelse try m.gpa.alloc(i32, 3 * rows);
+        defer if (staged == null) m.gpa.free(ids);
         var at: usize = 0;
         for (chains) |c| {
             for (c.tokens, 0..) |t, i| {
@@ -310,17 +313,27 @@ pub const Model = struct {
             }
             try m.upload(s, m.s.hi, std.mem.sliceAsBytes(hi));
         }
+        if (staged != null) try m.lean.?.queued(s); // the staging's next take waits for these copies
         // a decode forward's launches depend on its row count only (positions and slots are read on the device)
-        if (prompt or !m.graphed or head0 != 0 or heads != rows) return m.launch(k, s, chains, rows, prompt, head0, heads);
-        if (m.graphs[rows] == null) m.graphs[rows] = try m.capture(k, s, rows);
-        try m.graphs[rows].?.launchOn(s);
+        if (prompt or !m.graphed or head0 != 0 or heads != rows) {
+            try m.launch(k, s, chains, rows, prompt, head0, heads);
+            return m.argmax(k, s, rows); // eager forwards launch the round's argmax right after, as a graph holds it
+        }
+        const set = if (m.argmax_to != 0) &m.argmax_graphs else &m.graphs;
+        if (set[rows] == null) set[rows] = try m.capture(k, s, rows);
+        try set[rows].?.launchOn(s);
+    }
+
+    /// With `argmax_to` set, every row's pick (tf_round_bf16_argmax) over the logits, as drawRows launches it.
+    fn argmax(m: *const Model, k: *const kern.Kernels, s: cuda.Stream, rows: usize) !void {
+        if (m.argmax_to != 0) try k.round.argmax(s, m.s.logits, m.argmax_to, rows, cfg.vocab, cfg.vocab);
     }
 
     /// A decode forward of `rows` rows, every row's logits, captured as a graph.
     fn capture(m: *Model, k: *const kern.Kernels, s: cuda.Stream, rows: usize) !cuda.graph.Exec {
         try s.synchronize();
         try cuda.graph.beginCapture(s, .thread_local);
-        m.launch(k, s, &.{}, rows, false, 0, rows) catch |e| {
+        m.launchArgmax(k, s, rows) catch |e| {
             if (cuda.graph.endCapture(s)) |g| {
                 var gg = g;
                 gg.deinit();
@@ -332,11 +345,16 @@ pub const Model = struct {
         return g.instantiate();
     }
 
+    fn launchArgmax(m: *Model, k: *const kern.Kernels, s: cuda.Stream, rows: usize) !void {
+        try m.launch(k, s, &.{}, rows, false, 0, rows);
+        try m.argmax(k, s, rows);
+    }
+
     /// The forward's launches over staged ids, positions and slots: no host copies, so a graph can hold them.
     fn launch(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, rows: usize, prompt: bool, head0: usize, heads: usize) !void {
         const h = m.geo.hidden;
         const x = m.s;
-        try k.embed.affine(s, x.ids, m.w.embed_w, m.w.embed_s, m.w.embed_b, x.h[0], rows, h, .{ .bits = @intCast(m.w.embed_bits), .group = cfg.group, .scale = embedScale(h) });
+        try m.w.embed(&k.embed, s, x.ids, x.h[0], rows, embedScale(h));
         if (prompt) for (chains[0].images) |im| {
             try m.d.check(m.d.api.cuMemcpyDtoDAsync_v2(x.h[0] + im.row * h * 2, im.src, im.rows * h * 2, s.handle), "cuMemcpyDtoDAsync");
         };

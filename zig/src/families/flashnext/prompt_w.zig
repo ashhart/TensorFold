@@ -128,8 +128,8 @@ pub fn attach(p: *Prompt, m: *const Model) !void {
         try hc(w, r, L.mhc);
         const x = L.xw orelse variants.Experts{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 6, 32, 6, 32 } };
         for ([_]usize{ 0, 3, 6, 9, 12, 15 }, [_][2]usize{ .{ x.gu[0], x.gu[1] }, .{ x.gu[0], x.gu[1] }, .{ x.gu[2], x.gu[3] }, .{ x.gu[2], x.gu[3] }, .{ x.down[0], x.down[1] }, .{ x.down[2], x.down[3] } }) |j, v|
-            if (r.fsr != null and r.fsr.?.pool != null and (j == 0 or j == 3 or j == 12)) {
-                if (v[0] != 6 or v[1] != 32) try need(w, r, @intCast(v[0]), @intCast(v[1]));
+            if ((L.tfq3 != null or (r.fsr != null and r.fsr.?.pool != null)) and (j == 0 or j == 3 or j == 12)) {
+                if (L.tfq3 == null and (v[0] != 6 or v[1] != 32)) try need(w, r, @intCast(v[0]), @intCast(v[1]));
             } else try put(w, r, L.ex[j], width(v)); // routed gate and up (one fused pass or two), shared, then the downs
         const kind = if (L.linear) "gdn" else "att";
         for ([_][]const u8{ if (L.linear) "in" else "proj", if (L.linear) "out" else "o" }, [_]Buf{ p.proj[i][0], p.out[i][0] }) |n, b| {

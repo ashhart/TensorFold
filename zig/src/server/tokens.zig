@@ -26,7 +26,8 @@ fn flag(cx: *Cx, body: Value, name: []const u8, default: bool) errors.Refused!bo
 /// The ids a body renders to, with main's named effort and media expansion preserved.
 fn messageIds(srv: *Server, cx: *Cx, body: Value) errors.Refused![]const u32 {
     const generation = try flag(cx, body, "add_generation_prompt", true);
-    const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
+    const normalized = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
+    const msgs = try @import("deferred_tools.zig").resolve(cx, normalized, body.get("tools"), srv.text.deferred_native);
     const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
         error.Refused => return cx.refuse(cx.message), // a ValueError here is a RequestError
         else => |x| return x,
@@ -42,6 +43,7 @@ fn messageIds(srv: *Server, cx: *Cx, body: Value) errors.Refused![]const u32 {
     };
     // media expanded as the chat route expands them: each image's tokens, each video's frame groups
     if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, msgs, ids, 0)) |x| return x.ids;
+    if (try @import("audio.zig").expand(srv.info.audio, cx, msgs, ids, 0)) |x| return x.ids;
     return ids;
 }
 

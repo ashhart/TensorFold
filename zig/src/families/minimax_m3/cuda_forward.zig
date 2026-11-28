@@ -145,9 +145,14 @@ pub const Forward = struct {
 
     /// `ids` at each segment's positions: the last row's logits (a prompt chunk) or every row's, the caches written.
     pub fn run(f: *const Forward, ids: []const i32, segs: []const Seg) !void {
+        try f.upload(ids, segs);
+        return f.launches(ids.len, segs);
+    }
+
+    /// The window's checks and its ids' upload, ahead of its launches.
+    pub fn upload(f: *const Forward, ids: []const i32, segs: []const Seg) !void {
         const R = ids.len;
         const b = f.b;
-        const co = f.c();
         if (R == 0 or R > b.rows or segs.len == 0) return error.BadWindow;
         var total: usize = 0;
         for (segs) |g| {
@@ -156,6 +161,12 @@ pub const Forward = struct {
         }
         if (total != R) return error.BadWindow;
         try cuda.copy_source.enqueue(f.d, b.ids, std.mem.sliceAsBytes(ids), f.stream);
+    }
+
+    /// `run` past its ids' upload: every launch, with no host wait, read or upload (a graph records it whole).
+    pub fn launches(f: *const Forward, R: usize, segs: []const Seg) !void {
+        const b = f.b;
+        const co = f.c();
         try kern.embed(&f.m.k, f.stream, b.ids, f.w.embed, b.resid, R, co.hidden);
         if (f.images) |im| if (segs.len == 1) try @import("cuda_vision.zig").splice(&f.m.k, f.stream, im.rows, im.spans, segs[0].st.pos, segs[0].st.pos + R, b.resid);
         try kern.norm(&f.m.k, f.stream, b.resid, f.w.layers[0].in_norm, b.x, R, co.hidden, co.eps);
@@ -258,6 +269,12 @@ pub const Forward = struct {
         try g.decode(f.stream, .down_f32, in_down, m.routed, b.plan(), b.ey, b.max_items, pairs, tile, -1);
         try f.mlp(m.shared, f.w.share.shared.len(), R, b.sy, .f32);
         try kern.moePartial(&f.m.k, f.stream, b.ey, b.wts, b.sy, f.slot(R, 2), R, topk, h);
+    }
+
+    /// Whether segment `g`'s attention scores and selects index blocks first (more blocks than it attends).
+    pub fn sparse(f: *const Forward, g: Seg) bool {
+        const co = f.c();
+        return co.blocks(g.st.pos + g.rows) > co.topk_blocks;
     }
 
     /// One segment's rows prepared (q, k, v, index pair), its rows from `from` selected and attended into b.o.

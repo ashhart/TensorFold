@@ -21,6 +21,11 @@ comptime {
 
 /// MoE block (shared expert, route, routed experts, combine); expert parallel: our experts, sent, the peer's received.
 pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    _ = block(x, e, w, x_in, rows, false);
+}
+
+/// The block; `leave`: on the generated kernels' path the next boundary's expand takes the combine (true if it did).
+pub fn block(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32, leave: bool) bool {
     std.debug.assert(rows <= st.max_rows);
     const c = x.c;
     const k = x.k;
@@ -34,7 +39,7 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.sendRows(e, sc.yp, sc.wts, rows); // with its begin
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.combine == 0) ep.receiveRows(e, sc.ys, sc.branch, rows);
-        return;
+        return false;
     };
     if (x.ep) |ep| {
         if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
@@ -44,16 +49,55 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack") and on(x, "x_locpost"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
-    } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0 and on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down")) {
-        if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        both(x, e, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
-        if (s & Class.combine != 0 or !on(x, "combine")) return;
+    } else if (w.tfq3) |*tl| {
+        const full = (s & (Class.shared | Class.routed | Class.combine) == 0) and on(x, "combine");
+        const fuse_pw_sh = wide.tfq3.sharedFusion(w.sh_gate_up, w.sh_down, tl.has_5b, c.hidden, c.moe_inter, on(x, "s_gateup") and on(x, "s_down"), full);
+        const fuse_rt = rows == 1 and x.fused_route and (s & Class.route == 0) and (full or s & Class.routed == 0) and on(x, "r_topk");
+        if (!fuse_pw_sh and s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (s & Class.route == 0) {
+            if (fuse_rt) {
+                if (on(x, "r_router")) logits(x, e, w, x_in, rows);
+            } else route(x, e, w, x_in, rows);
+        }
+        if (full or s & Class.routed == 0) {
+            wide.tfq3.dispatch.moeDecode(&x.k.wide.?.tfq3.?, e, tl, .{
+                .x_in = x_in,
+                .logits_r = sc.logits_r,
+                .bias = w.bias,
+                .pick = sc.pick,
+                .uids = sc.uids,
+                .umem = sc.umem,
+                .ucount = sc.ucount,
+                .wts = sc.wts,
+                .sh_gu_w = w.sh_gate_up.w,
+                .sh_gu_s = w.sh_gate_up.s,
+                .sh_dn_w = w.sh_down.w,
+                .sh_dn_s = w.sh_down.s,
+                .act = sc.act,
+                .ye = sc.ye,
+                .ys = sc.ys,
+                .branch = sc.branch,
+                .routed_scale = c.routed_scale,
+                .has_5b = tl.has_5b,
+                .fuse_pw_shared = fuse_pw_sh,
+                .fuse_combine = full,
+                .fuse_route = fuse_rt,
+            }, rows, c.topk, c.experts, c.swiglu_limit);
+            if (full) return false;
+        }
+    } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0) {
+        const one = rows == 1 and x.fused_route; // the gate/up groups replay the select: the logits alone
+        if (s & Class.route == 0 and one and on(x, "r_router")) logits(x, e, w, x_in, rows);
+        if (s & Class.route == 0 and !one) route(x, e, w, x_in, rows);
+        both(x, e, w, x_in, rows, one); // the shared expert as the gathers' last slot: two launches fewer
+        if (s & Class.combine != 0 or !on(x, "combine")) return false;
+        if (leave) return true;
         e.setPipeline(k.combine_0);
         bind(e, 0, .{ sc.ye, sc.ye, sc.wts });
         shape(e, 3, .{ rows, top });
         bind(e, 4, .{sc.branch});
         e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
-        return;
+        return false;
     } else if (x.k.wide != null and wide.moeOne(parts(w)) and s & (Class.shared | Class.routed) == 0 and
         on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down"))
     {
@@ -74,16 +118,22 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, .{ sc.uids, sc.umem, sc.ucount });
     }
-    if (s & Class.combine != 0 or !on(x, "combine")) return;
+    if (s & Class.combine != 0 or !on(x, "combine")) return false;
     e.setPipeline(k.moe_combine);
     bind(e, 0, .{ sc.ys, sc.ye, sc.wts });
     shape(e, 3, .{ rows, top });
     bind(e, 4, .{sc.branch});
     e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+    return false;
 }
 
 fn parts(w: *const wts.Moe) wide.Moe {
     return .{ .gate = w.gate, .up = w.up, .down = w.down, .sh_gate_up = w.sh_gate_up, .sh_down = w.sh_down };
+}
+
+/// The router's fp32 logits (the core route's first launch).
+fn logits(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    moe_route.logits(e, if (rows == 1) x.k.route_logits_one else x.k.route_logits, route_shape, x_in, w.router, x.sc.logits_r, rows);
 }
 
 /// The router's fp32 logits and the route: picks, weights and the window's unique experts with their members.
@@ -92,7 +142,7 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     const k = x.k;
     const sc = x.sc;
     if (x.fused_route) {
-        if (on(x, "r_router")) moe_route.logits(e, k.route_logits, route_shape, x_in, w.router, sc.logits_r, rows);
+        if (on(x, "r_router")) logits(x, e, w, x_in, rows);
         if (!on(x, "r_topk")) return;
         if (x.ep) |ep| if (!c.byRows()) return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
         const rl = sc.rl;
@@ -152,27 +202,38 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     e.dispatchThreads(size(32 * rows, if (part == 1) D else D / 4, zs), size(32 * rows, 1, 1)); // the shared expert: an output a simdgroup
 }
 
-/// Routed experts and the shared one (slot topk: grid z past the routed ids, the kernels' last) into `act` and `ye`.
-fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+/// Routed and shared experts into `act` and `ye` (shared: slot topk); `one`: one row whose groups replay the select.
+fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32, one: bool) void {
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
     const D = c.hidden;
     const N = c.moe_inter;
     const zs: u32 = rows * c.topk + 1; // the routed ids' slots, then the shared expert's
-    const rps: u32 = if (rows == 1) 2 else 4; // one row: two outputs a simdgroup, more reads in flight (the same sums)
-    e.setPipeline(if (rows == 1) k.moe_gateup_0_one else k.moe_gateup_0);
-    bind(e, 0, .{x_in});
-    shape(e, 1, .{ rows, D });
-    bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, sc.uids, sc.umem, sc.ucount });
-    e.setValue(c.swiglu_limit, 14);
-    bind(e, 15, .{sc.act});
-    e.dispatchThreads(size(32 * rows, N / rps, zs), size(32 * rows, 1, 1));
-    e.setPipeline(if (rows == 1) k.moe_down_0_one else k.moe_down_0);
+    // Two outputs a simdgroup (more reads in flight, the same sums): gate/up to 4 rows, down at one (M5 Ultra).
+    const gu_two = rows <= 4;
+    const rps: u32 = if (gu_two) 2 else 4;
+    if (on(x, "e_gateup")) { // a profile's knock-outs leave out one launch of this path, never the path
+        e.setPipeline(if (one) k.moe_gateup_pick else if (gu_two) k.moe_gateup_0_one else k.moe_gateup_0);
+        bind(e, 0, .{x_in});
+        shape(e, 1, .{ rows, D });
+        bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b });
+        bind(e, 11, if (one) .{ sc.logits_r, w.bias, sc.pick } else .{ sc.uids, sc.umem, sc.ucount });
+        e.setValue(c.swiglu_limit, 14);
+        bind(e, 15, .{sc.act});
+        if (one) bind(e, 16, .{sc.wts});
+        if (one) e.setValue(c.routed_scale, 17);
+        e.dispatchThreads(size(32 * rows, N / rps, zs), size(32 * rows, 1, 1));
+    }
+    if (!on(x, "e_down")) return;
+    const down_rps: u32 = if (rows == 1) 2 else 4;
+    e.setPipeline(if (one) k.moe_down_pick else if (rows == 1) k.moe_down_0_one else k.moe_down_0);
     bind(e, 0, .{sc.act});
     shape(e, 1, .{ rows, c.topk + 1, N });
-    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, sc.uids, sc.umem, sc.ucount, sc.ye });
-    e.dispatchThreads(size(32 * rows, D / rps, zs), size(32 * rows, 1, 1));
+    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b });
+    bind(e, 8, if (one) .{ sc.pick, sc.none, sc.none } else .{ sc.uids, sc.umem, sc.ucount });
+    bind(e, 11, .{sc.ye});
+    e.dispatchThreads(size(32 * rows, D / down_rps, zs), size(32 * rows, 1, 1));
 }
 
 /// By rows: every routed pick's half (this Mac's intermediate rows), down's fp32 partials into `yp`.

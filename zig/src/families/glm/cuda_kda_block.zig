@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
@@ -9,10 +10,11 @@ const prof = @import("cuda_prof.zig");
 const l2pf = @import("cuda_l2pf.zig");
 const projection = @import("cuda_proj.zig");
 
-/// The input projection [q | k | v | f_a | g_a | b] [3 heads 128 + 256 + heads][dims]: one bf16 stack, or two parts.
+/// The input projection [q | k | v | f_a | g_a | b] [3 heads 128 + 256 + heads][dims]: one bf16 stack, or split.
 pub const In = union(enum) {
     bf16: u64,
     split: struct { qkv: cuda.qmmf.Weight, rest: u64 }, // MXFP8 [q | k | v] for the lane (FP4-Local's), bf16 the rest
+    tfq3_split: struct { q: cuda.tfq3.DenseWeight, k: cuda.tfq3.DenseWeight, v: cuda.tfq3.DenseWeight, rest: u64 },
 };
 
 /// One KDA layer, `heads` heads: its input projection, f_b, g_b, o (bf16 or MXFP8), the chain's taps and norm.
@@ -34,19 +36,22 @@ pub const Layer = struct {
         return 3 * l.heads * kda.dk + 2 * kda.dk + l.heads;
     }
 
-    /// The width the input stack's rows actually carry (TF_GLM_KDA_PAD): the COMMON width, so every rank agrees.
+    /// The width the input stack's rows actually carry: eight-aligned, its own or TF_GLM_KDA_PAD's common one.
     pub fn matWidth(l: Layer) usize {
         return rowWidth(l.heads);
     }
 
-    /// The input stack and its two views need glm_mm's eight-column output and row stride.
+    /// glm_mm reads the input stack and its two views: an even stack, or a padded one under TF_GLM_KDA_PAD=1.
     pub fn tiledInput(l: Layer) bool {
-        return l.matWidth() % 8 == 0;
+        return l.width() % 8 == 0 or (tile_pad and l.matWidth() % 8 == 0);
     }
 };
 
-/// TF_GLM_KDA_PAD's one eight-aligned row width for every rank, set once at load (Engine.open); 0: no pad.
+/// This rank's eight-aligned row width, set once at load (Engine.open); 0: each stack's own width.
 pub var pad_to: usize = 0;
+
+/// TF_GLM_KDA_PAD=1: a stack padded to the common width, tiled for glm_mm (its sums); unset, row-major bf16.
+pub var tile_pad: bool = false;
 
 /// The pad width for `kda_heads` split over `world` ranks: the widest rank's row, rounded up to eight columns.
 pub fn padWidth(kda_heads: usize, world: usize) usize {
@@ -54,7 +59,12 @@ pub fn padWidth(kda_heads: usize, world: usize) usize {
     return std.mem.alignForward(usize, 3 * heads * kda.dk + 2 * kda.dk + heads, 8);
 }
 
-/// The fused input's row width on a rank of `own_heads` heads: pad_to when the pad is on.
+/// A rank's own row width rounded up to eight columns (16-byte rows): what its stack is padded to unless tiled.
+pub fn alignedWidth(own_heads: usize) usize {
+    return std.mem.alignForward(usize, 3 * own_heads * kda.dk + 2 * kda.dk + own_heads, 8);
+}
+
+/// The fused input's row width on a rank of `own_heads` heads: pad_to once the engine has set it.
 pub fn rowWidth(own_heads: usize) usize {
     if (pad_to != 0) return pad_to;
     return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
@@ -109,6 +119,21 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
             try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
             if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows);
         },
+        .tfq3_split => |sp| {
+            const tk = set.tfq3 orelse return error.FormatNotLoaded;
+            const one = rows == 1;
+            if (set.prompt and rows > 16) {
+                try tk.densePrompt(stream, sp.q, x, x_stride, s.p, w, rows, false);
+                try tk.densePrompt(stream, sp.k, x, x_stride, s.p + n * 2, w, rows, false);
+                try tk.densePrompt(stream, sp.v, x, x_stride, s.p + 2 * n * 2, w, rows, false);
+            } else {
+                try tk.dense(stream, sp.q, x, x_stride, s.p, w, rows, false);
+                try tk.dense(stream, sp.k, x, x_stride, s.p + n * 2, w, rows, false);
+                try tk.dense(stream, sp.v, x, x_stride, s.p + 2 * n * 2, w, rows, false);
+            }
+            try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
+            if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows);
+        },
     }
     try b16.matmul(selected, stream, s.p + fa * 2, w, l.fb, s.ka, s.mm_part, rows, n, kda.dk, false);
     try b16.matmul(selected, stream, s.p + (fa + kda.dk) * 2, w, l.gb, s.kg, s.mm_part, rows, n, kda.dk, false);
@@ -124,7 +149,7 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, 
     a.add(@as(c_longlong, @intCast(stride * 2)));
     a.add(@as(c_int, @intCast(rows)));
     a.add(@as(c_int, @intCast(cols * 2)));
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 /// The chain over `rows` projected rows (s.p, s.ka, s.kg) on one sequence's conv window and recurrent state.

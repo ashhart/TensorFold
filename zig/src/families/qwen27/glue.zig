@@ -13,14 +13,28 @@ pub fn floatType(dtype: DType) !Float {
     };
 }
 
-pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32 };
+pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32, shift: u32 = 0, heads: u32 = 1, row_stride: u32 = 0 };
+pub const QkNormRope = extern struct { width: u32, heads: u32, kv_heads: u32, rows: u32, rotary: u32, key_stride: u32, eps: f32, theta: f32, h_end: u32, w_end: u32, plane: u32 };
 pub const Embed = extern struct { width: u32, rows: u32, vocab: u32, bits: u32, group: u32, metadata: Float };
-/// h_end, w_end: M-RoPE's interleaved h and w pairs end there (0: every pair turns by plane 0); planes `plane` apart.
-pub const Rope = extern struct { width: u32, heads: u32, rows: u32, rotary: u32, activation: Float, theta: f32, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0 };
+pub const EmbedBf16 = extern struct { width: u32, rows: u32, vocab: u32 };
+/// M-RoPE's axis ends (`plane` stride); nonzero `yarn_scale` turns rotated pairs via `yarn_freq`.
+pub const Rope = extern struct {
+    width: u32,
+    heads: u32,
+    rows: u32,
+    rotary: u32,
+    activation: Float,
+    theta: f32,
+    h_end: u32 = 0,
+    w_end: u32 = 0,
+    plane: u32 = 0,
+    yarn_scale: f32 = 0,
+    yarn_freq: [32]f32 = @splat(0),
+};
 pub const Element = extern struct { width: u32, heads: u32, rows: u32, activation: Float };
 
 pub fn headThreads(a: Head) !u32 {
-    if (a.width == 0 or a.width > 16384 or a.width % 32 != 0 or a.stride < a.width or a.rows == 0 or a.eps <= 0) return error.BadHead;
+    if (a.heads == 0 or a.rows % a.heads != 0 or (a.row_stride != 0 and a.row_stride < (a.heads - 1) * @as(u64, a.stride) + a.width) or a.width == 0 or a.width > 16384 or a.width % 32 != 0 or a.stride < a.width or a.rows == 0 or a.eps <= 0) return error.BadHead;
     return @min(1024, @max(32, (a.width + 127) / 128 * 32));
 }
 
@@ -30,10 +44,13 @@ pub fn checkEmbed(a: Embed) !void {
 }
 
 test "operator parameters match their Metal structs word for word" {
-    try std.testing.expectEqual(@as(usize, 24), @sizeOf(Head));
+    try std.testing.expectEqual(@as(usize, 44), @sizeOf(QkNormRope));
+    try std.testing.expectEqual(@as(usize, 36), @sizeOf(Head));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(Embed));
-    try std.testing.expectEqual(@as(usize, 36), @sizeOf(Rope));
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(EmbedBf16));
+    try std.testing.expectEqual(@as(usize, 168), @sizeOf(Rope));
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(Rope, "h_end"));
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(Rope, "yarn_scale"));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Element));
 }
 

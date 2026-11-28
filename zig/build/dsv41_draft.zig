@@ -62,8 +62,7 @@ pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const api = engine.import_table.get("engine_api").?;
     const tokenizer = engine.import_table.get("tokenizer").?;
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const exlr8 = @import("exlr8.zig").cliImport(b, target, optimize, engine.import_table.get("core").?);
-    const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engine }, .{ .name = "core", .module = engine.import_table.get("core").? }, exlr8 } });
+    const cli = @import("cuda.zig").checkpointCli(b, target, optimize, null, engine, engine.import_table.get("core").?);
     const m = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
         .target = target,
@@ -81,6 +80,8 @@ pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     m.addImport("uocr_chat", b.createModule(.{ .root_source_file = b.path("zig/src/families/uocr/chat.zig"), .target = target, .optimize = optimize }));
     // the server's Drama voice catalog reads the prompt builder; this engine set has no drama3 family to share
     m.addImport("drama_prompt", b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/prompt.zig"), .target = target, .optimize = optimize }));
+    // likewise ZONOS3's request side, which tells its release folder by its files
+    m.addImport("zonos_request", b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/request.zig"), .target = target, .optimize = optimize }));
     const exe = b.addExecutable(.{ .name = name, .root_module = m });
     _ = exe.getEmittedBin();
     return exe;

@@ -31,6 +31,8 @@ import { TurnStatsLine } from './turn/TurnStatsLine'
 import { TurnOutcome } from './turn/TurnOutcome'
 import { QuestionCard } from './user-question/QuestionCard'
 import { BotChatContext } from './bots/BotChatContext'
+import { BotComposerSettings } from './bots/BotComposerSettings'
+import { activeRoomWorkerEffort } from '../lib/room-worker-effort'
 import { BrandMark } from './BrandMark'
 import { isBuiltInProvider, isExternalProvider } from '../../shared/provider-trust'
 import { useEngineStatus } from '../lib/engine'
@@ -41,6 +43,7 @@ const BUSY_STATES = ['thinking', 'streaming', 'tool', 'awaiting']
 export function ThreadView({ threadId, simpleLayout = false }: { threadId: string; simpleLayout?: boolean }) {
   const tx = useAuthoredText()
   const thread = useStore((s) => s.threads.find((t) => t.id === threadId))
+  const roomWorkerEffort = useStore((s) => activeRoomWorkerEffort(s.tickets, threadId))
   const st = useStore((s) => s.status[threadId])
   const approvals = useStore((s) => s.approvals[threadId])
   const durableJobs = useStore((s) => s.jobs)
@@ -283,7 +286,9 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
                 onAllow={() => approve(threadId, pendingApproval.callId, 'allow')}
               />
             )}
-            <Composer mode="thread" thread={thread} />
+            <BotComposerSettings bot={thread.bot ?? (roomWorkerEffort === undefined ? undefined : { reasoningEffort: roomWorkerEffort })}>
+              <Composer mode="thread" thread={thread} />
+            </BotComposerSettings>
           </div>
         </div>
       </div>

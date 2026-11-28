@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "Удаление папки прекращает поиск моделей в ней, но не удаляет модели. Работающая модель остаётся загруженной до остановки сервера.",
   "Rename": "Переименовать",
   "Render the plan panel with block progress bars and status glyphs.": "Показывать план с полосами прогресса и значками состояния.",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "Воспроизводимые измерения community-v1 для моделей из кэша на этом Mac.",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "Воспроизводимые измерения community-v2 для моделей из кэша на этом Mac.",
   "repeated checks": "повторные проверки",
   "Replace matching records from the backup": "Заменить совпадающие записи из копии",
   "replaces the current instructions": "заменяет текущие инструкции",

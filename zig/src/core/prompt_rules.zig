@@ -36,4 +36,6 @@ pub const Rules = struct {
     intermediate_most: u8 = 0,
     /// Prompts shorter than this, and ladder positions before it, keep none.
     intermediate_min: u32 = 32768,
+    /// Message starts a request keeps states at, latest first; the rewind moves to its message's start (0: off).
+    message_starts: u8 = 0,
 };

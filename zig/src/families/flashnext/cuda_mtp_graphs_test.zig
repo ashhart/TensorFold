@@ -105,6 +105,7 @@ const Piece = struct {
     m: usize = 3,
     last: bool = true,
     score: bool = true,
+    kv_only: bool = false,
     input: u64 = 0x3000_0000,
 
     pub fn run(_: Piece) !void {
@@ -202,6 +203,20 @@ test "rank graphs: a head piece with a collective attached runs as its graph; wi
     try pieces.runPiece(Piece{ .o = .{ .e = &e }, .p = &p, .d = &media }, 0x6000_0000);
     try pieces.runPiece(Piece{ .o = .{ .e = &e }, .p = &p, .d = &media }, 0x6000_0000);
     try t.expectEqual([5]usize{ 1, 0, 1, 3, 2 }, counts(e.graphs.head));
+}
+
+test "Flash Next MTP lean prefill: pieces stay eager and never enter the graph cache" {
+    var r: Rig = undefined;
+    r.init();
+    defer r.restore();
+    var e: Engine = .{ .gpa = t.allocator, .stream = &r.stream };
+    defer e.deinit();
+    const s = scratch();
+    const p: Scratch = .{ .s = &s };
+    const d: Draft = .{};
+    const one: Piece = .{ .o = .{ .e = &e }, .p = &p, .d = &d, .score = false, .kv_only = true };
+    for (0..3) |_| try pieces.runPiece(one, 0x6000_0000);
+    try t.expectEqual([5]usize{ 0, 0, 0, 3, 0 }, counts(e.graphs.head));
 }
 
 test "rank graphs: a group of heads with a collective attached runs as its graph" {

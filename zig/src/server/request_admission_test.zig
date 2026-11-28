@@ -190,3 +190,25 @@ test "request admission: concurrency refusal consumes no rate credit and unspeci
     try spend(&c, limits, principal(2), 0);
     try testing.expectEqual(admission.Reason.rate_limit, c.acquireAt(io, limits, principal(2), 0).rejected.reason);
 }
+
+test "request admission: a widened lease takes its places all or none and gives every one back" {
+    var c: admission.Controller = .{};
+    const limits: admission.Limits = .{ .max_inflight = 3, .max_inflight_per_key = 2 };
+    var lease = try take(&c, limits, principal(1));
+    try testing.expectEqual(admission.Reason.key_limit, lease.widen(limits, 2).?.reason); // 3 for the key: over 2
+    try testing.expectEqual(@as(u32, 1), c.snapshot(io).inflight);
+    try testing.expectEqual(null, lease.widen(limits, 1));
+    var other = try take(&c, limits, principal(2));
+    try testing.expectEqual(admission.Reason.global_limit, other.widen(limits, 1).?.reason); // 4 in flight: over 3
+    try testing.expectEqual(@as(u32, 3), c.snapshot(io).inflight);
+    lease.release();
+    lease.release(); // once only
+    try testing.expectEqual(@as(u32, 1), c.snapshot(io).inflight);
+    try testing.expectEqual(@as(u32, 1), c.snapshot(io).principals);
+    other.release();
+    const snap = c.snapshot(io);
+    try testing.expectEqual(@as(u32, 0), snap.inflight);
+    try testing.expectEqual(@as(u32, 3), snap.peak);
+    try testing.expectEqual(@as(u64, 1), snap.rejected_key);
+    try testing.expectEqual(@as(u64, 1), snap.rejected_global);
+}

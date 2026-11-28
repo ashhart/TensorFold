@@ -7,29 +7,69 @@ const rules = sys.environment.rules;
 const model = @import("cuda_model.zig");
 const t = std.testing;
 
-fn refused(name: [:0]const u8) !void {
-    try t.expectEqual(@as(c_int, 0), env.setenv(name, "mistyped value", 1));
-    defer _ = env.unsetenv(name);
-    try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
-    try t.expectError(error.InvalidEnvironment, @import("aot_needs.zig").Served.fromEnv());
+fn preservesWhitespaceRefusal(name: []const u8) bool {
+    for ([_][]const u8{ "TF_DSV41_DRAFT_GRAPHS", "TF_DSV41_DRAFT_CHAIN", "TF_DSV41_DRAFT_OVERLAP", "TF_DSV41_DRAFT_CAPTURE", "TF_DSV41_DRAFT_BATCH_PROJ", "TF_DSV41_GRAPH_FLOOR", "TF_DSV41_PHASES", "TF_DSV41_SAMP_STATS", "TF_DSV41_SAMP_BATCH" }) |candidate|
+        if (std.mem.eql(u8, name, candidate)) return true;
+    return false;
 }
 
-fn blank(name: [:0]const u8) !void {
+fn refused(r: sys.environment.Rule) !void {
+    const raw = if (r.kind == .path) "\x01" else "mistyped value";
+    try t.expectEqual(@as(c_int, 0), env.setenv(r.name, raw, 1));
+    defer _ = env.unsetenv(r.name);
+    if (std.mem.eql(u8, r.name, "TF_EXPERIMENTAL")) {
+        try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
+        _ = try @import("aot_needs.zig").Served.fromEnv();
+    } else {
+        try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
+        try t.expectError(error.InvalidEnvironment, @import("aot_needs.zig").Served.fromEnv());
+    }
+}
+
+fn blank(r: sys.environment.Rule) !void {
+    try t.expectEqual(@as(c_int, 0), env.setenv(r.name, " ", 1));
+    defer _ = env.unsetenv(r.name);
+    if (std.mem.eql(u8, r.name, "TF_EXPERIMENTAL")) {
+        try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
+        _ = try @import("aot_needs.zig").Served.fromEnv();
+    } else if (r.blank_default) {
+        try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
+        if (!preservesWhitespaceRefusal(r.name)) _ = try @import("aot_needs.zig").Served.fromEnv();
+    } else {
+        try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
+        try t.expectError(error.InvalidEnvironment, @import("aot_needs.zig").Served.fromEnv());
+    }
+}
+
+fn whitespaceError(name: [:0]const u8, expected: anyerror, read: anytype) !void {
     try t.expectEqual(@as(c_int, 0), env.setenv(name, " ", 1));
     defer _ = env.unsetenv(name);
-    try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
-    _ = try @import("aot_needs.zig").Served.fromEnv();
+    try t.expectError(expected, read());
 }
 
 test "DeepSeek strict env: every malformed setting stops the real loader before resources" {
     _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
-    for (rules) |r| if (r.scope == .dsv41) try refused(r.name);
+    for (rules) |r| if (r.scope == .dsv41) try refused(r);
 }
 
-test "DeepSeek strict env: a blank setting is unset, so the loader and planner pass the check" {
+test "DeepSeek strict env: each rule's permitted blank setting passes startup" {
     _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
     _ = env.unsetenv("TF_EXPERIMENTAL");
-    for (rules) |r| if (r.scope == .dsv41) try blank(r.name);
+    for (rules) |r| if (r.scope == .dsv41) try blank(r);
+}
+
+test "DeepSeek strict env: migrated exact-string readers still reject whitespace" {
+    try whitespaceError("TF_DSV41_DRAFT_GRAPHS", error.BadDraftGraphs, @import("dspark_dev.zig").modeFromEnv);
+    try whitespaceError("TF_DSV41_DRAFT_CHAIN", error.BadDraftChain, @import("dspark_dev.zig").chainFromEnv);
+    try whitespaceError("TF_DSV41_DRAFT_OVERLAP", error.BadDraftOverlap, @import("dspark_slots.zig").overlapFromEnv);
+    try whitespaceError("TF_DSV41_DRAFT_CAPTURE", error.BadDraftCapture, @import("dspark_slots.zig").captureFromEnv);
+    try whitespaceError("TF_DSV41_DRAFT_BATCH_PROJ", error.BadDraftBatchProj, @import("dspark_slots.zig").batchProjFromEnv);
+    try whitespaceError("TF_DSV41_GRAPH_FLOOR", error.BadGraphFloor, @import("graphs.zig").Settings.fromEnv);
+    try whitespaceError("TF_DSV41_SAMP_STATS", error.BadSampStats, @import("sampling_dev.zig").Gpu.rowStats);
+    try whitespaceError("TF_DSV41_SAMP_BATCH", error.BadSampBatch, @import("sampling_gpu.zig").GpuSampler.batchEnv);
+    try t.expectEqual(@as(c_int, 0), env.setenv("TF_DSV41_PHASES", " ", 1));
+    defer _ = env.unsetenv("TF_DSV41_PHASES");
+    try t.expectError(error.BadPhasesMode, @import("phases.zig").Phases.fromEnv(t.allocator));
 }
 
 test "DeepSeek strict env: empty served-knob reads retain their local defaults" {
@@ -123,14 +163,29 @@ test "DeepSeek strict env: default-on graphs and lookup, nucleus and layer value
     const graphs = @import("graphs.zig");
     const lookup = @import("draft/lookup.zig");
     const pipe = @import("sampling_pipe.zig");
-    for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| _ = env.unsetenv(name);
-    defer for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| {
+    for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_COPY_DRAFTER", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| _ = env.unsetenv(name);
+    defer for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_COPY_DRAFTER", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| {
         _ = env.unsetenv(name);
     };
     try t.expect((try graphs.Settings.fromEnvOr(true)).on);
     try t.expect(!(try graphs.Settings.fromEnvOr(false)).on);
     try t.expect((try lookup.Settings.fromEnv()).lookup);
     try t.expect(!(try lookup.Settings.fromEnv()).plan);
+    try t.expect(!(try lookup.Settings.fromEnv()).copy_drafter);
+    _ = env.setenv("TF_DSV41_COPY_DRAFTER", "1", 1);
+    _ = env.setenv("TF_DSV41_LOOKUP_PLAN", "0", 1);
+    try t.expect((try lookup.Settings.fromEnv()).copy_drafter and (try lookup.Settings.fromEnv()).plan);
+    _ = env.unsetenv("TF_DSV41_LOOKUP_PLAN");
+    for ([_][:0]const u8{ "0", "false", "off", "no", "", " \t" }) |raw| {
+        _ = env.setenv("TF_DSV41_LOOKUP", raw, 1);
+        try t.expectError(error.InvalidEnvironment, lookup.Settings.fromEnv());
+    }
+    _ = env.unsetenv("TF_DSV41_LOOKUP");
+    _ = env.setenv("TF_DSV41_COPY_DRAFTER", " ", 1);
+    try t.expect(!(try lookup.Settings.fromEnv()).copy_drafter and !(try lookup.Settings.fromEnv()).plan);
+    _ = env.setenv("TF_DSV41_COPY_DRAFTER", "true", 1);
+    try t.expectError(error.InvalidEnvironment, lookup.Settings.fromEnv());
+    _ = env.unsetenv("TF_DSV41_COPY_DRAFTER");
     try t.expectEqual(@as(u32, 512), try pipe.nucleusEnv());
     try t.expect(try model.layersEnv(t.allocator) == null);
     _ = env.setenv("TF_DSV41_LAYERS", "2-4", 1);

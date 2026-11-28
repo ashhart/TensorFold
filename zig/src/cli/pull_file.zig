@@ -1,12 +1,16 @@
 //! One file from the hub into the blob store: range resume, size and sha256 checks, retries, and its snapshot link.
 const std = @import("std");
 const platform = @import("sys");
+const route = @import("pull_route.zig");
 const Allocator = std.mem.Allocator;
+const Auth = @import("pull_auth.zig").Auth;
 
 /// One file the hub's tree lists for the revision: LFS files carry their sha256, small files their git blob sha1.
 pub const Entry = struct { path: []const u8, size: u64, sha256: ?[32]u8 = null, git_sha1: ?[20]u8 = null };
 
 const attempts = 5;
+/// Resumes after no-progress timeouts before pull gives up on a file.
+pub const max_resumes = 3;
 
 /// The blob's cache name, as huggingface_hub names it: the LFS sha256, else the git blob sha1, else the path.
 pub fn blobName(a: Allocator, e: Entry) ![]const u8 {
@@ -25,13 +29,25 @@ fn partialPath(a: Allocator, blobs_dir: []const u8, e: Entry) ![]const u8 {
 }
 
 /// `download` again after a reset or a short body, waiting longer each time; a sha256 mismatch starts over once.
-pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
+pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
     var wait_ms: i64 = 250;
     var restarted = false;
     var attempt: u32 = 1;
+    var resumes: u32 = 0;
     while (true) : (attempt += 1) {
-        if (download(a, io, client, out, url, blobs_dir, e)) |name| return name else |err| {
-            if (attempt == attempts or (err == error.ShaMismatch and restarted)) return err;
+        const stalls = route.stalls();
+        if (download(a, io, client, auth, out, url, blobs_dir, e)) |name| return name else |err| {
+            if (err == error.HubCredentialBody) {
+                std.Io.Dir.cwd().deleteFile(io, try partialPath(a, blobs_dir, e)) catch {};
+                return err;
+            }
+            if (route.stalls() != stalls) { // no bytes within the stall timeout: resume from the .incomplete bytes now
+                resumes += 1;
+                if (resumes > max_resumes) return error.Stalled;
+                attempt -= 1;
+                continue;
+            }
+            if (attempt == attempts or err == error.HubDenied or (err == error.ShaMismatch and restarted)) return err;
             if (err == error.ShaMismatch) {
                 restarted = true;
                 std.Io.Dir.cwd().deleteFile(io, try partialPath(a, blobs_dir, e)) catch {};
@@ -43,7 +59,7 @@ pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, out:
 }
 
 /// Downloads one file into ``blobs`` with HTTP range resume, verifies size and sha256, and returns the blob name.
-fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
+fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
     const final_name = try blobName(a, e);
     const final_path = try std.fs.path.join(a, &.{ blobs_dir, final_name });
     const partial_path = try partialPath(a, blobs_dir, e);
@@ -53,6 +69,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
         if (fileStat(io, partial_path)) |size| resume_from = size else |_| {}
     }
     if (resume_from >= e.size) resume_from = 0;
+    if (resume_from > 0 and (auth.fileContains(a, io, partial_path) catch true)) return error.HubCredentialBody;
 
     var headers: [1]std.http.Header = undefined;
     var range_buf: [32]u8 = undefined;
@@ -63,11 +80,10 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
         extra = &headers;
     }
     const uri = std.Uri.parse(url) catch return error.BadUrl;
-    var req = try client.request(.GET, uri, .{ .extra_headers = extra, .headers = .{ .accept_encoding = .{ .override = "identity" } } }); // the file's own bytes: sizes, digests and ranges count them
-    defer req.deinit();
-    try req.sendBodiless();
+    var req: std.http.Client.Request = undefined;
     var redirect_buf: [8 << 10]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
+    var response = try auth.send(client, &req, .GET, uri, .{ .extra_headers = extra, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, &redirect_buf); // the file's own bytes: sizes, digests and ranges count them
+    defer req.deinit();
     const status = response.head.status;
     if (status != .ok and status != .partial_content) return error.HubStatus;
     var restart = false;
@@ -78,6 +94,8 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     // Read access too: a resumed blob feeds its on-disk prefix into the same digest.
     const file = try w.createFile(io, partial_path, .{ .read = true, .truncate = restart });
     defer file.close(io);
+    var body: Auth.Body = .init(auth);
+    defer body.deinit(a);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     const check_git = e.sha256 == null and e.git_sha1 != null;
     var git = std.crypto.hash.Sha1.init(.{}); // git's blob id: sha1 of "blob SIZE\0" and the bytes
@@ -92,6 +110,8 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
             const read = file.readPositionalAll(io, prefix_buf[0..want], at) catch 0;
             if (read == 0) break;
             hash.update(prefix_buf[0..read]);
+            const safe = try body.feed(a, prefix_buf[0..read]);
+            body.commit(safe.len);
             at += read;
         }
     }
@@ -100,13 +120,27 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     var chunk: [32 << 10]u8 = undefined;
     var offset = resume_from;
     while (true) {
-        const n = r.readSliceShort(&chunk) catch return error.ReadFailed;
-        if (n == 0) break;
-        if (n > e.size - offset) return error.SizeMismatch;
-        hash.update(chunk[0..n]);
-        if (check_git) git.update(chunk[0..n]);
-        try file.writePositionalAll(io, chunk[0..n], offset);
-        offset += n;
+        const prefix = r.buffered(); // persist progress before any underlying read can fail and advance
+        for ([_][]const u8{prefix}) |bytes| {
+            if (bytes.len > e.size - offset) return error.SizeMismatch;
+            hash.update(bytes);
+            if (check_git) git.update(bytes);
+            try writeGuarded(a, io, file, &body, bytes, offset);
+            offset += bytes.len;
+        }
+        r.toss(prefix.len);
+        var vecs = [_][]u8{&chunk};
+        const got = r.readVec(&vecs);
+        const left = r.buffered();
+        for ([_][]const u8{ chunk[0 .. got catch 0], left }) |bytes| {
+            if (bytes.len > e.size - offset) return error.SizeMismatch;
+            hash.update(bytes);
+            if (check_git) git.update(bytes);
+            try writeGuarded(a, io, file, &body, bytes, offset);
+            offset += bytes.len;
+        }
+        r.toss(left.len);
+        _ = got catch |err| if (err == error.EndOfStream) break else return error.ReadFailed;
     }
     const total = offset;
     if (total != e.size) return error.SizeMismatch;
@@ -117,11 +151,53 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     } else if (e.git_sha1) |want| {
         if (!std.mem.eql(u8, &git.finalResult(), &want)) return error.ShaMismatch;
     }
+    const tail = try body.finish(a);
+    if (tail.len > 0) {
+        try file.writePositionalAll(io, tail, total - @as(u64, @intCast(tail.len)));
+        body.commit(tail.len);
+    }
     try file.setLength(io, total);
     file.sync(io) catch {};
     try std.Io.Dir.cwd().rename(partial_path, std.Io.Dir.cwd(), final_path, io);
     try out.print("  {s}: {d:.2} MiB\n", .{ e.path, @as(f64, @floatFromInt(total)) / (1 << 20) });
     return final_name;
+}
+
+/// Write only the proven-safe prefix, retaining ambiguous bytes at `offset - held` until later input.
+fn writeGuarded(a: Allocator, io: std.Io, file: std.Io.File, body: *Auth.Body, bytes: []const u8, offset: u64) !void {
+    if (body.auth.bearer == null) return file.writePositionalAll(io, bytes, offset);
+    const held = body.buffered();
+    const safe = try body.feed(a, bytes);
+    if (safe.len == 0) return;
+    try file.writePositionalAll(io, safe, offset - @as(u64, @intCast(held)));
+    body.commit(safe.len);
+}
+
+/// Whether an existing cached blob still has the digest and byte count the hub advertised.
+pub fn cachedMatches(io: std.Io, path: []const u8, e: Entry) !bool {
+    if (try fileStat(io, path) != e.size) return false;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var git = std.crypto.hash.Sha1.init(.{});
+    var git_head: [32]u8 = undefined;
+    if (e.git_sha1 != null) git.update(try std.fmt.bufPrint(&git_head, "blob {d}\x00", .{e.size}));
+    var buf: [64 << 10]u8 = undefined;
+    var at: u64 = 0;
+    while (at < e.size) {
+        const n = try file.readPositionalAll(io, buf[0..@intCast(@min(buf.len, e.size - at))], at);
+        if (n == 0) return false;
+        hash.update(buf[0..n]);
+        if (e.git_sha1 != null) git.update(buf[0..n]);
+        at += n;
+    }
+    if (e.sha256) |want| {
+        var got: [32]u8 = undefined;
+        hash.final(&got);
+        return std.mem.eql(u8, &got, &want);
+    }
+    if (e.git_sha1) |want| return std.mem.eql(u8, &git.finalResult(), &want);
+    return false;
 }
 
 pub fn fileStat(io: std.Io, path: []const u8) !u64 {
@@ -130,7 +206,7 @@ pub fn fileStat(io: std.Io, path: []const u8) !u64 {
 }
 
 /// A snapshot's path a hub tree names: relative, and no traversal segments.
-fn snapshotPathOk(path: []const u8) bool {
+pub fn snapshotPathOk(path: []const u8) bool {
     if (path.len == 0 or path[0] == '/') return false;
     if (std.mem.indexOfAny(u8, path, "\\:\x00") != null) return false;
     var it = std.mem.splitScalar(u8, path, '/');

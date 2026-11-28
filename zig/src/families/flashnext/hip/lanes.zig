@@ -5,12 +5,15 @@ const lanes = @import("lanes");
 const serve = @import("hip_serve");
 const Engine = @import("engine.zig").Engine;
 const cache = @import("cache.zig");
+const facts_mod = @import("facts.zig");
 const forward = @import("forward.zig");
 const head_mod = @import("head.zig");
 const draft_batch = @import("draft_batch.zig");
 const load = @import("load.zig");
 const worker = @import("worker.zig");
 const snapshot = @import("snapshot.zig");
+const states = @import("lanes_states.zig");
+const ngram = @import("ngram.zig");
 const pc = @import("engine_api").prompt_cache;
 
 const be = lanes.backend;
@@ -18,9 +21,10 @@ const draw = serve.draw;
 
 /// Drawn tokens a handle names, newest last.
 pub const ring = 1024;
+/// The kept states' bounce buffer: one copy's chunk of a state.
+const bounce_bytes = 32 << 20;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
-
 pub const Fill = struct {
     at: usize,
     stops: [16]u32 = undefined,
@@ -29,6 +33,9 @@ pub const Fill = struct {
     from: usize = 0,
     kept0: u64 = 0,
 };
+
+/// A kept row inside a prompt chunk (forward.Mark): its position, the n-gram history there and its side buffer.
+pub const Marked = struct { at: usize, history: [2]i64, side: u64 };
 
 pub const Lane = struct {
     caches: cache.Caches,
@@ -67,6 +74,12 @@ pub const Fx = struct {
     /// The kept prompt states (null: no reuse), and the slot the next one takes on every rank.
     store: ?pc.Store = null,
     next_slot: u32 = 0,
+    /// The kept row inside the prompt chunk being saved (forward.Mark): its position, n-gram history and side buffer.
+    marked: ?Marked = null,
+    /// The last prompt chunk's keeps, saved as the next step begins: its first token goes out first.
+    keeps: ?states.Keeps = null,
+    /// Pinned host memory the kept states' copies pass through (snapshot.Copy), made with the store.
+    bounce: ?hip.HostBuffer = null,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
@@ -82,7 +95,7 @@ pub const Fx = struct {
             .streams = streams,
             .ones = try hip.DeviceBuffer.fromHost(&e.driver, std.mem.sliceAsBytes(host)),
             .draft_ids = &.{},
-            .drafts = @min(max_depth, e.o.policy.mtp.drafts),
+            .drafts = facts_mod.capDrafts(e.o.policy.mtp.drafts),
         };
         errdefer f.ones.free();
         if (e.weights.model.mtp != null) f.draft_ids = try load.draftIds(gpa);
@@ -90,7 +103,9 @@ pub const Fx = struct {
     }
 
     pub fn deinit(f: *Fx) void {
+        f.keeps = null;
         if (f.store) |*st| st.deinit();
+        if (f.bounce) |*b| b.free();
         if (f.link != null) f.send(&.{@backingInt(worker.Op.stop)}) catch {};
         f.e.stream.synchronize() catch {};
         var it = f.lanes.valueIterator();
@@ -109,87 +124,30 @@ pub const Fx = struct {
     /// Keep prompt states in `budget` host bytes on the prompt kernels' 64-row grid, each a token past its rows.
     pub fn keepPrompts(f: *Fx, budget: u64) void {
         if (budget == 0) return;
+        f.bounce = hip.HostBuffer.alloc(&f.e.driver, bounce_bytes) catch null; // none: the copies pin their pages
         f.store = pc.Store.init(
             f.gpa,
             .{
                 .ptr = f,
-                .vtable = &.{ .bytes = snapBytes, .save = snapSave, .restore = snapRestore, .drop = snapDrop },
+                .vtable = &.{ .bytes = states.bytes, .save = states.save, .restore = states.restore, .drop = states.drop },
             },
             .{ .lookahead = 1, .planned = true, .grid = 64 },
             budget,
         );
     }
 
-    fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        const f: *Fx = @ptrCast(@alignCast(ptr));
-        var buf: [64]bool = undefined;
-        const kinds = f.e.kinds(&buf) catch return std.math.maxInt(u64);
-        const main = cache.Layout.of(f.e.weights.model.dims, kinds, 64, f.e.act).stateBytes(at);
-        const head = if (f.e.weights.model.mtp) |h|
-            cache.Layout.of(h.dims, &.{false}, 64, f.e.act).stateBytes(at)
-        else
-            0;
-        return main + head;
+    /// How the kept states are copied: through the bounce buffer when there is one.
+    pub fn copy(f: *Fx) snapshot.Copy {
+        return .{ .d = &f.e.driver, .bounce = if (f.bounce) |b| b.bytes else &.{} };
     }
 
-    fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        const f = of(ptr);
-        const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-        const saved = try snapshot.save(
-            f.gpa,
-            &f.e.driver,
-            f.e.stream,
-            &lane.caches,
-            if (lane.head) |*h| h else null,
-            at,
-            f.e.cfg.index_ratio,
-        );
-        saved.slot = f.next_slot;
-        f.next_slot += 1;
-        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
-        return saved;
-    }
-
-    /// Every rank resumes from the state, or every rank starts the prompt over; a group that cannot do either stops.
-    fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) anyerror!void {
-        const f = of(ptr);
-        const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-        const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
-        // a follower that got the step waits for every rank's word on it: a rank 0 that cannot send stops too
-        if (f.link != null) f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot }) catch |err| {
-            f.e.stopped = true;
-            return err;
-        };
-        snapshot.restoreAgreed(
-            f.gpa,
-            &f.e.driver,
-            f.e.stream,
-            s,
-            &lane.caches,
-            if (lane.head) |*h| h else null,
-            f.e.cfg.index_ratio,
-            f.e.eos,
-            f.link,
-        ) catch |err| {
-            if (err == error.GroupStopped) f.e.stopped = true;
-            return err;
-        };
-    }
-
-    fn snapDrop(ptr: *anyopaque, saved: pc.Saved) void {
-        const f: *Fx = @ptrCast(@alignCast(ptr));
-        const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
-        if (f.link != null) f.send(&.{ @backingInt(worker.Op.drop), s.slot }) catch {};
-        snapshot.drop(f.gpa, s);
-    }
-
-    fn send(f: *Fx, words: []const u32) !void {
+    pub fn send(f: *Fx, words: []const u32) !void {
         if (f.e.stopped) return error.GroupStopped;
         if (f.link) |l| try l.send(words);
     }
 
     pub fn backend(f: *Fx) be.Backend {
-        return .{ .ptr = f, .vtable = &.{
+        return .{ .ptr = f, .first_before_draft = true, .vtable = &.{
             .prefill = prefillFn,
             .prefill_step = prefillStepFn,
             .first = firstFn,
@@ -206,19 +164,13 @@ pub const Fx = struct {
     }
 
     pub fn facts(f: *const Fx) lanes.Model {
-        const drafting = f.e.weights.model.mtp != null and f.drafts > 0;
-        return .{
-            .exact_width = cache.max_window,
-            .gpu_tokens = false,
-            .mtp = drafting,
-            .speculate = drafting,
-            .speculate_early = false,
-            .drafts = f.drafts,
-            .hidden_rows = true,
-            .batch_rows = @intCast(cache.max_window * f.streams),
-            .max_streams = @intCast(f.streams),
-            .draft_streams = drafting,
-        };
+        return facts_mod.factsFor(cache.max_window, f.streams, f.e.weights.model.mtp != null and f.drafts > 0, f.drafts);
+    }
+
+    /// Kept row `i`'s side buffer (forward.Mark): its part of the window snapshots, free while a prompt fills, or null.
+    fn sideBuffer(c: *const cache.Caches, i: usize) ?u64 {
+        const at = i * std.mem.alignForward(usize, c.layout.restBytes(), 256);
+        return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
     }
 
     fn free(f: *Fx, l: *Lane) void {
@@ -230,7 +182,7 @@ pub const Fx = struct {
         f.gpa.destroy(l);
     }
 
-    fn of(ptr: *anyopaque) *Fx {
+    pub fn of(ptr: *anyopaque) *Fx {
         const f: *Fx = @ptrCast(@alignCast(ptr));
         if (bound != f.e) {
             f.e.ctx.makeCurrent() catch |err| std.log.err("hipSetDevice on the lane thread: {s}", .{@errorName(err)});
@@ -310,10 +262,13 @@ pub const Fx = struct {
         if (f.store) |*st| {
             var arena: std.heap.ArenaAllocator = .init(f.gpa);
             defer arena.deinit();
+            const previous_salt = st.salt;
+            st.salt = s.cache_salt;
+            defer st.salt = previous_salt;
             fill.kept0 = st.counts.kept;
             const plan = st.begin(
                 arena.allocator(),
-                prompt,
+                if (s.key.len != 0) s.key else prompt,
                 s.history_len,
                 s.shared_prefixes,
                 &.{},
@@ -332,6 +287,7 @@ pub const Fx = struct {
     /// One prompt chunk on the 64-row grid; the head absorbs its rows; the last draws the first token. `_: u32`.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         const f = of(ptr);
+        states.settle(f);
         if (s.isCancelled()) return error.Cancelled;
         const lane = if (f.lanes.get(s)) |l| (if (l.fill != null) l else try f.begin(s)) else try f.begin(s);
         const e = f.e;
@@ -342,7 +298,27 @@ pub const Fx = struct {
         const stop: usize = if (fill.next < fill.count) fill.stops[fill.next] else prompt.len;
         // the idle chunk alone, the shorter one while other streams decode between chunks (both on the 64-row grid)
         const chunk: usize = if (f.decoding(lane)) e.o.policy.fill_rows else e.o.chunk;
-        const to = @min(stop, at + chunk);
+        var to = @min(stop, at + chunk);
+        // the chunk goes on through each kept row its side buffers hold, writing the row's state aside (the same bytes)
+        var marks: [cache.max_window]forward.Mark = undefined;
+        var held: [cache.max_window]Marked = undefined;
+        var n_marks: usize = 0;
+        var taken = fill.next; // the stops the chunk's marks take, a duplicate's too
+        if (to == stop and stop > at and stop < prompt.len and f.link == null and f.store != null) {
+            const end = @min(prompt.len, at + chunk);
+            var j = fill.next;
+            while (j < fill.count and fill.stops[j] < end and n_marks < marks.len) : (j += 1) {
+                const row = fill.stops[j];
+                if (n_marks > 0 and row <= held[n_marks - 1].at) continue; // a duplicate: kept once
+                const side = sideBuffer(&lane.caches, n_marks) orelse break;
+                marks[n_marks] = .{ .row = row - at, .side = side };
+                held[n_marks] = .{ .at = row, .history = ngram.after(lane.caches.history, prompt[at..row]), .side = side };
+                n_marks += 1;
+            }
+            taken = j;
+            to = if (j < fill.count and fill.stops[j] < end) fill.stops[j] else end;
+        }
+        defer f.marked = null; // a failed chunk's too
         const last = to == prompt.len;
         if (f.link != null) {
             f.msg.clearRetainingCapacity();
@@ -350,7 +326,7 @@ pub const Fx = struct {
             try f.msg.appendSlice(f.gpa, prompt[at..to]);
             try f.send(f.msg.items);
         }
-        const out = try e.prompt(&lane.caches, prompt[at..to]);
+        const out = try e.promptMarked(&lane.caches, prompt[at..to], marks[0..n_marks]);
         const rows = to - at;
         const row_bytes = m.dims.wide() * m.act.size();
         if (lane.head) |*hc| {
@@ -362,12 +338,12 @@ pub const Fx = struct {
             }
         }
         fill.at = to;
-        if (fill.next < fill.count and to == fill.stops[fill.next]) {
-            if (f.store) |*st| _ = st.keep(prompt, @intCast(to), lane, &.{}, &.{});
-            fill.next += 1;
-        }
+        fill.next = taken;
+        const live = fill.next < fill.count and to == fill.stops[fill.next];
+        if (live) fill.next += 1;
+        f.keeps = .{ .lane = lane, .s = s, .marks = held, .n = n_marks, .live = if (live) to else null, .last = last, .from = fill.from, .kept0 = fill.kept0 };
+        if (!last or f.link != null) states.settle(f); // the other ranks take each keep in step order
         if (!last) return false;
-        if (f.store) |*st| st.report(prompt.len, @intCast(fill.from), st.counts.kept - fill.kept0);
         try hip.raw.copy(lane.streams, 0, out.streams.ptr + (rows - 1) * row_bytes, row_bytes, e.stream.handle);
         if (s.grammar != null and lane.first_row == null) lane.first_row = try f.gpa.alloc(u16, e.cfg.vocab);
         const o = e.ops(&e.arena);
@@ -425,6 +401,7 @@ pub const Fx = struct {
     /// Every window in one forward, each from its stream's kept length; every row drawn at its position.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const f = of(ptr);
+        states.settle(f);
         const e = f.e;
         const m = &e.weights.model;
         if (windows.len > forward.max_segs) return error.WindowTooWide;
@@ -498,6 +475,7 @@ pub const Fx = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const f = of(ptr);
+        states.settle(f);
         for (windows, paths) |w, path| {
             const lane = f.lanes.get(w.stream) orelse return error.UnknownStream;
             for (path, 0..) |r, j| if (r != j) return error.TreesNotBuilt;
@@ -507,7 +485,9 @@ pub const Fx = struct {
 
     /// The head absorbs each stream's kept rows (residual streams and the token after each), then chains its drafts.
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
-        try draft_batch.draft(of(ptr), requests);
+        const f = of(ptr);
+        states.settle(f);
+        try draft_batch.draft(f, requests);
     }
 
     fn heldFn(ptr: *anyopaque, s: *lanes.Stream, _: std.mem.Allocator) anyerror!?lanes.stream.Held {
@@ -517,6 +497,7 @@ pub const Fx = struct {
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const f = of(ptr);
+        states.settle(f);
         const kv = f.lanes.fetchRemove(s) orelse return;
         if (f.link != null) f.send(&.{ @backingInt(worker.Op.release), kv.value.id }) catch {};
         f.free(kv.value);

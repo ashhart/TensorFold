@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const mtp = @import("cuda_mtp.zig");
-const draw = @import("cuda_mtp_draw.zig");
+const mtp_draft = @import("cuda_mtp_draft.zig");
 const wt = @import("cuda_prompt_wt.zig");
 
 pub const Device = struct {
@@ -30,10 +30,13 @@ pub const Device = struct {
     pub var copy_src: [512]u64 = undefined;
     pub var copy_dst: [512]u64 = undefined;
     pub var copy_bytes: [512]usize = undefined;
-    pub const Event = enum { best, topk, wait, read_best, read_vals, read_cols, read_row, read_batch };
+    pub const Event = enum { copy, pass, best, topk, wait, read_best, read_vals, read_cols, read_row, read_batch };
     pub var events: [512]Event = undefined;
     pub var events_n: usize = 0;
 
+    pub fn note(e: Event) void {
+        event(e);
+    }
     fn event(e: Event) void {
         if (events_n < events.len) {
             events[events_n] = e;
@@ -75,8 +78,9 @@ pub const Device = struct {
         reads += 1;
         std.debug.assert(!pending);
         const bytes = @as([*]u8, @ptrCast(dst.?))[0..n];
-        const tv = 0x1000 + mtp.max_rows * 16;
-        const tc = tv + mtp.max_rows * draw.topk_max * 2;
+        const rows = mtp.bufferRows();
+        const tv = 0x1000 + mtp_draft.valsAt(rows);
+        const tc = 0x1000 + mtp_draft.colsAt(rows);
         if (src == 0x9000) {
             event(.read_batch);
             const b = @import("cuda_draw_batch.zig");
@@ -85,13 +89,12 @@ pub const Device = struct {
             for (0..b.rows_max) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
             @memcpy(bytes[b.vals_at..][0 .. vals.len * 2], std.mem.sliceAsBytes(vals));
             @memcpy(bytes[b.cols_at..][0 .. cols.len * 4], std.mem.sliceAsBytes(cols));
-        } else if (src == 0x1000 and n > mtp.max_rows * 16) {
+        } else if (src == 0x1000 and n > rows * 16) {
             event(.read_batch);
             @memset(bytes, 0);
-            const rows = mtp.max_rows;
             for (0..rows) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
-            const va = rows * 16;
-            const ca = va + rows * draw.topk_max * 2;
+            const va = mtp_draft.valsAt(rows);
+            const ca = mtp_draft.colsAt(rows);
             @memcpy(bytes[va..][0..@min(vals.len * 2, ca - va)], std.mem.sliceAsBytes(vals)[0..@min(vals.len * 2, ca - va)]);
             @memcpy(bytes[ca..][0..@min(cols.len * 4, n - ca)], std.mem.sliceAsBytes(cols)[0..@min(cols.len * 4, n - ca)]);
         } else if (src == 0x1000) {
@@ -119,6 +122,7 @@ pub const Device = struct {
         return 0;
     }
     fn copy(dst: u64, src: u64, n: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+        note(.copy);
         copy_dst[copies] = dst;
         copy_src[copies] = src;
         copy_bytes[copies] = n;
@@ -169,7 +173,10 @@ pub fn draft(d: *cuda.Driver, host: []u16) mtp.Draft {
     x.host = host;
     x.rows = 1;
     x.fed0 = 2050;
-    x.best = .{ .d = d, .ptr = 0x1000, .len = @import("cuda_mtp_draft.zig").best_bytes };
+    x.layout = .of(.full);
+    x.best_ahead = false;
+    x.best_queued = false;
+    x.best = .{ .d = d, .ptr = 0x1000, .len = mtp_draft.bestBytes(x.layout.rows) };
     x.out = .{ .d = d, .ptr = 0x2000, .len = wt.wide * 2 };
     x.dlogits = .{ .d = d, .ptr = 0x3000, .len = 6 };
     x.logits = .{ .d = d, .ptr = 0x4000, .len = wt.vocab * 2 };
@@ -186,6 +193,7 @@ pub fn headIds(d: *cuda.Driver, ids: []const u32) !mtp.Head {
     h.service = try @import("lanes").proposal_head.Service.legacy(gpa, &h.artifact);
     h.draw_batch = .{ .scores = .{ .d = d, .ptr = 0xA000, .len = @import("cuda_draft_draw.zig").scoreBytes(ids.len) }, .device = .{ .d = d, .ptr = 0x9000, .len = @import("cuda_draw_batch.zig").bytes }, .host = &Device.batch_host, .on = true };
     h.best_fn = .{ .d = d, .handle = @ptrFromInt(1) };
+    h.split = null;
     h.topk_fn = .{ .d = d, .handle = @ptrFromInt(2) };
     return h;
 }

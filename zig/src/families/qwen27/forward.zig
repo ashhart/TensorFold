@@ -17,6 +17,8 @@ pub const Mixer = struct {
     /// A pass that keeps no row and has no other reader of the last layer: that layer writes keys and values only.
     keys: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void = null,
 };
+/// Staged references (tf-qwen27-run only): the stream after each stage, the final norm and the head's rows.
+const stage_planes = @import("stage_planes.zig");
 
 /// One exchange: `x` its index, `ref` this rank's `width` columns of the seam in the window's slot for x.
 pub const Seam = struct { x: u32, ref: Ref };
@@ -78,17 +80,34 @@ pub const Stages = struct {
     reduce: ?Reduce = null,
     /// Head seam picks (one u32 a row), required with `Reduce.argmax`: the ranks must pick the same token.
     picks: ?Ref = null,
+    /// A prompt chunk's tail (prompt_tail.zig): the last layer's o projection, MLP and final norm from this row on.
+    tail_from: ?u32 = null,
+    /// The norm before the head: the target's, or the MTP head's own (mtp.zig).
+    norm: ?wts.Tensor = null,
+    /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
+    logits: ?Ref = null,
+    /// The rows layer `index`'s post and the final norm run: the tail's on the last layer, else every row.
+    fn rowsAt(s: *const Stages, index: usize) Span {
+        const f = &s.model.frame;
+        if (s.tail_from) |t0| if (index + 1 == s.model.config.layers) return .{ .t0 = t0, .n = s.rows - t0, .dims = f.get(.tail_dims) };
+        return .{ .t0 = 0, .n = s.rows, .dims = f.get(.dims) };
+    }
     pub fn begin(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
         s.hidden = m.frame.get(.hidden);
         s.residual = m.frame.get(.residual);
-        try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
+        if (m.weights.embed_bf16) |t| {
+            try m.glue.embeddingBf16(lane.enc, m.config.hidden, m.config.vocab, wts.ref(t), m.frame.get(.ids), s.hidden, s.rows);
+        } else {
+            try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
+        }
         lane.enc.barrier();
         if (s.images) |rows| {
             m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);
             lane.enc.barrier();
         }
+        if (stage_planes.on) try stage_planes.record(s.model.glue, lane.enc, .embed, s.hidden, s.rows);
     }
     pub fn wait(_: *Stages, _: usize) @import("core").segments.Wait {
         return .mixer;
@@ -98,13 +117,19 @@ pub const Stages = struct {
         const m = s.model;
         const f = &m.frame;
         const e = lane.enc;
-        const layer = m.weights.layers[index];
+        const layer = layerAt(m, index);
         const h: u32 = @intCast(m.config.hidden);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        if (m.config.mhc_roles[index] != .none) {
+            const tap: ?@import("loop.zig").TapHook = if (s.hooks.tap) |cb| .{ .ptr = s.hooks.ptr, .cb = cb } else null;
+            try @import("loop.zig").preMhc(&m.mhc.?, &m.kernels, m.config, index, layer, m.weights.mhc[m.config.exec_phys[index]], &s.hidden, &s.residual, &s.pending, f, s.rows, e, tap);
+            return;
+        }
+        try m.kernels.normShift(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows, m.config.shift_norms);
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
+            if (stage_planes.on) try stage_planes.record(s.model.glue, e, .{ .block = index - 1 }, s.hidden, s.rows);
         }
     }
     /// The last layer of a pass whose other rows nothing reads: q, attention, o and the MLP have no reader.
@@ -114,11 +139,11 @@ pub const Stages = struct {
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
         const m = s.model;
         if (s.keysOnly(index)) {
-            try s.hooks.keys.?(s.hooks.ptr, lane.enc, index, m.weights.layers[index].mixer.attention, &m.frame, s.rows);
+            try s.hooks.keys.?(s.hooks.ptr, lane.enc, index, layerAt(m, index).mixer.attention, &m.frame, s.rows);
             lane.enc.barrier();
             return;
         }
-        switch (m.weights.layers[index].mixer) {
+        switch (layerAt(m, index).mixer) {
             .linear => |g| try s.hooks.gdn(s.hooks.ptr, lane.enc, index, g, &m.frame, s.rows),
             .attention => |a| try s.hooks.attention(s.hooks.ptr, lane.enc, index, a, &m.frame, s.rows),
         }
@@ -129,15 +154,16 @@ pub const Stages = struct {
         const m = s.model;
         const f = &m.frame;
         var e = lane.enc;
-        const layer = m.weights.layers[index];
+        const layer = layerAt(m, index);
         const h: u32 = @intCast(m.config.hidden);
+        const t = s.rowsAt(index);
         const out = switch (layer.mixer) {
             .linear => |g| g.out,
             .attention => |a| a.out,
         };
         // Seam A: a rank owns output rows, not a K half: gather the mixer's columns before o_proj, its rows after.
         const split_attention = s.reduce != null and m.shard.splitsAttention();
-        var out_in = f.get(.mixer_out);
+        var out_in = t.at(f.get(.mixer_out), out.k);
         if (split_attention) {
             std.debug.assert(m.shard.ranks == 2); // two Macs: gather's other half is the peer's half
             const cols: u32 = @intCast(@divExact(out.k, 2)); // this rank's mixer columns, rows contiguous in `.mixer_out`
@@ -149,7 +175,7 @@ pub const Stages = struct {
             out_in = f.get(.mixed);
         }
         const product = if (split_attention) s.reduce.?.next() else null;
-        if (product) |sm| try m.kernels.quant(lane.enc, out, out_in, null, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, out, out_in, null, f.get(.dims), f.get(.output), s.rows);
+        if (product) |sm| try m.kernels.quant(lane.enc, out, out_in, null, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, out, out_in, null, t.dims, t.at(f.get(.output), h), t.n);
         lane.enc.barrier();
         if (product) |sm| {
             s.reduce.?.rowsOut(&e, sm, f.get(.output), s.rows, out.n, h);
@@ -157,9 +183,14 @@ pub const Stages = struct {
             if (s.reduce.?.broken()) return error.PairFailed;
             e.barrier();
         }
-        try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
-        e.barrier();
-        std.mem.swap(Ref, &s.hidden, &s.residual);
+        if (m.config.mhc_roles[index] != .none) {
+            try @import("loop.zig").postMhcMid(&m.mhc.?, &m.kernels, m.config, layer, m.weights.mhc[m.config.exec_phys[index]], f, s.rows, e);
+        } else {
+            try m.kernels.normShift(e, t.at(s.hidden, h), t.at(f.get(.output), h), wts.ref(layer.post_norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n, m.config.shift_norms);
+            e.barrier();
+            std.mem.swap(Ref, &s.hidden, &s.residual);
+            if (stage_planes.on) try stage_planes.record(s.model.glue, e, .{ .mixer = index }, s.hidden, s.rows);
+        }
         if (layer.moe) |*mo| if (!m.moe.?.sorted(mo, m.kernels.prompt)) {
             // decode rows: the routed block runs the shared expert as one more slot of the experts' kernel
             try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
@@ -200,13 +231,15 @@ pub const Stages = struct {
             s.pending = f.get(.output);
             return;
         } else {
-            try m.kernels.quant(e, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
+            const in_sums: @import("quant_gpu.zig").Sums = .{ .ref = t.sums(f.get(.sums)), .stride = sums(f, .sums, s.rows).stride };
+            try m.kernels.quant(e, layer.gu, t.at(f.get(.input), h), in_sums, t.dims, t.at(f.get(.mixed), layer.gu.n), t.n);
             e.barrier();
-            try m.kernels.mlp(e, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), width, s.rows);
+            const act = t.at(f.get(.activated), width);
+            try m.kernels.mlp(e, t.at(f.get(.mixed), layer.gu.n), t.at(up, layer.gu.n), t.dims, act, t.sums(f.get(.act_sums)), width, t.n);
         }
         lane.enc.barrier();
         // Seam B: gate|up gives each rank its columns, so down_proj's full K needs the peer's; `.mlp` keeps it whole.
-        var down_in = f.get(.activated);
+        var down_in = t.at(f.get(.activated), width);
         const acts = if (s.reduce) |r| r.next() else null;
         if (acts) |sm| {
             s.reduce.?.rowsIn(&e, sm, down_in, s.rows, width, width, f.get(.mixed), layer.down.k);
@@ -219,8 +252,9 @@ pub const Stages = struct {
         const split_down = layer.down.n != h;
         const seam_b = if (s.reduce != null and split_down) s.reduce.?.next() else null;
         // A gathered frame's group sums are the peer's to write, so the kernel derives them where there is no peer.
-        const down_sums: ?@import("quant_gpu.zig").Sums = if (s.reduce == null) sums(f, .act_sums, s.rows) else null;
-        if (seam_b) |sm| try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, f.get(.dims), f.get(.output), s.rows);
+        const act_sums: @import("quant_gpu.zig").Sums = .{ .ref = t.sums(f.get(.act_sums)), .stride = sums(f, .act_sums, s.rows).stride };
+        const down_sums: ?@import("quant_gpu.zig").Sums = if (s.reduce == null) act_sums else null;
+        if (seam_b) |sm| try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, t.dims, t.at(f.get(.output), h), t.n);
         lane.enc.barrier();
         if (seam_b) |sm| {
             s.reduce.?.rowsOut(&e, sm, f.get(.output), s.rows, layer.down.n, h);
@@ -233,6 +267,13 @@ pub const Stages = struct {
             try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
             lane.enc.barrier();
         }
+        if (m.config.mhc_roles[index] != .none) {
+            const tap: ?@import("loop.zig").TapHook = if (s.hooks.tap) |cb| .{ .ptr = s.hooks.ptr, .cb = cb } else null;
+            const next_l: ?wts.Layer = if (index + 1 < m.config.layers) m.weights.layers[index + 1] else null;
+            const next_ml: ?@import("loop.zig").MhcLayer = if (index + 1 < m.config.layers) m.weights.mhc[m.config.exec_phys[index + 1]] else null;
+            try @import("loop.zig").postMhcEnd(&m.mhc.?, &m.kernels, m.config, index, next_l, next_ml, &s.hidden, &s.pending, f, s.rows, lane.enc, tap);
+            return;
+        }
         s.pending = f.get(.output);
     }
     pub fn finish(s: *Stages, lane: *@import("core").segments.Lane) !void {
@@ -241,10 +282,18 @@ pub const Stages = struct {
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
         if (s.keysOnly(m.config.layers - 1)) return if (s.tail) |tail| tail.encode(tail.ptr, e);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
+        const h: u32 = @intCast(m.config.hidden);
+        const t = s.rowsAt(m.config.layers - 1);
+        const pending: ?Ref = if (s.pending) |p| t.at(p, h) else null;
+        try m.kernels.normShift(e, t.at(s.hidden, h), pending, wts.ref(s.norm orelse m.weights.norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n, m.config.shift_norms);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
+        if (stage_planes.on) {
+            // the last block is the residual stream; final is the normed rows the head reads (f.input)
+            try stage_planes.record(m.glue, e, .{ .block = m.config.layers - 1 }, s.hidden, s.rows);
+            try stage_planes.record(m.glue, e, .final, f.get(.input), s.rows);
+        }
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
             var input = f.get(.input);
@@ -253,7 +302,11 @@ pub const Stages = struct {
                 input.offset += @as(usize, s.rows - 1) * m.config.hidden * 2;
                 head_sums.ref.offset += @as(usize, s.rows - 1) * 4;
             }
-            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
+            try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), s.logits orelse f.get(.logits), if (s.head == .last) 1 else s.rows);
+            if (stage_planes.on) if (stage_planes.active != null) {
+                e.barrier();
+                try stage_planes.record(m.glue, e, .logits, f.get(.logits), if (s.head == .last) 1 else s.rows);
+            };
         }
         e.barrier();
         if (s.reduce) |r| {
@@ -294,6 +347,24 @@ fn run(m: *Model, e: *mtl.ComputeEncoder, stages: *Stages) !void {
         try stages.post(&lane, index);
     }
     try stages.finish(&lane);
+}
+
+/// Rows [t0, t0 + n) of a pass: a row-major ref's rows from t0 on, group sums at their rows, and their dims.
+const Span = struct {
+    t0: u32,
+    n: u32,
+    dims: Ref,
+    fn at(t: Span, r: Ref, width: usize) Ref {
+        return .{ .buffer = r.buffer, .offset = r.offset + @as(usize, t.t0) * width * 2 };
+    }
+    fn sums(t: Span, r: Ref) Ref {
+        return .{ .buffer = r.buffer, .offset = r.offset + @as(usize, t.t0) * 4 };
+    }
+};
+
+/// Block `index` of the layer program; one past the last is the MTP head's block (mtp.zig).
+pub fn layerAt(m: *const Model, index: usize) wts.Layer {
+    return if (index == m.config.layers) m.weights.mtp.?.layer else m.weights.layers[index];
 }
 
 /// A norm's or the MLP gate's group sums for the frame's padded rows.

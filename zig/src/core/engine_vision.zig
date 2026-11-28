@@ -23,6 +23,9 @@ pub const Size = struct { width: u32, height: u32 };
 /// One tower input of an image, and the tokens the placeholder expands to around its rows.
 pub const Piece = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, before: []const u32 = &.{}, after: []const u32 = &.{} };
 
+/// How a request's images share ``image_tokens`` (--vision-image-share): its own count, or the image limit (#2510).
+pub const ImageShare = enum { request, fixed };
+
 /// Image input an engine serves (``Info.vision``): image bytes to tower input, and what a request may hold.
 pub const Vision = struct {
     ctx: *anyopaque,
@@ -38,6 +41,8 @@ pub const Vision = struct {
     /// Image tokens one request may hold in all, and images.
     image_tokens: u32,
     max_images: u32,
+    /// How the images share ``image_tokens``: the request's count, or the fixed share over ``max_images``.
+    image_share: ImageShare = .request,
     /// Video input, when the engine's family reads it.
     video: ?VideoOffer = null,
     /// The engine's words for a prepare error the server cannot word (a decoder library it lacks); null: the server's.
@@ -85,5 +90,67 @@ pub const VideoOffer = struct {
     max_frames: u32,
 };
 
-/// --vision: image and video input's limits (``Open.vision``); image_tokens_set: the flag given, over a family default.
-pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
+/// An audio clip prepared for the engine's encoder (``AudioOffer.prepare``): samples, rows and a content hash.
+pub const PreparedAudio = struct { samples: []f32, tokens: u32, hash: u64 };
+
+/// Audio input an engine serves (``Info.audio``): a clip's bytes to encoder input, and what a request may hold.
+pub const AudioOffer = struct {
+    ctx: *anyopaque,
+    /// The clip's bytes (a WAV file) at most ``max_tokens`` rows; allocated in ``a``.
+    prepare: *const fn (ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!PreparedAudio,
+    /// The template's once-a-clip token, expanded to its rows (0 from an engine; the server sets ``locator``'s id).
+    audio_token: u32 = 0,
+    /// The audio locator text (config.json's audio_locator_tag).
+    locator: []const u8,
+    /// Audio rows one request may hold in all, and clips.
+    audio_tokens: u32,
+    max_audios: u32,
+};
+
+/// --vision's limits (``Open.vision``); image_tokens_set: the flag given; image_share: --vision-image-share's value.
+pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256, image_share: ImageShare = .request };
+
+/// --vision against the checkpoint: given without a tower, refused by name; a tower without it stays unread.
+pub fn gate(requested: bool, tower: bool) error{VisionWithoutTower}!bool {
+    if (requested and !tower) return error.VisionWithoutTower;
+    return requested;
+}
+
+/// Whether config.json's bytes name a vision_config other than null; JSON that does not parse counts as one.
+pub fn declared(a: Allocator, config: []const u8) bool {
+    const doc = std.json.parseFromSlice(std.json.Value, a, config, .{}) catch return true;
+    defer doc.deinit();
+    if (doc.value != .object) return true;
+    const vc = doc.value.object.get("vision_config") orelse return false;
+    return vc != .null;
+}
+
+/// The gate's words for `model` ("this LFM2 checkpoint"): one format in every family; null for any other error.
+pub fn words(comptime model: []const u8, err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.VisionWithoutTower => "--vision given but " ++ model ++ " has no vision tower",
+        error.VisionNotLoaded => model ++ " has a vision tower; pass --vision to load it",
+        else => null,
+    };
+}
+
+test "the gate refuses --vision without a tower by name and leaves a tower unread without --vision" {
+    try std.testing.expectError(error.VisionWithoutTower, gate(true, false));
+    try std.testing.expect(try gate(true, true));
+    try std.testing.expect(!try gate(false, true));
+    try std.testing.expect(!try gate(false, false));
+    const m = "this X checkpoint";
+    try std.testing.expectEqualStrings("--vision given but this X checkpoint has no vision tower", words(m, error.VisionWithoutTower).?);
+    try std.testing.expectEqualStrings("this X checkpoint has a vision tower; pass --vision to load it", words(m, error.VisionNotLoaded).?);
+    try std.testing.expect(words(m, error.OutOfMemory) == null);
+}
+
+test "a vision_config is declared unless absent or null" {
+    const a = std.testing.allocator;
+    try std.testing.expect(declared(a, "{\"vision_config\":{\"depth\":2}}"));
+    try std.testing.expect(declared(a, "{\"vision_config\":[]}"));
+    try std.testing.expect(declared(a, "{\"vision_config\":\"x\"}"));
+    try std.testing.expect(!declared(a, "{\"vision_config\":null}"));
+    try std.testing.expect(!declared(a, "{\"text_config\":{}}"));
+    try std.testing.expect(declared(a, "not json"));
+}

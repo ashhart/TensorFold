@@ -60,7 +60,7 @@ pub const Affine4Kernels = struct {
         a.mlp128_fn = try group_mod.function("_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii");
         try a.mlp128_fn.allowDynamicShared(26880);
         a.mlp128 = false;
-        if (sms == 82 or std.c.getenv("TF_CUDA_TEST_MLP128") != null) {
+        if (sms == 82 or @import("sys").environment.rawText("TF_CUDA_TEST_MLP128") != null) {
             var device: @import("abi.zig").Device = 0;
             try d.check(d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
             var major: c_int = 0;
@@ -368,7 +368,7 @@ pub const Affine4Kernels = struct {
         try launch_.launch(f, .{ .grid = .{ .x = u(grid), .y = 1, .z = 1 }, .block = .{ .x = threads }, .shared = smem }, s, &g);
     }
 
-    /// One GB10 launch over 2-4 affine-4 prompt projections, each retaining prompt()'s exact tile body.
+    /// One GB10 launch over 2-4 affine-4 prompt projections, with the same copies and math as prefill_kernel.
     pub fn promptMany(a: *const Affine4Kernels, s: Stream, x: u64, outs: []const Out, rows: usize) !void {
         if (!a.pdl or a.half_prompt) return error.UnsupportedPromptMany;
         if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;

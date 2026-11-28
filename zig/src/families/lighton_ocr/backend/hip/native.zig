@@ -156,7 +156,7 @@ fn load(gpa: Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype
     defer ck.close();
     own.layout = try weights.Layout.init(gpa, &ck, c);
     errdefer own.layout.deinit();
-    const limits: ?vision.Limits = if (@hasField(@TypeOf(o), "vision")) if (o.vision) |v| .{ .image_tokens = @intCast(@min(v.image_tokens, o.window)), .max_images = v.max_images } else null else null;
+    const limits: ?vision.Limits = if (@hasField(@TypeOf(o), "vision")) if (o.vision) |v| .{ .image_tokens = @intCast(@min(v.image_tokens, o.window)), .max_images = v.max_images, .image_share = v.image_share } else null else null;
     if (limits != null) try image.readProcessor(gpa, io, dir, c);
     const plan = try Plan.init(c, own.layout.bytes, o.window, limits);
     own.r = try hip.Runtime.open();

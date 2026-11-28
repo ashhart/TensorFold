@@ -162,15 +162,23 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     e.* = .{ .gpa = gpa, .io = io, .window = window, .driver = undefined, .ctx = undefined, .cfg = undefined, .weights = undefined, .model = undefined };
     e.cfg = try lfm2.config.Config.load(gpa, io, o.dir, problem) orelse return null;
     errdefer e.cfg.deinit(gpa);
+    // --vision against the config's vision_config (core's gate): without it the tower stays on disk
+    const tower = api.visionGate(o.vision != null, e.cfg.vision != null) catch |err| {
+        problem.* = api.visionWords("this LFM2 checkpoint", err).?;
+        e.cfg.deinit(gpa);
+        gpa.destroy(e);
+        return null;
+    };
     e.driver = cuda.Driver.open() catch |err| {
         problem.* = try std.fmt.allocPrint(a, "no CUDA driver ({s})", .{@errorName(err)});
         return null;
     };
     errdefer e.driver.close();
+    try @import("cuda_schedule.zig").apply(&e.driver, 0); // TF_CUDA_SCHED, before the context starts
     e.ctx = try cuda.Context.init(&e.driver, 0);
     errdefer e.ctx.deinit();
     try e.ctx.makeCurrent();
-    e.weights = try lfm2.weights.Weights.load(gpa, io, &e.driver, o.dir, &e.cfg);
+    e.weights = try lfm2.weights.Weights.load(gpa, io, &e.driver, o.dir, &e.cfg, tower);
     errdefer e.weights.deinit(gpa);
     e.model = try lfm2.model.Model.init(gpa, &e.driver, &e.cfg, &e.weights, window);
     errdefer e.model.deinit();

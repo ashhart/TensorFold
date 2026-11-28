@@ -1,0 +1,91 @@
+//! LFM2.5-24B-A2B message-start chunk/tap planning helpers, without a GPU.
+const std = @import("std");
+const be = @import("cuda_backend.zig");
+const mdl = @import("cuda_model.zig");
+const lanes = @import("lanes");
+const liquid = @import("liquid_cuda");
+const t = std.testing;
+
+fn cut(at: usize, len: usize, marks: []const u32, chunks: []const u32) liquid.lanes.Cut {
+    return liquid.lanes.cut(at, len, marks, chunks, be.prompt_rows, mdl.max_taps);
+}
+
+/// A pass's chunk ends and the points it keeps a state at (taps and cut-point ends).
+const Walk = struct { ends: []usize, kept: []usize };
+fn walk(from: usize, len: usize, marks: []const u32, chunks: []const u32) !Walk {
+    var ends: std.ArrayList(usize) = .empty;
+    errdefer ends.deinit(t.allocator);
+    var kept: std.ArrayList(usize) = .empty;
+    errdefer kept.deinit(t.allocator);
+    var at = from;
+    while (at < len) {
+        const c = cut(at, len, marks, chunks);
+        try ends.append(t.allocator, c.end);
+        for (c.taps()) |tap| try kept.append(t.allocator, tap);
+        for ([_][]const u32{ marks, chunks }) |points| {
+            if (std.mem.indexOfScalar(u32, points, @intCast(c.end)) != null) {
+                try kept.append(t.allocator, c.end);
+                break;
+            }
+        }
+        at = c.end;
+    }
+    return .{ .ends = try ends.toOwnedSlice(t.allocator), .kept = try kept.toOwnedSlice(t.allocator) };
+}
+
+test "LFM helper: plans a keep at every named start, grid-aligned or not" {
+    const len = 9000;
+    const starts = [_]u32{ 700, 1024, 2100, 4096, 5700, 8192 };
+    const w = try walk(0, len, &.{}, &starts);
+    defer t.allocator.free(w.ends);
+    defer t.allocator.free(w.kept);
+    for (starts) |s| try t.expect(std.mem.indexOfScalar(usize, w.kept, s) != null);
+    try t.expectEqual(starts.len, w.kept.len); // the grid alone keeps nothing
+}
+
+test "message starts past the tap limit end their chunk so each still keeps a state" {
+    const len = 3000;
+    const starts = [_]u32{ 100, 200, 300, 400, 500, 600 };
+    const w = try walk(0, len, &.{}, &starts);
+    defer t.allocator.free(w.ends);
+    defer t.allocator.free(w.kept);
+    for (starts) |s| try t.expect(std.mem.indexOfScalar(usize, w.kept, s) != null);
+    try t.expectEqual(starts.len, w.kept.len);
+}
+
+test "only a hook asks forward for tap snapshots; the cut plan is unchanged either way" {
+    const len = 2500;
+    const few = [_]u32{ 100, 200, 300, 400, 500 };
+    const c = cut(0, len, &.{}, &few);
+    var rows: [mdl.max_taps]usize = undefined;
+    const hooked = liquid.lanes.tapRows(0, &c, true, &rows);
+    try t.expectEqualSlices(usize, &.{ 99, 199, 299, 399 }, hooked); // tap row = t - at - 1
+    const cache_off = liquid.lanes.tapRows(0, &c, false, &rows);
+    try t.expectEqual(@as(usize, 0), cache_off.len); // no hook, no capture work
+    try t.expectEqual(@as(usize, 500), c.end); // the fifth start still ends the chunk
+}
+
+test "lfm: cold and reused passes both bound chunks by the shared cut points" {
+    var prompt: [2000]u32 = undefined;
+    for (&prompt, 0..) |*v, i| v.* = @intCast(i);
+    const local_starts = [_]u32{ 1, 2, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129 };
+    var s = try lanes.Stream.init(t.allocator, .{
+        .id = "cold-and-reused",
+        .prompt = &prompt,
+        .max_new = 1,
+        .drafts = false,
+        .chunks = &local_starts,
+    });
+    defer s.deinit(t.allocator);
+    const points = lanes.cutPoints(&s);
+    try t.expectEqualSlices(u32, &local_starts, points);
+    const cold = try walk(0, prompt.len, &.{}, points);
+    defer t.allocator.free(cold.ends);
+    defer t.allocator.free(cold.kept);
+    for (local_starts) |at| try t.expect(std.mem.indexOfScalar(usize, cold.kept, at) != null);
+    // A state kept at 128 resumes there; later starts remain taps or chunk ends.
+    const reused = try walk(128, prompt.len, &.{}, points);
+    defer t.allocator.free(reused.ends);
+    defer t.allocator.free(reused.kept);
+    for (local_starts) |at| if (at > 128) try t.expect(std.mem.indexOfScalar(usize, reused.kept, at) != null);
+}

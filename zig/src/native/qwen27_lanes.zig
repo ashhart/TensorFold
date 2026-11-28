@@ -10,6 +10,7 @@ const be = lanes.backend;
 pub const Draft = @import("qwen27_draft.zig").Draft;
 const slots = @import("qwen27_slots.zig");
 const draft_fns = @import("qwen27_drafts.zig");
+const features = @import("qwen27_features.zig");
 const Round = q.round_plan.Round;
 const Tree = q.dflash.selector.Tree;
 const Ring = q.tap_ring.Ring;
@@ -20,7 +21,7 @@ const contract = tf.tree_round;
 /// A window's rows at most: the pending row and a DFlash2 tree.
 pub const max_rows = @import("qwen27_window.zig").capacity;
 pub fn windowRows(units: bool) !u32 {
-    return @import("qwen27_window.zig").requested(units, if (platform.c.getenv("TF_QWEN27_WINDOW")) |v| std.mem.span(v) else null);
+    return platform.environment.read(u32, "TF_QWEN27_WINDOW", @import("qwen27_window.zig").rows(units)) catch return error.BadQwenWindow;
 }
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = @import("qwen27_prompt_floor.zig").minimum;
@@ -49,6 +50,7 @@ pub const Metal = struct {
     tensor_units: bool = false, // the device capability used by startup and first-token policy
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
+    external: bool = false, // a core drafter in front (lanes.drafted) reads each pass's taps (qwen27_features.zig)
     chunk: usize = 128, // prompt rows a pass
     window: u32 = 16, // the device per-stream verification width
     copies: bool = false, // lone context copies leave room past a 15-node tree
@@ -84,6 +86,7 @@ pub const Metal = struct {
     prefetch_encoded: bool = false,
     prepared_keep: ?mtl.CommandBuffer = null, // encoded during verify, committed only after the core chooses its path
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
+    pens: lanes.penalty_rows.Entries = .{}, // the next draw's presence and frequency entries, by frame row
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
     vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, slots.Fill) = .empty, // prompt passes the lane host runs by chunks
@@ -92,6 +95,11 @@ pub const Metal = struct {
     standing: @import("qwen27_resume.zig").Standing = .{}, // what slot 0 stands at once its stream left (#1197)
     rewind: ?mtl.Buffer = null, // slot 0's DeltaNet states and taps at its last pass's history end
     slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
+    give_back: [max_streams]bool = @splat(false), // a free slot's grown K/V and ring wait to go back (slots.giveBack)
+    draft_block: @import("qwen27_draft_block.zig").Lone = .{}, // TF_Q27_DFLASH_ADAPTIVE_BLOCK: a lone stream's block rows
+    held_taps: ?mtl.Buffer = null,
+    features_state: @import("sensenova_features.zig").State = .{},
+    sn_features: bool = false, // SenseNova-Loop's MTP head in front: its tap slots are sensenova_features.zig's
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
@@ -104,7 +112,8 @@ pub const Metal = struct {
         const device = runner.model.device;
         const tensor_units = device.tensorUnits();
         const window = try windowRows(tensor_units);
-        const copies = try @import("qwen27_window.zig").copyPolicy(tensor_units, window, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null);
+        const copies_env = platform.environment.rawText("TF_QWEN27_COPIES");
+        const copies = try @import("qwen27_window.zig").copyPolicy(tensor_units, window, copies_env orelse if (runner.model.config.looped) "1" else null);
         const ops = try tf.tree_round_gpu.Ops.init(device);
         errdefer ops.deinit();
         const picks = try device.buffer(batch_rows * @sizeOf(contract.Pick), opts);
@@ -113,13 +122,16 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv(), .draft_block = .{ .enabled = try slots.adaptiveBlockEnv() } };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
             b.gathered_taps = try device.buffer(batch_rows * g.stride, opts);
-            for (b.contexts[1..runner.ready], 1..) |*x, slot| x.* = try Context.init(gpa, d.model, slot < b.draft_slots);
+            for (b.contexts[1..runner.ready], 1..) |*x, slot| {
+                x.* = try Context.initGrow(gpa, d.model, slot < b.draft_slots, runner.kv_step);
+                x.*.?.settle = .{ .ctx = runner, .slot = @intCast(slot), .run = q.decode_round.Runner.settleOpaque };
+            }
         }
         return b;
     }
@@ -138,10 +150,12 @@ pub const Metal = struct {
         q.residency.setBack(b, null);
         b.standing.deinit(b.gpa);
         if (b.rewind) |x| x.deinit();
+        if (b.held_taps) |x| x.deinit();
         b.dropRound();
         b.dropTree();
         b.freeContexts();
         b.fills.deinit(b.gpa);
+        b.pens.deinit(b.gpa);
         b.kept.deinit();
         b.picks.deinit();
         b.ops.deinit();
@@ -157,19 +171,21 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        const feat = @import("sensenova_features.zig"); // SenseNova-Loop's head keeps its own taps; else the 27B's
+        if (b.sn_features) return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .prefill_features = feat.prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = feat.prepareFeaturesFn, .features = feat.featuresFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = features.prepare, .features = features.rows, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
-        const drafting = b.draft != null;
+        const drafting = b.draft != null or b.features_state.enabled or b.external;
         const shared = b.runner.slots > 1;
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
         const narrow: usize = @min(b.window, b.timed);
         // routed experts make a drafted window read most expert weights: plain rounds compete with drafted depths
         const routed = b.runner.model.config.moe();
-        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
+        return .{ .exact_width = if (drafting or shared or lone_copies) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -248,38 +264,51 @@ pub const Metal = struct {
         return if (slot == 0) b.draft else null;
     }
 
-    /// Logits rows [first, first + rows) drawn at their positions: argmax on the GPU, or the stream's keyed sampler.
-    fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32) !void {
+    /// Rows [first, first + rows) drawn at their positions: GPU argmax, else on the host (sampled, masked or `pens`).
+    fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32, pens: bool) !void {
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const width = (@as(usize, vocab) + 31) / 32;
         if (masks.len != 0 and masks.len != rows * width) return error.InvalidQwenMasks;
-        if (s.sampling != null or masks.len > 0) {
+        if (s.sampling != null or masks.len > 0 or pens) {
             const metric = mtl.pass_metrics.phase(.sampling);
             defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
             // each row's whole-row draw at its own position, the window's rows on threads
-            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks }, rows);
+            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks, .pens = if (pens) .{ .ctx = &b.pens, .apply = lowerRow } else null, .row0 = first }, rows);
         }
         try b.argmaxRows(first, rows);
         try b.picked(first, rows, out);
+    }
+
+    fn lowerRow(ctx: *const anyopaque, row: u32, logits: []u16) void {
+        const pens: *const lanes.penalty_rows.Entries = @ptrCast(@alignCast(ctx));
+        pens.applyRow(row, logits);
+    }
+
+    fn encodeArgmaxRange(b: *const Metal, e: mtl.ComputeEncoder, first: usize, rows: usize) !void {
+        const logits = b.runner.model.frame.get(.logits);
+        const vocab: u32 = @intCast(b.runner.model.config.vocab);
+        var at = first;
+        while (at < first + rows) : (at += contract.max_rows) {
+            const n = @min(first + rows - at, contract.max_rows);
+            try b.ops.argmaxChunks(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
+        }
+    }
+
+    fn encodeArgmaxTail(ptr: *anyopaque, e: mtl.ComputeEncoder) anyerror!void {
+        try self(ptr).encodeArgmaxRange(e, 0, self(ptr).rows);
     }
 
     /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
     fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
         const metric = mtl.pass_metrics.phase(.sampling);
         defer metric.end();
-        const logits = b.runner.model.frame.get(.logits);
-        const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = b.runner.model.queue.commandBuffer();
         const e = cb.compute(.serial);
-        var at = first;
-        while (at < first + rows) : (at += contract.max_rows) {
-            const n = @min(first + rows - at, contract.max_rows);
-            try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
-        }
+        try b.encodeArgmaxRange(e, first, rows);
         e.end();
         cb.commit();
         cb.wait();
@@ -343,11 +372,12 @@ pub const Metal = struct {
         std.debug.assert(r.active == null);
         if (r.active != null) return error.RoundNotReady;
         try r.taps.complete();
-        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, r.taps.count, rows[0..n], out.contents()[0..out.length()]);
+        const src = r.taps.source();
+        try q.tap_gather.gather(src.buffer.contents()[0..src.buffer.length()], r.taps.capacity, r.taps.rows, src.width, src.planes, rows[0..n], out.contents()[0..out.length()]);
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
-            if (g.stride != r.taps.width * r.taps.count * 2) return error.BadTapGather;
+            if (g.stride != @as(usize, src.width) * src.planes * 2) return error.BadTapGather; // a v1 ring: one fused plane
             if (b.early[slot] == 0) {
                 try g.absorb(out, at * g.stride, @intCast(path.len));
                 at += path.len;
@@ -390,7 +420,7 @@ pub const Metal = struct {
         const b = self(ptr);
         _ = try b.slotFor(s);
         var token: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &token, &.{});
+        try b.draw(s, 0, 1, &.{position}, &token, &.{}, false); // a reply's first token: no count yet
         return b.push(token[0]);
     }
 
@@ -398,7 +428,7 @@ pub const Metal = struct {
         const b = self(ptr);
         _ = try b.slotFor(s);
         var token: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &token, mask);
+        try b.draw(s, 0, 1, &.{position}, &token, mask, false);
         return b.push(token[0]);
     }
 
@@ -415,7 +445,9 @@ pub const Metal = struct {
         }
         slots.charge(b, s, before);
         var next: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &next, &.{});
+        b.pens.clear();
+        try b.pens.stageOne(b.gpa, s, @intCast(position - 1), token, 0); // the reply before the fed token, then it
+        try b.draw(s, 0, 1, &.{position}, &next, &.{}, b.pens.len() > 0);
         return b.push(next[0]);
     }
 
@@ -465,22 +497,27 @@ pub const Metal = struct {
         errdefer b.dropRound();
         b.rows = total;
         if (b.pass_profile and windows.len == 1) std.log.info("q27_offer width={d} rows={d} tree_nodes={d} copy_rows={d}", .{ b.window, total, b.from_tree, total - 1 - b.from_tree });
-        const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0;
+        b.pens.clear(); // each penalized window's rows: the reply, its pending token, then the row's own path
+        for (windows, b.round.?.firsts) |w, first| try b.pens.stageWindow(b.gpa, w, b.ids[first + 1 ..][0 .. w.rows() - 1], first);
+        const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0 and b.pens.len() == 0;
+        // every greedy window's rows from one argmax over the round; a sampled window draws on the host
+        var greedy = false;
+        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0 and !w.stream.penalties.active());
+        const tail_argmax = r.model.config.looped and !fused and greedy and r.reduce == null;
         std.debug.assert(r.tail == null);
-        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
+        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail } else if (tail_argmax) r.tail = .{ .ptr = b, .encode = encodeArgmaxTail };
         defer r.tail = null;
         const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
+        try @import("sensenova_features.zig").recordVerify(b, windows, inputs[0..windows.len]);
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
         b.advanced = plain;
         b.rows = total;
-        // every greedy window's rows from one argmax over the round; a sampled window draws on the host
-        var greedy = false;
-        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0);
-        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy) try b.argmaxRows(0, total);
+        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy and !tail_argmax) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
-            if (w.stream.sampling != null or w.masks.len > 0) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks) else try b.picked(first, rows, o.sampled);
+            const pens = w.stream.penalties.active();
+            if (w.stream.sampling != null or w.masks.len > 0 or pens) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks, pens) else try b.picked(first, rows, o.sampled);
             @memcpy(o.drafts, b.ids[first + 1 ..][0 .. rows - 1]);
         }
         if (windows.len == 1) @memcpy(b.sampled[0..b.rows], out[0].sampled);
@@ -516,6 +553,7 @@ pub const Metal = struct {
         const t = b.trees[0] orelse return;
         if (b.from_tree == 0) return;
         const stream = b.owners[0] orelse return;
+        if (!stream.shared_round) b.draft_block.observe(@intFromPtr(stream), @import("qwen27_draft_block.zig").landed(path, b.from_tree));
         var kept: [max_rows]bool = @splat(false);
         for (path) |r| kept[r] = true;
         for (t.tokens, t.parents, 0..) |token, parent, i| {
@@ -547,15 +585,16 @@ pub const Metal = struct {
         if (b.round == null or windows.len != b.count) return error.NothingToKeep;
         for (windows, paths, b.windows[0..b.count]) |w, path, slot| if (path.len == 0 or path[0] != 0 or b.slotOf(w.stream) != slot) return error.NothingToKeep;
         try b.keepPaths(paths);
+        @import("sensenova_features.zig").recordKeep(b, windows, paths);
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
-        slots.endFill(self(ptr), s);
-        self(ptr).unbind(s);
+        const b = self(ptr);
+        if (b.slotOf(s)) |slot| b.features_state.clearSlot(slot);
+        slots.endFill(b, s);
+        b.unbind(s);
     }
 };
 
 /// Streams that draft their own trees in shared rounds, while no more are live (TF_Q27_DRAFT_SLOTS; 1: slot 0 alone).
-pub fn draftSlots() !u32 {
-    return std.math.clamp(try @import("sys").environment.read(u32, "TF_Q27_DRAFT_SLOTS", 8), 1, max_streams);
-}
+pub const draftSlots = draft_fns.draftSlots;

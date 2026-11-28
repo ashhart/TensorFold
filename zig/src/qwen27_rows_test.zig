@@ -5,6 +5,34 @@ const policy = @import("native/qwen27_prompt_rows.zig");
 const Stream = @import("core/lanes/stream.zig").Stream;
 const a = std.testing.allocator;
 
+test "qwen27 rows: the qualified shared-prefix frame keeps each chip's prompt width" {
+    for ([_]u32{ 13, 14, 15, 16, 17, 18 }, [_]u32{ 512, 512, 512, 512, 2048, 512 }) |generation, expected| {
+        const geometry = @import("families/qwen27/attention_plan.zig").Geometry{ .shared_prefix = true };
+        const chosen = rows.frameRequested(generation, false, null, geometry);
+        try std.testing.expectEqual(expected, chosen);
+        try std.testing.expectEqual(geometry.promptRows(rows.requested(generation, false, null)), geometry.promptRows(chosen));
+    }
+}
+
+test "qwen27 rows: deferred loading keeps the real geometry and the M5 initial frame" {
+    try std.testing.expectEqual(@as(u32, 128), rows.frameRequested(0, false, null, .{ .shared_prefix = false }));
+    try std.testing.expectEqual(@as(u32, 512), rows.frameRequested(0, false, null, .{}));
+    try std.testing.expectEqual(@as(u32, 2048), rows.frameRequested(17, false, null, .{}));
+    try std.testing.expectEqual(@as(u32, 512), rows.frameRequested(15, false, null, .{}));
+}
+
+test "qwen27 rows: frame overrides and routed defaults stay exact on every chip" {
+    for ([_]u32{ 0, 13, 14, 15, 16, 17, 18 }) |generation| {
+        const geometry = @import("families/qwen27/attention_plan.zig").Geometry{ .shared_prefix = generation >= 17 };
+        try std.testing.expectEqual(@as(u32, 1024), rows.frameRequested(generation, true, null, geometry));
+        for ([_]bool{ false, true }) |routed| {
+            for ([_][]const u8{ "16", "128", "512", "1024", "2048" }, [_]u32{ 16, 128, 512, 1024, 2048 }) |value, wanted| {
+                try std.testing.expectEqual(wanted, rows.frameRequested(generation, routed, value, geometry));
+            }
+        }
+    }
+}
+
 test "qwen27 rows: only the measured generation widens its default" {
     for ([_]u32{ 0, 13, 14, 15, 16, 18 }) |generation| try std.testing.expectEqual(@as(u32, 512), rows.requested(generation, false, null));
     try std.testing.expectEqual(@as(u32, 2048), rows.requested(17, false, null));
@@ -28,8 +56,28 @@ test "qwen27 rows: valid overrides stay exact and invalid ones use the chip defa
     }
 }
 
+const Device = struct {
+    units: bool = true,
+    pub fn tensorUnits(d: Device) bool {
+        return d.units;
+    }
+};
+
+test "qwen27 rows: looped SenseNova-Loop widens its default from generation 15" {
+    for ([_]u32{ 0, 13, 14 }) |generation| try std.testing.expectEqual(@as(u32, 512), rows.requestedModel(generation, false, true, null));
+    for ([_]u32{ 15, 16, 17, 18 }) |generation| try std.testing.expectEqual(@as(u32, 2048), rows.requestedModel(generation, false, true, null));
+    for ([_]u32{ 0, 15, 17 }) |generation| try std.testing.expectEqual(@as(u32, 1024), rows.requestedModel(generation, true, true, null));
+}
+
 const Backend = struct {
-    runner: struct { slots: usize = 3 } = .{},
+    runner: struct {
+        slots: usize = 3,
+        model: struct { device: Device = .{} } = .{},
+        decode_rows: u32 = 2048,
+        pub fn decodeRows(r: *const @This()) u32 {
+            return r.decode_rows;
+        }
+    } = .{},
     chunk: usize = 2048,
     owners: [3]?*Stream = @splat(null),
     fills: std.AutoHashMapUnmanaged(*Stream, bool) = .empty,
@@ -159,4 +207,27 @@ test "qwen27 rows: empty or whitespace-only settings are unset and reach the loa
     for ([_][]const u8{ "", " ", "\t\n" }) |value| try loader.open(value, &why);
     try std.testing.expectEqual(@as(usize, 3), loader.calls);
     try std.testing.expectEqualStrings("unchanged", why);
+}
+
+test "qwen27 rows: pre-M5 decoded spans and a live decoder keep the 128-row bound" {
+    var prompt = try Stream.init(a, .{ .id = "prompt", .prompt = &.{ 1, 2 }, .max_new = 4, .drafts = false });
+    defer prompt.deinit(a);
+    var decoder = try Stream.init(a, .{ .id = "decoder", .prompt = &.{ 1, 2 }, .max_new = 4, .drafts = false });
+    defer decoder.deinit(a);
+    var b: Backend = .{ .owners = .{ &prompt, null, null } };
+    defer b.fills.deinit(a);
+    try b.fills.put(a, &prompt, true);
+    for ([_]bool{ false, true }) |units| {
+        b.runner.model.device.units = units;
+        b.runner.decode_rows = if (units) 2048 else 128;
+        b.owners[1] = null;
+        try std.testing.expectEqual(@as(usize, 2048), policy.chunk(&b, &prompt, 0, false));
+        try std.testing.expectEqual(@as(usize, b.runner.decode_rows), policy.chunk(&b, &prompt, 0, true));
+        b.owners[1] = &decoder;
+        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.choose(&b, &prompt, 0));
+        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.chunk(&b, &prompt, 0, true));
+        decoder.paused = true;
+        try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
+        decoder.paused = false;
+    }
 }

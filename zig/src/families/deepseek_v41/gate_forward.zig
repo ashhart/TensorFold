@@ -22,6 +22,8 @@ pub fn widths(a: std.mem.Allocator, w: *const load.Weights, p: *const plan.Plan)
     var it = w.map.iterator();
     while (it.next()) |e| {
         const name = e.key_ptr.*;
+        // a float projection (`<name>.plain`) has no K2: width 0 is what block.Widths.plain reads
+        if (std.mem.endsWith(u8, name, ".plain")) try out.dense.put(a, name[0 .. name.len - ".plain".len], 0);
         if (!std.mem.endsWith(u8, name, ".trellis") or e.value_ptr.rank != 3) continue;
         try out.dense.put(a, name[0 .. name.len - ".trellis".len], @intCast(e.value_ptr.shape[2] / 8));
     }

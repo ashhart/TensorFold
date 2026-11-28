@@ -16,6 +16,12 @@ pub const Costs = struct {
         gpa.free(c.verify);
     }
 
+    /// A pass dearer than twice a whole 1-row round cannot be a measurement of one: drafts could never pay.
+    pub fn plausible(c: Costs) bool {
+        if (c.verify.len == 0 or !std.math.isFinite(c.draft) or !std.math.isFinite(c.verify[0]) or c.verify[0] <= 0.0) return false;
+        return c.draft >= 0.0 and c.draft <= 2.0 * c.verify[0];
+    }
+
     pub fn clone(c: Costs, gpa: Allocator) !Costs {
         return .{ .verify = try gpa.dupe(f64, c.verify), .draft = c.draft, .slot = c.slot };
     }
@@ -57,7 +63,10 @@ pub const Costs = struct {
         const parsed = try std.json.parseFromSlice(File, gpa, bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         if (parsed.value.verify.len < 2) return error.BadCosts;
-        return .{ .verify = try gpa.dupe(f64, parsed.value.verify), .draft = parsed.value.draft, .slot = parsed.value.slot };
+        var c: Costs = .{ .verify = try gpa.dupe(f64, parsed.value.verify), .draft = parsed.value.draft, .slot = parsed.value.slot };
+        errdefer c.deinit(gpa);
+        if (!c.plausible()) return error.ImplausibleCosts;
+        return c;
     }
 };
 

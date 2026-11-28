@@ -189,10 +189,10 @@ pub const NormMlp = struct {
         };
     }
 
-    // Add is out-of-place; binary_vec loads 4 elements per run, so count and operands must be divisible by 4.
+    // Add is out-of-place; binary_vec loads 4 elements per run, so count must be %4==0 and views 16-byte aligned.
     pub fn add(m: *NormMlp, cmds: *Commands, out: View, a: View, b: View, timeout_ns: u64) Error!void {
         const variant = try addVariant(out, a, b);
-        try vec4Guard(out.elements);
+        try vec4ViewsGuard(&.{ out, a, b });
         const pipe = m.addPipeline(variant);
         try pipe.bind(&.{ a.bind(), b.bind(), out.bind() });
         var p: params.Params = .{
@@ -207,7 +207,7 @@ pub const NormMlp = struct {
     // SwiGLU is 4-wide, out-of-place; bindings 3/4 materialize=0; ORACLE_QWEN35 rounds once, MLX fused_chain 3 times.
     pub fn swiglu(m: *NormMlp, cmds: *Commands, out: View, gate: View, up: View, timeout_ns: u64) Error!void {
         const kind = try swigluVariant(out, gate, up);
-        try vec4Guard(out.elements);
+        try vec4ViewsGuard(&.{ out, gate, up });
         const pipe = if (kind == .f32) &m.swiglu_f32 else &m.swiglu_bf16;
         try pipe.bind(&.{ gate.bind(), up.bind(), out.bind(), m.dummyBinding(), m.dummyBinding() });
         const p: SwigluParams = .{ .count = try out.elemCount32() };
@@ -221,6 +221,14 @@ fn cast32(v: u64) Error!u32 {
 
 fn vec4Guard(elements: u64) Error!void {
     if (elements % 4 != 0) return error.Invalid;
+}
+
+/// Refuses ragged counts and non-16-byte-aligned views before 4-wide add or SwiGLU dispatch.
+pub fn vec4ViewsGuard(views: []const View) Error!void {
+    for (views) |v| {
+        try vec4Guard(v.elements);
+        if (v.byte_offset % 16 != 0) return error.Misaligned;
+    }
 }
 
 /// The RMSNorm's derived geometry, or the named reason it cannot run; pure and host-tested.
@@ -300,10 +308,16 @@ test "normPlan derives the geometry and refuses torn rows, wrong gamma, bad eps 
     try testing.expectError(error.Invalid, normPlan(4 * 8, 4 * 8, 8, 4, 8, std.math.inf(f32)));
     try testing.expectError(error.Invalid, normPlan(0, 0, 8, 0, 8, 1e-6));
     try testing.expectError(error.TooLarge, normPlan(1 << 32, 1 << 32, 1 << 32, 1, 1 << 32, 1e-6)); // width past u32
-    try testing.expectError(error.TooLarge, normPlan(1 << 32, 1 << 32, 1 << 16, 1 << 16, 1 << 16, 1e-6)); // rows*width past u32
+    try testing.expectError(error.TooLarge, normPlan(1 << 32, 1 << 32, 1 << 16, 1 << 16, 1 << 16, 1e-6)); // past u32
 }
 
-test "the four-wide gate refuses ragged element counts" {
+test "the four-wide gate refuses ragged element counts and non-16-byte-aligned views" {
     try testing.expectError(error.Invalid, vec4Guard(6));
     try vec4Guard(8);
+    const buf = fakeBuffer(1024);
+    const aligned = view(&buf, .bf16, 16, 8);
+    try vec4ViewsGuard(&.{ aligned, view(&buf, .f32, 32, 8) });
+    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, view(&buf, .bf16, 4, 8) }));
+    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, view(&buf, .f32, 8, 8) }));
+    try testing.expectError(error.Invalid, vec4ViewsGuard(&.{view(&buf, .bf16, 16, 6)}));
 }

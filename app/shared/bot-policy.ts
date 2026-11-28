@@ -1,6 +1,7 @@
 import type { AgentPreset, ApprovalMode, BotThreadConfig, Provider, Thread } from '../electron/agent/types'
 import { isExternalProvider } from './provider-trust'
 import { normalizeBotToolScope } from './bot-tool-policy'
+import { normalizeBotReasoningEffort } from './bot-reasoning'
 
 const lanes = new Set(['planning', 'development', 'review', 'research', 'operations'])
 const apiTransports = new Set<Provider['transport']>([undefined, 'chat-completions'])
@@ -21,6 +22,9 @@ export function normalizeAgentPresets(value: unknown, strict = false): AgentPres
   for (const item of value.slice(0, 200)) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) { if (strict) throw new Error('Invalid bot.'); continue }
     const raw = item as Record<string, unknown>
+    let reasoningEffort
+    try { reasoningEffort = normalizeBotReasoningEffort(raw.reasoningEffort) }
+    catch (error) { if (strict) throw error; continue }
     let toolScope, toolScopeProblem
     try {
       toolScope = normalizeBotToolScope(raw.toolScope)
@@ -50,6 +54,7 @@ export function normalizeAgentPresets(value: unknown, strict = false): AgentPres
       id: preset.id, name: preset.name.slice(0, 80), role: preset.role.slice(0, 240), lane: preset.lane,
       providerId: preset.providerId.slice(0, 200), providerAccountId: preset.providerAccountId?.slice(0, 200) ?? null,
       model: preset.model.slice(0, 300), instructions: preset.instructions?.slice(0, 16_000) ?? '',
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       approvalScope: preset.approvalScope ?? 'readonly', executionTarget: preset.executionTarget ?? 'workspace',
       ...(toolScope ? { toolScope } : {}),
       ...(toolScopeProblem ? { toolScopeProblem } : {}),
@@ -70,6 +75,7 @@ export function captureBotConfig(preset: AgentPreset, providers: Provider[], now
   const snapshot: BotThreadConfig = {
     presetId: normalized.id, name: normalized.name.trim(), role: normalized.role, instructions: normalized.instructions ?? '',
     providerId: normalized.providerId, providerAccountId: normalized.providerAccountId ?? null, model: normalized.model,
+    ...(normalized.reasoningEffort !== undefined ? { reasoningEffort: normalized.reasoningEffort } : {}),
     approvalScope: normalized.approvalScope ?? 'readonly', executionTarget: normalized.executionTarget ?? 'workspace', capturedAt: now,
     ...(normalized.toolScope ? { toolScope: normalizeBotToolScope(normalized.toolScope) } : {}),
   }
@@ -95,6 +101,7 @@ export function botRunApprovalMode(thread: Pick<Thread, 'bot'>, presets: AgentPr
   if (!bot || typeof bot !== 'object' || Array.isArray(bot)) throw new Error('This chat has an invalid captured bot configuration; start a new bot chat.')
   if (bot.toolScopeProblem !== undefined) throw new Error('This chat\'s captured tool selection needs repair; start a new chat from the repaired bot.')
   normalizeBotToolScope(bot.toolScope)
+  normalizeBotReasoningEffort(bot.reasoningEffort)
   if (typeof bot.presetId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(bot.presetId) || typeof bot.name !== 'string' || !bot.name.trim() || bot.name.length > 80 || typeof bot.instructions !== 'string' || bot.instructions.length > 16_000 || typeof bot.role !== 'string' || bot.role.length > 240 || typeof bot.providerId !== 'string' || typeof bot.model !== 'string' || (bot.providerAccountId !== null && typeof bot.providerAccountId !== 'string')) throw new Error('This chat has an invalid bot configuration.')
   const current = presets.find((preset) => preset.id === bot.presetId)
   if (!current || current.archivedAt) throw new Error('This bot is archived; restore it before continuing its chat.')

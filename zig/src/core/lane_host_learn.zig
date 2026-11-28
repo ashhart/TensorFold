@@ -8,10 +8,11 @@ pub fn submit(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.Learn
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
     h.mutex.lockUncancelable(h.io);
     defer h.unlock();
-    if (h.closing) return error.Closed;
+    if (h.closing.load(.acquire)) return error.Closed;
     if (h.learner == null) return error.Unsupported;
     if (request.audit != null and !h.learner.?.read_only_audit) return error.Unsupported;
-    if (request.audit != null and h.stale) return error.Busy;
+    if (request.audit != null and h.stale.load(.acquire)) return error.Busy;
+    try @import("lane_activity.zig").restoreWork(h);
     h.lessons.append(h.gpa, .{ .request = request, .sink = sink }) catch return error.Busy;
     h.wake.signal(h.io);
 }
@@ -20,7 +21,7 @@ pub fn submit(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.Learn
 pub fn refuse(h: *LaneHost) void {
     while (true) {
         h.lock();
-        if (!h.stale or h.queued.items.len == 0) return h.unlock();
+        if (!h.stale.load(.acquire) or h.queued.items.len == 0) return h.unlock();
         const job = h.queued.orderedRemove(0);
         h.unlock();
         h.finish(job, .failed, api.stale_message);
@@ -39,7 +40,7 @@ pub fn step(h: *LaneHost) void {
     if (!h.lesson_open) {
         h.mutex.lockUncancelable(h.io);
         const lesson = h.lessons.orderedRemove(0);
-        const blocked = lesson.request.audit != null and h.stale;
+        const blocked = lesson.request.audit != null and h.stale.load(.acquire);
         h.unlock();
         if (blocked) {
             const failed: api.LearnEvent = .{ .done = .{ .message = "AuditUnresolved" } };
@@ -56,6 +57,6 @@ pub fn step(h: *LaneHost) void {
     h.lesson_open = !s.done;
     // learn requests still come in, so the learner can try the put-back again; replies wait for it
     h.mutex.lockUncancelable(h.io);
-    h.stale = s.stale;
+    h.stale.store(s.stale, .release);
     h.unlock();
 }

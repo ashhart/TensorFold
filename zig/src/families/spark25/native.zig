@@ -18,6 +18,7 @@ pub const snap_lookahead: u32 = 0;
 pub const explains_open = true;
 /// A request's last verify window: its pages hold that many rows past its prompt and reply.
 pub const window_rows: u32 = be.max_window;
+pub const kept_view = @import("cuda_disk.zig"); // the disk store's image (native/cuda_kept.zig)
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };

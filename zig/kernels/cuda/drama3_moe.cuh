@@ -56,6 +56,61 @@ extern "C" __global__ void d3_router(const bf16* __restrict__ sp, int ss, int r_
   }
 }
 
+// d3_router over held ids only (slots[e] >= 0), picks as slots; a poisoned sum gives NaN weights, never a dropped id.
+extern "C" __global__ void d3_router_compact(const bf16* __restrict__ sp, int ss, int r_off, int* __restrict__ picks,
+                                             float* __restrict__ weights, const int* __restrict__ slots) {
+  const int t = blockIdx.x, e = threadIdx.x;  // 256 threads
+  const bool kept = slots[e] >= 0;
+  const float lg = kept ? b2f(sp[(size_t)t * ss + r_off + e]) : -INFINITY;
+  const float m = block_max(lg);
+  const float p = expf(lg - m);
+  const float sum = block_sum(p);
+  const bool poisoned = !isfinite(sum) || sum <= 0.f;
+  __shared__ float best_v[8];
+  __shared__ int best_i[8];
+  __shared__ float wv[32];
+  __shared__ int wi[32];
+  float mine = kept ? (poisoned ? 0.f : p / sum) : -1.f;
+  for (int k = 0; k < 8; ++k) {
+    float v = mine;
+    int idx = e;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      const float ov = __shfl_xor_sync(FULL, v, o);
+      const int oi = __shfl_xor_sync(FULL, idx, o);
+      if (ov > v || (ov == v && oi < idx)) {
+        v = ov;
+        idx = oi;
+      }
+    }
+    if ((e & 31) == 0) {
+      wv[e >> 5] = v;
+      wi[e >> 5] = idx;
+    }
+    __syncthreads();
+    if (e == 0) {
+      float bv = wv[0];
+      int bi = wi[0];
+      for (int j = 1; j < 8; ++j)
+        if (wv[j] > bv || (wv[j] == bv && wi[j] < bi)) {
+          bv = wv[j];
+          bi = wi[j];
+        }
+      best_v[k] = bv;
+      best_i[k] = bi;
+    }
+    __syncthreads();
+    if (e == best_i[k]) mine = -1.f;
+    __syncthreads();
+  }
+  if (e < 8) {
+    float s = 0.f;
+    for (int j = 0; j < 8; ++j) s += best_v[j];
+    picks[t * 8 + e] = slots[best_i[e]];
+    weights[t * 8 + e] = poisoned ? NAN : best_v[e] / s;
+  }
+}
+
 // y [T, N] = bf16(bf16(silu(g)) * u) with g, u at offsets of rows `stride` apart.
 extern "C" __global__ void d3_swiglu(const bf16* __restrict__ x, int stride, int g_off, int u_off, int N,
                                      bf16* __restrict__ y) {

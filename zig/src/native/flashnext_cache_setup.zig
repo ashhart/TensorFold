@@ -13,14 +13,25 @@ pub fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Alloc
     if (limit) |cap| {
         const ready = cache_fit.footprint() orelse return error.NoMemoryReading;
         if (ready +| cache_fit.MARGIN > cap) return error.OverMemoryLimit;
+        if (gib == null) if (eng.r.fsr) |fsr| if (fsr.pool != null) {
+            const maximum = try @import("flashnext_cache_budget.zig").automatic(cap, ready, dev.allocated());
+            if (maximum < cache_fit.defaultBudget(cap -| ready -| cache_fit.MARGIN))
+                return cache_fit.budgetUnderMaximum(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), maximum, a, why, rank);
+        };
         return cache_fit.budgetUnder(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), a, why, rank);
     }
     return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
 }
 
 /// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
-pub fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, dir, eng)).id, cap);
+pub fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, root: []const u8, cap: u64) !?api.prompt_imprint.Imprint {
+    const identity = (try disk.identity(gpa, io, dir, eng)) orelse return null;
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, identity.id, cap);
     std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
+}
+
+/// Attach ordinary learned state to a live prompt cache after its identity has been checked.
+pub fn attachLearned(store: *api.prompt_cache.Store, learned: *?api.prompt_imprint.Imprint) void {
+    store.imprint = if (learned.*) |*m| m else null;
 }

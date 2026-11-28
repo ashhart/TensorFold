@@ -134,7 +134,7 @@ test "qwen27 quant: preparation skips projections that cannot take a decode lane
 }
 
 const wide_formats = [_]lane_projection.Format{
-    .{ .bits = 8, .group = 64 }, .{ .bits = 6, .group = 32 }, .{ .bits = 5, .group = 64 },
+    .{ .bits = 8, .group = 64 }, .{ .bits = 6, .group = 32 }, .{ .bits = 5, .group = 32 },
     .{ .bits = 3, .group = 32 }, .{ .bits = 2, .group = 64 }, .{ .bits = 8, .group = 128 },
 };
 
@@ -189,10 +189,17 @@ test "qwen27 quant: each non-reg whole prompt is one projection dispatch" {
         k.long_prompt = false;
         r.count = 0;
         try k.quant(r.encoder(), p, ref, producer, ref, ref, 2048);
-        try t.expectEqual(@as(usize, 128), r.count);
-        for (r.launches[0..r.count]) |call| {
-            try t.expectEqual(@as(u32, 16), call.rows);
-            try t.expectEqual(@as(usize, 1), call.grid.height);
+        // Tensor units take the row blocks a dispatch at every width; elsewhere 16 rows a dispatch.
+        if (r.device().tensorUnits()) {
+            try t.expectEqual(@as(usize, 1), r.count);
+            try t.expectEqual(@as(u32, 2048), r.launches[0].rows);
+            try t.expectEqual(@as(usize, (2048 + 15) / 16), r.launches[0].grid.height);
+        } else {
+            try t.expectEqual(@as(usize, 128), r.count);
+            for (r.launches[0..r.count]) |call| {
+                try t.expectEqual(@as(u32, 16), call.rows);
+                try t.expectEqual(@as(usize, 1), call.grid.height);
+            }
         }
     };
 }
@@ -331,24 +338,85 @@ test "qwen27 quant: mixed raw columns remain unordered until the caller barrier"
 }
 
 test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only its grid" {
+    const glue = @import("core_delta");
+    defer glue.flat_glue = true;
     var r: mtl.Record = .{};
     var k = quant.Kernels{ .allocator = a, .device = r.device(), .raw_tiles = false };
     defer k.deinit();
     const ref = quant.Ref{ .buffer = r.virtual() };
-    for ([_]bool{ false, true, false }) |units| {
-        r.tensor_units = units;
-        for ([_]u32{ 1, 7, 16, 17 }) |rows| {
-            r.count = 0;
-            try k.norm(r.encoder(), ref, null, ref, ref, ref, ref, ref, ref, 512, rows);
-            try k.norm(r.encoder(), ref, ref, ref, ref, ref, ref, ref, ref, 512, rows);
-            try k.mlp(r.encoder(), ref, ref, ref, ref, ref, 1024, rows);
-            try t.expectEqual(@as(usize, 3), r.count);
-            for (r.launches[0..r.count]) |l| {
-                try t.expectEqual(@as(?bool, units), l.xs);
-                try t.expectEqual(@as(usize, if (units) quant.padded(rows) else rows), l.grid.height);
+    // The flat glue's row-side MLP takes 16 rows a threadgroup, so its grid is padded rows over 16 on every chip.
+    for ([_]bool{ false, true }) |flat| {
+        glue.flat_glue = flat;
+        for ([_]bool{ false, true, false }) |units| {
+            r.tensor_units = units;
+            for ([_]u32{ 1, 7, 16, 17 }) |rows| {
+                r.count = 0;
+                try k.norm(r.encoder(), ref, null, ref, ref, ref, ref, ref, ref, 512, rows);
+                try k.norm(r.encoder(), ref, ref, ref, ref, ref, ref, ref, ref, 512, rows);
+                try k.mlp(r.encoder(), ref, ref, ref, ref, ref, 1024, rows);
+                try t.expectEqual(@as(usize, 3), r.count);
+                for (r.launches[0..r.count], 0..) |l, i| {
+                    try t.expectEqual(@as(?bool, units), l.xs);
+                    const height: usize = if (flat and i == 2) quant.padded(rows) / 16 else if (units) quant.padded(rows) else rows;
+                    try t.expectEqual(height, l.grid.height);
+                }
             }
         }
     }
-    try t.expectEqual(@as(u32, 6), k.cache.count());
-    try t.expectEqual(@as(usize, 6), r.libraries);
+    try t.expectEqual(@as(u32, 8), k.cache.count());
+    try t.expectEqual(@as(usize, 8), r.libraries);
+}
+
+test "qwen27 quant: 5-bit and 6-bit g64 use reg lane keys with 128/2048 row capacity and producer sums" {
+    for ([_]u8{ 5, 6 }) |bits| {
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true };
+        defer k.deinit();
+        var p = matrix(&r, 64);
+        p.bits = bits;
+        p.group = 64;
+        const ref = quant.Ref{ .buffer = r.virtual() };
+        const sums: quant.Sums = .{ .ref = ref, .stride = 2080 };
+        try k.prepareDecode(p);
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 128);
+        try t.expectEqual(@as(usize, 1), r.count);
+        try t.expectEqual(@as(u32, 128), r.launches[0].rows);
+        try t.expectEqual(@as(i32, 2080), r.launches[0].stride);
+        k.prompt = true;
+        r.count = 0;
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 2048);
+        try t.expectEqual(@as(usize, 1), r.count);
+        try t.expectEqual(@as(u32, 2048), r.launches[0].rows);
+        try t.expectEqual(@as(u32, 2), k.lanes.count());
+    }
+}
+
+test "qwen27 quant: 5-bit and 6-bit g64 keep v1.3.4's K split on decode and prompt; 4-bit keeps the M5 tables" {
+    // the 27B's projection shapes (n, k): every row of the M5 and prompt tables
+    const shapes = [_][2]u32{ .{ 5120, 17408 }, .{ 12288, 5120 }, .{ 10240, 5120 }, .{ 5120, 6144 }, .{ 34816, 5120 }, .{ 2048, 5120 }, .{ 6240, 5120 } };
+    for ([_]u8{ 4, 5, 6 }) |bits| for (shapes) |s| {
+        const v134 = try projection.split(s[0], s[1]); // prepare's split before #4419 moved 5/6-bit onto the M5 table
+        try t.expectEqual(if (bits == 4) @as(u32, 4) else v134, projection.laneSplit(bits, 64, .{ .slices = v134, .m5 = 4 }));
+        try t.expectEqual(v134, projection.laneSplit(bits, 64, .{ .slices = v134, .m5 = null }));
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true };
+        defer k.deinit();
+        var p = matrix(&r, s[0]);
+        p.k = s[1];
+        p.bits = bits;
+        p.slices = if (bits == 4) projection.laneSplit(4, 64, .{ .slices = v134, .m5 = null }) else v134;
+        const ref = quant.Ref{ .buffer = r.virtual() };
+        const sums: quant.Sums = .{ .ref = ref, .stride = 2080 };
+        try k.prepareDecode(p);
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 1);
+        k.prompt = true;
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 128);
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 2048);
+        // every entry built for these rows: 5/6-bit at v1.3.4's split; 4-bit at main's decode or prompt-table split
+        const prompt4 = projection.promptSplit(s[0], s[1]) orelse p.slices;
+        var it = k.lanes.keyIterator();
+        while (it.next()) |key| {
+            if (bits == 4) try t.expect(key.slices == p.slices or key.slices == prompt4) else try t.expectEqual(v134, key.slices);
+        }
+    };
 }

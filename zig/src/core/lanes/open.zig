@@ -145,8 +145,8 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
 /// The first drafts' depth for `reach`.
 pub fn firstDepth(e: *Engine, s: *Stream, reach: Reach) !u32 {
     var who = win.who(s);
-    if (reach == .head and e.cfg.node_probabilities) return @intCast(try e.rule.headDepth(&who, null, win.probe(e)));
-    return @intCast(try e.rule.depth(who));
+    const d = if (reach == .head and e.cfg.node_probabilities) try e.rule.headDepth(&who, null, win.probe(e)) else try e.rule.depth(who);
+    return @intCast(if (e.cfg.shared_mtp_cap > 0 and e.live.items.len > 0) @min(d, e.cfg.shared_mtp_cap) else d); // joins a shared round
 }
 
 /// Whether the backend can run a prompt pass a chunk at a time between rounds (`fillStream`).

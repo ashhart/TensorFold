@@ -215,11 +215,18 @@ const Exchange = struct {
     }
 };
 
-/// A refusal's body, up to 16 KiB, read for at most 100 ms past its head, after its sample's time and code are set.
+/// A complete refusal body up to 16 KiB, read for 100 ms; oversized, timed-out and incomplete bodies return none.
 pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
     if (resp.head.transfer_encoding != .none) return "";
-    var wait: BodyWait = .{ .in = resp.request.reader.in, .want = @min(resp.head.content_length orelse 16 << 10, 16 << 10) };
-    if (wait.in.buffered().len < wait.want) _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);
+    const declared = resp.head.content_length;
+    if (declared != null and declared.? > 16 << 10) return "";
+    var wait: BodyWait = .{ .in = resp.request.reader.in, .want = @min(declared orelse 16 << 10, 16 << 10), .exact = declared != null };
+    if (wait.exact and wait.in.buffered().len >= wait.want) {
+        wait.complete = true;
+    } else {
+        _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);
+        if (!wait.complete) return "";
+    }
     const got = wait.in.buffered();
     return a.dupe(u8, got[0..@min(got.len, wait.want)]) catch "";
 }
@@ -227,14 +234,21 @@ pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response
 const BodyWait = struct {
     in: *std.Io.Reader,
     want: usize,
+    exact: bool,
+    complete: bool = false,
     done: std.atomic.Value(bool) = .init(false),
 
     fn run(w: *BodyWait) void {
-        while (w.in.buffered().len < w.want) w.in.fillMore() catch return;
+        while (w.in.buffered().len < w.want) w.in.fillMore() catch |e| {
+            w.complete = !w.exact and e == error.EndOfStream;
+            return;
+        };
+        w.complete = w.exact;
     }
 };
 
-fn eventStream(content_type: ?[]const u8) bool {
+/// A ``text/event-stream`` reply, parameters aside.
+pub fn eventStream(content_type: ?[]const u8) bool {
     const t = content_type orelse return false;
     const media = std.mem.trim(u8, t[0 .. std.mem.indexOfScalar(u8, t, ';') orelse t.len], " \t");
     return std.ascii.eqlIgnoreCase(media, "text/event-stream");
@@ -317,8 +331,10 @@ pub const Fetch = struct {
     url: []const u8,
     body: ?[]const u8 = null,
     token: ?[]const u8 = null,
+    legacy_key: bool = false,
     limit: usize,
     timeout_s: f64,
+    agent: []const u8 = user_agent,
 };
 
 pub const Fetched = struct {
@@ -327,6 +343,35 @@ pub const Fetched = struct {
     body: []const u8 = "",
     failed: enum { none, network, too_large, stopped, deadline } = .none,
 };
+
+/// Latin-1 uses Python's header bytes; other legacy UTF-8 keeps main's bytes, with C0 and DEL excluded.
+pub fn rawHeader(buf: []u8, token: []const u8) ?[]const u8 {
+    const prefix = "Bearer ";
+    if (prefix.len + token.len > buf.len) return null;
+    @memcpy(buf[0..prefix.len], prefix);
+    var view = std.unicode.Utf8View.init(token) catch {
+        for (token) |ch| if (ch < 0x20 or ch == 0x7f) return null;
+        @memcpy(buf[prefix.len..][0..token.len], token);
+        return buf[0 .. prefix.len + token.len];
+    };
+    var it = view.iterator();
+    var n = prefix.len;
+    while (it.nextCodepoint()) |cp| {
+        if (cp < 0x20 or cp == 0x7f) return null;
+        if (cp > 0xff or (cp >= 0x7f and cp <= 0x9f)) {
+            @memcpy(buf[prefix.len..][0..token.len], token);
+            return buf[0 .. prefix.len + token.len];
+        }
+        buf[n] = @intCast(cp);
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+/// Legacy callers send the exact original key bytes, as main's Bearer concatenation did.
+pub fn legacyHeader(buf: []u8, token: []const u8) ?[]const u8 {
+    return std.fmt.bufPrint(buf, "Bearer {s}", .{token}) catch null;
+}
 
 const FetchTask = struct {
     a: Allocator,
@@ -339,11 +384,11 @@ const FetchTask = struct {
         x.out.failed = .network;
         const uri = std.Uri.parse(x.f.url) catch return;
         var auth_buf: [300]u8 = undefined;
-        const auth: std.http.Client.Request.Headers.Value = if (x.f.token) |tok| .{ .override = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{tok}) catch return } else .omit;
+        const auth: std.http.Client.Request.Headers.Value = if (x.f.token) |tok| .{ .override = (if (x.f.legacy_key) legacyHeader(&auth_buf, tok) else rawHeader(&auth_buf, tok)) orelse return } else .omit;
         var req = x.client.request(x.f.method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
-            .headers = .{ .authorization = auth, .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = user_agent }, .content_type = if (x.f.body != null) .{ .override = "application/json" } else .default },
+            .headers = .{ .authorization = auth, .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = x.f.agent }, .content_type = if (x.f.body != null) .{ .override = "application/json" } else .default },
             .extra_headers = &.{.{ .name = "accept", .value = "application/json" }},
         }) catch return;
         defer req.deinit();

@@ -1,13 +1,41 @@
 //! What a kept state on disk is read under: a checkpoint's files and stamps, the OS build and the chip.
 const std = @import("std");
 const api = @import("engine_api");
+const digests = @import("tensorfold").digest_cache;
 const Allocator = std.mem.Allocator;
+/// PWV3's active header, affine coefficients and LUTs, already read by both backends' finite-value checks.
+pub const tfq3_table_bytes = 10816;
 
-/// Config/index bytes, stamps of every indexed shard (IndexedShardMissing if absent) and top-level safetensors.
+/// Prompt-file bytes, config/index bytes and stamps of every indexed or top-level safetensors shard.
+const prompt_files = [_][]const u8{ "tokenizer.json", "tokenizer_config.json", "tokenizer.model", "chat_template.jinja", "chat_template.json" };
+
+/// The tokenizer's and template's bytes: missing optional files leave no entry.
+pub fn promptFiles(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
+    for (prompt_files) |name| {
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        defer a.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch |e| switch (e) {
+            error.FileNotFound => continue,
+            else => return e,
+        };
+        defer a.free(bytes);
+        h.update(name);
+        h.update(bytes);
+    }
+}
+
+/// Config/index bytes and every shard stamp, behind the checkpoint's prompt-file identity.
 pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
+    const root = try digests.environmentRoot(a);
+    defer if (root) |r| a.free(r);
+    return checkpointMode(h, a, io, dir, root, false);
+}
+fn checkpointMode(h: anytype, a: Allocator, io: std.Io, dir: []const u8, root: ?[]const u8, comptime verified: bool) !void {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
+    const digest_cache: digests.Cache = .{ .root = root };
+    try promptFiles(h, a, io, dir);
     var indexed: std.StringArrayHashMapUnmanaged(void) = .empty;
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
         const path = try std.fs.path.join(scratch, &.{ dir, name });
@@ -28,8 +56,20 @@ pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
     var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
     var it = d.iterate();
-    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors"))
-        try names.append(scratch, try scratch.dupe(u8, e.name));
+    var tfq3_records = false;
+    while (try it.next(io)) |e| {
+        if (std.mem.endsWith(u8, e.name, ".safetensors") or std.mem.endsWith(u8, e.name, ".tffpw"))
+            try names.append(scratch, try scratch.dupe(u8, e.name));
+        if (std.mem.endsWith(u8, e.name, ".tffpw")) tfq3_records = true;
+    }
+    if (tfq3_records) {
+        const table = try d.openFile(io, "pw_v3_tables.bin", .{});
+        defer table.close(io);
+        var bytes: [tfq3_table_bytes]u8 = undefined;
+        if (try table.readPositionalAll(io, &bytes, 0) != bytes.len) return error.IdentityTfq3TableTruncated;
+        h.update("tfq3-active-tables-v1");
+        h.update(&bytes);
+    }
     std.mem.sort([]const u8, names.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.lessThan(u8, x, y);
@@ -41,7 +81,21 @@ pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
             return if (e == error.FileNotFound and indexed.contains(name)) error.IndexedShardMissing else e;
         const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
         h.update(name);
-        h.update(std.mem.sliceAsBytes(&stamp));
+        if (!verified) h.update(std.mem.sliceAsBytes(&stamp));
+        // Known limit: unchanged descriptor stamps can hide a TFQ3 coefficient edit; loading must not scan payloads.
+        const path = try std.fs.path.join(scratch, &.{ dir, name });
+        const known_value: ?digests.Result = if (verified) blk: {
+            const file = try d.openFile(io, name, .{});
+            defer file.close(io);
+            break :blk (try digest_cache.checkedFile(scratch, io, file)) orelse return error.UnverifiedPersistence;
+        } else try digest_cache.lookup(scratch, io, path);
+        if (known_value) |known| {
+            if (known.key.size != info.size or known.key.inode != info.inode or
+                known.key.mtime != info.mtime.nanoseconds or known.key.ctime != info.ctime.nanoseconds)
+                return error.DigestFileChanged;
+            field(h, "verified-shard-sha256-v1");
+            field(h, &known.value.sha256);
+        }
     }
 }
 
@@ -133,5 +187,20 @@ pub fn scoped(a: Allocator, io: std.Io, dir: []const u8, legacy: u64) !u64 {
     h.update(std.mem.asBytes(&legacy));
     try checkpoint(&h, arena.allocator(), io, dir);
     try @import("sys").file_identity.current(&h, arena.allocator(), io);
+    return h.final();
+}
+
+/// Stable serving namespaces require verified content; unknown copies can serve with optional state kept cold.
+pub fn scopedVerified(a: Allocator, io: std.Io, dir: []const u8, legacy: u64) !u64 {
+    const root = try digests.environmentRoot(a);
+    defer if (root) |r| a.free(r);
+    return scopedVerifiedWithCache(a, io, dir, legacy, root);
+}
+pub fn scopedVerifiedWithCache(a: Allocator, io: std.Io, dir: []const u8, legacy: u64, root: ?[]const u8) !u64 {
+    var h = std.hash.Wyhash.init(0x70657273);
+    h.update("kept-verified-checkpoint-v2");
+    h.update(std.mem.asBytes(&legacy));
+    try checkpointMode(&h, a, io, dir, root, true);
+    try @import("sys").file_identity.current(&h, a, io);
     return h.final();
 }

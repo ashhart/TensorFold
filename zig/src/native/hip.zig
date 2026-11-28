@@ -14,6 +14,7 @@ const dots = @import("dots_mocr");
 const parse = @import("nemotron_parse");
 const lighton = @import("lighton_ocr");
 const fam = @import("hip_families.zig");
+const hip_drafter = @import("hip_drafter.zig");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
@@ -59,8 +60,8 @@ fn matrixRefused(comptime F: type, policy: hip.Policy, caps: hip.Caps) ?[]const 
 }
 
 /// The tensor-parallel flags as the Python ROCm server checks them, and the flags this engine cannot take.
-fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
-    if (o.drafter != null) return refuse(a, problem, "--drafter: the HIP engine runs no DFlash2 drafter yet; serve without --drafter", .{});
+pub fn checkGroup(comptime F: type, a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
+    if (hip_drafter.groupRefusal(a, o)) |why| return refuse(a, problem, "{s}", .{why});
     if (o.tp != 1 and o.tp != 2 and o.tp != 4 and o.tp != 8) return refuse(a, problem, "--tp {d} is not a supported ROCm world size; choose 1, 2, 4 or 8", .{o.tp});
     if (o.tp > 1 and o.master.len == 0) return refuse(a, problem, "--tp > 1 needs --master: rank 0's address on the link between the machines", .{});
     // the two-Mac engines take their ranks from --speed-up's settings file; this engine takes them from --tp
@@ -68,7 +69,7 @@ fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.tp == 1 and o.rank != 0) return refuse(a, problem, "--rank must be 0 when --tp 1", .{});
     if (o.rank >= o.tp) return refuse(a, problem, "--rank {d} not in [0, --tp {d})", .{ o.rank, o.tp });
     if (o.keep) |n| if (n < 0) return refuse(a, problem, "--checkpoint-slots must be 0 or more", .{});
-    if (o.mtp_drafts) |n| if (n > 3) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most 3", .{n});
+    if (o.mtp_drafts) |n| if (n > fam.mtpMost(F, o.tp)) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most {d}{s}", .{ n, fam.mtpMost(F, o.tp), if (fam.mtpMost(F, o.tp) < fam.mtpMost(F, 1)) " with --tp above 1" else "" });
     if (o.mtp_confidence) |c| if (c < 0 or c > 1) return refuse(a, problem, "--mtp-confidence must be from 0 to 1", .{});
     if (o.prompt_cache_gib) |g| if (g < 0) return refuse(a, problem, "--prompt-cache-gib must be 0 or more", .{});
 }
@@ -99,7 +100,7 @@ fn cacheRefused(o: api.Open) ?[]const u8 {
 
 /// Resolves the policy on rank 0 (defaults, flags, old variables, TF_POLICY), joins the group, sends it to the others.
 fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) (Refused || Allocator.Error)!Ready {
-    try checkGroup(a, o, problem);
+    try checkGroup(F, a, o, problem);
     if (cacheRefused(o)) |why| return refuse(a, problem, "{s}", .{why});
     const native = modelContext(a, io, o.dir);
     const window = admission.contextWindow(o.context, native, F.default_context) catch |err| return switch (err) {
@@ -139,6 +140,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
             .cache_gib = o.prompt_cache_gib,
             .cache_over_cap = o.prompt_cache_over_cap,
             .vision = o.vision,
+            .drafter = hip_drafter.drafterOf(o),
         },
         .policy_line = policy_line,
     };
@@ -209,8 +211,8 @@ fn reasoning(comptime F: type) bool {
     return if (@hasDecl(F, "reasoning")) F.reasoning else true;
 }
 
-/// The family's refusals before it loads or joins a group (hip_families.zig).
-const flagRefused = fam.refused;
+/// The family's refusals before it loads or joins a group, then its refusal of --drafter (hip_drafter.zig).
+const flagRefused = hip_drafter.flagRefused;
 
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
@@ -223,11 +225,13 @@ const Host = struct {
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    drafted: ?*lanes.drafted.Drafted = null, // --drafter: the family's backend behind Drafted (null: as it loaded)
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
         h.host.stop();
         h.core.deinit();
+        hip_drafter.release(h.gpa, h.drafted);
         h.cfg.deinit(h.gpa);
         h.release(h.family);
         if (h.group) |g| g.close(h.gpa);
@@ -293,6 +297,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         else => |x| return x,
     };
     errdefer loaded.deinit(loaded.ctx);
+    const wrapped = try hip_drafter.attach(a, gpa, loaded, o, problem) orelse return null;
+    errdefer hip_drafter.release(gpa, wrapped.drafted);
     const offer = fam.offerOf(loaded);
     const text = fam.generates(offer);
     if (fam.textOnly(o, offer))
@@ -304,10 +310,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.policy_line = r.policy_line;
     h.family = loaded.ctx;
     h.release = loaded.deinit;
-    h.cfg = try lanes.Config.init(gpa, loaded.facts, loaded.rows, loaded.rows - 1);
+    h.drafted = wrapped.drafted;
+    h.cfg = try lanes.Config.init(gpa, wrapped.facts, loaded.rows, loaded.rows - 1);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
+    h.core = lanes.Engine.init(gpa, &h.cfg, wrapped.backend, h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{
         .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1,
@@ -317,6 +324,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .decode_share = o.decode_share,
         .policy = offer.policy orelse h.policy_line,
         .startup = loaded.startup,
+        .draft_sources = hip_drafter.draftSources(o, wrapped.drafted),
         .structures = text and loaded.backend.vtable.first_masked != null,
         .text_generation = text,
         .embeddings = offer.embeddings,
@@ -499,50 +507,51 @@ test "the group flags: one rank source, a supported world, a master past one ran
     const a = arena.allocator();
     var problem: []const u8 = "";
     const base: api.Open = .{ .dir = "d", .model_type = "qwen3_5" };
-    try checkGroup(a, base, &problem);
+    try checkGroup(qwen35.native, a, base, &problem);
     var two = base;
     two.tp = 2;
     two.master = "node0";
-    try checkGroup(a, two, &problem);
+    try checkGroup(qwen35.native, a, two, &problem);
     var speed = base;
     speed.speed_up = "settings.json";
-    try std.testing.expectError(error.Refused, checkGroup(a, speed, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, speed, &problem));
     try std.testing.expect(std.mem.indexOf(u8, problem, "--speed-up") != null);
     speed.tp = 2;
     speed.master = "node0";
-    try std.testing.expectError(error.Refused, checkGroup(a, speed, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, speed, &problem));
     var three = two;
     three.tp = 3;
-    try std.testing.expectError(error.Refused, checkGroup(a, three, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, three, &problem));
     var lone = two;
     lone.master = "";
-    try std.testing.expectError(error.Refused, checkGroup(a, lone, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, lone, &problem));
     var outside = two;
     outside.rank = 2;
-    try std.testing.expectError(error.Refused, checkGroup(a, outside, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, outside, &problem));
 }
-
-test "--drafter is refused before any load, on every rank, until the HIP engine runs DFlash2" {
+test "--drafter on qwen3_5 passes the group check on one rank; a group, another family, and --mtp-drafts past three are refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var problem: []const u8 = "";
     const drafted: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter" };
-    try std.testing.expectError(error.Refused, checkGroup(a, drafted, &problem));
-    try std.testing.expectStringStartsWith(problem, "--drafter: the HIP engine runs no DFlash2 drafter yet");
-    var follower = drafted;
-    follower.tp = 2;
-    follower.rank = 1;
-    follower.master = "node0";
-    try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
+    try std.testing.expect(flagRefused(qwen35.native, drafted) == null and flagRefused(qwen35.native_moe, drafted) != null);
+    try checkGroup(qwen35.native, a, drafted, &problem);
+    const follower: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter", .tp = 2, .rank = 1, .master = "node0" };
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, follower, &problem));
+    try std.testing.expectStringStartsWith(problem, "--drafter with --tp 2:");
+    // three drafts and fewer are not refused
+    var o: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 3 };
+    try checkGroup(qwen35.native, a, o, &problem);
+    o.mtp_drafts = 4;
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, o, &problem));
+    try std.testing.expectEqualStrings("--mtp-drafts 4: the HIP engine drafts at most 3", problem);
 }
-
 test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
     const fp8: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .kv8 = true };
     try std.testing.expectEqualStrings(kv8_refusal, cacheRefused(fp8).?);
     try std.testing.expect(cacheRefused(.{ .dir = "d", .model_type = "qwen3_5" }) == null);
 }
-
 test "matrix=on runs only where the matrix-core tiles exist; auto runs everywhere" {
     var on: hip.Policy = .{};
     try on.apply("matrix=on");
@@ -558,16 +567,15 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
     const auto: hip.Policy = .{};
     for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201" }) |name| try std.testing.expect(matrixRefused(qwen35.native, auto, hip.Caps.of(name).?) == null);
 }
-
 test {
     _ = @import("draft_sources_hip_test.zig");
+    _ = @import("mtp_drafts_hip_test.zig");
     _ = @import("hip_confidence_test.zig");
+    _ = hip_drafter;
 }
-
 test "slide admission: hip refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").check(open, "HIP", &.{ "qwen3_5", "qwen3_5_moe", "qwen4_exp", "nemotron_h" });
 }
-
 test "slide admission: HIP followers refuse before joining ranks" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -578,7 +586,6 @@ test "slide admission: HIP followers refuse before joining ranks" {
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on HIP yet", .{f.model_type}), why);
     }
 }
-
 test "a family's offer names what it serves; one without an offer generates text in the asked window" {
     const p = fam.offerOf(.{ .streams = @as(usize, 1) });
     try std.testing.expect(p.text_generation and p.embeddings == null and p.window == null and !p.decides and p.rerank == null);

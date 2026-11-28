@@ -35,8 +35,9 @@ fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
 /// The checkpoint's bytes as both ranks see them: TENSORFOLD_CHECKPOINT_SHA256 when set, else the cached full digest.
 pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usize, chunk: usize) !Identity {
     var checkpoint: [32]u8 = undefined;
-    if (std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256")) |given| {
-        const digest = std.mem.span(given);
+    const given = @import("sys").environment.rawText("TENSORFOLD_CHECKPOINT_SHA256");
+    @import("sys").environment.check("TENSORFOLD_CHECKPOINT_SHA256", given) catch return error.NoCheckpointIdentity;
+    if (given) |digest| {
         if (digest.len != 64) return error.NoCheckpointIdentity;
         _ = std.fmt.hexToBytes(&checkpoint, digest) catch return error.NoCheckpointIdentity;
     } else checkpoint = try @import("core").checkpoint_identity.fullIdentity(a, io, dir);
@@ -51,7 +52,7 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
 
 /// How long a rank waits for its peer: a minute with a given digest, 30 when the peer may be hashing every byte.
 pub fn linkWait() u64 {
-    return if (std.c.getenv("TENSORFOLD_CHECKPOINT_SHA256") != null) 60_000 else 30 * 60_000;
+    return if (@import("sys").environment.rawText("TENSORFOLD_CHECKPOINT_SHA256") != null) 60_000 else 30 * 60_000;
 }
 
 pub const Session = struct {
@@ -150,6 +151,12 @@ pub const Session = struct {
         };
         if (peer.kind != .ready or peer.sequence != 0 or peer.object != 0 or peer.bytes != 0 or peer.flags != 0) return error.BadRankFrame;
         return @min(local, peer.arg);
+    }
+
+    /// The first collective once the peer has loaded: the load-ready exchange bounds the wait; a closed link ends it.
+    pub fn afterLoad(s: *Session, io: std.Io, ctx: *const cuda.Context, stream: cuda.Stream) !void {
+        _ = try s.room(std.math.maxInt(u64));
+        s.benchmark_group = try @import("core").benchmark_group.cuda(s.gpa, io, ctx, &s.collective, stream);
     }
 
     pub fn command(s: *Session, input: wire.Header, payload: []const u8) !wire.Header {
@@ -551,4 +558,8 @@ test "rank identity: the cached full digest by default, a given digest when set,
     try t.expectEqual(@as([32]u8, @splat(0xab)), (try identity(t.allocator, t.io, dir, 4096, 64)).checkpoint);
     _ = env.setenv("TENSORFOLD_CHECKPOINT_SHA256", "ab", 1);
     try t.expectError(error.NoCheckpointIdentity, identity(t.allocator, t.io, dir, 4096, 64));
+}
+
+test {
+    if (@import("builtin").os.tag != .windows) _ = @import("cuda_rank_start_test.zig"); // over a Unix socket pair
 }

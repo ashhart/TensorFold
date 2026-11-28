@@ -15,7 +15,8 @@ const admit = @import("xpu_admit.zig");
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
-const qwen27_family: []const api.Family = if (has_qwen27) &.{.{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }} else &.{};
+pub const serves: []const []const u8 = &.{"--tp"};
+const qwen27_family: []const api.Family = if (has_qwen27) &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q4g32"} } } else &.{};
 const gemma4_family: []const api.Family = if (nem.has_gemma4) &.{.{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} }} else &.{};
 pub const families: []const api.Family = qwen27_family ++ &[_]api.Family{ .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "lfm3", .formats = &.{"mlx-q4g64"} } } ++ gemma4_family;
 
@@ -29,7 +30,26 @@ fn pickCtx(ctx: *anyopaque, row: []const f32, position: u64, s: api.Sampling) !u
     return pickRow(gpa.*, row, position, s);
 }
 
-fn pickRow(gpa: Allocator, row: []const f32, position: u64, s: api.Sampling) !u32 {
+/// The same draw from the card's top_k candidates (1 <= top_k <= 64), widened to f64 as pickRow's scan holds them.
+fn pickCandCtx(ctx: *anyopaque, vals: []const f32, ids: []const u32, bad: bool, position: u64, s: api.Sampling) !u32 {
+    const gpa: *const Allocator = @ptrCast(@alignCast(ctx));
+    return pickCand(gpa.*, vals, ids, bad, position, s);
+}
+
+pub fn pickCand(gpa: Allocator, vals: []const f32, ids: []const u32, bad: bool, position: u64, s: api.Sampling) !u32 {
+    if (bad) return error.NonfiniteLogits; // a value anywhere in the row, as pickRow's scan finds it
+    const k: usize = s.top_k;
+    if (s.temperature <= 0 or k == 0 or k > 64 or vals.len != k or ids.len != k) return error.BadCandidates;
+    var v64: [64]f64 = undefined;
+    var id64: [64]u64 = undefined;
+    for (vals, ids, v64[0..k], id64[0..k]) |v, id, *o, *oi| {
+        o.* = v;
+        oi.* = id;
+    }
+    return @intCast(try sampling.choose(gpa, v64[0..k], id64[0..k], position, s));
+}
+
+pub fn pickRow(gpa: Allocator, row: []const f32, position: u64, s: api.Sampling) !u32 {
     if (s.temperature <= 0 or s.top_k == 0 or s.top_k > 256) return pickAll(gpa, row, position, s);
     const k: usize = s.top_k;
     var vals: [256]f64 = undefined;
@@ -156,7 +176,7 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
     gpa_box.* = gpa;
     h.gpa = gpa;
     h.cache = null; // gpa.create leaves the defaults unset
-    h.back = .{ .gpa = gpa, .runner = runner, .drafter = drafter, .pick = pickCtx, .pick_ctx = gpa_box, .slots = slots };
+    h.back = .{ .gpa = gpa, .runner = runner, .drafter = drafter, .pick = pickCtx, .pick_cand = pickCandCtx, .pick_ctx = gpa_box, .slots = slots };
     if (std.c.getenv("XPU_BLOCK")) |v| h.back.block = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8;
     if (std.c.getenv("XPU_TREE")) |v| h.back.nodes = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 15;
     if (drafter != null) {
@@ -190,11 +210,16 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
     }
     errdefer if (h.cache) |*store| store.deinit();
     try h.host.start();
-    std.log.info("qwen27-xpu: {d} streams of {d} tokens{s}", .{ slots, context, if (drafter != null) ", DFlash2 trees for a lone stream" else "" });
+    std.log.info("qwen27-xpu: tp={d}, {d} streams of {d} tokens{s}", .{ runner.tp, slots, context, if (drafter != null) ", DFlash2 trees for a lone stream" else "" });
     return .{ .engine = h.host.engine(), .close = LaneServed.close, .ctx = h };
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, .{ .xpu = true })) |why| {
+        problem.* = why;
+        return null;
+    }
     if (try o.slideRefusal(a, "XPU")) |why| {
         problem.* = why;
         return null;
@@ -207,21 +232,36 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "--rope-yarn: the native Intel GPU engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
         return null;
     }
-    if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
+    if (o.vision != null) {
+        problem.* = "--vision: the native Intel GPU engine reads text only";
+        return null;
+    }
+    if (nem.serves(o.model_type)) {
+        if (o.tp != 1) {
+            problem.* = try std.fmt.allocPrint(a, "the XPU engine does not support --tp {d} for {s}", .{ o.tp, o.model_type });
+            return null;
+        }
+        return nem.open(a, gpa, io, o, problem);
+    }
     if (comptime has_qwen27) {
         if (std.mem.eql(u8, o.model_type, "qwen3_5")) return openQwen27(a, gpa, io, o, problem);
+        if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return @import("xpu_flashnext.zig").open(a, gpa, io, o, problem);
         const gemma = if (nem.has_gemma4) ", Gemma 4 E4B (gemma4, MLX 4/64)" else "";
-        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128), Nemotron-H (nemotron_h, MLX 4/64){s} and LFM3 (lfm3, MLX 4/64), not {s}", .{ gemma, o.model_type });
-    } else problem.* = try std.fmt.allocPrint(a, "this XPU build (no DPAS) serves Nemotron-H (nemotron_h, MLX 4/64) and LFM3 (lfm3, MLX 4/64), not {s}: Qwen3.8-27B and Gemma 4 E4B need DPAS (-Dxpu-dpas=true)", .{o.model_type});
+        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128), Qwen3.8 Flash Next (qwen4_exp, MLX 4/32), Nemotron-H (nemotron_h, MLX 4/64){s} and LFM3 (lfm3, MLX 4/64), not {s}", .{ gemma, o.model_type });
+    } else problem.* = try std.fmt.allocPrint(a, "this XPU build (no DPAS) serves Nemotron-H (nemotron_h, MLX 4/64) and LFM3 (lfm3, MLX 4/64), not {s}: Qwen3.8-27B, Qwen3.8 Flash Next and Gemma 4 E4B need DPAS (-Dxpu-dpas=true)", .{o.model_type});
     return null;
 }
 
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (o.tp != 1 and o.tp != 2 and o.tp != 4) {
+        problem.* = try std.fmt.allocPrint(a, "the XPU engine supports --tp 1, 2 or 4 for Qwen3.8-27B, not {d}", .{o.tp});
+        return null;
+    }
     const context = xq.limits.context(o.context orelse 32768) catch {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine holds 1 to {d} tokens a stream, not {d}", .{ xq.limits.MAX_CONTEXT, o.context.? });
         return null;
     };
-    const runner = xq.Runner.init(o.dir, context) catch |err| {
+    const runner = xq.Runner.initTp(o.dir, context, o.tp) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine could not load {s}: {s}", .{ o.dir, @errorName(err) });
         return null;
     };

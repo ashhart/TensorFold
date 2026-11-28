@@ -1,4 +1,4 @@
-//! The tensorfold checkpoint subcommands: `models` and `info` (pull adds downloading in its own commit).
+//! The tensorfold checkpoint subcommands (`models`, `info`, `pull`, `rm`, `plan`, `merge`, `tfq3`) and `log`.
 const std = @import("std");
 const models = @import("models.zig");
 const info = @import("info.zig");
@@ -6,17 +6,27 @@ const pull = @import("pull.zig");
 const plan = @import("plan.zig");
 const pull_exlr8 = @import("pull_exlr8.zig");
 const rm = @import("rm.zig");
+const tfq3 = @import("tfq3.zig");
+const journal_log = @import("journal_log.zig");
 const lora_merge = @import("core").lora_merge;
+/// The checkpoints `models` lists, sized, for `tensorfold device`.
+pub const onDisk = models.onDisk;
+/// `tensorfold start`'s view of the existing registry, fit selector and pull implementation.
+pub const start = @import("start.zig");
 
 const usage =
-    \\usage: tensorfold models [--json]
-    \\       tensorfold info MODEL
+    \\usage: tensorfold models [--all] [--json]
+    \\       tensorfold start [--yes] [--check] [--startup-timeout SECONDS]
+    \\       tensorfold info MODEL [--context N] [--parallel N|auto]
     \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
+    \\                (a gated or private REPO: set HF_TOKEN, or log in with `hf auth login`)
     \\       tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...
     \\       tensorfold merge MODEL ADAPTER OUT
     \\       tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED
+    \\       tensorfold tfq3 MODEL [--out DIR] [--profile 4b|3.5b|3b] [--target-gib GB] [--fit auto|GB] [--native]
+    \\       tensorfold log [list|show ID|follow] [PATH] [--json]   (the request journal, read-only)
     \\
 ;
 
@@ -24,7 +34,7 @@ const usage =
 pub fn wants(args: []const []const u8) bool {
     if (args.len == 0) return false;
     const cmd = args[0];
-    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge") or std.mem.eql(u8, cmd, "plan") or std.mem.eql(u8, cmd, "rm");
+    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge") or std.mem.eql(u8, cmd, "plan") or std.mem.eql(u8, cmd, "rm") or std.mem.eql(u8, cmd, "tfq3") or std.mem.eql(u8, cmd, "log");
 }
 
 /// Runs a checkpoint subcommand; `argv` is argv[1..] as in cluster.cli.main.
@@ -41,12 +51,18 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     for (args, argv) |*x, y| x.* = y;
     const env = init.environ_map;
     if (std.mem.eql(u8, args[0], "models")) {
-        const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
-        if (args.len != 1 and !json) {
-            try err.interface.writeAll(usage);
-            return 2;
+        var opts: models.Options = .{};
+        for (args[1..]) |flag| {
+            if (std.mem.eql(u8, flag, "--json")) {
+                opts.json = true;
+            } else if (std.mem.eql(u8, flag, "--all")) {
+                opts.all = true;
+            } else {
+                try err.interface.writeAll(usage);
+                return 2;
+            }
         }
-        return models.run(a, init.io, &out.interface, env, null, json);
+        return models.run(a, init.io, &out.interface, env, null, opts, null);
     }
     if (std.mem.eql(u8, args[0], "pull")) {
         if (args.len < 2) {
@@ -70,6 +86,13 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         const interactive = std.Io.File.stdin().isTty(init.io) catch false;
         return rm.run(a, init.io, &out.interface, &err.interface, env, null, parsed, .{ .interactive = interactive, .input = &input.interface });
     }
+    if (std.mem.eql(u8, args[0], "log")) {
+        if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
+            try out.interface.writeAll(journal_log.usage);
+            return 0;
+        }
+        return journal_log.run(a, init.io, &out.interface, &err.interface, env, args[1..]);
+    }
     if (std.mem.eql(u8, args[0], "plan")) {
         const parsed = plan.parseArgs(a, args[1..]) orelse {
             try err.interface.writeAll(usage);
@@ -88,11 +111,15 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         };
         return lora_merge.run(init.gpa, init.io, &out.interface, &err.interface, m.dense, m.adapter, m.dest, m.shipped);
     }
-    if (args.len != 2) {
+    if (std.mem.eql(u8, args[0], "tfq3")) {
+        return tfq3.run(a, init.io, &out.interface, &err.interface, env, args[1..]);
+    }
+    const info_start = if (args.len >= 2) info.parseStart(args[2..]) else null;
+    if (info_start == null) {
         try err.interface.writeAll(usage);
         return 2;
     }
-    return info.run(a, init.io, &out.interface, env, null, args[1]);
+    return info.runStart(a, init.io, &out.interface, env, null, args[1], info_start.?);
 }
 
 test "wants only the checkpoint subcommands" {
@@ -101,5 +128,7 @@ test "wants only the checkpoint subcommands" {
     try std.testing.expect(wants(&.{ "merge", "model", "adapter", "out" }));
     try std.testing.expect(wants(&.{ "merge", "dense", "adapter", "out", "--quantize", "shipped" }));
     try std.testing.expect(wants(&.{ "rm", "Org/Flash@main", "--yes" }));
+    try std.testing.expect(wants(&.{ "tfq3", "Qwen/Qwen3.8-27B" }));
+    try std.testing.expect(wants(&.{"log"}) and wants(&.{ "log", "show", "chatcmpl-a" }));
     try std.testing.expect(!wants(&.{"run"}) and !wants(&.{}) and !wants(&.{"serve"}));
 }

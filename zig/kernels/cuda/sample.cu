@@ -97,7 +97,11 @@ struct Shared {
     unsigned ush[NSG], ush2[NSG];
     unsigned hist[256];
     unsigned st[4];
-    unsigned ck[C], ci[C];
+    union {  // Candidate keys are dead when nucleus extension starts.
+        unsigned ck[C];
+        float probe[16][NSG];
+    };
+    unsigned ci[C];
     unsigned fill[2];
 };
 
@@ -267,7 +271,8 @@ __device__ unsigned first_block(const Row& r, float m, float top_p, float near, 
         sort_n = 32u;
         while (sort_n < n_near) sort_n <<= 1;
     } else {
-        const Top top = top_keys(r, C, s);
+        const unsigned want = (kw == 0u || kw > C) ? C : kw; // pick() only reads the first top_k candidates
+        const Top top = top_keys(r, want, s);
         if (t == 0) {
             s.fill[0] = 0u;
             s.fill[1] = 0u;
@@ -285,6 +290,8 @@ __device__ unsigned first_block(const Row& r, float m, float top_p, float near, 
                 s.ci[at] = i;
             }
         }
+        sort_n = 32u;
+        while (sort_n < want) sort_n <<= 1;
         n_cand = top.above + top.need;
     }
     __syncthreads();
@@ -307,61 +314,7 @@ __device__ unsigned first_block(const Row& r, float m, float top_p, float near, 
     return min(n_cand, C);
 }
 
-// The probability mass (over `norm`) of the tokens after `b`, inside `top`, at or above `lo`, and inside `cut`.
-__device__ float mass(const Row& r, float m, float norm, float lo, Mark b, Mark top, Mark cut, bool strict, Shared& s) {
-    float x = 0.0f;
-    for (unsigned i = r.t; i < r.V; i += TG) {
-        const float v = r.v(i);
-        if (!(v >= lo)) continue;
-        const unsigned k = key(v);
-        const bool inside = strict ? (k > cut.key || (k == cut.key && i < cut.id)) : at_or_before(k, i, cut);
-        if (after(k, i, b) && at_or_before(k, i, top) && inside) x += expf(v - m) / norm;
-    }
-    return group_sum(x, r, s);
-}
-
-// The nucleus's last token past the block: the first place whose prefix reaches top_p, by bits of key then id.
-__device__ Mark extend(const Row& r, float m, float norm, float lo, float top_p, float cum, Mark b, Mark top, Shared& s) {
-    if (!(cum + mass(r, m, norm, lo, b, top, end_mark(), false, s) >= top_p)) return end_mark();
-    unsigned k = 0u;
-    for (int bit = 31; bit >= 0; bit--) {
-        const unsigned cand = k | (1u << bit);
-        if (cum + mass(r, m, norm, lo, b, top, Mark{cand, 0xFFFFFFFFu}, false, s) >= top_p) k = cand;
-    }
-    unsigned id = 0u;
-    for (int bit = 31 - __clz(r.V - 1u); bit >= 0; bit--) {
-        const unsigned cand = id | (1u << bit);
-        if (cand >= r.V) continue;
-        if (cum + mass(r, m, norm, lo, b, top, Mark{k, cand}, true, s) < top_p) id = cand;
-    }
-    return Mark{k, id};
-}
-
-// The nucleus's last token: the sequential sum over the first block, extended past it when it falls short.
-__device__ Mark nucleus(const Row& r, float m, float lo, float top_p, float near, unsigned kc, bool whole, Mark top, Shared& s) {
-    float z = 0.0f;
-    const unsigned n = first_block(r, m, top_p, near, whole ? 0u : kc, z, s);
-    const float norm = whole ? z : mass(r, m, 1.0f, -INFINITY, Mark{0xFFFFFFFFu, 0xFFFFFFFFu}, top, end_mark(), false, s);
-    if (r.t == 0) {
-        float cum = 0.0f;
-        unsigned keep = 0u;
-        for (unsigned j = 0; j < n; j++) {
-            cum += expf(val(s.ck[j]) - m) / norm;
-            if (cum >= top_p) {
-                keep = j + 1;
-                break;
-            }
-        }
-        s.st[0] = keep;
-        s.fsh2[0] = cum;
-    }
-    __syncthreads();
-    const unsigned keep = s.st[0];
-    const float cum = s.fsh2[0];
-    const Mark last = keep > 0u ? Mark{s.ck[keep - 1u], s.ci[keep - 1u]} : Mark{s.ck[n - 1u], s.ci[n - 1u]};
-    __syncthreads();
-    return keep > 0u ? last : extend(r, m, norm, lo, top_p, cum, last, top, s);
-}
+#include "sample_nucleus.cuh"
 
 // tf_gpu_sample's cuts and race over the sorted candidates in s.ck / s.ci (z: the row's mass, used with top_k off).
 template <bool MAP>

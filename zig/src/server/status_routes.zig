@@ -1,9 +1,11 @@
-//! GET /health, /v1/models, /metrics, and the opt-in dashboard.
+//! GET /health, /v1/models and one model's /v1/models/{id}, /metrics, and the opt-in dashboard.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
 const live = @import("live.zig");
 const routes = @import("routes.zig");
+const pyrepr = @import("pyrepr.zig");
+const percentDecode = @import("tool_kinds.zig").percentDecode;
 const manifest = @import("benchmark_manifest.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
@@ -78,17 +80,38 @@ pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
-    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
-    const created = std.Io.Clock.real.now(srv.io).toSeconds();
-    const data = try a.alloc(Value, srv.config.model_ids.len);
-    const reasoning = try modelReasoning(a, srv);
-    for (srv.config.model_ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder));
-    }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
-    try o.put(a, "data", .{ .array = data });
+    try o.put(a, "data", .{ .array = try entries(srv, a, srv.config.model_ids) });
     routes.sendValue(conn, a, 200, .{ .object = o });
+}
+
+/// GET /v1/models/{id}: the listing's entry for a served id or alias, `raw` percent-decoded; else 404 model_not_found.
+pub fn model(srv: *Server, conn: *Conn, a: Allocator, raw: []const u8) !void {
+    const id = (try percentDecode(a, raw)) orelse raw; // a % that escapes no hex pair is read as written
+    for (srv.config.model_ids) |known| {
+        if (std.mem.eql(u8, known, id)) return routes.sendValue(conn, a, 200, (try entries(srv, a, &.{known}))[0]);
+    }
+    const err = try json.newObject(a);
+    try err.put(a, "message", .{ .string = try std.fmt.allocPrint(a, "model {s} is not served here", .{try pyrepr.repr(a, .{ .string = id })}) });
+    try err.put(a, "type", .{ .string = "invalid_request_error" });
+    try err.put(a, "param", .{ .string = "model" });
+    try err.put(a, "code", .{ .string = "model_not_found" });
+    const o = try json.newObject(a);
+    try o.put(a, "error", .{ .object = err });
+    routes.sendValue(conn, a, 404, .{ .object = o });
+}
+
+/// The discovery entries for `ids`, as the listing and the one-model route both send them.
+fn entries(srv: *Server, a: Allocator, ids: []const []const u8) ![]Value {
+    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
+    const created = std.Io.Clock.real.now(srv.io).toSeconds();
+    const data = try a.alloc(Value, ids.len);
+    const reasoning = try modelReasoning(a, srv);
+    for (ids, data) |id, *slot| {
+        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder, info.audio != null));
+    }
+    return data;
 }
 
 fn modelReasoning(a: Allocator, srv: *const Server) Allocator.Error!?Value {
@@ -176,6 +199,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     @import("load_metrics.zig").render(&out.writer, snap, .{ .model = srv.config.served_name, .backend = srv.config.identity.backend, .version = srv.config.identity.version }) catch return;
     if (srv.config.admission.enabled()) @import("metrics.zig").renderAdmission(&out.writer, srv.admission.snapshot(srv.io)) catch return;
+    @import("load_metrics.zig").renderConnections(&out.writer, srv.open_connections.load(.acquire)) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
     conn.addHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8") catch return;

@@ -1,0 +1,72 @@
+inkling2-tiny-model 404 e0f797f40c47aacdba26c9b4702e40e55f6d4f574a94acb0aaaa5779cb781089
+model.llm.attn_res.attn_queries.{L} F32 128 0-3,5-9
+model.llm.attn_res.attn_queries.{L} F32 3x128 4,10
+model.llm.attn_res.mlp_queries.{L} F32 128 0-11
+model.llm.attn_res.output_query F32 128
+model.llm.embed.weight BF16 201024x128
+model.llm.embed_norm.weight BF16 128
+model.llm.layers.{L}.attn.attn_sink_proj.weight BF16 8x128 0-11
+model.llm.layers.{L}.attn.gate_attn.weight BF16 1024x128 0-11
+model.llm.layers.{L}.attn.k_sconv.static_w BF16 4x512 5,11
+model.llm.layers.{L}.attn.k_sconv.weight BF16 512x1x4 0-4,6-10
+model.llm.layers.{L}.attn.k_sconv.weight_proj BF16 16x128 5,11
+model.llm.layers.{L}.attn.q_l2_clip.scale BF16 8x128 0-11
+model.llm.layers.{L}.attn.rel_l2_clip.scale BF16 8x16 0-11
+model.llm.layers.{L}.attn.rel_logits_proj.proj BF16 16x1024 0-11
+model.llm.layers.{L}.attn.v_sconv.static_w BF16 4x512 5,11
+model.llm.layers.{L}.attn.v_sconv.weight BF16 512x1x4 0-4,6-10
+model.llm.layers.{L}.attn.v_sconv.weight_proj BF16 16x128 5,11
+model.llm.layers.{L}.attn.wk_dv.weight BF16 512x128 0-11
+model.llm.layers.{L}.attn.wo_ud.weight BF16 128x1024 0-11
+model.llm.layers.{L}.attn.wq_du.weight BF16 1024x128 0-11
+model.llm.layers.{L}.attn.wr_du.weight BF16 128x128 0-11
+model.llm.layers.{L}.attn.wv_dv.weight BF16 512x128 0-11
+model.llm.layers.{L}.attn_norm.weight BF16 128 0-4,6-10
+model.llm.layers.{L}.attn_sconv.weight BF16 128x1x4 0-11
+model.llm.layers.{L}.k_input_norm.weight BF16 128 5,11
+model.llm.layers.{L}.mlp.experts.w13_weight F8_E4M3 96x256x128 6-11
+model.llm.layers.{L}.mlp.experts.w13_weight U8 96x256x64 0-5
+model.llm.layers.{L}.mlp.experts.w13_weight_amax F32 96 0-5
+model.llm.layers.{L}.mlp.experts.w13_weight_outer_scale_denominator F32 1 0-5
+model.llm.layers.{L}.mlp.experts.w13_weight_scale F8_E4M3 96x256x8 0-5
+model.llm.layers.{L}.mlp.experts.w13_weight_scale U8 96x256x4 6-11
+model.llm.layers.{L}.mlp.experts.w2_weight F8_E4M3 96x128x128 6-11
+model.llm.layers.{L}.mlp.experts.w2_weight U8 96x128x64 0-5
+model.llm.layers.{L}.mlp.experts.w2_weight_amax F32 96 0-5
+model.llm.layers.{L}.mlp.experts.w2_weight_outer_scale_denominator F32 1 0-5
+model.llm.layers.{L}.mlp.experts.w2_weight_scale F8_E4M3 96x128x8 0-5
+model.llm.layers.{L}.mlp.experts.w2_weight_scale U8 96x128x4 6-11
+model.llm.layers.{L}.mlp.gate.bias F32 96 0-11
+model.llm.layers.{L}.mlp.gate.weight BF16 96x128 0-11
+model.llm.layers.{L}.mlp_norm.weight BF16 128 0-11
+model.llm.layers.{L}.mlp_sconv.weight BF16 128x1x4 0-11
+model.llm.layers.{L}.q_input_norm.weight BF16 128 5,11
+model.llm.layers.{L}.v_input_norm.weight BF16 128 5,11
+model.llm.norm.weight BF16 128
+model.llm.unembed.weight BF16 201024x128
+model.visual.backbone.embeddings.class_embedding BF16 32
+model.visual.backbone.embeddings.cls_position_embedding BF16 32
+model.visual.backbone.embeddings.patch_embedding.weight BF16 32x1200
+model.visual.backbone.embeddings.position_embedding BF16 1024x32
+model.visual.backbone.layers.{L}.ln_1.bias BF16 32 0-3
+model.visual.backbone.layers.{L}.ln_1.weight BF16 32 0-3
+model.visual.backbone.layers.{L}.ln_2.bias BF16 32 0-3
+model.visual.backbone.layers.{L}.ln_2.weight BF16 32 0-3
+model.visual.backbone.layers.{L}.ls_1.gamma BF16 32 0-3
+model.visual.backbone.layers.{L}.ls_2.gamma BF16 32 0-3
+model.visual.backbone.layers.{L}.mlp.c_fc.bias BF16 128 0-3
+model.visual.backbone.layers.{L}.mlp.c_fc.weight BF16 128x32 0-3
+model.visual.backbone.layers.{L}.mlp.c_proj.bias BF16 32 0-3
+model.visual.backbone.layers.{L}.mlp.c_proj.weight BF16 32x128 0-3
+model.visual.backbone.layers.{L}.self_attn.k_proj.bias BF16 32 0-3
+model.visual.backbone.layers.{L}.self_attn.k_proj.weight BF16 32x32 0-3
+model.visual.backbone.layers.{L}.self_attn.out_proj.bias BF16 32 0-3
+model.visual.backbone.layers.{L}.self_attn.out_proj.weight BF16 32x32 0-3
+model.visual.backbone.layers.{L}.self_attn.q_proj.bias BF16 32 0-3
+model.visual.backbone.layers.{L}.self_attn.q_proj.weight BF16 32x32 0-3
+model.visual.backbone.layers.{L}.self_attn.v_proj.bias BF16 32 0-3
+model.visual.backbone.layers.{L}.self_attn.v_proj.weight BF16 32x32 0-3
+model.visual.backbone.ln_pre.bias BF16 32
+model.visual.backbone.ln_pre.weight BF16 32
+model.visual.proj_in.weight BF16 32x128
+model.visual.proj_out.weight BF16 128x32

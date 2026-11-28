@@ -29,6 +29,8 @@ pub const Image = struct {
     blank_bytes: ?*const fn (ptr: *anyopaque, at: u32) u64 = null,
     /// Copy `in`, back to back, into `ranges` of `saved`'s image.
     scatter: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, in: []const u8) anyerror!void,
+    /// Rows may disappear outside cache eviction; stage at the completed keep boundary when true.
+    transient: ?*const fn (ptr: *anyopaque, saved: pc.Saved) bool = null,
     /// Whether `saved`'s image can still be read whole (null: always).
     whole: ?*const fn (ptr: *anyopaque, saved: pc.Saved) bool = null,
 };
@@ -531,14 +533,7 @@ fn onGrid(kept: []const u32, at: u32, grid: u32) bool {
     return true;
 }
 
-/// A planned state's starts with its own position last: its blocks' last chunk ends by it.
-pub fn withAt(a: Allocator, starts: []const u32, at: u32, planned: bool) ![]u32 {
-    if (!planned) return a.alloc(u32, 0);
-    var out = try a.alloc(u32, starts.len + 1);
-    @memcpy(out[0..starts.len], starts);
-    out[starts.len] = at;
-    return out;
-}
+pub const withAt = chain.withAt;
 
 fn dayNow() u64 {
     var t: platform.c.timespec = undefined;

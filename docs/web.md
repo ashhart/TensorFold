@@ -13,12 +13,14 @@ For example, a binary built with `-Dversion=1.2.0` prints:
 uv tool install "tensorfold-web @ git+https://github.com/ashhart/TensorFold@v1.2.0#subdirectory=web"
 ```
 
-After installation, the launcher checks PATH and then `uv tool dir --bin` for the executable.
+The launcher checks PATH first, then `uv tool dir --bin` if uv is available. It repeats the lookup after a successful install.
 On systems where process replacement is available it execs the application; on Windows it waits for the child.
 The application's exit status is retained.
 
 With either stdin or stdout redirected, without `uv`, or with `TENSORFOLD_WEB_NO_PROMPT=1`, the launcher prints manual
 commands and exits 1. It never installs in those cases. A negative or empty answer does the same.
+If `uv` is missing, follow [uv's installation guide](https://docs.astral.sh/uv/getting-started/installation/) and
+make sure `uv` is on PATH before running the printed `uv tool install` command.
 An already installed application starts without prompting in all of these cases.
 Builds without an explicit `-Dversion` never install automatically: their printed command targets the manifest version,
 which is identified as a manual suggestion rather than the development build's release tag.

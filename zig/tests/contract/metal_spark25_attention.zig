@@ -1,4 +1,4 @@
-//! Spark-X2.6-4B's prompt attention (spark25/attention_nax.metal) as metal_model.zig builds it, both layer kinds.
+//! Spark-X2.6-4B's prompt attention (core/prompt_attention_nax.metal) as metal_model.zig builds it, both layer kinds.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -393,8 +393,8 @@ pub const Suite = struct {
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, l, k);
-            try s.probes.append(s.a, p);
-            try s.kernels.append(s.a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
         };
     }
 

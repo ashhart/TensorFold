@@ -1,5 +1,6 @@
 //! Whole-vocabulary grammar draws and prompt redraws.
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const std = @import("std");
 const sampler = @import("cuda_sampler.zig");
 const projection = @import("cuda_proj.zig");
@@ -8,6 +9,7 @@ const Engine = @import("cuda_engine.zig").Engine;
 
 /// Structured output's draw: the rows whole on every rank (Sampler.gather); rank 0 masks them by `bits` and draws.
 pub fn drawWhole(e: anytype, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
+    if (e.local.len > 0) return error.SharesOneRankEach; // full GLM-5.3 at TP=1: one rank's pass (cuda_engine_shares)
     try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, e.smp.stage.ptr, e.smp.full.ptr);
     if (e.share.rank != 0) {
         try e.stream.synchronize();
@@ -24,7 +26,7 @@ pub fn drawWhole(e: anytype, logits: u64, rows: usize, first: u64, bits: u64, ou
         a.add(@as(i64, @intCast(e.c.vocab)));
         a.add(@as(u32, 0));
         a.add(e.pairs.ptr);
-        try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
+        try cuda_pdl.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
         var pick: [2]u32 = undefined;
         try e.stream.synchronize();
         try e.checkGathers();

@@ -9,7 +9,7 @@ pub fn parseChunk(v: ?[]const u8) !usize {
 }
 
 pub fn chunkRows() !usize {
-    return parseChunk(@import("sys").getenv("TF_FLASHNEXT_CHUNK"));
+    return parseChunk(@import("sys").environment.rawText("TF_FLASHNEXT_CHUNK"));
 }
 
 /// A pass's rows on a server of one stream: no request waits on a pass there, and this takes most of 16,384's gain.
@@ -27,7 +27,7 @@ pub fn parseSolo(v: ?[]const u8, busy: usize, lone: bool) !usize {
 }
 
 pub fn soloRows(busy: usize, lone: bool) !usize {
-    return parseSolo(@import("sys").getenv("TF_FLASHNEXT_CHUNK_SOLO"), busy, lone);
+    return parseSolo(@import("sys").environment.rawText("TF_FLASHNEXT_CHUNK_SOLO"), busy, lone);
 }
 
 /// The rows the pass of stream `own` takes when it starts: lanes.solo_chunk's rule on the lanes' `filled`.
@@ -44,7 +44,8 @@ pub fn readoutTileRows() usize {
 
 test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the rest" {
     try std.testing.expectEqual(batch.default_chunk, try parseChunk(null));
-    try std.testing.expectEqual(@as(usize, 1536), try parseChunk(""));
+    try std.testing.expectEqual(batch.default_chunk, try parseChunk(""));
+    try std.testing.expectEqual(@as(usize, 1536), try parseChunk("1536"));
     try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
     try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
     for ([_][]const u8{ "0", "16385", "-1", "4k" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));

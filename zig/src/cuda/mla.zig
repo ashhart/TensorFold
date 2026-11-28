@@ -1,4 +1,4 @@
-//! mla.cu: MLA over a 512-wide latent with 64 roped columns and 128-wide heads (Ling-3.1), on GLM's chunk bodies.
+//! mla.cu: MLA over a 512-wide latent with 64 roped columns (128- and 256-wide v heads, a sink merge), on GLM's chunks.
 const std = @import("std");
 const kernels = @import("kernels.zig");
 const module = @import("module.zig");
@@ -15,6 +15,10 @@ const Args = launch_.Args;
 pub const latent_width = 512;
 pub const head_width = 128;
 pub const rope_width = 64;
+/// Full GLM-5.3's q_nope heads, which the absorb also takes (GLM's latent path: a q head of 192 + 64 columns).
+pub const glm_nope = 192;
+/// The wider v heads the expand also takes.
+pub const wide_v = 256;
 /// Heads a chunk block takes (the r16 form).
 pub const heads_tile = 16;
 /// Absorb and expand: rows from prompt_rows on go prompt_rb a block (as GLM's latent), fewer rows in one block.
@@ -23,11 +27,16 @@ pub const prompt_rb = 64;
 
 /// A model's MLA shape against the one the kernels are built for, refused before anything is allocated or launched.
 pub fn geometry(kv_lora: usize, nope: usize, v_dim: usize, rope_dim: usize) error{MlaGeometry}!void {
-    if (kv_lora != latent_width or nope != head_width or v_dim != head_width or rope_dim != rope_width) return error.MlaGeometry;
+    const nope_ok = nope == head_width or nope == glm_nope;
+    const v_ok = v_dim == head_width or v_dim == wide_v;
+    if (kv_lora != latent_width or !nope_ok or !v_ok or rope_dim != rope_width) return error.MlaGeometry;
 }
 
 /// Online-softmax partials a chunk writes: o [nch][rows][heads][512] fp32, m and l [nch][rows][heads] fp32.
 pub const Partials = struct { po: u64, pm: u64, pl: u64 };
+
+/// Where chunksOn's keys come from: a page table and step, or (sparse) token lists `w` wide and their counts.
+pub const On = struct { pt: u64 = 0, ps: usize = 0, tokens: u64 = 0, counts: u64 = 0, w: usize = 0, sparse: bool = false };
 
 /// The 64 roped columns of `heads` heads a row: in at x + r x_row + h x_head, out likewise (bf16 elements).
 pub const RopeRows = struct { x: u64, x_row: usize, x_head: usize, out: u64, o_row: usize, o_head: usize };
@@ -62,9 +71,12 @@ pub const Mla = struct {
     chunks_split_fn: Function,
     merge_part_fn: Function,
     absorb_q_fn: Function,
+    absorb_q_192_fn: Function,
     expand_v_fn: Function,
     rope_fn: Function,
     gate_fn: Function,
+    expand_v_256_fn: Function,
+    merge_sink_fn: Function,
 
     pub fn load(d: *const Driver) !Mla {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -76,9 +88,12 @@ pub const Mla = struct {
             .chunks_split_fn = try mod.function("tf_mla_chunks_split_r16"),
             .merge_part_fn = try mod.function("tf_mla_merge_part"),
             .absorb_q_fn = try mod.function("tf_mla_absorb_q_128"),
+            .absorb_q_192_fn = try mod.function("tf_mla_absorb_q_192"),
             .expand_v_fn = try mod.function("tf_mla_expand_v_128"),
             .rope_fn = try mod.function("tf_mla_rope"),
             .gate_fn = try mod.function("tf_mla_gate"),
+            .expand_v_256_fn = try mod.function("tf_mla_expand_v_256"),
+            .merge_sink_fn = try mod.function("tf_mla_merge_sink"),
         };
         try m.chunks_fn.allowDynamicShared(chunksSmem(heads_tile));
         try m.chunks_split_fn.allowDynamicShared(chunksSmem(heads_tile));
@@ -97,18 +112,28 @@ pub const Mla = struct {
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(heads), .y = @intCast(cols), .z = cdiv(rows, rb) }, .block = .{ .x = 128 } }, s, &a);
     }
 
-    /// The absorb: q_nope the first d = 128 of each head's `q_stride` columns, out rows `out_stride` apart per head.
+    /// The absorb: q_nope the first d (128, or GLM's 192) of each head's `q_stride` columns, out `out_stride` apart.
     pub fn absorbQ(m: *const Mla, s: Stream, q: u64, q_stride: usize, wk: u64, out: u64, out_stride: usize, rows: usize, heads: usize, d: usize, lw: usize) !void {
-        if (d != head_width or lw != latent_width or q_stride < d or out_stride < lw) return error.LatentShape;
+        const f = switch (d) {
+            head_width => m.absorb_q_fn,
+            glm_nope => m.absorb_q_192_fn,
+            else => return error.LatentShape,
+        };
+        if (lw != latent_width or q_stride < d or out_stride < lw) return error.LatentShape;
         if (rows == 0) return;
-        try rowBlocks(m.absorb_q_fn, s, q, wk, out, rows, heads, lw / 32, .{ i64of(q_stride), i64of(out_stride) });
+        try rowBlocks(f, s, q, wk, out, rows, heads, lw / 32, .{ i64of(q_stride), i64of(out_stride) });
     }
 
-    /// out [rows][heads][dv] bf16 = o_lat [rows][heads][lw] . wv [heads][dv][lw], 128-wide v heads.
+    /// out [rows][heads][dv] bf16 = o_lat [rows][heads][lw] . wv [heads][dv][lw], 128- or 256-wide v heads.
     pub fn expandV(m: *const Mla, s: Stream, ol: u64, wv: u64, out: u64, rows: usize, heads: usize, dv: usize, lw: usize) !void {
-        if (lw != latent_width or dv != head_width) return error.LatentShape;
+        const f = switch (dv) {
+            head_width => m.expand_v_fn,
+            wide_v => m.expand_v_256_fn,
+            else => return error.LatentShape,
+        };
+        if (lw != latent_width) return error.LatentShape;
         if (rows == 0) return;
-        try rowBlocks(m.expand_v_fn, s, ol, wv, out, rows, heads, dv / 16, .{});
+        try rowBlocks(f, s, ol, wv, out, rows, heads, dv / 16, .{});
     }
 
     /// The GPT-J rope at device i32 pos + r, fp32 inv_freq [32], cos and sin times `scale` (YaRN's; 1: plain).
@@ -121,9 +146,14 @@ pub const Mla = struct {
 
     /// The chunk tiles with roped keys: qa and cache rows lw + 64 wide, 16-head blocks, nch chunks' partials into `p`.
     pub fn chunks(m: *const Mla, s: Stream, qa: u64, cache: u64, pos: u64, p: Partials, rows: usize, heads: usize, nch: usize, scale: f32) !void {
+        try m.chunksOn(s, qa, cache, pos, .{}, p, rows, heads, nch, scale);
+    }
+
+    /// GLM's chunk tiles: keys on 512-row pages (pt 0: in order) or each row's `counts` of `tokens`; Ling's: neither.
+    pub fn chunksOn(m: *const Mla, s: Stream, qa: u64, cache: u64, pos: u64, on: On, p: Partials, rows: usize, heads: usize, nch: usize, scale: f32) !void {
         if (rows == 0 or nch == 0) return;
         var a: Args = .{};
-        inline for (.{ qa, cache, pos, @as(u64, 0), @as(u64, 0), p.po, p.pm, p.pl, i64of(rows), i64of(heads), @as(i64, 0), scale, @as(c_int, 0), @as(u64, 0), @as(i64, 0) }) |v| a.add(v);
+        inline for (.{ qa, cache, pos, on.tokens, on.counts, p.po, p.pm, p.pl, i64of(rows), i64of(heads), i64of(on.w), scale, @as(c_int, @intFromBool(on.sparse)), on.pt, i64of(on.ps) }) |v| a.add(v);
         try launch_.launch(m.chunks_fn, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(heads, heads_tile), .z = @intCast(nch) }, .block = .{ .x = 256 }, .shared = chunksSmem(heads_tile) }, s, &a);
     }
 
@@ -144,6 +174,14 @@ pub const Mla = struct {
         try launch_.launch(m.merge_part_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads) }, .block = .{ .x = 128 } }, s, &a);
     }
 
+    /// nch chunks' partials merged with fp32 sinks [heads] (zero-value keys, counted once) into bf16 [rows][heads][lw].
+    pub fn mergeSink(m: *const Mla, s: Stream, p: Partials, sinks: u64, out: u64, rows: usize, heads: usize, nch: usize) !void {
+        if (rows == 0 or heads == 0) return;
+        var a: Args = .{};
+        inline for (.{ p.po, p.pm, p.pl, sinks, out, i64of(rows), i64of(heads), cint(nch) }) |v| a.add(v);
+        try launch_.launch(m.merge_sink_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads) }, .block = .{ .x = 128 } }, s, &a);
+    }
+
     /// o [rows][heads][dv] bf16 *= bf16(sigmoid(g [rows][gs] at column h)): the head-wise output gate, in place.
     pub fn gate(m: *const Mla, s: Stream, o: u64, g: u64, gs: usize, rows: usize, heads: usize, dv: usize) !void {
         if (dv == 0 or dv > 1024 or gs < heads) return error.GateShape;
@@ -157,8 +195,9 @@ pub const Mla = struct {
 test "mla: the roped chunk tiles fit the 99 KiB a GB10 block may take, and other widths are refused" {
     try std.testing.expectEqual(@as(u32, 93568), chunksSmem(heads_tile)); // common/mla.cuh's wide_smem<16, 64>()
     try std.testing.expect(chunksSmem(heads_tile) <= 99 * 1024);
-    try geometry(512, 128, 128, 64);
-    for ([_][4]usize{ .{ 256, 128, 128, 64 }, .{ 512, 192, 128, 64 }, .{ 512, 128, 256, 64 }, .{ 512, 128, 128, 32 } }) |x|
+    for ([_][4]usize{ .{ 512, 128, 128, 64 }, .{ 512, 192, 128, 64 }, .{ 512, 128, 256, 64 }, .{ 512, 192, 256, 64 } }) |x|
+        try geometry(x[0], x[1], x[2], x[3]);
+    for ([_][4]usize{ .{ 256, 128, 128, 64 }, .{ 512, 160, 128, 64 }, .{ 512, 128, 192, 64 }, .{ 512, 128, 512, 64 }, .{ 512, 128, 128, 32 } }) |x|
         try std.testing.expectError(error.MlaGeometry, geometry(x[0], x[1], x[2], x[3]));
 }
 

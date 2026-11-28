@@ -1,4 +1,10 @@
 /** Renderer-safe local benchmark contracts. No process paths, credentials or generated text. */
+import suites from './benchmark-suites.json'
+
+/** The engine's benchmark suites by id and manifest sha256: community-v2 now, community-v1 from older engines. */
+export type ModelBenchmarkSuiteId = 'community-v2' | 'community-v1'
+export const BENCHMARK_SUITES: Readonly<Record<ModelBenchmarkSuiteId, string>> = suites
+export const BENCHMARK_SUITE_CURRENT: ModelBenchmarkSuiteId = 'community-v2'
 export type ModelBenchmarkState = 'preparing' | 'running' | 'restoring' | 'complete' | 'cancelled' | 'failed'
 export type ModelBenchmarkFixture = 'code' | 'chat'
 export type ModelBenchmarkSampleStatus = 'ok' | 'early_eos' | 'error' | 'unmeasured'
@@ -68,16 +74,27 @@ export interface ModelBenchmarkSample {
   prefill_seconds: number | null
   token_sha: string | null
   error_code: string | null
+  finish_reason?: 'stop' | 'length' | null
+  route?: '/v1/chat/completions' | '/v1/completions'
 }
-/** Exact community-v1 export schema. Supplemental GUI state stays outside this object. */
+/** Exact community benchmark export schema (BENCHMARK_SUITES). Supplemental GUI state stays outside this object. */
 export interface ModelBenchmarkReceipt {
   schema_version: 1
-  suite: { id: 'community-v1'; sha256: string }
+  suite: { id: ModelBenchmarkSuiteId; sha256: string }
   run_id: string
   created_at: string
   runtime: { tensorfold_version: string; backend: 'mlx' | 'cuda' | 'rocm'; python_version: string; platform: 'macos' | 'linux'; dependencies: Record<string, string | null> }
   model: { repo_id: string; revision: string | null; family: string | null; config_sha256: string | null; tokenizer_sha256: string | null; quantization: string | null; drafter_repo_id: string | null; local: boolean }
   hardware: { cpu_model: string | null; system_memory_bytes: number | null; memory_type: 'unified' | 'dedicated' | 'unknown'; gpus: { name: string; memory_bytes: number | null; cores: number | null }[]; gpu_count: number | null; source: 'detected' | 'partial' | 'unavailable' }
-  settings: { tokens: number; repetitions: number; temperatures: number[]; serial: boolean; context_tokens: number | null; managed: boolean; rank_count: number | null }
+  settings: { tokens: number; repetitions: number; temperatures: number[]; serial: boolean; context_tokens: number | null; managed: boolean; rank_count: number | null; kv_cache?: 'bf16' | 'fp8' | null; thinking_mode?: 'server_default' }
   samples: ModelBenchmarkSample[]
+  /** Frozen loaded-group inventory from newer community-v2 engines; absent on older receipts. */
+  group?: ModelBenchmarkGroup
+}
+export interface ModelBenchmarkGroup {
+  schema_version: 1
+  source: 'loaded-group'
+  rank_count: number
+  category: 'single-node' | 'multi-node'
+  nodes: { id: number; ranks: number[]; hardware: ModelBenchmarkReceipt['hardware'] }[]
 }

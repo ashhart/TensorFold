@@ -6,6 +6,7 @@ const types = @import("types.zig");
 const command = @import("command.zig");
 const sync = @import("sync.zig");
 const residency = @import("residency.zig");
+const metal4 = @import("metal4.zig");
 
 const Id = objc.Id;
 
@@ -24,6 +25,17 @@ pub const Buffer = struct {
         return objc.msg(usize, self.id, "length", .{});
     }
 
+    /// Let the OS discard this shared buffer's physical contents until the owner restores them (Volatile).
+    pub fn makeVolatile(self: Buffer) void {
+        _ = objc.msg(usize, self.id, "setPurgeableState:", .{@import("purgeable.zig").release});
+    }
+
+    /// Make the contents valid again before any GPU command reads them (NonVolatile); true when the OS discarded them.
+    pub fn makeNonVolatile(self: Buffer) bool {
+        const purgeable = @import("purgeable.zig");
+        return purgeable.discarded(objc.msg(usize, self.id, "setPurgeableState:", .{purgeable.restore}));
+    }
+
     /// The buffer viewed as `len` values of T from its start.
     pub fn slice(self: Buffer, comptime T: type, len: usize) []T {
         return @as([*]T, @ptrCast(@alignCast(self.contents())))[0..len];
@@ -38,6 +50,7 @@ pub const Buffer = struct {
     }
 
     pub fn deinit(self: Buffer) void {
+        if (comptime metal4.enabled) metal4.forget(self.id);
         objc.release(self.id);
     }
 };
@@ -89,6 +102,20 @@ pub const Device = struct {
 
     pub fn queue(self: Device) Error!command.Queue {
         return .{ .id = objc.msg(?Id, self.id, "newCommandQueue", .{}) orelse return error.NoQueue };
+    }
+
+    /// Whether this Mac has Metal 4's command queues (macOS 26 and later).
+    pub fn hasMetal4(self: Device) bool {
+        return self.responds("newMTL4CommandQueue");
+    }
+
+    /// A queue taking `queue`'s calls through Metal 4, or error.Unsupported; TF_METAL4_TIMELINE=n stamps n rounds.
+    pub fn queue4(self: Device) Error!command.Queue {
+        if (comptime !metal4.enabled) return error.Unsupported;
+        if (!self.hasMetal4()) return error.Unsupported;
+        const rounds = platform.environment.read(u32, "TF_METAL4_TIMELINE", 0) catch 0;
+        const q = metal4.State.open(self.id, rounds) orelse return error.Unsupported;
+        return .{ .id = q.queue, .m4 = q };
     }
 
     /// A new buffer of `len` bytes; `options` from types.ResourceOptions (shared storage by default).

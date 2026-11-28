@@ -30,6 +30,10 @@ pub fn Types(comptime B: type) type {
             served: [2]c.Shape,
             shape: c.Shape = undefined,
             pipes: [3]?metal.Pipeline = @splat(null),
+            base_pipes: [3]?metal.Pipeline = @splat(null),
+            base_out: rig_.Ref = undefined,
+            identity: bool = false,
+            rounding: bool = false,
             owns: bool = true,
             control: Control = .none,
             control_pipe: ?metal.Pipeline = null,
@@ -44,25 +48,30 @@ pub fn Types(comptime B: type) type {
                 p.rig.deinit();
                 if (p.arena) |*a| a.deinit();
                 if (p.owns) for (p.pipes) |pipe| if (pipe) |x| x.deinit();
+                for (p.base_pipes) |pipe| if (pipe) |x| x.deinit();
                 if (p.control_pipe) |x| x.deinit();
             }
             pub fn kernel(p: *Probe) g.Kernel {
-                const name = std.fmt.bufPrint(&p.label, "{s}metal masked-V {s} {s} {s}", .{ if (p.control == .none) "" else "control: ", B.label(p.kind), @tagName(p.poison), if (p.control == .none) "" else @tagName(p.control) }) catch unreachable;
-                return .{ .ctx = p, .vt = &vt, .control = if (p.control == .none) null else .nonfinite, .spec = .{
+                const name = if (p.identity)
+                    std.fmt.bufPrint(&p.label, "{s}metal glm sparse finite replacement {s}{s}", .{ if (p.rounding) "control: " else "", B.label(p.kind), if (p.rounding) ", one rounding" else "" }) catch unreachable
+                else
+                    std.fmt.bufPrint(&p.label, "{s}metal masked-V {s} {s} {s}", .{ if (p.control == .none) "" else "control: ", B.label(p.kind), @tagName(p.poison), if (p.control == .none) "" else @tagName(p.control) }) catch unreachable;
+                return .{ .ctx = p, .vt = &vt, .control = if (p.rounding) .shapes else if (p.control == .none) null else .nonfinite, .spec = .{
                     .name = name,
-                    .accum = .f32,
+                    .accum = if (p.identity) .none else .f32,
                     .depth = depth,
                     .ops = 32,
                     .mids = 2,
                     .out = B.output(p.kind),
+                    .replaces = if (p.identity) "main's glm_sparse_nax source at the same head count and launch shape" else null,
                     .served = &p.served,
                     .nan = .{ .stated = "Each output class and every finite hidden value matches binary64 over the actual visible key set." },
                     .sums = .{ .f16 = 0, .bf16 = 0, .exact = false, .why = "equal-score unit-value mask panel; this entry does not discriminate accumulator precision" },
-                    .known = if (p.control == .none and B.known(p.kind, p.poison)) .{ .gate = .nonfinite, .finding = B.finding(p.kind) } else null,
+                    .known = if (!p.identity and p.control == .none and B.known(p.kind, p.poison)) .{ .gate = .nonfinite, .finding = B.finding(p.kind) } else null,
                 } };
             }
             const vt = g.hooks(Probe);
-            pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, _: u64) !bool {
+            pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
                 if (shape.rows == 0 or shape.rows > 32 or shape.n != p.geo.heads * p.geo.dim or (p.geo.ring == 0 and shape.k + shape.rows > p.geo.cap)) return false;
                 p.rig.reset();
                 if (p.arena) |*a| a.deinit();
@@ -71,7 +80,9 @@ pub fn Types(comptime B: type) type {
                 var geo = p.geo;
                 geo.first = shape.k;
                 p.fixture = try data.Data.init(p.arena.?.allocator(), geo, shape.rows, fill == .nonfinite, p.poison);
+                if (p.identity and fill == .random) p.fixture.finite(seed);
                 try B.prepare(p);
+                if (p.identity and fill == .random) p.base_out = try p.rig.scratch(p.fixture.count() * c.size(B.output(p.kind)));
                 return true;
             }
             pub fn run(p: *Probe) !void {
@@ -85,6 +96,23 @@ pub fn Types(comptime B: type) type {
                     pass.e.dispatchGroups(.{ .width = 1 }, .{ .width = 32 });
                 }
                 try p.rig.finish(pass);
+            }
+            pub fn replaced(p: *Probe) ![]const u8 {
+                if (!p.identity) return error.NotAReplacement;
+                const len = p.fixture.count() * c.size(B.output(p.kind));
+                @memset(p.rig.bytes(p.base_out, len), 0xff);
+                const pass = p.rig.begin();
+                const pipes = p.pipes;
+                const out = p.out;
+                p.pipes = p.base_pipes;
+                p.out = p.base_out;
+                defer {
+                    p.pipes = pipes;
+                    p.out = out;
+                }
+                B.encode(p, pass.e);
+                try p.rig.finish(pass);
+                return p.rig.bytes(p.base_out, len);
             }
             pub fn count(p: *Probe) usize {
                 return p.fixture.count();
@@ -161,10 +189,26 @@ pub fn Types(comptime B: type) type {
                             try B.load(p);
                             first = p;
                         }
-                        try s.probes.append(s.a, p);
-                        try s.kernels.append(s.a, p.kernel());
+                        try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
                     }
                 }
+            }
+            pub fn identities(s: *Suite, only: ?[]const u8) !void {
+                for ([_]B.Kind{ .glm_nax64, .glm_nax32, .glm_split, .glm_padding }) |kind| for ([_]bool{ false, true }) |rounding| {
+                    const p = try s.a.create(Probe);
+                    const geo = B.geometry(kind);
+                    p.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .kind = kind, .geo = geo, .poison = .inf, .identity = true, .rounding = rounding, .served = .{ .{ .rows = 8, .n = geo.heads * geo.dim, .k = geo.first }, .{ .rows = 32, .n = geo.heads * geo.dim, .k = geo.first + 15 } } };
+                    errdefer {
+                        p.deinit();
+                        s.a.destroy(p);
+                    }
+                    if (only) |o| if (std.mem.indexOf(u8, p.kernel().spec.name, o) == null) {
+                        s.a.destroy(p);
+                        continue;
+                    };
+                    try B.loadIdentity(p);
+                    try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
+                };
             }
             pub fn controls(s: *Suite, kind: B.Kind, only: ?[]const u8) !void {
                 for ([_]Control{ .hidden, .visible }) |control| {
@@ -175,11 +219,14 @@ pub fn Types(comptime B: type) type {
                         s.a.destroy(p);
                         continue;
                     };
+                    errdefer {
+                        p.deinit();
+                        s.a.destroy(p);
+                    }
                     try B.load(p);
                     p.control_pipe = try rig_.pipeline(s.device, control_source, "tf_masked_control");
                     if (p.control_pipe.?.maxThreads() < 32 or rig_.tgMemory(p.control_pipe.?) != 0) return error.MaskedControlLaunchLimits;
-                    try s.probes.append(s.a, p);
-                    try s.kernels.append(s.a, p.kernel());
+                    try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
                 }
             }
             pub fn deinit(s: *Suite) void {

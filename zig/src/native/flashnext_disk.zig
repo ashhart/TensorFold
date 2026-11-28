@@ -18,7 +18,7 @@ pub fn ask(comptime H: type) *const fn (*anyopaque, *api.ImprintAsk) bool {
             const h: *H = @ptrCast(@alignCast(ctx));
             h.lock();
             defer h.unlock();
-            if (h.closing or !h.disk.push(h.gpa, a)) return false;
+            if (h.closing or (a.op == .flush and h.cache == null) or !h.disk.push(h.gpa, a)) return false; // no store: 501
             h.wake.signal(h.io);
             return true;
         }
@@ -29,19 +29,28 @@ pub fn ask(comptime H: type) *const fn (*anyopaque, *api.ImprintAsk) bool {
 pub fn idleStep(h: anytype) bool {
     h.lock();
     const asks = h.disk.take(h.gpa);
+    var flushes = h.disk.takeFlushes(); // between requests: none is in flight
     const store = if (h.cache) |*c| c else null;
     const write = if (store) |c| c.disk != null and rows.write.ready(c.disk.?) and h.queued.items.len == 0 and !h.closing and h.disk.quiet(h.served, h.now()) else false;
     h.unlock();
     defer h.gpa.free(asks);
+    defer flushes.deinit(h.gpa);
     for (asks) |a| a.answer(store, .{ .starts = false, .spans = false }); // its lookups pass neither
+    for (flushes.items) |a| a.answer(store, .{});
+    if (flushes.items.len > 0) if (store) |s| { // a reply's end publishes these; with none to come, the flush does
+        h.lock();
+        h.cache_status = api.prompt_cache.status.PromptCache(s);
+        h.disk_status = api.prompt_cache.status.Disk(s);
+        h.unlock();
+    };
     if (write) _ = rows.write.step(store.?.disk.?);
-    return write or asks.len > 0;
+    return write or asks.len > 0 or flushes.items.len > 0;
 }
 
 /// Whether the idle loop has work: asks, or kept states waiting for disk (under the lock).
 pub fn idleWork(h: anytype) bool {
-    const store = if (h.cache) |*c| c else return h.disk.asks.items.len > 0;
-    return h.disk.asks.items.len > 0 or (store.disk != null and rows.write.ready(store.disk.?));
+    const store = if (h.cache) |*c| c else return h.disk.waiting();
+    return h.disk.waiting() or (store.disk != null and rows.write.ready(store.disk.?));
 }
 
 /// The store's view of a kept state: the n-gram history at it (16 bytes), then its buffer as snapshot.zig lays it out.
@@ -130,7 +139,7 @@ fn copyIn(st: *snap.State, ranges: []const rows.image.Range, in: []const u8) voi
 }
 
 /// What learned and disk states read under: checkpoint, kernel sources, modes, the probe's bits, the OS build and chip.
-pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !struct { id: u64, rate: f64 } {
+pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !?struct { id: u64, rate: f64 } {
     var h = std.hash.Wyhash.init(0x6678);
     const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     const probe = try learned.probe(eng, gpa);
@@ -145,12 +154,22 @@ pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !s
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.r.device.name()));
     @import("disk_identity.zig").profile(&h, .{ .family = "qwen4_exp", .backend = "metal" });
-    return .{ .id = try @import("disk_identity.zig").scoped(gpa, io, dir, try withInputs(withPolicy(h.final(), eng.r), gpa, io, eng.r)), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    const id = servingKey(h.final(), gpa, io, dir, eng.r) catch |err| {
+        if (err != error.UnverifiedPersistence) return err;
+        std.log.info("flash next: persisted state stays cold until input content digests are verified", .{});
+        return null;
+    };
+    return .{ .id = id, .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+}
+
+fn servingKey(legacy: u64, a: Allocator, io: std.Io, dir: []const u8, run: anytype) !u64 {
+    return @import("disk_identity.zig").scopedVerified(a, io, dir, try withInputs(withPolicy(legacy, run), a, io, run));
 }
 
 /// --learn-conversations or --spill-gib: the store under `l.root`, attached to the cache (Imprint's cut files unread).
-pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, id: anytype, l: anytype) !*rows.Rows {
-    const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots });
+pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, optional: anytype, l: anytype, longest: u32) !?*rows.Rows {
+    const id = optional orelse return null;
+    const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots, .longest = longest });
     r.prefill_rate = id.rate;
     std.log.info("flash next: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, l.cap >> 20 });
     return r;
@@ -179,4 +198,60 @@ pub fn withFiles(legacy: u64, a: Allocator, io: std.Io, files: []const c_int) !u
 /// The loaded weight files and metadata, including a supplied reference outside the checkpoint.
 pub fn withInputs(legacy: u64, a: Allocator, io: std.Io, run: anytype) !u64 {
     return @import("persistence_policy.zig").mapped(try withFiles(legacy, a, io, run.files.items), a, run.maps.items);
+}
+
+const PermitProbe = struct {
+    fn charge(at: u32) u64 {
+        return @as(u64, at) * 8 + 28;
+    }
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return charge(at);
+    }
+    fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+        return error.NotAtMark;
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {
+        return error.CopyFailed;
+    }
+    fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    fn parts(_: *anyopaque, at: u32, out: *std.ArrayList(rows.image.Part), a: Allocator) anyerror!void {
+        try out.append(a, .{ .bytes = 16 });
+        try out.append(a, .{ .bytes = @as(u64, at) * 8, .row = 8 });
+        try out.append(a, .{ .bytes = 12 });
+    }
+    fn gather(_: *anyopaque, _: api.prompt_cache.Saved, _: []const rows.image.Range, _: []u8) anyerror!void {
+        return error.GatherFailed;
+    }
+    fn blank(_: *anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+        return error.NoSnapshotSlot;
+    }
+    fn scatter(_: *anyopaque, _: api.prompt_cache.Saved, _: []const rows.image.Range, _: []const u8) anyerror!void {
+        return error.CopyFailed;
+    }
+    fn snapshots(p: *PermitProbe) api.prompt_cache.Snapshots {
+        return .{ .ptr = p, .vtable = &.{ .bytes = PermitProbe.bytes, .save = PermitProbe.save, .restore = PermitProbe.restore, .drop = PermitProbe.drop, .rows = &.{ .parts = PermitProbe.parts, .gather = PermitProbe.gather, .blank = PermitProbe.blank, .scatter = PermitProbe.scatter } } };
+    }
+};
+
+test "Flash Next disk: the served window takes a state past the default permit whole" {
+    const longest: u32 = 1 << 28; // eight row bytes per token: over 2 GiB
+    var probe: PermitProbe = .{};
+    var store = api.prompt_cache.Store.init(std.testing.allocator, probe.snapshots(), .{}, 8 << 30);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const learn = .{ .root = root, .cap = @as(u64, 1) << 34, .floor = @as(u64, 0), .daily = @as(u64, 1) << 34, .spill = rows.Spill.finish, .slots = @as(u32, 4) };
+    const open_id: ?struct { id: u64, rate: f64 } = .{ .id = 7, .rate = 1 };
+    const r = (attach(std.testing.allocator, &store, open_id, learn, longest) catch |err| {
+        store.deinit();
+        return err;
+    }).?;
+    defer {
+        store.deinit();
+        r.deinit();
+    }
+    const whole = try rows.write.coldCharge(r, longest);
+    try std.testing.expect(whole > 1 << 30);
+    try std.testing.expectEqual(@max(1 << 30, @min(whole, store.budget)), r.staging_bytes);
 }

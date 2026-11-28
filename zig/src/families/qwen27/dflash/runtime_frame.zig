@@ -34,6 +34,7 @@ pub const Frame = struct {
     residency: ?mtl.ResidencySet.Follow = null,
     profiler: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE: each pass's buffers time its `drafter` class
     hold: @import("core").gpu_profile.Hold = .{}, // while open, the trace's spans keep this frame's encoder
+    borrowed: bool = false, // open on another's buffer: its owner commits and waits for it
     pub fn setResident(f: *Frame, hook: ?mtl.ResidencySet.Follow) void {
         for (f.pool.items) |buffer| {
             if (f.residency) |h| h.leave(h.ctx, buffer);
@@ -64,9 +65,30 @@ pub const Frame = struct {
         f.hold.take(f.profiler); // a span's own buffer would overtake this frame's pending ops
         return f.epoch;
     }
+    /// Opens on another's open buffer (a target window's): ops encode into its encoder, its owner commits and waits.
+    pub fn beginOn(f: *Frame, cb: mtl.CommandBuffer, encoder: mtl.ComputeEncoder) !u64 {
+        if (f.active or f.epoch >= 0x7fffffff) return error.DraftFrameBusy;
+        f.epoch += 1;
+        if (f.external_epoch != f.epoch) f.external = null;
+        f.cursor = 0;
+        f.entries.clearRetainingCapacity();
+        f.cb = cb;
+        f.encoder = encoder;
+        f.active = true;
+        f.completed = false;
+        f.borrowed = true;
+        f.part_count = 0;
+        f.ops = 0;
+        return f.epoch;
+    }
+    /// A borrowed frame's owner saw its buffer complete: its outputs are readable until release.
+    pub fn landed(f: *Frame) !void {
+        if (!f.active or !f.borrowed or f.completed) return error.DraftFrameNotActive;
+        f.completed = true;
+    }
     /// Commits the work so far and opens the next buffer behind a fence, so the GPU starts early; between ops only.
     pub fn part(f: *Frame) !void {
-        if (!f.active or f.completed or f.part_count == f.parts.len) return;
+        if (!f.active or f.completed or f.borrowed or f.part_count == f.parts.len) return;
         if (f.fence == null) f.fence = mtl.objc.msg(?mtl.objc.Id, f.device.id, "newFence", .{}) orelse return error.NoFence;
         mtl.objc.msg(void, f.encoder.id, "updateFence:", .{f.fence.?});
         f.encoder.end();
@@ -78,7 +100,7 @@ pub const Frame = struct {
         mtl.objc.msg(void, f.encoder.id, "waitForFence:", .{f.fence.?});
     }
     pub fn finish(f: *Frame) !void {
-        if (!f.active or f.completed) return error.DraftFrameNotActive;
+        if (!f.active or f.completed or f.borrowed) return error.DraftFrameNotActive;
         f.encoder.end();
         f.cb.commit();
         f.cb.wait();
@@ -95,12 +117,13 @@ pub const Frame = struct {
         }
     }
     pub fn release(f: *Frame) void {
-        if (f.active and !f.completed) {
+        if (f.active and !f.completed and !f.borrowed) {
             f.encoder.end();
             for (f.parts[0..f.part_count]) |cb| cb.wait(); // committed parts still use the pool
         }
         f.hold.release();
         f.active = false;
+        f.borrowed = false;
         f.external = null;
     }
     pub fn require(f: *const Frame, epoch: u64) !void {

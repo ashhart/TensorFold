@@ -44,7 +44,7 @@ pub fn confidence() !f64 {
     return @import("sys").environment.read(f64, "TF_GLM_DRAFT_CONFIDENCE", 0.7);
 }
 
-/// The drafter MLP split: two ranks as before; three or more only with `wide` (TF_ROCE=1) and 256-aligned shares of FF.
+/// The drafter MLP split: two ranks as before; three or more with `wide` (Settings.draftWide) and 256-aligned shares.
 pub const MlpSplit = struct { split: bool, ff: usize };
 pub fn mlpSplit(world: usize, wide: bool) MlpSplit {
     if (world < 2 or (world > 2 and !wide) or FF % world != 0 or (FF / world) % 256 != 0) return .{ .split = false, .ff = FF };
@@ -295,7 +295,7 @@ pub const Drafter = struct {
             }
         }
         const M = S * BLOCK;
-        try block.upload(dr, e, dr.ids, std.mem.sliceAsBytes(dr.h_ids[0..M]));
+        try uploadIds(dr, e, dr.h_ids[0..M]);
         try block.upload(dr, e, dr.bpos, std.mem.sliceAsBytes(dr.h_bpos[0..M]));
         try block.upload(dr, e, dr.rings, std.mem.sliceAsBytes(dr.h_rings[0..S]));
         try block.upload(dr, e, dr.starts, std.mem.sliceAsBytes(dr.h_starts[0..S]));
@@ -321,6 +321,11 @@ pub const Drafter = struct {
     }
 };
 
+fn uploadIds(dr: *const Drafter, e: anytype, ids: []const i32) !void {
+    try @import("cuda_forward.zig").checkTokenIds(ids, e.c.vocab);
+    try block.upload(dr, e, dr.ids, std.mem.sliceAsBytes(ids));
+}
+
 /// Prompt context retained in the window; row0 is a tap-buffer offset, not a position; cap is that buffer's rows.
 pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, row0: usize, cap: usize) !?Run {
     if (start > len or rows > len - start) return error.BadPromptContext;
@@ -335,4 +340,26 @@ pub fn ingestPrompt(dr: anytype, e: anytype, i: u32, start: usize, rows: usize, 
     const s = try dr.slot(i);
     const run = (try promptRun(s.ring.?.ptr, dr.taps_prefill, start, rows, len, row0, dr.tap_rows)) orelse return;
     try dr.ingest(e, &.{run});
+}
+
+test "GLM embedding: DFlash generated IDs are checked before their upload" {
+    const Fake = struct {
+        var calls: usize = 0;
+        fn copy(_: u64, _: ?*const anyopaque, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            calls += 1;
+            return cuda.abi.error_not_ready;
+        }
+    };
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemcpyHtoDAsync_v2 = Fake.copy;
+    var dr: Drafter = undefined;
+    dr.ids = 0;
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    const e = .{ .d = &d, .stream = stream, .c = @import("config.zig").Config{ .vocab = 154880 } };
+    for ([_][2]i32{ .{ 154880, MASK }, .{ -1, MASK }, .{ 0, 154880 }, .{ MASK, -1 } }) |ids| {
+        try std.testing.expectError(error.BadTokenId, uploadIds(&dr, &e, &ids));
+        try std.testing.expectEqual(0, Fake.calls);
+    }
+    try std.testing.expectError(error.NotReady, uploadIds(&dr, &e, &.{ 127, MASK }));
+    try std.testing.expect(Fake.calls > 0);
 }

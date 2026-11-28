@@ -46,7 +46,7 @@ pub const Fixture = struct {
     ix: [6][2]Ref, // each projection's index and table
     io: [7]Ref, // input rows, logits, row count, then act, picks, weights and y
     direct: [2]mtl.Pipeline, // the recorded gate/up and down
-    grouped: [2]gx.Gx, // reading scales and biases direct, and through the index
+    grouped: [4]gx.Gx, // direct and through the index, then the same two with MB=2 gate/up
     libraries: std.ArrayList(mtl.Library) = .empty,
     pipelines: std.ArrayList(mtl.Pipeline) = .empty,
     buffers: std.ArrayList(Ref) = .empty,
@@ -54,7 +54,7 @@ pub const Fixture = struct {
     list: ?mtl.Buffer = null,
     wrong_scales: bool = false,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rows: usize, seed: u64, nonfinite: bool) !*Fixture {
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, rows: usize, seed: u64, nonfinite: bool, two: bool) !*Fixture {
         if (rows == 0 or rows > gx.rmax) return error.GroupedFixtureShape;
         const p = try a.create(Fixture);
         p.* = .{ .memory = .init(a), .a = undefined, .queue = queue, .rows = rows, .w = undefined, .ix = undefined, .io = undefined, .direct = undefined, .grouped = undefined };
@@ -106,11 +106,13 @@ pub const Fixture = struct {
             try p.pipelines.append(p.a, p.direct[k]);
         }
         p.list = try device.buffer(gx.list_bytes, mtl.ResourceOptions.shared);
-        for ([_]bool{ false, true }, &p.grouped) |indexed, *g| {
-            const lib = try gx.library(p.a, device, indexed);
+        for (&p.grouped, 0..) |*g, at| {
+            const indexed, const mb2 = [2]bool{ at % 2 == 1, at >= 2 };
+            if (mb2 and !two) continue;
+            const lib = try gx.library(p.a, device, indexed, mb2);
             try p.libraries.append(p.a, lib);
-            for (gx.functions, &g.pipes) |name, *pipe| {
-                pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+            for (&g.pipes, 0..) |*pipe, j| {
+                pipe.* = try mtl.Pipeline.init(device, lib, gx.functionName(j, mb2), false);
                 try p.pipelines.append(p.a, pipe.*);
             }
             g.buf = p.list.?;
@@ -158,7 +160,7 @@ pub const Fixture = struct {
     }
 
     /// Act, picks, weights and y after the recorded launches, or gx.zig's when `by_expert` (`indexed`: on the index).
-    pub fn run(p: *Fixture, by_expert: bool, indexed: bool) ![]const u8 {
+    pub fn run(p: *Fixture, by_expert: bool, indexed: bool, two: bool) ![]const u8 {
         for (p.io[3..]) |ref| @memset(p.bytes(ref), 0);
         const cb = p.queue.commandBuffer();
         const e = cb.compute(.serial);
@@ -171,7 +173,7 @@ pub const Fixture = struct {
             };
             const slot: usize = if (indexed) 2 else 1; // the control: gate and up scales (indexed: their tables) change places
             if (p.wrong_scales) std.mem.swap(Buf, &w[slot], &w[slot + 3]);
-            p.grouped[@intFromBool(indexed)].launch(e, false, buf(p.io[0]), buf(p.io[1]), w, buf(p.io[3]), buf(p.io[4]), buf(p.io[5]), buf(p.io[2]), buf(p.io[6]), p.rows);
+            p.grouped[@as(usize, @intFromBool(indexed)) + @as(usize, 2) * @intFromBool(two)].launch(e, false, buf(p.io[0]), buf(p.io[1]), w, buf(p.io[3]), buf(p.io[4]), buf(p.io[5]), buf(p.io[2]), buf(p.io[6]), p.rows);
         } else {
             e.setPipeline(p.direct[0]);
             bind(e, 0, p.io[0]);

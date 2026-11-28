@@ -1,0 +1,10 @@
+START LAUNCHER serve CKPT --host 127.0.0.1 --port 56417 --name glm53-cuda --no-update-check --prompt-cache-gib 0 --backend cuda --context 32768 --parallel 2 --no-thinking
+START LAUNCHER serve CKPT --host 127.0.0.1 --port 36539 --name glm53-cuda --no-update-check --prompt-cache-gib 2 --backend cuda --context 32768 --parallel 2 --no-thinking
+PASS drafted == plain: 10/10 equal, 0 unequal, 0 unverified; 401 of 683 drafts accepted
+PASS repeat == first: 10/10 equal, 0 unequal, 0 unverified; another seed differs
+PASS concurrent == solo: 28/28 equal, 0 unequal, 0 unverified (levels [1, 2], drafted and plain, 16 with a long prompt among decoders); chat requests open at once: 2 to 4
+PASS resumed == fresh: 6/6 equal, 0 unequal, 0 unverified; resumed cached_tokens [4096, 4096, 4096, 4096]
+PASS refusals: 4/4 refused as listed
+PASS cancel: 4/4 equal, 0 unequal, 0 unverified after a cut; 4/4 cut mid-reply, 4 disconnects counted, 4/4 censuses back to {'running': 0, 'waiting': 0, 'active': 0, 'lanes_free': 2, 'pools': [{'promised': 0, 'unheld': 66560}]}, 4/4 healthy
+PASS evict: 3/3 equal, 0 unequal, 0 unverified against cache-off (kept, resumed, evicted); cached 4096 -> 0 after 10 fill prompts; census back to {'running': 0, 'waiting': 0, 'active': 0, 'lanes_free': 2, 'pools': [{'promised': 0, 'unheld': 66560}]}
+glm53-cuda: 7 passed, 0 failed, 0 skipped

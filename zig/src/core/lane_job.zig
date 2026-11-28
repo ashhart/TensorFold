@@ -33,6 +33,7 @@ pub const Job = struct {
     load: @import("lane_host_load.zig").Pass = .{}, // this attempt's prompt pass in the load ledger
     prefilled: ?i96 = null,
     entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
+    lent: ?u64 = null, // a filling job's kept state (its serial), given back until its first call borrows it again
     cache_promise: @import("prompt_cache_reserve.zig").Room = .{}, // net room for this pass, until kept or ended
     marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
     frame: u32 = 0, // exact family frame, before its compact cache-word hash
@@ -46,6 +47,11 @@ pub const Job = struct {
     lease: @import("kv_ledger.zig").Lease = .{}, // its caches' bytes in the host's ledger, from admission to its end
     wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
     fell_back: bool = false, // its saved prefix's restore fallback is counted (once a request)
+    backlog: @import("lane_host_backlog.zig").Watch = .{}, // a slow reader's hold on its stream (engine thread only)
+    memory_snap: ?*anyopaque = null, // Folded Memory Weights v3 transient Snap (freed on job finish)
+    memory_prompt: []u32 = &.{}, // [M virtual prefix zeros ++ stripped user prompt] (gpa-owned)
+    memory_refused: bool = false, // its memory prefix could not be restored: it runs its own prompt instead
+    memory_version: ?u64 = null, // the published memory version its routing saw, which its reply reports
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {
@@ -60,10 +66,20 @@ pub const Job = struct {
 
     /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
     pub fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, false);
+    }
+
+    /// An interrupted pass reports its completed prefix; warm passes may hand it to a queued follow-up.
+    pub fn interrupted(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, true);
+    }
+
+    fn keepAt(ptr: *anyopaque, s: *lanes.Stream, at: u32, cancelled: bool) void {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
-        @import("lane_cache_queue.zig").keep(job.host, job, s, at);
+        const cache = @import("lane_cache_queue.zig");
+        if (cancelled) cache.interrupted(job.host, job, s, at) else cache.keep(job.host, job, s, at);
     }
 
     /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
@@ -76,4 +92,32 @@ pub const Job = struct {
         const ok = !job.stream.reuse_failed and job.stream.cached == e.at;
         if (job.stream.reuse_failed or ok) store.resumedWithReason(e, job.cacheKey(), if (ok) null else job.stream.reuse_error orelse error.RestoreRejected) else store.release(e);
     }
+
+    /// Into the fill queue: its kept state goes back to the store until its first call, so none is pinned meanwhile.
+    pub fn lending(job: *Job) *Job {
+        const e = job.entry orelse return job;
+        const store = job.host.cache orelse return job;
+        if (e.serial == 0) return job; // not the index's (it numbers every entry it adds): the borrow stays
+        job.lent = e.serial;
+        job.entry = null;
+        store.release(e);
+        return job;
+    }
+
+    /// Its first call: the kept state borrowed again; evicted while it waited, the pass fills from the start (exact).
+    pub fn reborrow(job: *Job) void {
+        const serial = job.lent orelse return;
+        job.lent = null;
+        const store = job.host.cache orelse return;
+        if (store.reborrow(serial)) |e| {
+            job.entry = e;
+            return;
+        }
+        @import("lane_stream.zig").lookAgain(job.host, job); // gone since: marks, promise and fill as a fresh admission's
+    }
 };
+
+/// Whether a stream's kept state is restored or refused (or none was offered): its lookup can be reported.
+pub fn restoreSettled(s: *const lanes.Stream) bool {
+    return s.reuse.saved == null or s.reuse_failed or s.cached > 0;
+}

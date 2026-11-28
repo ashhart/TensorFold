@@ -40,8 +40,9 @@ fn generateSteps(b: *std.Build, all: *std.Build.Step) void {
 fn compileCuda(b: *std.Build) void {
     const cuda = @import("cuda_runtime.zig").runtime(b, b.graph.host, .Debug, &.{});
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = b.graph.host, .link_libc = true });
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
     const moss = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
-    const root = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "moss_image", .module = moss } } });
+    const root = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "moss_image", .module = moss } } });
     const exe = b.addExecutable(.{ .name = "moss-teacher-cuda-compile", .root_module = root });
     b.step("compile-moss-teacher-cuda", "Compile the MOSS CUDA teacher CLI without kernel images or execution").dependOn(&exe.step);
 }
@@ -56,4 +57,6 @@ pub fn compileMetal(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.
     const step = b.step("compile-moss-teacher-metal", "Compile the MOSS Metal teacher and generate CLIs without shader compilation or execution");
     step.dependOn(&exe.step);
     step.dependOn(&gen_exe.step);
+    const rotary = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"moss image rotary:"} }));
+    b.step("test-moss-image-rotary-host", "MOSS-Image encoder RoPE words and bf16 tables against the fp32-pow form, no device").dependOn(&rotary.step);
 }

@@ -6,6 +6,7 @@ const affine = @import("affine.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const kernels = @import("kernels.zig");
 const fp8 = @import("fp8.zig");
+pub const tfq3 = @import("tfq3.zig");
 pub const gather = @import("gather.zig");
 const Affine = affine.Affine;
 const Ref = affine.Ref;
@@ -44,7 +45,9 @@ pub const Pipes = struct {
     mm5: affine_mm.Pipes, // and at 5 and 6 bits (oQ4's), split stacks' members too
     mm6: affine_mm.Pipes,
     zeros: mtl.Buffer, // expert ids all 0: a dense GLU through the by-ids kernel (the shared expert)
+    tfq3: ?tfq3.Pipes = null,
     hash: u64, // every source compiled here
+    mm_bm: u32, // affine_mm dense row-tile height: 32 pre-M5 (TF_GLM_M3_FAST), 64 on M5
 
     pub fn deinit(p: *Pipes) void {
         inline for (.{
@@ -67,6 +70,7 @@ pub const Pipes = struct {
         if (p.bf16_nax) |x| x.deinit();
         p.kda_pre.deinit();
         p.zeros.deinit();
+        if (p.tfq3) |*t| t.deinit();
         inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6 }) |set| for (set) |x| x.deinit();
     }
 };
@@ -188,13 +192,15 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     h.update(sources.ops_embed_norm);
     try lib(made, device, sources.ops_embed_norm, &.{ "tf_embed_b6_g64", "tf_embed_b8_g64" }, &p.embed);
     for ([_]u8{ 8, 2, 5, 6 }, [_]*affine_mm.Pipes{ &p.mm8, &p.mm2, &p.mm5, &p.mm6 }) |bits, out| {
-        const src = try affine_mm.source(device, gpa, .{ .bits = bits, .group = 64 });
+        const src = try affine_mm.source(device, gpa, .{ .bits = bits, .group = 64, .glm_m3_fast = !device.tensorUnits() });
         defer gpa.free(src);
         h.update(src);
         try lib(made, device, src, &affine_mm.names, out);
     }
+    p.mm_bm = if (device.tensorUnits()) 64 else 32;
     p.zeros = try device.buffer(64 * 4, mtl.ResourceOptions.shared);
     @memset(p.zeros.slice(i32, 64), 0);
+    p.tfq3 = null;
     p.hash = h.final();
     return p;
 }
@@ -231,8 +237,8 @@ fn at(bits: u8) usize {
     return std.mem.indexOfScalar(u8, &bit_widths, bits).?;
 }
 
-/// Rows of x (`ldx` apart) through a matrix into out (`ldo` apart).
-pub const Io = struct { in: Ref, ldx: u32, out: Ref, ldo: u32, rows: u32 };
+/// Rows of x (`ldx` apart) through a matrix into out (`ldo` apart); a prompt pass's TFQ3 runs may take MMA.
+pub const Io = struct { in: Ref, ldx: u32, out: Ref, ldo: u32, rows: u32, prompt: bool = false };
 
 fn launch(p: *const Pipes, e: mtl.ComputeEncoder, w: [3]Ref, bits: u8, d: RowDims, in: Ref, out: Ref) void {
     e.setPipeline(if (d.rows >= 4) p.rows_wide[at(bits)] else p.rows[at(bits)]);
@@ -244,9 +250,10 @@ fn launch(p: *const Pipes, e: mtl.ComputeEncoder, w: [3]Ref, bits: u8, d: RowDim
 
 /// x through every member of `q` at its own width, each into its own output rows.
 pub fn dense(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io) void {
+    if (p.tfq3) |*t| if (tfq3.dispatch.tryKdaIn(t, e, q, io.in, io.out, io.rows, io.ldx, io.ldo)) return;
     for (0..@as(usize, q.more) + 1) |i| {
         const r = q.run(i);
-        launch(p, e, .{ r.w, r.s, r.b }, r.bits, .{ .k = @intCast(q.k), .n = @intCast(r.n), .group = r.group, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, io.in, io.out.at(@as(usize, r.row) * 2));
+        if (r.group == 512) tfq3.dispatch.dense(&p.tfq3.?, e, r.w, r.s, r.b, r.bits, io.in, io.out.at(@as(usize, r.row) * 2), r.n, q.k, io.rows, io.ldx, io.ldo, io.prompt, r.tfq3_ends) else launch(p, e, .{ r.w, r.s, r.b }, r.bits, .{ .k = @intCast(q.k), .n = @intCast(r.n), .group = r.group, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, io.in, io.out.at(@as(usize, r.row) * 2));
     }
 }
 
@@ -263,7 +270,7 @@ pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io:
     var head = q;
     head.n = ny;
     affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, h * kx, io.ldx); // a head's sums one row apart
-    affine_mm.denseBatch(e, pipes, io.in, sums, head, io.out, io.rows, h, .{
+    affine_mm.denseBatchBm(e, pipes, io.in, sums, head, io.out, io.rows, h, .{
         .x_row = @intCast(io.ldx),
         .y_row = @intCast(io.ldo),
         .sums_row = @intCast(h),
@@ -271,7 +278,7 @@ pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io:
         .y_batch = @intCast(ny),
         .sums_batch = 1,
         .w_batch = @intCast(ny),
-    });
+    }, p.mm_bm);
 }
 
 /// x [rows, k] through bf16 W [n, k]: scalar path, kept for tests / non-prefill callers (decode-side eh uses mtp.zig).
@@ -319,6 +326,7 @@ pub fn byIds(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, ids: Ref,
 /// x through [gate; up] (one width, `n` rows each) SwiGLU'd into out: the by-ids GLU, every id 0 (glm_swiglu's bits).
 pub fn glu(p: *const Pipes, e: mtl.ComputeEncoder, gu: Affine, n: u32, x: Ref, out: Ref, rows: u32, lim: f32) void {
     std.debug.assert(gu.more == 0 and gu.n == 2 * n and rows <= 64);
+    if (gu.group == 512) return tfq3.dispatch.denseGlu(&p.tfq3.?, e, gu.w, gu.s, gu.b, gu.bits, x, out, n, gu.k, rows, lim);
     var gate = gu;
     gate.n = n;
     var up = gate;
@@ -461,26 +469,18 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
     var summed = false;
     for (0..@as(usize, q.more) + 1) |i| {
         const r = q.run(i);
-        const one: Affine = .{ .w = r.w, .s = r.s, .b = r.b, .n = r.n, .k = q.k, .bits = r.bits, .group = r.group };
+        const one: Affine = .{ .w = r.w, .s = r.s, .b = r.b, .n = r.n, .k = q.k, .bits = r.bits, .group = r.group, .tfq3_ends = r.tfq3_ends };
         var part = io;
         part.out = io.out.at(@as(usize, r.row) * 2);
+        part.prompt = true; // only the prompt pass (prompt.zig) runs denseMm
         const pipes = (if (q.more == 0 or r.n % 64 == 0) mm(p, one) else null) orelse {
             dense(p, e, one, part);
             continue;
         };
         if (!summed) affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, q.k, io.ldx); // every member's: one k, g64
         summed = true;
-        affine_mm.denseBatch(
-            e,
-            pipes,
-            io.in,
-            sums,
-            one,
-            part.out,
-            io.rows,
-            1,
-            .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) },
-        );
+        const strides: affine_mm.Strides = .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) };
+        affine_mm.denseBatchBm(e, pipes, io.in, sums, one, part.out, io.rows, 1, strides, p.mm_bm);
     }
 }
 

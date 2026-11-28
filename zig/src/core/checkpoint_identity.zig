@@ -26,6 +26,11 @@ pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
     return h.finalResult();
 }
 
+/// The shard names `Content` reads, in name order: the index's, or the one model.safetensors.
+pub fn shardNames(a: std.mem.Allocator, io: Io, dir: []const u8) ![]const []const u8 {
+    return shards(a, io, dir, null);
+}
+
 /// The index's shard names (or the one model.safetensors) in name order, each once; the index text goes into `h`.
 fn shards(a: std.mem.Allocator, io: Io, dir: []const u8, h: ?*Sha256) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;

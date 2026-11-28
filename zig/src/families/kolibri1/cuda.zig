@@ -8,18 +8,21 @@ pub const weights = @import("weights.zig");
 pub const tree = @import("tree.zig");
 pub const kernels = @import("kernels.zig");
 pub const forward = @import("forward.zig");
+pub const rounds = @import("rounds.zig");
 pub const snap = @import("snap.zig");
 pub const backend = @import("backend.zig");
 pub const native = @import("native.zig");
 
 test {
     _ = @import("config.zig");
+    _ = @import("config_v11.zig");
     _ = @import("names.zig");
     _ = @import("pack.zig");
     _ = @import("weights.zig");
     _ = @import("tree.zig");
     _ = @import("kernels.zig");
     _ = @import("forward.zig");
+    _ = @import("rounds.zig");
     _ = @import("snap.zig");
     _ = @import("backend.zig");
     _ = @import("native.zig");

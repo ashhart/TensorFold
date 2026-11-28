@@ -1,36 +1,24 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { approvalPolicyScope, isReadOnlyShellCommand } from './approval-policy'
 import { commandShell, commandShellArgs } from './cli-path'
+import { LinuxSandboxError, canUseLinuxSandbox, linuxSandboxArgv, linuxSandboxBinary } from './linux-sandbox'
 import { commandApprovalReason } from './command-policy'
-import { hostGitEnv } from './host-git-env'
+import { MAX_HASH_BYTES, captureWorkspaceSnapshot, changedWorkspacePaths } from './sandbox-workspace'
+import type { SandboxWorkspaceSnapshot } from './sandbox-workspace'
+export type { SandboxWorkspaceSnapshot } from './sandbox-workspace'
 import { redactCommandStreams } from './command-output-redaction'
 import { SECRET_MASK } from './security'
 import { redactSecretValues } from './secret-detection'
 import type { ToolArtifactSummary } from './types'
-
-export type SandboxProfileId =
-  | 'read-only'
-  | 'build-test'
-  | 'package-install'
-  | 'browser'
-  | 'network-fetch'
-  | 'connector-send'
-  | 'system-control'
-  | 'untrusted-code'
-
-export interface SandboxProfileDefinition {
-  id: SandboxProfileId
-  label: string
-  allowCwdWrite: boolean
-  allowNetwork: boolean
-  envSecretsAllowed: boolean
-  description: string
-}
+import { SANDBOX_PROFILES, macSandboxProfile, sandboxProfileAllowsNetwork, sandboxProfileForCommandClass } from './mac-sandbox-profile'
+import type { SandboxProfileId } from './mac-sandbox-profile'
+export { SANDBOX_PROFILES, gitControlWriteDeny, macSandboxProfile, sandboxProfileAllowsNetwork, sandboxProfileForCommandClass, sbplString, taskSandboxNetworkOverride, uniqueExistingPaths } from './mac-sandbox-profile'
+export type { SandboxProfileDefinition, SandboxProfileId } from './mac-sandbox-profile'
 
 export const SANDBOX_ARTIFACT_SCHEMA = 'vontra.sandbox-artifacts/1'
 
@@ -63,18 +51,13 @@ export interface SandboxArtifactBaseline {
   workspaceSnapshot?: SandboxWorkspaceSnapshot
 }
 
-export interface SandboxWorkspaceSnapshot {
-  root: string
-  files: Array<{ path: string; fingerprint: string }>
-}
-
 export interface SandboxArtifactBundle {
   schema: typeof SANDBOX_ARTIFACT_SCHEMA
   id: string
   command: string
   cwd: string
   profile: SandboxProfileId | 'unsandboxed'
-  implementation: 'macos-sandbox-exec' | 'unsandboxed'
+  implementation: 'macos-sandbox-exec' | 'linux-bwrap' | 'unsandboxed'
   inputSnapshot: SandboxFileArtifact[]
   outputFiles: SandboxFileArtifact[]
   screenshots: SandboxFileArtifact[]
@@ -90,7 +73,7 @@ export interface SandboxedCommandResult {
   stderr: string
   sandboxed: boolean
   profile: SandboxProfileId | 'unsandboxed'
-  implementation: 'macos-sandbox-exec' | 'unsandboxed'
+  implementation: 'macos-sandbox-exec' | 'linux-bwrap' | 'unsandboxed'
   /** Number of value-level secrets removed from stdout/stderr before this result left the sandbox. */
   redactionCount?: number
   artifacts?: SandboxArtifactBundle
@@ -144,75 +127,7 @@ const PACKAGE_INSTALL_INPUT_PATHS = [
 ]
 const ARTIFACT_SKIP_DIRS = new Set(['.git', 'node_modules'])
 const MAX_ARTIFACT_FILES = 120
-const MAX_HASH_BYTES = 10 * 1024 * 1024
 const SCREENSHOT_RE = /\.(?:png|jpe?g|webp|gif)$/i
-
-export const SANDBOX_PROFILES: Record<SandboxProfileId, SandboxProfileDefinition> = {
-  'read-only': {
-    id: 'read-only',
-    label: 'Read-only',
-    allowCwdWrite: false,
-    allowNetwork: false,
-    envSecretsAllowed: false,
-    description: 'Read workspace files and system tools without workspace writes or network.',
-  },
-  'build-test': {
-    id: 'build-test',
-    label: 'Build/test',
-    allowCwdWrite: true,
-    allowNetwork: false,
-    envSecretsAllowed: false,
-    description: 'Run local builds, typechecks, tests, and git-local operations in the workspace with network denied.',
-  },
-  'package-install': {
-    id: 'package-install',
-    label: 'Package install',
-    allowCwdWrite: false,
-    allowNetwork: false,
-    envSecretsAllowed: false,
-    description: 'Evaluate package-install commands away from host project writes; network still requires separate policy.',
-  },
-  browser: {
-    id: 'browser',
-    label: 'Browser',
-    allowCwdWrite: false,
-    allowNetwork: true,
-    envSecretsAllowed: false,
-    description: 'Browser/preview automation with network allowed and no workspace writes.',
-  },
-  'network-fetch': {
-    id: 'network-fetch',
-    label: 'Network fetch',
-    allowCwdWrite: false,
-    allowNetwork: true,
-    envSecretsAllowed: false,
-    description: 'Explicit public network fetches without workspace writes.',
-  },
-  'connector-send': {
-    id: 'connector-send',
-    label: 'Connector send',
-    allowCwdWrite: false,
-    allowNetwork: true,
-    envSecretsAllowed: false,
-    description: 'Approval-gated outbound connector delivery without workspace writes.',
-  },
-  'system-control': {
-    id: 'system-control',
-    label: 'System control',
-    allowCwdWrite: false,
-    allowNetwork: false,
-    envSecretsAllowed: false,
-    description: 'System-control commands stay isolated and approval-gated; no network or workspace writes.',
-  },
-  'untrusted-code': {
-    id: 'untrusted-code',
-    label: 'Untrusted code',
-    allowCwdWrite: false,
-    allowNetwork: false,
-    envSecretsAllowed: false,
-    description: 'Untrusted code interpreter profile with no network, no workspace writes, and no inherited secrets.',
-  },
-}
 
 export function commandNeedsNetwork(command: string): boolean {
   return !!commandApprovalReason(command)
@@ -222,47 +137,6 @@ export function sandboxProfileForCommand(command: string): SandboxProfileId {
   if (isReadOnlyShellCommand(command)) return 'read-only'
   const classification = approvalPolicyScope('tool', 'run_command', { command }).classification
   return sandboxProfileForCommandClass(classification)
-}
-
-export function sandboxProfileForCommandClass(classification: string | null | undefined): SandboxProfileId {
-  switch (classification) {
-    case 'git-read':
-    case 'read-only':
-    case 'secret-read':
-      return 'read-only'
-    case 'test':
-    case 'build':
-    case 'git-mutate':
-    case 'destructive-filesystem':
-    case 'shell':
-    case 'compound-shell':
-    case 'empty-command':
-      return 'build-test'
-    case 'package-install':
-      return 'package-install'
-    case 'network-fetch':
-    case 'network-shell':
-      return 'network-fetch'
-    case 'system-control':
-      return 'system-control'
-    default:
-      return 'untrusted-code'
-  }
-}
-
-export function sandboxProfileAllowsNetwork(profile: SandboxProfileId, override?: boolean): boolean {
-  return override ?? SANDBOX_PROFILES[profile].allowNetwork
-}
-
-/**
- * The global task-network toggle is only meaningful for a command already
- * classified as network-bearing. It must never widen build-test/untrusted-code
- * profiles merely because an opaque interpreter invocation slipped classification.
- */
-export function taskSandboxNetworkOverride(profile: SandboxProfileId, enabled: boolean | undefined): boolean | undefined {
-  if (profile === 'package-install') return true
-  if (profile === 'network-fetch') return enabled === true
-  return undefined
 }
 
 export function captureSandboxArtifactBaseline(cwd: string, now = Date.now(), captureWorkspace = true): SandboxArtifactBaseline {
@@ -344,9 +218,7 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
   const profile = options.profile ?? sandboxProfileForCommand(command)
   const allowNetwork = sandboxProfileAllowsNetwork(profile, options.allowNetwork)
   const cwd = prepareSandboxExecutionCwd(hostCwd, profile)
-  // package-install runs in a throwaway temp dir; remove it once artifacts are captured so we
-  // don't orphan a (potentially node_modules-sized) directory per install. The host cwd is never
-  // deleted — only a sandbox-owned scratch dir that differs from it.
+  // Only sandbox-owned package-install scratch is removed after artifact capture.
   const ephemeralCwd = cwd === hostCwd ? null : cwd
   try {
     const baseline = captureSandboxArtifactBaseline(cwd, Date.now(), SANDBOX_PROFILES[profile].allowCwdWrite)
@@ -358,6 +230,34 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
         sandboxed: true,
         profile,
         implementation: 'macos-sandbox-exec',
+        signal: options.signal,
+      })
+      return attachSandboxArtifacts(command, cwd, result, baseline)
+    }
+    if (canUseLinuxSandbox()) {
+      const definition = SANDBOX_PROFILES[profile]
+      let bwrapArgv: string[]
+      try {
+        bwrapArgv = linuxSandboxArgv(cwd, { allowCwdWrite: definition.allowCwdWrite, allowNetwork })
+      } catch (error) {
+        // A workspace whose git metadata the profile cannot protect keeps commands refused.
+        if (!(error instanceof LinuxSandboxError)) throw error
+        return attachSandboxArtifacts(command, cwd, {
+          code: 126,
+          stdout: '',
+          stderr: `${error.message}\n`,
+          sandboxed: false,
+          profile,
+          implementation: 'unsandboxed',
+        }, baseline)
+      }
+      const result = await runShell([linuxSandboxBinary()!, ...bwrapArgv, commandShell(), ...commandShellArgs(), command], {
+        cwd,
+        timeoutMs: options.timeoutMs,
+        maxBuffer: options.maxBuffer,
+        sandboxed: true,
+        profile,
+        implementation: 'linux-bwrap',
         signal: options.signal,
       })
       return attachSandboxArtifacts(command, cwd, result, baseline)
@@ -404,130 +304,6 @@ function prepareSandboxExecutionCwd(hostCwd: string, profile: SandboxProfileId):
     } catch { /* ignore unreadable optional package inputs */ }
   }
   return realpathSync(sandboxCwd)
-}
-
-export function macSandboxProfile(cwd: string, profileOrNetwork: SandboxProfileId | boolean = 'build-test', extraReadRoots: Array<string | null | undefined> = [], allowNetworkOverride?: boolean): string {
-  const profile = typeof profileOrNetwork === 'boolean' ? (profileOrNetwork ? 'network-fetch' : 'build-test') : profileOrNetwork
-  const definition = SANDBOX_PROFILES[profile]
-  const allowNetwork = allowNetworkOverride ?? definition.allowNetwork
-  const readRoots = uniqueExistingPaths([
-    cwd,
-    '/bin',
-    '/sbin',
-    '/usr/bin',
-    '/usr/sbin',
-    '/usr/lib',
-    '/usr/libexec',
-    '/usr/share',
-    '/System',
-    '/Library',
-    '/opt/homebrew',
-    '/usr/local',
-    // /usr/bin/git, make, clang… are xcrun shims that load from the selected developer dir.
-    developerDir(),
-    os.tmpdir(),
-    process.env.TMPDIR,
-    darwinUserTempDir(),
-    ...extraReadRoots,
-  ])
-  const writeRoots = uniqueExistingPaths([
-    ...(definition.allowCwdWrite ? [cwd] : []),
-    os.tmpdir(),
-    process.env.TMPDIR,
-    darwinUserTempDir(),
-  ])
-  const readRules = readRoots.map((root) => `(subpath ${sbplString(root)})`).join('\n      ')
-  const writeRules = writeRoots.map((root) => `(subpath ${sbplString(root)})`).join('\n      ')
-  // For no-network profiles, `(allow mach-lookup)` alone would still let a sandboxed child reach
-  // network-resolution daemons (mDNSResponder/DNS, the system proxy/DNS configuration services)
-  // over the bootstrap port and perform name resolution / proxied network actions, partially
-  // undermining the "network denied" guarantee. SBPL is last-match-wins, so re-deny just those
-  // network-adjacent mach services after the broad allow — general mach-lookup (needed by dyld,
-  // compilers and language runtimes) stays open so build/test/read-only runs don't break.
-  const machNetworkDeny = allowNetwork
-    ? ''
-    : `
-(deny mach-lookup
-      (global-name "com.apple.mDNSResponder")
-      (global-name "com.apple.mDNSResponder.dnsproxy")
-      (global-name "com.apple.dnssd.service")
-      (global-name "com.apple.SystemConfiguration.DNSConfiguration")
-      (global-name "com.apple.SystemConfiguration.PPPController")
-      (global-name "com.apple.SystemConfiguration.SCNetworkReachability")
-      (global-name "com.apple.SystemConfiguration.configd")
-      (global-name "com.apple.network.statistics")
-      (global-name "com.apple.networkd")
-      (global-name "com.apple.nehelper")
-      (global-name "com.apple.nesessionmanager"))`
-  return `(version 1)
-(deny default)
-(allow process*)
-(allow sysctl-read)
-(allow mach-lookup)
-(allow ipc-posix-shm)
-(allow file-map-executable)
-(allow file-read-metadata)
-(allow file-read-data (literal "/"))
-(allow file-read*
-      ${readRules}
-      (literal "/dev/null")
-      (literal "/dev/random")
-      (literal "/dev/urandom"))
-(allow file-write*
-      ${writeRules}
-      (literal "/dev/null"))${definition.allowCwdWrite ? gitControlWriteDeny(cwd) : ''}${machNetworkDeny}
-${allowNetwork ? '(allow network*)' : ''}`
-}
-
-// A writable workspace still may not touch git's control files. Host-side git (status,
-// diff, snapshots) runs outside the sandbox and would execute a planted core.fsmonitor,
-// filter driver or hook, so a sandboxed `npm test` could otherwise escape through
-// .git/config. Denies the `.git` entry itself (no swapping or creating it) and its
-// config, hooks and info at any depth (nested repos, submodules). SBPL is last-match-wins.
-export function gitControlWriteDeny(cwd: string): string {
-  let root: string
-  try { root = realpathSync(path.resolve(cwd)) } catch { return '' }
-  const literal = `
-      (literal ${sbplString(path.join(root, '.git'))})
-      (subpath ${sbplString(path.join(root, '.git', 'config'))})
-      (subpath ${sbplString(path.join(root, '.git', 'config.worktree'))})
-      (subpath ${sbplString(path.join(root, '.git', 'hooks'))})
-      (subpath ${sbplString(path.join(root, '.git', 'info'))})`
-  // A quote would end the #"..." literal; such a root keeps the top-level rules only.
-  const nested = root.includes('"') ? '' : `
-      (regex #"^${sbplRegexEscape(root)}/.+/\\.git$")
-      (regex #"^${sbplRegexEscape(root)}/(.+/)?\\.git/(config|config\\.worktree|hooks|info|modules/.+/(config|hooks|info))(/.*)?$")`
-  return `
-(deny file-write*${literal}${nested})`
-}
-
-// The developer dir `xcode-select` points at (Xcode.app or the Command Line Tools), read
-// from its link rather than spawning xcode-select on every sandboxed command. Inside Xcode.app
-// the shims also load SharedFrameworks (DVTSystemPrerequisites), so the whole bundle is read.
-let cachedDeveloperDir: string | null | undefined
-function developerDir(): string | null {
-  if (cachedDeveloperDir === undefined) {
-    let dir: string | null
-    try { dir = realpathSync('/var/db/xcode_select_link') } catch { dir = existsSync('/Library/Developer/CommandLineTools') ? '/Library/Developer/CommandLineTools' : null }
-    const bundle = dir?.match(/^(.*?\.app)\/Contents\/Developer$/)
-    cachedDeveloperDir = bundle ? bundle[1] : dir
-  }
-  return cachedDeveloperDir
-}
-
-// xcrun keeps its lookup cache in the per-user temp dir (confstr DARWIN_USER_TEMP_DIR), which is
-// TMPDIR for a Finder launch but not when the app starts with a scrubbed environment.
-let cachedUserTempDir: string | null | undefined
-function darwinUserTempDir(): string | null {
-  if (cachedUserTempDir === undefined) {
-    const result = process.platform === 'darwin' ? spawnSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8', timeout: 2000 }) : null
-    cachedUserTempDir = result?.status === 0 && result.stdout.trim() ? result.stdout.trim() : null
-  }
-  return cachedUserTempDir
-}
-
-function sbplRegexEscape(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function runShell(argv: string[], opts: { cwd: string; timeoutMs?: number; maxBuffer?: number; sandboxed: boolean; profile: SandboxedCommandResult['profile']; implementation: SandboxedCommandResult['implementation']; signal?: AbortSignal }): Promise<SandboxedCommandResult> {
@@ -577,8 +353,7 @@ function runShell(argv: string[], opts: { cwd: string; timeoutMs?: number; maxBu
     }
     opts.signal?.addEventListener('abort', onAbort, { once: true })
     if (opts.signal?.aborted) onAbort()
-    // Per-stream decoders buffer partial multi-byte sequences across chunk boundaries, so emoji/CJK
-    // split across two 'data' events don't decode to U+FFFD replacement chars.
+    // Streaming decoders preserve UTF-8 characters split across data events.
     const outDecoder = new StringDecoder('utf8')
     const errDecoder = new StringDecoder('utf8')
     const append = (kind: 'stdout' | 'stderr', chunk: Buffer) => {
@@ -587,12 +362,7 @@ function runShell(argv: string[], opts: { cwd: string; timeoutMs?: number; maxBu
       else stderr = (stderr + text).slice(0, maxBuffer)
       if (stdout.length + stderr.length >= maxBuffer && !overflowed) {
         overflowed = true
-        // Cancel the unrelated timeout timer so it doesn't double-fire later, then run the same
-        // SIGTERM-now/SIGKILL-after-grace-period escalation the timeout path uses, so a child that
-        // traps/ignores SIGTERM doesn't linger until the original (possibly much longer) timeout.
-        // Note: `child.killed` reflects whether a signal was *sent*, not whether the process has
-        // actually exited yet — checking `exitCode`/`signalCode` (only set once 'exit' fires) is
-        // what correctly detects a child that is still alive after ignoring SIGTERM.
+        // A sent signal is not an exit; escalate after the grace period while the child is alive.
         clearTimeout(timer)
         terminate()
       }
@@ -632,68 +402,6 @@ function attachSandboxArtifacts(command: string, cwd: string, result: SandboxedC
     artifacts: buildSandboxArtifactBundle({ cwd, command, result: sanitized, baseline }),
     changedPaths: changedWorkspacePaths(cwd, baseline.workspaceSnapshot),
   }
-}
-
-function gitOutput(args: string[], cwd: string): Buffer | null {
-  const result = spawnSync('git', args, {
-    cwd,
-    encoding: 'buffer',
-    maxBuffer: 32 * 1024 * 1024,
-    timeout: 20_000,
-    env: hostGitEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' }),
-  })
-  return result.status === 0 && Buffer.isBuffer(result.stdout) ? result.stdout : null
-}
-
-function captureWorkspaceSnapshot(cwd: string): SandboxWorkspaceSnapshot | null {
-  const rootRaw = gitOutput(['rev-parse', '--show-toplevel'], cwd)
-  if (!rootRaw) return null
-  const rootText = rootRaw.toString('utf8').trim()
-  if (!rootText) return null
-  let root: string
-  try { root = realpathSync(rootText) } catch { return null }
-  const listed = gitOutput(['ls-files', '-c', '-o', '--exclude-standard', '-z'], root)
-  if (!listed) return null
-  const files: Array<{ path: string; fingerprint: string }> = []
-  for (const rel of listed.toString('utf8').split('\0').filter(Boolean)) {
-    if (rel.startsWith('/') || rel.split('/').includes('..')) continue
-    const full = path.join(root, ...rel.split('/'))
-    let stat
-    try { stat = lstatSync(full) } catch { continue }
-    let fingerprint: string
-    if (stat.isSymbolicLink()) {
-      try { fingerprint = `link:${workspaceContentFingerprint(readlinkSync(full))}` } catch { continue }
-    } else if (stat.isFile()) {
-      try {
-        fingerprint = stat.size <= MAX_HASH_BYTES
-          ? `file:${workspaceContentFingerprint(readFileSync(full))}`
-          : `large:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
-      } catch { continue }
-    } else {
-      continue
-    }
-    files.push({ path: rel.replace(/\\/g, '/'), fingerprint })
-  }
-  return { root, files: files.sort((a, b) => a.path.localeCompare(b.path)) }
-}
-
-function workspaceContentFingerprint(content: string | Buffer): string {
-  return createHash('sha256').update(content).digest('hex')
-}
-
-function changedWorkspacePaths(cwd: string, before: SandboxWorkspaceSnapshot | undefined): string[] {
-  if (!before) return []
-  const after = captureWorkspaceSnapshot(before.root)
-  if (!after || after.root !== before.root) return []
-  const previous = new Map(before.files.map((file) => [file.path, file.fingerprint]))
-  const current = new Map(after.files.map((file) => [file.path, file.fingerprint]))
-  const changed = new Set<string>()
-  for (const [file, fingerprint] of current) if (previous.get(file) !== fingerprint) changed.add(file)
-  for (const file of previous.keys()) if (!current.has(file)) changed.add(file)
-  return [...changed].sort().map((repoPath) => {
-    const relative = path.relative(cwd, path.join(before.root, ...repoPath.split('/')))
-    return relative.split(path.sep).join('/') || '.'
-  })
 }
 
 function collectArtifactFiles(cwd: string, roots: string[]): SandboxFileArtifact[] {
@@ -831,24 +539,4 @@ export function sandboxCommandEnv(cwd: string): NodeJS.ProcessEnv {
 function allowUnsandboxedCommands(): boolean {
   const value = process.env[UNSANDBOXED_ENV]?.toLowerCase()
   return value === '1' || value === 'true' || value === 'yes'
-}
-
-export function uniqueExistingPaths(paths: Array<string | null | undefined>): string[] {
-  const out: string[] = []
-  const seen = new Set<string>()
-  for (const item of paths) {
-    if (!item) continue
-    try {
-      const resolved = realpathSync(path.resolve(item))
-      if (!seen.has(resolved)) {
-        seen.add(resolved)
-        out.push(resolved)
-      }
-    } catch { /* ignore missing roots */ }
-  }
-  return out
-}
-
-export function sbplString(value: string): string {
-  return JSON.stringify(value)
 }

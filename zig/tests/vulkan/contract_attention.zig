@@ -52,6 +52,18 @@ pub fn sdpaBound(n: u64, m: Mags, want: f64) f64 {
     return work + 0x1p-8 * (@abs(want) + work) + 0x1p-133;
 }
 
+// Same stage bound for f32 output (sdpa_rows_f32q): f32 store rounding replaces the 2^-8 bf16 store term.
+pub fn sdpaBoundF32(n: u64, m: Mags, want: f64) f64 {
+    const u: f64 = 0x1p-24;
+    const dot = rel(dot_terms) * m.terms;
+    const arg = dot + u * 2 * m.score;
+    const e_rel = arg + 2 * u;
+    const den_rel = rel(@floatFromInt(softmaxDepth(n))) + e_rel;
+    const prob_rel = e_rel + den_rel + u;
+    const work = prob_rel * m.value + rel(@floatFromInt(outputDepth(n))) * m.value;
+    return work + u * (@abs(want) + work) + 0x1p-149;
+}
+
 pub const SdpaCase = struct { name: []const u8, rows: u64, prefix: u64 };
 
 // Capacity covers prefix + rows and rejects totals above max_visible_keys.
@@ -124,6 +136,11 @@ pub fn attendRef(
             var denom: f64 = 0;
             for (scores[0..n]) |s| denom += @exp(s - m);
             for (0..@intCast(fx.head_dim)) |d| {
+                if (n == 1) {
+                    const vbase = (kh * cap) * @as(usize, @intCast(fx.head_dim));
+                    want[r * row_elems + h * @as(usize, @intCast(fx.head_dim)) + d] = c.fromBf16(values[vbase + d]);
+                    continue;
+                }
                 var acc: f64 = 0;
                 for (0..n) |j| {
                     const vbase = (kh * cap + j) * @as(usize, @intCast(fx.head_dim));
@@ -166,6 +183,16 @@ pub const Sdpa = struct {
         for (q_bits) |*x| x.* = fx.sampleDyadic(rng, -5, 3);
         for (k_bits) |*x| x.* = fx.sampleDyadic(rng, -5, 3);
         for (v_bits) |*x| x.* = fx.sampleDyadic(rng, -5, 3);
+        if (case.prefix == 0) {
+            const cap_u: usize = @intCast(capacity);
+            const dim_u: usize = @intCast(fx.head_dim);
+            for (0..@intCast(fx.kv_heads)) |kh| {
+                const base = kh * cap_u * dim_u;
+                v_bits[base + 0] = 0x8000;
+                v_bits[base + 1] = 0x0001;
+                v_bits[base + 2] = 0x8001;
+            }
+        }
         var f: Sdpa = .{
             .a = a,
             .case = case,
@@ -217,7 +244,47 @@ pub const Sdpa = struct {
         }
         return r;
     }
+
+    // Check f32 outputs from sdpa_rows_f32q against f64 bounds; single-key rows preserve exact widened V bits.
+    pub fn checkF32(f: Sdpa, bits: []const u32) !Report {
+        var r: Report = .{};
+        const row_elems: usize = @intCast(fx.heads * fx.head_dim);
+        const kh_span: usize = @intCast(fx.heads / fx.kv_heads);
+        for (0..@intCast(f.case.rows)) |row| {
+            const n = f.visible[row];
+            for (0..@intCast(fx.heads)) |h| {
+                for (0..@intCast(fx.head_dim)) |d| {
+                    const i = row * row_elems + h * @as(usize, @intCast(fx.head_dim)) + d;
+                    const got: f64 = @as(f32, @bitCast(bits[i]));
+                    if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+                    const w = f.want[i];
+                    const bound = sdpaBoundF32(n, f.mags, w);
+                    const dist = @abs(got - w);
+                    if (dist > bound) return error.OverBound;
+                    const ratio = dist / bound;
+                    if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
+                    if (n == 1) {
+                        const vb = f.v_bits[(h / kh_span) * @as(usize, @intCast(f.capacity)) * @as(usize, @intCast(fx.head_dim)) + d];
+                        if (bits[i] != (@as(u32, vb) << 16)) return error.SingleKeyNotTransport;
+                    }
+                }
+            }
+        }
+        return r;
+    }
 };
+
+/// Native SDPA must match the composed Vulkan SDPA baseline byte for byte at every served shape.
+pub fn checkBaseline(got: []const u16, baseline: []const u16) !void {
+    if (got.len != baseline.len) return error.BaselineLengthMismatch;
+    if (std.mem.indexOfDiff(u16, got, baseline) != null) return error.BaselineMismatch;
+}
+
+/// Native sdpa_rows_f32q must match the f32 composed Vulkan SDPA baseline byte for byte at every served shape.
+pub fn checkBaselineF32(got: []const u32, baseline: []const u32) !void {
+    if (got.len != baseline.len) return error.BaselineLengthMismatch;
+    if (std.mem.indexOfDiff(u32, got, baseline) != null) return error.BaselineMismatch;
+}
 
 const testing = std.testing;
 
@@ -306,20 +373,47 @@ test "sdpa checkers accept the honest bf16 output and refuse planted ones" {
     for (f.want, 0..) |w, i| good[i] = c.toBf16(@floatCast(w));
     const rep = try f.check(good); // the honest rounded output passes
     try testing.expect(rep.worst <= 1);
-    // single-key row: bit-exact V transport, and tampering with it is caught
-    try testing.expectEqual(f.v_bits[0], good[0]); // row 0, head 0, d 0: n=1
-    good[0] ^= 1;
+    // Single-key row: -0 (0x8000) and subnormal (0x0001) transport bit-for-bit; sign or flush drift is caught.
+    try testing.expectEqual(@as(u16, 0x8000), f.v_bits[0]);
+    try testing.expectEqual(@as(u16, 0x0001), f.v_bits[1]);
+    try testing.expectEqual(f.v_bits[0], good[0]);
+    try testing.expectEqual(f.v_bits[1], good[1]);
+    good[0] = 0x0000;
     try testing.expectError(error.SingleKeyNotTransport, f.check(good));
     good[0] = f.v_bits[0];
-    good[1] = 0x4f00; // 2^31: an absolutely wrong finite past any bound
+    good[1] = 0x0000;
+    try testing.expectError(error.SingleKeyNotTransport, f.check(good));
+    good[1] = f.v_bits[1];
+    good[3] = 0x4f00; // 2^31: an absolutely wrong finite past any bound
     try testing.expectError(error.OverBound, f.check(good));
-    good[1] = 0x7fc0;
+    good[3] = 0x7fc0;
     try testing.expectError(error.NonFiniteOutput, f.check(good));
     // an all-poison output (dead kernel) is refused
     const dead = try a.alloc(u16, f.want.len);
     defer a.free(dead);
     @memset(dead, fx.poison16);
     try testing.expectError(error.NonFiniteOutput, f.check(dead));
+    // Byte-comparison against the composed Vulkan baseline rejects any single-bit drift.
+    try checkBaseline(good, good);
+    const drifted = try a.dupe(u16, good);
+    defer a.free(drifted);
+    drifted[0] ^= 1;
+    try testing.expectError(error.BaselineMismatch, checkBaseline(good, drifted));
+    try testing.expectError(error.BaselineLengthMismatch, checkBaseline(good, good[0 .. good.len - 1]));
+    // F32 output checker and baseline parity behave identically for sdpa_rows_f32q.
+    const good32 = try a.alloc(u32, f.want.len);
+    defer a.free(good32);
+    for (f.want, 0..) |w, i| good32[i] = @bitCast(@as(f32, @floatCast(w)));
+    const rep32 = try f.checkF32(good32);
+    try testing.expect(rep32.worst <= 1);
+    try checkBaselineF32(good32, good32);
+    good32[0] ^= 1;
+    try testing.expectError(error.SingleKeyNotTransport, f.checkF32(good32));
+    good32[0] = @as(u32, f.v_bits[0]) << 16;
+    const drifted32 = try a.dupe(u32, good32);
+    defer a.free(drifted32);
+    drifted32[1] ^= 1;
+    try testing.expectError(error.BaselineMismatch, checkBaselineF32(good32, drifted32));
 }
 
 test "depth derivation is pinned to the shader source this contract reads" {

@@ -19,6 +19,7 @@ pub fn fits(parts: []const engine.Prompt, capacity: usize) bool {
 
 /// The prompts' pass on their slots (each begun, at position 0); `firsts[k]`: prompt k's first token.
 pub fn prefillMany(e: *Engine, parts: []const engine.Prompt, firsts: []u32) !void {
+    if (e.local.len > 0) return error.SharesOneRankEach; // full GLM-5.3 at TP=1: one rank's pass (cuda_engine_shares)
     for (parts) |p| if (p.slot >= e.seqs.items.len or e.seqs.items[p.slot] == null) return error.BadPrompts;
     return pass(e, parts, firsts, fw.Forward, fw.Rank);
 }
@@ -54,7 +55,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
         one[0] = .{ .w = &e.w, .st = g.st, .b = &e.bp };
         // decode._absorb_rows; the head's pass writes final-norm row 0, which the hold rows above already copied
         if (e.mtp and g.rows > 1) {
-            try f.mtp(@ptrCast(p.ids[1..]), &.{e.bp.fnormed + g.row0 * D * 2});
+            try f.mtpMode(@ptrCast(p.ids[1..]), &.{e.bp.fnormed + g.row0 * D * 2}, false);
             try g.st.setMtpLen(e.stream, g.st.mtp_len + g.rows - 1);
         }
         try f.commit(g.rows);

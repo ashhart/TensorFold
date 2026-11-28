@@ -1,5 +1,6 @@
 //! Nemotron-H dimensions from config.json, one Config for every backend, checked against the shapes our kernels serve.
 const std = @import("std");
+const bolt_checks = @import("config_bolt.zig");
 
 pub const Kind = enum { mamba, moe, attention };
 
@@ -12,22 +13,7 @@ pub const latent_max_experts = 1024;
 /// Conditional MTP acceptance by depth until a stream has its own estimates, from model.py draft_prior.
 pub const draft_prior = [_]f64{ 0.8, 0.72, 0.68, 0.62, 0.58, 0.55, 0.5, 0.5 };
 
-/// Why a check refused the checkpoint, kept for the caller's log line (tests read it instead).
-pub const Why = struct {
-    buf: [320]u8 = undefined,
-    len: usize = 0,
-
-    /// Keep the reason, cut short if it is long.
-    pub fn set(self: *Why, comptime fmt: []const u8, args: anytype) void {
-        var w: std.Io.Writer = .fixed(&self.buf);
-        w.print(fmt, args) catch {};
-        self.len = w.end;
-    }
-
-    pub fn text(self: *const Why) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
+pub const Why = @import("config_types.zig").Why;
 
 /// config.json's count of learned neurons at the end of every shared expert (other loaders read them as the expert's).
 pub const pocket_key = "tensorfold_learned_neurons";
@@ -38,21 +24,7 @@ pub const Format = enum { mlx, modelopt };
 /// --precision: a ModelOpt checkpoint's own math (e4m3 and NVFP4 rows), or bf16 rows throughout (full).
 pub const Precision = enum { checkpoint, full };
 
-/// One matrix's MLX affine width: `bits` per weight, a scale and a bias for each `group` of them.
-pub const Width = struct {
-    bits: u8 = 4,
-    group: u16 = 64,
-
-    /// The width the 4-bit kernels read (lane tiles, the expert kernels, the embedding); others take the row kernels.
-    pub fn four(w: Width) bool {
-        return w.bits == 4 and w.group == 64;
-    }
-
-    /// A width the core's affine kernels unpack: 2 to 8 bits but 7, in groups of 32, 64 or 128.
-    pub fn readable(w: Width) bool {
-        return w.bits >= 2 and w.bits <= 8 and w.bits != 7 and (w.group == 32 or w.group == 64 or w.group == 128);
-    }
-};
+pub const Width = @import("config_types.zig").Width;
 
 /// A matrix by its module name, at its width.
 pub const Named = struct { name: []const u8, width: Width };
@@ -101,13 +73,16 @@ pub const Config = struct {
     eos_count: usize = 0,
     latent: usize = 0, // moe_latent_size: routed experts read and write this width between two bf16 projections
     omni: bool = false, // nemotron_h_omni: the text model's tensors sit under "language_model."
+    salm: bool = false, // nemo_speechlm (Nemotron 3.5 Transcribe): bf16 throughout, NeMo's names under "llm."
     shares: usize = 1, // latent MoE: expert widths cut in this many shares, summed in share order on every TP world
     held: ?usize = null, // a split checkpoint (tensorfold_tp): the one share its expert tensors hold
     rank: usize = 0, // this process's tensor-parallel rank of `world`: set at load, never by config.json
     world: usize = 1,
     ck: bool = false, // --precision checkpoint: e4m3 rows into the FP8 layers, NVFP4 rows into the experts
+    wide_rounds: bool = false, // TF_NEMOTRON_WIDE_ROUNDS where cuda_wide.allowed: shared rounds of 16 streams, 32 rows
     widths: [max_layers][4]Width = @splat(@splat(.{})), // each layer's matrices (members(kind) order) at their widths
     embed_width: Width = .{},
+    embed_bf16: bool = false, // the token table is stored bf16 (config.json's `false` for it), read by HIP only
     head_width: Width = .{},
 
     /// MoE layer `i`'s routed experts and width.
@@ -145,6 +120,24 @@ pub const Config = struct {
     /// Where the text model's tensor names start.
     pub fn prefix(self: Config) []const u8 {
         return if (self.omni) "language_model." else "";
+    }
+
+    /// The stem of layer i's names after prefix(): HF's "backbone.layers.", NeMo's "model.layers." (salm).
+    pub fn layerStem(self: Config) []const u8 {
+        return if (self.salm) "model.layers." else "backbone.layers.";
+    }
+
+    /// The token table, the final norm and a Mamba layer's fp32 parameters by their names after prefix().
+    pub fn embedName(self: Config) []const u8 {
+        return if (self.salm) "model.embed_tokens.weight" else "backbone.embeddings.weight";
+    }
+
+    pub fn normName(self: Config) []const u8 {
+        return if (self.salm) "model.norm.weight" else "backbone.norm_f.weight";
+    }
+
+    pub fn ssmParams(self: Config) []const u8 {
+        return if (self.salm) "_fp32_params." else "";
     }
 
     /// The expert width shares this rank holds and sums before the ranks meet.
@@ -200,19 +193,24 @@ pub const Config = struct {
 
     /// `dir`/config.json.
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
+        return readWith(gpa, io, dir, .{});
+    }
+
+    /// `dir`/config.json, also reading what `allow` names.
+    pub fn readWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, allow: Allow) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 25)); // ModelOpt names each module
         defer gpa.free(text);
         var why: Why = .{};
-        return parse(gpa, text, &why) catch |e| {
+        return parseWith(gpa, text, &why, allow) catch |e| {
             if (why.len > 0) std.log.err("{s}: {s}", .{ path, why.text() });
             return e;
         };
     }
 };
 
-fn int(obj: std.json.ObjectMap, key: []const u8) !usize {
+pub fn int(obj: std.json.ObjectMap, key: []const u8) !usize {
     const v = obj.get(key) orelse {
         std.log.err("config.json has no {s}", .{key});
         return error.BadConfig;
@@ -241,7 +239,7 @@ fn float(obj: std.json.ObjectMap, key: []const u8) !f32 {
     return @floatCast(try number(obj.get(key) orelse return error.BadConfig));
 }
 
-fn kindOf(name: []const u8) !Kind {
+pub fn kindOf(name: []const u8) !Kind {
     if (std.mem.eql(u8, name, "mamba") or std.mem.eql(u8, name, "M")) return .mamba;
     if (std.mem.eql(u8, name, "moe") or std.mem.eql(u8, name, "E")) return .moe;
     if (std.mem.eql(u8, name, "attention") or std.mem.eql(u8, name, "*")) return .attention;
@@ -284,7 +282,7 @@ fn width(o: std.json.ObjectMap, key: []const u8, default: usize) usize {
 }
 
 /// The checkpoint's width and each per-module entry's (oQ quants); a width no kernel reads is refused by its module.
-fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
+fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why, allow: Allow) !void {
     const q = quantBlock(o) orelse {
         why.set("config.json declares no quantization; the native Nemotron kernels read MLX affine checkpoints", .{});
         return error.UnsupportedQuantization;
@@ -315,7 +313,7 @@ fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
     c.head_width = global;
     c.widths = @splat(@splat(global));
     var it = q.iterator();
-    while (it.next()) |e| if (!blockField(e.key_ptr.*)) try module(c, global, e.key_ptr.*, e.value_ptr.*, why);
+    while (it.next()) |e| if (!blockField(e.key_ptr.*)) try module(c, global, e.key_ptr.*, e.value_ptr.*, why, allow);
 }
 
 /// What the native Nemotron kernels read, for the refusals that name a width.
@@ -328,7 +326,11 @@ fn readable(bits: usize, group: usize) ?Width {
 }
 
 /// A per-module entry as nn.quantize reads it: true, a dict at a readable width, or false for a lesson's matrix.
-fn module(c: *Config, global: Width, path: []const u8, v: std.json.Value, why: *Why) !void {
+fn module(c: *Config, global: Width, path: []const u8, v: std.json.Value, why: *Why, allow: Allow) !void {
+    if (allow.bf16_embed and v == .bool and !v.bool and isEmbed(path)) {
+        c.embed_bf16 = true;
+        return;
+    }
     const slot = target(c, path) orelse return; // a module the engine does not read as a quantized matrix
     slot.* = switch (v) {
         .bool => |on| if (on) global else if (learned(path)) Width{} else return unquantized(path, why), // split to 4/64
@@ -345,6 +347,15 @@ fn module(c: *Config, global: Width, path: []const u8, v: std.json.Value, why: *
         .null => return unquantized(path, why),
         else => return,
     };
+}
+
+/// What a backend's loader reads beyond MLX affine matrices (`bf16_embed`: unquantized token table).
+pub const Allow = struct { bf16_embed: bool = false };
+
+/// Whether `path` names the token embedding (with or without "language_model.").
+fn isEmbed(path: []const u8) bool {
+    const bare = if (std.mem.startsWith(u8, path, "language_model.")) path["language_model.".len..] else path;
+    return std.mem.eql(u8, bare, "backbone.embeddings");
 }
 
 fn unquantized(path: []const u8, why: *Why) error{UnsupportedQuantization} {
@@ -377,12 +388,18 @@ fn learned(path: []const u8) bool {
 
 /// config.json's text; a refusal's reason goes to `why`.
 pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config {
+    return parseWith(allocator, text, why, .{});
+}
+
+/// `parse`, also reading what `allow` names.
+pub fn parseWith(allocator: std.mem.Allocator, text: []const u8, why: *Why, allow: Allow) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
-    // nemotron_h_omni (Bolt) wraps the language model's config in llm_config, its quantization at the top
+    // nemotron_h_omni (Bolt, quantization at the top) and nemo_speechlm (Transcribe) wrap theirs in llm_config
     const wrapped = isType(root, "nemotron_h_omni");
-    const o = if (wrapped) (llmConfig(root) orelse return error.BadConfig) else root;
+    const salm = isType(root, "nemo_speechlm");
+    const o = if (wrapped or salm) (llmConfig(root) orelse return error.BadConfig) else root;
     if (!isType(o, "nemotron_h") and !isType(o, "nemotron_h_puzzle")) return error.NotNemotronH;
     var c = Config{
         .hidden = try int(o, "hidden_size"),
@@ -404,6 +421,10 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         .routed_scaling = if (o.get("routed_scaling_factor")) |v| @floatCast(try number(v)) else 1.0,
         .eps = if (o.get("layer_norm_epsilon")) |v| @floatCast(try number(v)) else 1e-5,
     };
+    if (c.heads == 0 or c.kv_heads == 0) { // before hidden / heads below, and the engine's heads / kv_heads groups
+        why.set("config.json declares {d} attention and {d} key/value heads; both must be positive", .{ c.heads, c.kv_heads });
+        return error.BadConfig;
+    }
     c.head_dim = if (o.get("head_dim")) |v| @intCast(v.integer) else c.hidden / c.heads;
     if (o.get(pocket_key)) |v| {
         if (v != .integer or v.integer < 0 or @as(usize, @intCast(v.integer)) >= c.shared_width or @mod(v.integer, 64) != 0) return error.BadConfig;
@@ -416,7 +437,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         if (v.integer < 0) return error.BadConfig; // a width: refused before the cast, as the latent checks below would
         c.latent = @intCast(v.integer);
     };
-    if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try puzzle(&c, v.array.items, why);
+    if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try bolt_checks.puzzle(&c, v.array.items, why);
     // hybrid_override_pattern (one character a block) wins over layers_block_type, as the Python loader reads them
     if (c.layers == 0) if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) {
         if (v.string.len > max_layers) return error.BadConfig;
@@ -430,7 +451,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         c.layers = blocks.len;
     }
     // generation_config's [2, 11] is the omni wrapper's eos plus the language model's
-    if (wrapped) if (root.get("eos_token_id")) |e| eos(&c, e);
+    if (wrapped or salm) if (root.get("eos_token_id")) |e| eos(&c, e);
     if (o.get("eos_token_id")) |e| eos(&c, e);
     if (o.get("time_step_limit")) |v| if (v == .array and v.array.items.len == 2) {
         c.dt_min = @floatCast(try number(v.array.items[0]));
@@ -443,7 +464,9 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         if (!c.bolt) c.shares = 2;
         try split(&c, root, why);
     };
-    try quantization(&c, root, why);
+    c.salm = salm;
+    // the published bf16 weights, read per tensor as the ModelOpt loader reads a bf16 projection
+    if (salm) c.format = .modelopt else try quantization(&c, root, why, allow);
     return c;
 }
 
@@ -518,46 +541,22 @@ fn eos(c: *Config, e: std.json.Value) void {
     };
 }
 
-/// nemotron_h_puzzle's block_configs: a block type per layer, each MoE layer its own experts and width (one top-k).
-fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
-    if (blocks.len > max_layers) {
-        why.set("config.json has {d} layers; the native Nemotron engine reads up to {d}", .{ blocks.len, max_layers });
-        return error.BadConfig;
-    }
-    c.bolt = true;
-    c.experts = 0;
-    c.expert_width = 0;
-    for (blocks, 0..) |b, i| {
-        if (b != .object) return error.BadConfig;
-        c.kinds[i] = try kindOf((b.object.get("block_type") orelse return error.BadConfig).string);
-        if (c.kinds[i] != .moe) continue;
-        const m: Moe = .{ .experts = try int(b.object, "n_routed_experts"), .width = try int(b.object, "moe_intermediate_size") };
-        const k = try int(b.object, "num_experts_per_tok");
-        if (c.top_k == 0) c.top_k = k;
-        if (k != c.top_k) {
-            why.set("layer {d} routes to a different number of experts than the others; the engine reads one top-k", .{i});
-            return error.BadConfig;
-        }
-        c.moe[i] = m;
-        c.experts = @max(c.experts, m.experts);
-        c.expert_width = @max(c.expert_width, m.width);
-    }
-    c.layers = blocks.len;
-}
-
 pub fn checkShapes(c: Config) !void {
-    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
-        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
-        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (c.format == .modelopt) {
         std.log.err("this is a ModelOpt (FP8 and NVFP4) checkpoint: the CUDA engine serves it; Metal reads MLX checkpoints", .{});
         return error.UnsupportedQuantization;
     }
+    if (c.bolt) return bolt_checks.shapes(c);
+    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
+        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
+        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (!ok) {
         std.log.err("this Nemotron-H's shapes differ from the kernels built for Nemotron 3.5 Lightning 30B-A3B", .{});
         return error.UnsupportedShapes;
     }
 }
+
+pub const checkDevice = bolt_checks.device;
 
 pub const lightning =
     \\{"model_type": "nemotron_h", "hidden_size": 2688, "vocab_size": 131072, "mamba_num_heads": 64,
@@ -570,8 +569,5 @@ pub const lightning =
 
 test {
     _ = @import("config_test.zig");
-}
-
-test {
     _ = @import("config_bolt_test.zig");
 }

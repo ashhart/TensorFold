@@ -1,6 +1,8 @@
 // glue._rmsnorm by hand (glm_glue.cu's first group): see glm_triton.cuh for the Triton ops it keeps.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_triton.cuh"
 
 namespace glm_glue {
@@ -137,18 +139,21 @@ __device__ void rmsnorm(const __nv_bfloat16* x, int64_t x_stride, const W* w, __
 #define RMSNORM(D, BLOCK, NW, S)                                                                                   \
   extern "C" __global__ void __launch_bounds__(NW * 32)                                                            \
       tf_glm_rmsnorm_##D(const __nv_bfloat16* x, int64_t x_stride, const __nv_bfloat16* w, __nv_bfloat16* out,    \
-                         int64_t o_stride, float* xs, float eps, int sums) {                                       \
+                         int64_t o_stride, float* xs, float eps, int sums) { glm_pdl::enter();                     \
     glm_glue::rmsnorm<D, BLOCK, NW, S>(x, x_stride, w, out, o_stride, xs, eps, sums);                              \
   }
 
-// The model's norms: hidden 4096 (8 warps), q_lora 1536 and kv_lora 512 (4 warps), as glue.rmsnorm launches them.
+// The norms glue.rmsnorm launches: hidden 4096 or 6144 (8 warps), q_lora 1536 or 2048 and kv_lora 512 (4 warps).
 RMSNORM(4096, 4096, 8, 8)
 RMSNORM(1536, 2048, 4, 8)
 RMSNORM(512, 512, 4, 4)
+RMSNORM(6144, 8192, 8, 8)
+RMSNORM(2048, 2048, 4, 8)
 
 // FP4-Local's float32 hidden norm weight: rmsnorm_4096's arithmetic, the weight read as float32.
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_rmsnorm_4096_f32w(const __nv_bfloat16* x, int64_t x_stride, const float* w, __nv_bfloat16* out,
                              int64_t o_stride, float* xs, float eps, int sums) {
+  glm_pdl::enter();
   glm_glue::rmsnorm<4096, 4096, 8, 8, float>(x, x_stride, w, out, o_stride, xs, eps, sums);
 }

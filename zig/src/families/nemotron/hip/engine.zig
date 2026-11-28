@@ -36,6 +36,8 @@ pub const Options = struct {
     mtp: bool = true,
     /// The KV pool is made at `open` from `streams` and `extra_pages`; false leaves it to `sizePool` (after agreeing).
     pool: bool = true,
+    /// Admitted config when `admit` already checked the checkpoint; null reads `config.json` with HIP allowances.
+    cfg: ?config.Config = null,
 };
 
 pub const Engine = struct {
@@ -73,7 +75,8 @@ pub const Engine = struct {
     comm: ?hip.collective.Comm = null,
     arena: hip.Arena,
     pool: pages.Pool,
-    /// A lane round's plan and its windows, sized with the pool for `o.streams` streams of `rounds.max_window` rows.
+    /// A stream's window, its round plan and its windows, sized with the pool for `o.streams` streams.
+    window: usize,
     plan: rounds.Plan,
     wins: []rounds.Window,
     sized: bool,
@@ -108,6 +111,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.io = io;
         e.o = o;
+        e.window = rounds.windowFor(o.policy.mtp.drafts);
         e.stopped = false;
         e.driver = try hip.Runtime.open();
         errdefer e.driver.close();
@@ -125,14 +129,15 @@ pub const Engine = struct {
         if (o.world > 1) e.comm = try (o.group orelse return error.NoGroup).open();
         errdefer if (e.comm) |c| c.close();
         _ = try steps.done(.{ 0, 0 }, .first);
-        e.cfg = try config.Config.read(gpa, io, dir);
+        e.cfg = o.cfg orelse try config.Config.readWith(gpa, io, dir, .{ .bf16_embed = true });
         const mtp = o.mtp and o.rank == 0 and hasFile(gpa, dir, tensors.mtp_file);
-        e.weights = try loader.load(
+        e.weights = try loader.loadInto(
             gpa,
             io,
             &e.driver,
             dir,
             &e.cfg,
+            o.cfg != null,
             .{ .world = o.world, .rank = o.rank, .mtp = mtp, .act = e.act },
         );
         errdefer e.weights.deinit();
@@ -172,7 +177,7 @@ pub const Engine = struct {
             head_kv,
         );
         errdefer e.pool.deinit();
-        e.plan = try rounds.Plan.init(&e.driver, &e.pool, streams * rounds.max_window, streams, d.vocab);
+        e.plan = try rounds.Plan.init(&e.driver, &e.pool, rounds.planRows(streams, e.window), streams, d.vocab);
         errdefer e.plan.deinit();
         e.wins = try e.gpa.alloc(rounds.Window, streams);
         e.sized = true;

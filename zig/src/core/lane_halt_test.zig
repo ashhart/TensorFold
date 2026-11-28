@@ -154,7 +154,7 @@ fn haltCase(release_at_stop: ?*bool) !void {
     const halter = try std.Thread.spawn(.{}, LaneHost.halt, .{ &host, "server restarting: retry shortly" });
     // Observe the real request under the host's lock before allowing the in-flight round to finish.
     host.mutex.lockUncancelable(std.testing.io);
-    while (host.halt_reason == null) host.wake.waitUncancelable(std.testing.io, &host.mutex);
+    while (host.halt_reason == null) host.wake.waitTimeout(std.testing.io, &host.mutex, .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }) catch {}; // timed: the lane thread also waits on wake
     const admitted = host.admitted.items.len;
     const queued = host.queued.items.len;
     host.mutex.unlock(std.testing.io);

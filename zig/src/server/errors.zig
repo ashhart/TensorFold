@@ -24,6 +24,8 @@ pub const Refused = error{ Refused, OutOfMemory };
 /// The request's allocator and the refusal it ended with.
 pub const Cx = struct {
     a: Allocator,
+    /// The chat/completion id this request's reply names (``runNamed`` sets it); null on other routes.
+    request_id: ?[]const u8 = null,
     kind: Kind = .request,
     message: []const u8 = "",
     /// The bounded wait code a retryable refusal carries (wait_reason.zig); null on a request refusal.
@@ -38,6 +40,8 @@ pub const Cx = struct {
     template_fields: @import("json").Value = .null,
     /// Set by a route that has already planned the same body (its first plan writes the request log).
     skip_request_log: bool = false,
+    /// The request prompt-cache salt, retained by server-created compaction requests; 0: none.
+    cache_salt: u64 = 0,
 
     pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
         cx.kind = kind;

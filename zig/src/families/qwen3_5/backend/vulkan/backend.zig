@@ -233,7 +233,7 @@ test "the whole-request plan gates exact fit and one past, with checked arithmet
     try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, 0, 7169, 1));
     try std.testing.expectError(error.UnsupportedPrompt, engine_mod.planFor(cap, 0, 0, 1)); // empty
     try std.testing.expectError(error.UnsupportedPrompt, engine_mod.planFor(cap, 0, 1, 0));
-    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, std.math.maxInt(u64) - 2, 2, 2)); // checked add refuses, never wraps
+    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, std.math.maxInt(u64) - 2, 2, 2));
 }
 
 test "stepped and cancel callbacks exist and their ownership guards fire before any engine access" {
@@ -253,4 +253,40 @@ test "stepped and cancel callbacks exist and their ownership guards fire before 
     // cancel guard: no owner, or a foreign stream, refuses without touching the engine
     var fresh: Vulkan = .{ .gpa = undefined, .engine = undefined };
     try std.testing.expectError(error.UnknownQwenStream, table.cancel_prefill.?(@ptrCast(&fresh), &s));
+}
+
+test "drafted, retained-state and multi-stream serving refuse by name before any engine access" {
+    var v: Vulkan = .{ .gpa = undefined, .engine = undefined };
+    const table = v.backend().vtable;
+    var s = try lanes.Stream.init(std.testing.allocator, .{ .id = "t", .prompt = &.{ 1, 2 }, .max_new = 4 });
+    defer s.deinit(std.testing.allocator);
+    // drafted serving: a nonzero depth names the missing draft head; a depth-0 absorb stays a no-op
+    const drafted: be.DraftRequest = .{ .stream = &s, .follow = &.{}, .rows = null, .start = 0, .position = 3, .depth = 1 };
+    try std.testing.expectError(error.QwenCheckpointHasNoDraftHead, table.draft(@ptrCast(&v), &.{drafted}));
+    try table.draft(@ptrCast(&v), &.{.{ .stream = &s, .follow = &.{}, .rows = null, .start = 0, .position = 3, .depth = 0 }});
+    // retained-state windows: every retained field names the window shape this engine cannot serve
+    const pos: [1]u64 = .{3};
+    var sampled: [1]u32 = .{0};
+    const ver: [1]be.Verified = .{.{ .sampled = &sampled, .drafts = &.{} }};
+    var out: [1]be.Verified = ver;
+    const retained: [4]be.Window = .{
+        .{ .stream = &s, .pending = 7, .held = 1, .tokens = &.{}, .parents = null, .positions = &pos },
+        .{ .stream = &s, .pending = 7, .held = 0, .tokens = &.{9}, .parents = null, .positions = &pos },
+        .{ .stream = &s, .pending = 7, .held = 0, .tokens = &.{}, .parents = &.{-1}, .positions = &pos },
+        .{ .stream = &s, .pending = 7, .held = 0, .tokens = &.{}, .parents = null, .positions = &pos, .early = true },
+    };
+    for (retained) |w| {
+        try std.testing.expectError(error.UnsupportedQwenWindow, table.verify(@ptrCast(&v), &.{w}, &out));
+    }
+    // multi-stream serving: a shared verify round and a second owning stream both name their refusal
+    const w1: be.Window = .{ .stream = &s, .pending = 7, .held = 0, .tokens = &.{}, .parents = null, .positions = &pos };
+    var out2: [2]be.Verified = .{ ver[0], ver[0] };
+    try std.testing.expectError(error.UnsupportedQwenWindow, table.verify(@ptrCast(&v), &.{ w1, w1 }, &out2));
+    v.owner = &s;
+    const path: [1]u32 = .{1};
+    try std.testing.expectError(error.UnsupportedQwenWindow, table.keep(@ptrCast(&v), &.{retained[0]}, &.{&path}));
+    // a rewind path the append-only state cannot take names its refusal too
+    const rewind: [2]u32 = .{ 1, 1 };
+    try std.testing.expectError(error.UnsupportedQwenRewind, table.keep(@ptrCast(&v), &.{w1}, &.{&rewind}));
+    try table.keep(@ptrCast(&v), &.{w1}, &.{&path}); // the kept row is already in: a one-path keep stays a no-op
 }

@@ -4,14 +4,25 @@ const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const core = @import("core");
 const projection = @import("cuda_projection.zig");
+const environment = @import("sys").environment;
 
+const name = "TF_FLASHNEXT_DRAFT_HEAD";
+
+/// How a bf16 language head's draft rows are held; the order is the setting's accepted words.
 pub const Mode = enum { bf16, affine4 };
-pub fn mode() !Mode {
-    const value = if (std.c.getenv("TF_FLASHNEXT_DRAFT_HEAD")) |v| std.mem.span(v) else "bf16";
-    if (std.mem.eql(u8, value, "bf16")) return .bf16;
-    if (std.mem.eql(u8, value, "affine4")) return .affine4;
-    return error.BadDraftHead;
+
+/// What an unset or blank TF_FLASHNEXT_DRAFT_HEAD selects: the rows as 4-bit affine groups of 32.
+pub const default_mode: Mode = .affine4;
+
+/// The setting's text as its reader takes it: unset or blank is the default, anything malformed is refused by name.
+fn parse(raw: ?[]const u8) !Mode {
+    return @fromBackingInt(@intCast(try environment.value(u1, name, raw, @backingInt(default_mode))));
 }
+
+pub fn mode() !Mode {
+    return @fromBackingInt(@intCast(try environment.read(u1, name, @backingInt(default_mode))));
+}
+
 pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, artifact: *const core.proposal_vocab.Artifact, role: Mode) !wt.Q4 {
     const ids = artifact.ids();
     const affine = role == .affine4;
@@ -21,6 +32,12 @@ pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, artifact: 
         var selected = try (core.proposal_rows.Source{ .identity = artifact.identity(), .storage = .bf16, .recipe = .qlinear_decode, .codes = .{ .bytes = tensor.bytes, .stride = wt.dims * 2 } }).extract(a, artifact, 1, std.math.maxInt(usize));
         defer selected.deinit();
         const rows = selected.codes;
+        if (affine) return quantized(a, d, rows, ids.len);
+        return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ ids.len, wt.dims, 1, 1, 1 }, .bytes = rows });
+    }
+    if (tensor.dtype == .u32 and tensor.rank == 2 and tensor.dim(1) == wt.dims / 4) {
+        const rows = try @import("cuda_tfq3.zig").draftRows8(a, store, ids);
+        defer a.free(rows);
         if (affine) return quantized(a, d, rows, ids.len);
         return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ ids.len, wt.dims, 1, 1, 1 }, .bytes = rows });
     }
@@ -46,4 +63,11 @@ fn quantized(a: std.mem.Allocator, d: *cuda.Driver, rows: []const u8, n: usize) 
     defer a.free(biases);
     for (0..n) |i| try @import("cuda_draft_affine.zig").row(rows[i * wt.dims * 2 ..][0 .. wt.dims * 2], words[i * wt.dims / 2 ..][0 .. wt.dims / 2], scales[i * wt.dims / 16 ..][0 .. wt.dims / 16], biases[i * wt.dims / 16 ..][0 .. wt.dims / 16]);
     return wt.uploadQ4(a, d, words, scales, biases, n, wt.dims / 8);
+}
+
+test "unset and blank read affine4, the two words read as themselves, and other text is refused" {
+    for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| try std.testing.expectEqual(Mode.affine4, try parse(raw));
+    try std.testing.expectEqual(Mode.bf16, try parse("bf16"));
+    try std.testing.expectEqual(Mode.affine4, try parse("affine4"));
+    for ([_][]const u8{ "BF16", "affine", "fp8", "1", "bf16 ", "checkpoint" }) |raw| try std.testing.expectError(error.InvalidEnvironment, parse(raw));
 }

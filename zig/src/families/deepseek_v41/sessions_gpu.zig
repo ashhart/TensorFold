@@ -70,12 +70,12 @@ pub fn optionsFromEnv() !Options {
     if (std.c.getenv("TF_DSV41_SESSION_DISK_MIN")) |v| if (std.mem.span(v).len > 0) {
         o.disk_min_tokens = try std.fmt.parseInt(u64, std.mem.span(v), 10);
     };
-    if (std.c.getenv("TF_DSV41_SESSION_RESIDENT")) |v| o.resident = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-    if (std.c.getenv("TF_DSV41_SESSION_RESIDENT_GIB")) |v| o.resident_bytes = @intFromFloat(try std.fmt.parseFloat(f64, std.mem.span(v)) * (1 << 30));
+    o.resident = try @import("sys").environment.read(?u32, "TF_DSV41_SESSION_RESIDENT", null);
+    if (try @import("sys").environment.read(?f64, "TF_DSV41_SESSION_RESIDENT_GIB", null)) |v| o.resident_bytes = @intFromFloat(v * (1 << 30));
     if (std.c.getenv("TF_DSV41_SESSION_RAM_MIB")) |v| if (std.mem.span(v).len > 0) {
         o.ram_bytes = (try std.fmt.parseInt(u64, std.mem.span(v), 10)) << 20;
     };
-    if (std.c.getenv("TF_DSV41_SESSION_STAGING_MIB")) |v| o.staging_mib = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+    o.staging_mib = try @import("sys").environment.read(u32, "TF_DSV41_SESSION_STAGING_MIB", 128);
     o.skip_covered = try flag("TF_DSV41_SESSION_SKIP_COVERED");
     o.delta = try flag("TF_DSV41_SESSION_DELTA");
     o.several = try flag("TF_DSV41_SESSION_SLOTS");

@@ -22,16 +22,13 @@ const deciders = [_][]const u8{
     "language_model.model.layers.0.mlp.shared_expert.down_proj.weight",
 };
 
-/// TF_FLASHNEXT_SPLIT_DENSE: unset or 1 splits, 0 keeps every dense projection whole.
+/// TF_FLASHNEXT_SPLIT_DENSE: unset, blank or 1 splits, 0 keeps every dense projection whole.
 pub fn setting(value: ?[]const u8) !bool {
-    const v = value orelse return true;
-    if (std.mem.eql(u8, v, "0")) return false;
-    if (std.mem.eql(u8, v, "1")) return true;
-    return error.BadDenseSplit;
+    return @import("sys").environment.value(bool, "TF_FLASHNEXT_SPLIT_DENSE", value, true) catch return error.BadDenseSplit;
 }
 
 pub fn enabled() !bool {
-    return setting(if (std.c.getenv("TF_FLASHNEXT_SPLIT_DENSE")) |v| std.mem.span(v) else null);
+    return setting(@import("sys").environment.rawText("TF_FLASHNEXT_SPLIT_DENSE"));
 }
 
 /// At two ranks with the setting on, a checkpoint whose deciders are BF16 splits; world 1 never reads the setting.
@@ -115,8 +112,11 @@ test "the dense split setting is on unless 0 and refuses any other value" {
     try std.testing.expect(try setting(null));
     try std.testing.expect(try setting("1"));
     try std.testing.expect(!try setting("0"));
+    // an empty or whitespace-only value is unset, so it keeps the default on, as every other setting here does
+    try std.testing.expect(try setting(""));
+    try std.testing.expect(try setting(" \t"));
     try std.testing.expectError(error.BadDenseSplit, setting("2"));
-    try std.testing.expectError(error.BadDenseSplit, setting(""));
+    try std.testing.expectError(error.BadDenseSplit, setting("on"));
 }
 
 test "the dense split applies at two ranks to BF16 layers only, and world 1 never reads the setting" {
@@ -133,6 +133,11 @@ test "the dense split applies at two ranks to BF16 layers only, and world 1 neve
     _ = env.setenv("TF_FLASHNEXT_SPLIT_DENSE", "0", 1);
     try std.testing.expect(!try applies(&bf16, 2));
     _ = env.setenv("TF_FLASHNEXT_SPLIT_DENSE", "1", 1);
+    try std.testing.expect(try applies(&bf16, 2));
+    // the production reader takes the same blank-as-unset rule, so the split stays on
+    _ = env.setenv("TF_FLASHNEXT_SPLIT_DENSE", "", 1);
+    try std.testing.expect(try applies(&bf16, 2));
+    _ = env.setenv("TF_FLASHNEXT_SPLIT_DENSE", " \t", 1);
     try std.testing.expect(try applies(&bf16, 2));
     _ = env.setenv("TF_FLASHNEXT_SPLIT_DENSE", "on", 1);
     try std.testing.expectError(error.BadDenseSplit, applies(&bf16, 2));

@@ -1,7 +1,30 @@
 #version 460
-// qmm.comp q4 g64 transposed bf16, 16-byte loads, one batch, zero offsets; same arithmetic; see ops_q4.qmmVariant.
+
+// Clean-room Q4 affine projection, vector loads (issue #5215): out[m, n] =
+// sum_k x[m, k] * (q[n, k] * scale[n, k / 64] + bias[n, k / 64]) in float32.
+// Same arithmetic as the scalar image with x and weights read through uvec4;
+// the host dispatches it only when both windows start 16-byte aligned.
+// Behaviour from spec-qmm-q4-4.md; ABI from zig/src/vulkan/ops_q4.zig.
+
+// BF16 halves ride the low and high 16 bits of each weight-lane word.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Two packed BF16 activations per loaded word: low half, then high half.
+float bf16_pair(uint word, uint lane) {
+  uint bits = lane == 0u ? (word & 0xffffu) << 16u : word & 0xffff0000u;
+  return uintBitsToFloat(bits);
+}
+
+// Round-to-nearest-even f32 -> bf16: add 0x7fff + the kept lsb, then truncate;
+// a NaN keeps its class with the quiet bit set.
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16u) | 0x0040u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
 
 layout(local_size_x = 256) in;
 
@@ -21,7 +44,7 @@ layout(set = 0, binding = 4, std430) writeonly buffer Output {
   uint16_t values[];
 } output_data;
 
-layout(push_constant) uniform Params {
+layout(push_constant, std430) uniform Params {
   uint count;
   uint operation;
   uint lhs_size;
@@ -43,49 +66,41 @@ layout(push_constant) uniform Params {
   uint shape[4];
   uint in_strides[4];
   uint out_strides[4];
-} params;
-
-uint16_t bf16_store(float value) {
-  uint bits = floatBitsToUint(value);
-  if (isnan(value)) {
-    return uint16_t((bits >> 16) | 0x40u);
-  }
-  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
-}
-
-float bf16_value(uint16_t x) {
-  return uintBitsToFloat(uint(x) << 16u);
-}
+} p;
 
 void main() {
-  uint groups_per_row = params.matrix_k / 64u;
-  uint total = params.matrix_m * params.matrix_n;
-  uint stride = gl_NumWorkGroups.x * 256u;
-  for (uint index = gl_GlobalInvocationID.x; index < total; index += stride) {
-    uint row = index / params.matrix_n;
-    uint column = index - row * params.matrix_n;
-    uint w_vec = column * (params.matrix_k / 32u);
-    uint x_vec = row * (params.matrix_k / 8u);
-    uint param_base = column * groups_per_row;
-    float accumulator = 0.0;
-    for (uint group = 0u; group < groups_per_row; ++group) {
-      float scale = bf16_value(scales.values[param_base + group]);
-      float bias = bf16_value(biases.values[param_base + group]);
-      for (uint half_group = 0u; half_group < 2u; ++half_group) {
-        uvec4 w4 = input_w.values[w_vec + group * 2u + half_group];
-        for (uint t = 0u; t < 4u; ++t) {
-          uint word = w4[t];
-          uvec4 x8 = input_x.values[x_vec + group * 8u + half_group * 4u + t];
-          for (uint pair = 0u; pair < 4u; ++pair) {
-            uint x_pair = x8[pair];
-            accumulator += uintBitsToFloat(x_pair << 16u) *
-                (scale * float((word >> (pair * 8u)) & 0xfu) + bias);
-            accumulator += uintBitsToFloat(x_pair & 0xffff0000u) *
-                (scale * float((word >> (pair * 8u + 4u)) & 0xfu) + bias);
-          }
+  uint tid = gl_GlobalInvocationID.x;
+  if (tid >= p.count) {
+    return;
+  }
+  uint m = tid / p.matrix_n;
+  uint n = tid % p.matrix_n;
+
+  // Element offsets land on whole vectors: host alignment checks guarantee it.
+  uint x_vecs = p.lhs_offset / 8u + m * (p.matrix_k / 8u);
+  uint w_vecs = p.rhs_offset / 4u + n * (p.matrix_k / 32u);
+  uint sb_base = p.aux_offset + n * (p.matrix_k / 64u);
+
+  float acc = 0.0;
+  for (uint g = 0u; g < p.matrix_k / 64u; ++g) {
+    float s = uintBitsToFloat(uint(scales.values[sb_base + g]) << 16u);
+    float b = uintBitsToFloat(uint(biases.values[sb_base + g]) << 16u);
+    // Two uvec4 loads cover one group: 8 words, 32 codes each.
+    for (uint v = 0u; v < 2u; ++v) {
+      uvec4 packed_codes = input_w.values[w_vecs + g * 2u + v];
+      for (uint i = 0u; i < 4u; ++i) {
+        uint word = packed_codes[i];
+        // Eight x uvec4 loads per group, walking code lanes in lockstep.
+        uvec4 packed_x = input_x.values[x_vecs + g * 8u + v * 4u + i];
+        for (uint j = 0u; j < 8u; ++j) {
+          float xv = bf16_pair(packed_x[j / 2u], j % 2u);
+          // Dequantized weight per code: x * (q * s + b), matching
+          // contract_qmm's .dequantized form; the factored form goes NaN
+          // on (inf, q=0).
+          acc += xv * (float((word >> (4u * j)) & 0xfu) * s + b);
         }
       }
     }
-    output_data.values[params.output_offset + index] = bf16_store(accumulator);
   }
+  output_data.values[p.output_offset + m * p.matrix_n + n] = bf16_store(acc);
 }

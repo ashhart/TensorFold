@@ -6,15 +6,29 @@ const walker = lanes.draft_tree;
 
 pub const Candidates = walker.Candidates;
 pub const Landing = walker.Landing;
+pub const GrowNode = walker.GrowNode;
+pub const GrowTrace = walker.GrowTrace;
 pub const chain = walker.chain;
 pub const lanesOf = walker.lanesOf;
 
 /// A grown tree's nodes at most: walker.nodes under the engine's window, 0 under TF_NO_TREES.
 pub fn nodes() !usize {
-    return walker.nodes(engine.most_window, platform.c.getenv("TF_NO_TREES") != null);
+    return walker.nodes(engine.most_window, try platform.environment.read(bool, "TF_NO_TREES", false));
 }
 
 /// walker.grow under the engine's window.
 pub fn grow(c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64) usize {
     return walker.grow(engine.most_window, c, pending, rows, most, tokens, parents, own);
+}
+
+/// Select the traced specialization once per round, or ordinary grow when tracing is off.
+pub fn growTraced(c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64, trace: ?*GrowTrace) usize {
+    if (trace) |t| return walker.growTraced(engine.most_window, c, pending, rows, most, tokens, parents, own, t);
+    return walker.grow(engine.most_window, c, pending, rows, most, tokens, parents, own);
+}
+
+test "TF_NO_TREES: the platform parses unset, valid and malformed text" {
+    try @import("std").testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_NO_TREES", null));
+    try @import("std").testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_NO_TREES", "1"));
+    try @import("std").testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_NO_TREES", "on"));
 }

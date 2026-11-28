@@ -220,7 +220,7 @@ pub const Host = struct {
     fn run(h: *Host) void {
         while (true) {
             h.lock();
-            if (h.queued.items.len == 0 and !h.closing) {
+            if ((h.queued.items.len == 0 or h.disk.holding()) and !h.closing) { // a flush goes before the next request
                 const ms_: i64 = if (disk.idleWork(h)) 10 else 100; // writes waiting for the quiet look again soon
                 if (ms_ == 100 or !h.disk.quiet(h.served, h.now())) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(ms_), .clock = .awake } }) catch {};
                 h.unlock();
@@ -391,7 +391,7 @@ pub const Host = struct {
         job.cached = plan.from;
         defer if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (waited {d:.1} ms; lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.began - job.queued), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
         h.saved.clearRetainingCapacity();
-        defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
+        defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0, h.now());
         defer if (h.eng.r.tp != null) for (plan.marks) |mk| if (std.mem.indexOfScalar(u32, h.saved.items, mk) == null) {
             h.eng.peer_drops.append(h.gpa, fx.keyOf(r.prompt[0 .. mk + 1])) catch {}; // rank 1 kept it, this Mac didn't
         };
@@ -410,6 +410,7 @@ pub const Host = struct {
             fin.message = @errorName(e);
             return;
         };
+        if (res.reason == .cancelled and h.eng.r.tp == null) @import("flashnext_cancel.zig").keep(h.gpa, job.prefilled == null, @intCast(h.eng.m.pos), job.cached, r.prompt.len, &c, Ctx.marked);
         if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
         fin.reason = switch (res.reason) {
             .stop => .stop,
@@ -484,10 +485,10 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, 
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
     if (learn) |l| if (l.conversations) {
-        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l);
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l, h.info_.context_window);
     } else {
         h.learned = try cache_setup.learnedStates(gpa, io, dir, eng, l.root, l.cap);
-        if (h.cache) |*store| store.imprint = &h.learned.?;
+        if (h.cache) |*store| cache_setup.attachLearned(store, &h.learned);
     };
     errdefer if (h.learned) |*m| m.deinit();
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();

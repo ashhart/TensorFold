@@ -23,15 +23,17 @@ const initial = (): BenchmarkViewState => ({ selected: null, active: null, histo
 
 /** One mounted drawer owns reads/actions, while the host owns the durable running job. */
 export function createBenchmarkController(port: BenchmarkPort, changed: (state: BenchmarkViewState) => void) {
-  let state = initial(), alive = true, epoch = 0, reading: number | null = null, acting = false
+  let state = initial(), alive = true, epoch = 0, reading: { epoch: number; historyRequested: boolean } | null = null, acting = false
   const publish = (patch: Partial<BenchmarkViewState>) => { state = { ...state, ...patch }; if (alive) changed(state) }
   const newest = (run: ModelBenchmarkSnapshot) => {
     return [state.active, state.selected, ...state.history].reduce<ModelBenchmarkSnapshot>((latest, item) => item?.id === run.id && item.revision > latest.revision ? item : latest, run)
   }
   const read = async (historyRequested: boolean) => {
-    if (!alive || reading === epoch || acting) return
-    const ownEpoch = epoch
-    reading = ownEpoch
+    if (!alive || acting) return
+    // A manual history refresh can replace a status-only poll.
+    if (reading?.epoch === epoch && (!historyRequested || reading.historyRequested)) return
+    const ownEpoch = ++epoch
+    reading = { epoch: ownEpoch, historyRequested }
     if (historyRequested) publish({ loading: true, error: '' })
     try {
       const current = await port.status()
@@ -50,7 +52,7 @@ export function createBenchmarkController(port: BenchmarkPort, changed: (state: 
       const notice = state.active && !active ? latest ? `The active benchmark ${latest.state === 'complete' ? 'finished' : latest.state === 'cancelled' ? 'was cancelled' : 'stopped with an issue'}; open its result to check restoration and measurements.` : 'The host no longer reports the active job; check saved history before starting again.' : state.notice
       publish({ active, selected, history, notice, loading: false, cancellationRequested: active?.id === state.active?.id && state.cancellationRequested, error: historyFailed ? 'Saved benchmark history could not be read; active run status is still shown, and you can refresh to retry history.' : '' })
     } catch { if (alive && ownEpoch === epoch) publish({ loading: false, error: 'Benchmark status could not be read; a running job may still be active, so refresh before starting another run.' }) }
-    finally { if (reading === ownEpoch) reading = null }
+    finally { if (reading?.epoch === ownEpoch) reading = null }
   }
   const action = async (kind: BenchmarkViewState['action'], work: () => Promise<void>) => {
     if (!alive || acting) return

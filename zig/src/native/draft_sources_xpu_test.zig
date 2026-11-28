@@ -3,6 +3,7 @@ const check = @import("draft_sources_check.zig").check;
 const present = @import("draft_sources_check.zig").present;
 
 comptime {
+    _ = @import("xpu_sampled_topk_test.zig"); // and so do these
     _ = @import("xpu_dflash2_test.zig"); // its tests run under this file's "draft sources:" filter
     _ = @import("xpu_dflash2_depth_test.zig"); // the core depth sweep on the XPU adapter
     _ = @import("xpu_logrow.zig"); // the logprob row's own test
@@ -70,6 +71,46 @@ test "capability audit: XPU unknown-model refusal names every listed family" {
         try std.testing.expect(std.mem.indexOf(u8, problem, "Gemma 4 E4B need DPAS") != null);
         try std.testing.expect(std.mem.indexOf(u8, problem, "(gemma4,") == null);
     }
+}
+
+test "lfm3 refusal: the XPU open refuses the ModelOpt NVFP4 export by name, before the driver or any weight" {
+    const std = @import("std");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg = @import("lfm3_xpu");
+    // config.json alone and no Level Zero here: an open that went on would fail at the driver with another problem
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg.fixtures.nvfp4 });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var problem: []const u8 = "";
+    const o: @import("engine_api").Open = .{ .dir = dir, .model_type = "lfm3", .context = 4096 };
+    try std.testing.expect((try @import("xpu.zig").open(a, std.testing.allocator, io, o, &problem)) == null);
+    try std.testing.expectEqualStrings(cfg.config.servedProblem(error.Lfm3ModeloptNvfp4NotOnXpu).?, problem);
+    // the MLX export goes on to the driver: the refusal is the scheme's alone
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg.fixtures.text });
+    try std.testing.expect((try @import("xpu.zig").open(a, std.testing.allocator, io, o, &problem)) == null);
+    try std.testing.expect(!std.mem.eql(u8, cfg.config.servedProblem(error.Lfm3ModeloptNvfp4NotOnXpu).?, problem));
+}
+
+test "lfm3 refusal: the XPU open refuses the block FP8 export by name, before the driver or any weight" {
+    const std = @import("std");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg = @import("lfm3_xpu");
+    // config.json alone and no Level Zero here: an open that went on would fail at the driver with another problem
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg.fixtures.fp8 });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var problem: []const u8 = "";
+    const o: @import("engine_api").Open = .{ .dir = dir, .model_type = "lfm3", .context = 4096 };
+    try std.testing.expect((try @import("xpu.zig").open(a, std.testing.allocator, io, o, &problem)) == null);
+    try std.testing.expectEqualStrings(cfg.config.servedProblem(error.Lfm3Fp8BlockNotOnXpu).?, problem);
 }
 
 test "draft sources: XPU verify gives each window row the logprob row of its own place in the block" {

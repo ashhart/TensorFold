@@ -1,4 +1,4 @@
-// MLA over a 512-wide latent with 64 roped columns and 128-wide heads (Ling-3.1), on common/mla.cuh's bodies.
+// MLA over a 512-wide latent with 64 roped columns (Ling-3.1's 128-wide heads, GLM-5.3's 192), on common/mla.cuh.
 #include <cuda_bf16.h>
 #include <stdint.h>
 
@@ -34,11 +34,32 @@ extern "C" __global__ void __launch_bounds__(128)
   tf_mla::absorb_q<128>(q, wk, qa, rows, heads, rb, qs, qaw);
 }
 
+// Full GLM-5.3's q_nope (the first 192 of each head's qs columns, 256 there) absorbed the same way.
+extern "C" __global__ void __launch_bounds__(128)
+    tf_mla_absorb_q_192(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows,
+                        int64_t heads, int64_t rb, int64_t qs, int64_t qaw) {
+  tf_mla::absorb_q<192>(q, wk, qa, rows, heads, rb, qs, qaw);
+}
+
 // The latent output expanded into 128-wide v heads.
 extern "C" __global__ void __launch_bounds__(128)
     tf_mla_expand_v_128(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
                         int64_t heads, int64_t rb) {
   tf_mla::expand_v<128>(ol, wv, out, rows, heads, rb);
+}
+
+// The latent output expanded into 256-wide v heads.
+extern "C" __global__ void __launch_bounds__(128)
+    tf_mla_expand_v_256(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
+                        int64_t heads, int64_t rb) {
+  tf_mla::expand_v<256>(ol, wv, out, rows, heads, rb);
+}
+
+// nch chunks' partials merged with each head's fp32 sink counted once into bf16 rows, block (row, head) of 128.
+extern "C" __global__ void __launch_bounds__(128)
+    tf_mla_merge_sink(const float* po, const float* pm, const float* pl, const float* sinks, __nv_bfloat16* out,
+                      int64_t rows, int64_t heads, int nch) {
+  tf_mla::merge_sink(po, pm, pl, sinks, out, rows, heads, nch, threadIdx.x * 4);
 }
 
 // The 64 roped columns (GPT-J pairs) at pos + row, cos and sin times YaRN's attention factor.

@@ -23,8 +23,13 @@ pub const arena_bytes: u64 = 16 << 20;
 
 // Step errors include dispatch.Error; Timeout exits 124 and InFlight exits 1 inside `vk.orExit`, before teardown.
 pub const Error = vk.dispatch.Error ||
-    error{ ContextTooLong, NonFinite, UnsupportedPrompt, Poisoned };
+    error{ ContextTooLong, NonFinite, UnsupportedPrompt, Poisoned, WrongVendor };
 // Engine.init has no explicit error set: inferred platform I/O/config errors pass through; steps do no filesystem I/O.
+
+/// Pure vendor admission predicate: checks requested Vulkan vendorID immediately after device selection.
+pub fn admitVendor(got: u32, want: ?u32) error{WrongVendor}!void {
+    if (want) |expected| if (got != expected) return error.WrongVendor;
+}
 
 // Build-supplied SPIR-V variants (norm/swiglu/rope use ORACLE_QWEN35 Metal oracle); engine checks and pipelines them.
 pub const ShaderBundle = struct {
@@ -89,6 +94,20 @@ pub const Engine = struct {
         context: usize,
         timeout_ns: u64,
     ) !*Engine {
+        return initWithVendor(gpa, io, bundle, model_dir, context, timeout_ns, null, null);
+    }
+
+    // Checks optional vendor admission immediately after Device.open, before pipeline creation or weight upload.
+    pub fn initWithVendor(
+        gpa: Allocator,
+        io: std.Io,
+        bundle: ShaderBundle,
+        model_dir: []const u8,
+        context: usize,
+        timeout_ns: u64,
+        vendor: ?u32,
+        got_vendor: ?*u32,
+    ) !*Engine {
         const cap = try state.capacityFor(context);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
@@ -104,6 +123,8 @@ pub const Engine = struct {
         errdefer gpa.destroy(e.dev);
         e.dev.* = try vk.Device.open(e.rt, .{ .features = .{ .storage16 = true, .int16 = true } });
         errdefer e.dev.close();
+        if (got_vendor) |slot| slot.* = e.dev.properties.vendorID;
+        try admitVendor(e.dev.properties.vendorID, vendor);
         e.cmds = try gpa.create(vk.Commands);
         errdefer gpa.destroy(e.cmds);
         e.cmds.* = try vk.Commands.init(e.dev);
@@ -190,7 +211,7 @@ pub const Engine = struct {
         try vk.ops_q4.checkIds(tokens, e.model.embed.n);
         try planFor(@intCast(e.state.capacity), e.state.visible(), tokens.len, 1);
         e.poisoned = true;
-        try vk.orExit(vk.upload(e.cmds, e.ids.buffer.*, e.ids.byte_offset, e.staging, std.mem.sliceAsBytes(tokens), e.timeout_ns));
+        try vk.orExit(vk.commands.updateInBatch(e.cmds, e.ids.buffer.*, e.ids.byte_offset, std.mem.sliceAsBytes(tokens)));
         try vk.orExit(embed(e, ringView(try e.h[0].slice(0, tokens.len * pinned.hidden), .bf16), tokens.len));
         try runLayers(e, tokens.len);
         try vk.orExit(e.state.append(tokens.len));
@@ -203,7 +224,7 @@ pub const Engine = struct {
         try vk.ops_q4.checkIds(&.{token}, e.model.embed.n);
         try planFor(@intCast(e.state.capacity), e.state.visible(), 1, 1);
         e.poisoned = true;
-        try vk.orExit(vk.upload(e.cmds, e.ids.buffer.*, e.ids.byte_offset, e.staging, std.mem.sliceAsBytes(&[1]u32{token}), e.timeout_ns));
+        try vk.orExit(vk.commands.fillInBatch(e.cmds, e.ids.buffer.*, e.ids.byte_offset, 4, token));
         try vk.orExit(embed(e, ringView(try e.h[0].slice(0, pinned.hidden), .bf16), 1));
         try runLayers(e, 1);
         try vk.orExit(e.state.append(1));
@@ -273,6 +294,7 @@ pub const Engine = struct {
         const cx = e.core();
         const span = rows * pinned.hidden;
         const base = e.state.visible();
+        try vk.orExit(e.attn.setBasePosition(e.cmds, e.staging, @intCast(base), e.timeout_ns));
         var ring: usize = 0;
         for (e.model.layers, 0..) |layer, i| {
             const act = fwd.actKind(i);
@@ -390,4 +412,10 @@ test "the arena holds the persistent windows plus the worst transient layer" {
     try testing.expectEqual(fwd.actKind(0), vk.tensor.Kind.f32); // the wide layers the buffers size for
     try testing.expectEqual(fwd.actKind(fwd.wide_layers), vk.tensor.Kind.bf16); // the first narrow layer
     try testing.expect(arena_bytes >= persistentBytes() + worst + (1 << 20));
+}
+
+test "admitVendor accepts matching or unconstrained vendors and rejects mismatches before init" {
+    try admitVendor(0x106b, null);
+    try admitVendor(0x106b, 0x106b);
+    try testing.expectError(error.WrongVendor, admitVendor(0x106b, 0x1002));
 }

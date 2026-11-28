@@ -17,6 +17,11 @@ constexpr int GROUPED_LOAD = tf_exl3::AHEAD;
 constexpr int GROUPED_LOAD = tf_exl3::PLAIN;
 #endif
 
+// Defined before the others: nvcc 13.3 then leaves tf_exl3_grouped_2's sm_12x SASS as it was.
+extern "C" __global__ void tf_exl3_grouped_wide_2(tf_exl3::GroupedArgs a) {  // mul1, 64 columns by 32 members
+    tf_exl3::grouped_body<2, 4, 4, GROUPED_LOAD, 2>(a, blockIdx.x, blockIdx.y, blockIdx.z);
+}
+
 extern "C" __global__ void tf_exl3_grouped_0(tf_exl3::GroupedArgs a) {  // 3inst, any width
     tf_exl3::grouped_body<0, 8, 4, GROUPED_LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);
 }
@@ -145,13 +150,9 @@ struct GateUpArgs {
     int act_mode;
 };
 
-extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
-    const int p = blockIdx.x, blk = blockIdx.y;
-    const int e = a.pick[p];
-    if (e < 0 || e >= a.experts) return;
-    const int lane = threadIdx.x;
-    const int n = blk * 128 + 4 * lane;
-    float gv[4], uv[4];
+// The gate and up splits of pair p summed in order and rotated back (before the scales).
+__device__ __forceinline__ void gateup_sums(const GateUpArgs& a, int p, int n, int lane, float (&gv)[4],
+                                            float (&uv)[4]) {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
         float sg = 0.f, su = 0.f;
@@ -164,6 +165,24 @@ extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
     }
     fwht128(gv, lane);
     fwht128(uv, lane);
+}
+
+// The activations rotated into the down projection's inputs.
+__device__ __forceinline__ void gateup_store(const GateUpArgs& a, int p, int n, int lane, float (&v)[4]) {
+    fwht128(v, lane);
+    half* o = a.xd + (size_t)p * a.n + n;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
+}
+
+extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
+    const int p = blockIdx.x, blk = blockIdx.y;
+    const int e = a.pick[p];
+    if (e < 0 || e >= a.experts) return;
+    const int lane = threadIdx.x;
+    const int n = blk * 128 + 4 * lane;
+    float gv[4], uv[4];
+    gateup_sums(a, p, n, lane, gv, uv);
     float v[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
@@ -181,10 +200,35 @@ extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
         }
         v[j] = act * __half2float(a.suh_d[(size_t)e * a.n + n + j]);
     }
-    fwht128(v, lane);
-    half* o = a.xd + (size_t)p * a.n + n;
+    gateup_store(a, p, n, lane, v);
+}
+
+// act_mode 3, Inkling 2's softcapped SwiGLU: gate_cap tanh(g / gate_cap) sigmoid(g) up_cap tanh(u / up_cap), fp32.
+struct CappedArgs {
+    GateUpArgs g;
+    float gate_cap, up_cap;
+};
+
+extern "C" __global__ void tf_exl3_gateup_capped(const CappedArgs c) {
+    const GateUpArgs& a = c.g;
+    const int p = blockIdx.x, blk = blockIdx.y;
+    const int e = a.pick[p];
+    if (e < 0 || e >= a.experts) return;
+    const int lane = threadIdx.x;
+    const int n = blk * 128 + 4 * lane;
+    float gv[4], uv[4];
+    gateup_sums(a, p, n, lane, gv, uv);
+    float v[4];
 #pragma unroll
-    for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
+    for (int j = 0; j < 4; ++j) {
+        const float g = gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]);
+        const float u = uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]);
+        // Each product and the sum round on their own: core's flags would otherwise fuse them into FMAs.
+        const float gs = __fmul_rn(__fmul_rn(c.gate_cap, tanhf(g / c.gate_cap)), 1.f / __fadd_rn(1.f, expf(-g)));
+        const float act = __fmul_rn(__fmul_rn(gs, c.up_cap), tanhf(u / c.up_cap));
+        v[j] = __fmul_rn(act, __half2float(a.suh_d[(size_t)e * a.n + n + j]));
+    }
+    gateup_store(a, p, n, lane, v);
 }
 
 // Program (member row, 128-block of the width): down epilogue and combine in one launch, the same bits as the two.
@@ -282,7 +326,9 @@ extern "C" __global__ void tf_exl3_prompt_rotate(const __nv_bfloat16* __restrict
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
-extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu(const half* __restrict__ Xg, const half* __restrict__ Xu,
+// Gate and up of one width K2 (8: 4 bits, 6: 3 bits), the shared expert skipped before any payload read.
+template <int K2>
+__device__ __forceinline__ void prompt_gu(const half* __restrict__ Xg, const half* __restrict__ Xu,
         const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
         const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
         half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip) {
@@ -292,18 +338,34 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu(const hal
     const int e = items[3 * item];
     if (e == skip) return;
 
-    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes()];   // one buffer for either instantiation
+    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<K2>()];   // one buffer for either instantiation
     __shared__ int rows_sh[TPM];
-    if (xdiv > 1) tgateup<TPM>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh);
-    else tgateup<2 * TPM>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, 1, limit, act_mode, smem_raw, rows_sh);
+    if (xdiv > 1) tgateup<TPM, K2>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh);
+    else tgateup<2 * TPM, K2>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, 1, limit, act_mode, smem_raw, rows_sh);
+}
+
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip) {
+    prompt_gu<8>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
+}
+
+// The same at 3 bits: gate and up both 3-bit mcg (tile_words<6>: 96-byte tiles), the arguments tf_exl3_prompt_gu's.
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_k6(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip) {
+    prompt_gu<6>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
 }
 
 // Block (256 model-width columns, item): y[row][slot][:] = the down epilogue of the item's pairs (this rank's share).
-extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+template <int K2>
+__device__ __forceinline__ void prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
         const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
         float* __restrict__ y, int K, int D, int skip) {
 
-    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes()];
+    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<K2>()];
     __shared__ int rows_sh[TPM];
     const int cb = blockIdx.x, item = blockIdx.y;
     if (item >= counts[0]) return;
@@ -314,7 +376,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const h
     __syncthreads();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     float acc[TMT][TNB][4];
-    tmain<1, TPM>(Xd, Xd, Td, Td, rows_sh, cnt, e, K, D >> 4, cb, 1, reinterpret_cast<half*>(smem_raw), acc);
+    tmain<1, TPM, K2>(Xd, Xd, Td, Td, rows_sh, cnt, e, K, D >> 4, cb, 1, reinterpret_cast<half*>(smem_raw), acc);
     float* Ed = reinterpret_cast<float*>(smem_raw);
     for (int hf = 0; hf < 2 && hf * TPH < cnt; ++hf) {
         if (hf) __syncthreads();
@@ -335,4 +397,71 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const h
             }
         }
     }
+}
+
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip) {
+    prompt_down<8>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
+}
+
+// The same at 3 bits (3-bit mcg down), the arguments tf_exl3_prompt_down's.
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_k6(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip) {
+    prompt_down<6>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
+}
+
+// Mixed widths (a K2 an expert: full GLM-5.3's EXL3): one launch a width over every item, the others' items left alone.
+template <int K2>
+__device__ __forceinline__ bool other_width(const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ k2, int skip) {
+    const int item = blockIdx.y;
+    if (item >= counts[0]) return false;
+    const int e = items[3 * item];
+    return e != skip && k2[e] != K2;   // the shared expert's id has no width: its guard comes first
+}
+
+// Gate and up of the layer's 2-bit experts (tf_exl3_prompt_gu's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_m4(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip, const int* __restrict__ k2) {
+    if (!other_width<4>(items, counts, k2, skip)) prompt_gu<4>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
+}
+
+// Gate and up of the layer's 3-bit experts (tf_exl3_prompt_gu's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_m6(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip, const int* __restrict__ k2) {
+    if (!other_width<6>(items, counts, k2, skip)) prompt_gu<6>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
+}
+
+// Gate and up of the layer's 4-bit experts (tf_exl3_prompt_gu's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_m8(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip, const int* __restrict__ k2) {
+    if (!other_width<8>(items, counts, k2, skip)) prompt_gu<8>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
+}
+
+// Down of the layer's 2-bit experts (tf_exl3_prompt_down's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_m4(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip, const int* __restrict__ k2) {
+    if (!other_width<4>(items, counts, k2, skip)) prompt_down<4>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
+}
+
+// Down of the layer's 3-bit experts (tf_exl3_prompt_down's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_m6(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip, const int* __restrict__ k2) {
+    if (!other_width<6>(items, counts, k2, skip)) prompt_down<6>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
+}
+
+// Down of the layer's 4-bit experts (tf_exl3_prompt_down's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_m8(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip, const int* __restrict__ k2) {
+    if (!other_width<8>(items, counts, k2, skip)) prompt_down<8>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
 }

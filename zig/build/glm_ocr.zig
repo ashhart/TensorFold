@@ -6,6 +6,8 @@ pub fn hostTests(b: *std.Build, all: *std.Build.Step) void {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     core.addImport("tokenizer", b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .link_libc = true }));
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .link_libc = true });
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const options = b.addOptions();
     options.addOption(?[]const u8, "model_dir", b.option([]const u8, "glm-ocr-model-dir", "Existing GLM-OCR checkpoint for host validation"));
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
@@ -14,7 +16,7 @@ pub fn hostTests(b: *std.Build, all: *std.Build.Step) void {
             .target = target,
             .optimize = mode,
             .link_libc = true,
-            .imports = &.{.{ .name = "core", .module = core }},
+            .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "engine_api", .module = api } },
         });
         tests.addOptions("glm_ocr_options", options);
         const run = b.addRunArtifact(b.addTest(.{ .root_module = tests }));

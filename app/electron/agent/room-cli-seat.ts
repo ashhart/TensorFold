@@ -69,14 +69,17 @@ export const defaultCliSeatSource: CliSeatSource = (params) => planningGuard(par
 
 // Run one CLI seat turn: accumulate content text (what gateAction parses) and forward
 // deltas to onDelta for the live room stream. Reasoning/status lines and resume cursors
-// are dropped; abort/timeout signaling kills the child process group inside the transport.
+// are dropped but still count as progress through onActivity; abort/timeout signaling kills
+// the child process group inside the transport.
 export async function runCliSeatTurn(
   params: CliSeatTurnParams,
   onDelta: (text: string) => void,
   source: CliSeatSource = defaultCliSeatSource,
+  onActivity?: () => void,
 ): Promise<string> {
   let reply = ''
   for await (const chunk of source(params)) {
+    onActivity?.()
     if (chunk.type === 'content' && chunk.text) {
       reply += chunk.text
       onDelta(chunk.text)

@@ -1,16 +1,20 @@
 //! The real-weight gate. Help returns before any device or checkpoint access.
 const std = @import("std");
+/// --stages: the qwen27 stage recorder is built into this tool only (stage_planes.on).
+pub const qwen27_stages = true;
 const q = @import("qwen27");
 const mtl = @import("metal");
 const sources = @import("qwen_runtime_sources");
 const gdn_source = @import("qwen_gdn_source");
-const profile = @import("core").gpu_profile;
+const core = @import("core");
+const profile = core.gpu_profile;
 const core_lane = @import("core_lane");
 
 const help =
     \\tf-qwen27-run --run --model DIR --tokens IDS.json [--max-tokens 256]
     \\  [--chunk 128] [--compare-chunk 16] [--reference GENERATED.json] [--force-length]
     \\  [--no-warmup] [--profile-steps N] [--profile-prompt] [--teacher] [--seams N] [--resume-reply]
+    \\  [--stages DIR]
     \\IDs and reference files are JSON arrays of unsigned token IDs, already chat-rendered.
     \\Greedy only, drafts off; JSON receipt on stdout, errors on stderr.
     \\--teacher feeds every reference token and records native top2 at all positions; margin timing is diagnostic.
@@ -19,6 +23,7 @@ const help =
     \\--seams N (with --compare-chunk): state/KV/logits bytes every N prompt rows under both chunks and after decode.
     \\--resume-reply: the reply fed again in one pass that keeps no row, then a turn's tail, against decoding it.
     \\--profile-prompt: GPU seconds by class over the timed prompt (split command buffers, so slower than unprofiled).
+    \\--stages DIR writes the measured prompt's and decode's staged references (stream per stage, final norm, logits).
     \\CPU only: --help or --emit-sources EXISTING_DIR, no Metal device or model load.
 ;
 
@@ -33,6 +38,8 @@ fn write(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8, te
 fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "glue.metal", sources.glue ++ sources.copy);
     try write(a, io, dir, "attention.metal", sources.glue ++ sources.attention_mpp ++ sources.attention_io);
+    try write(a, io, dir, "attention-tensor.metal", try q.simd_attention.grouped(a, true, true, 6, 4, false));
+    try write(a, io, dir, "attention-simd.metal", try q.simd_attention.grouped(a, false, true, 6, 4, false));
     try write(a, io, dir, "gdn.metal", gdn_source.text);
     const helpers = [_]q.quant_gpu.Kind{ .input_norm, .norm, .mlp, .xsum };
     const names = [_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" };
@@ -110,6 +117,7 @@ pub fn main(init: std.process.Init) !void {
     var chunk: usize = 128;
     var compare: usize = 0;
     var seam_every: usize = 0;
+    var stages_dir: ?[]const u8 = null;
     var run = false;
     var force = false;
     var warmup = true;
@@ -146,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model = value else if (std.mem.eql(u8, arg, "--tokens")) file = value else if (std.mem.eql(u8, arg, "--reference")) reference = value else if (std.mem.eql(u8, arg, "--max-tokens")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--chunk")) chunk = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--profile-steps")) profile_steps = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--compare-chunk")) compare = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--seams")) seam_every = try std.fmt.parseInt(usize, value, 10) else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--model")) model = value else if (std.mem.eql(u8, arg, "--tokens")) file = value else if (std.mem.eql(u8, arg, "--reference")) reference = value else if (std.mem.eql(u8, arg, "--max-tokens")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--chunk")) chunk = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--profile-steps")) profile_steps = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--compare-chunk")) compare = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--seams")) seam_every = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--stages")) stages_dir = value else return error.UnknownOption;
     }
     if (!run or model == null or file == null or chunk == 0 or chunk > 2048 or compare > 2048 or count > 65536 or (seam_every > 0 and compare == 0)) return error.BadOptions;
     const ids = try tokens(a, io, file.?);
@@ -174,6 +182,15 @@ pub fn main(init: std.process.Init) !void {
     var trace = profile.Trace{ .queue = m.queue };
     if (profile_steps > 0 or profile_prompt) runner.profile(&trace);
     trace.enabled = profile_prompt;
+    var recorder: ?core.qwen35_stages.Recorder = null;
+    defer if (recorder) |*r| r.deinit();
+    var planes: ?q.stage_planes.Planes = null;
+    defer if (planes) |p| p.deinit();
+    if (stages_dir != null) {
+        recorder = try core.qwen35_stages.Recorder.init(init.gpa, m.config.layers, m.config.hidden, m.config.vocab);
+        planes = try q.stage_planes.Planes.init(m.device, &recorder.?, m.frame.capacity, @min(m.frame.capacity, q.gpu_frame.logit_rows));
+        q.stage_planes.active = &planes.?;
+    }
     const start = std.Io.Clock.awake.now(io);
     try s.prefill(ids, chunk);
     const prompt_ns = start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
@@ -183,6 +200,8 @@ pub fn main(init: std.process.Init) !void {
     const generation = try generated(a, s, count, force, expected, if (profile_steps > 0) &trace else null, profile_steps, teacher);
     const out = generation.tokens;
     const decode_ns = decode_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+    q.stage_planes.active = null;
+    if (stages_dir) |dir| try recorder.?.write(io, dir);
     const decoded = if (compare > 0) try s.fingerprint() else digest;
     const reference_equal = if (expected) |wanted| std.mem.eql(u32, out, wanted) else false;
     if (compare > 0) {
@@ -243,7 +262,7 @@ pub fn main(init: std.process.Init) !void {
         .prompt_ns = prompt_ns,
         .decode_ns = decode_ns,
         .prompt_tok_s = @as(f64, @floatFromInt(ids.len)) * 1e9 / @as(f64, @floatFromInt(@max(prompt_ns, 1))),
-        .physical_prompt_rows = 128,
+        .physical_prompt_rows = runner.promptRows(@intCast(chunk)),
         .projection_rows = 16,
         .prompt_sha256 = @as([]const u8, &digest_hex),
     }, .{});

@@ -1,0 +1,21 @@
+- B0 cache on concurrent: concurrent equals solo 156/0 (unverified 0); drafted equals `"draft": false` 56/0
+- B0 cache on golden: concurrent equals solo 13/0 (unverified 0); drafted equals `"draft": false` 24/0
+- B0 cache on drafts: 8 of 8 equal to `"draft": false` (basis token_ids)
+- B0 cache on turns: resumed from cached prompt tokens [13, 16, 16, 13, 24, 18, 3406]
+- B0 cache off drafts: 8 of 8 equal to `"draft": false` (basis token_ids)
+- B0 cache off fresh: 7 of 7 resumed replies equal the fresh ones
+- B1 cache on concurrent: concurrent equals solo 156/0 (unverified 0); drafted equals `"draft": false` 56/0
+- B1 cache on golden: concurrent equals solo 13/0 (unverified 0); drafted equals `"draft": false` 24/0
+- B1 cache on drafts: 8 of 8 equal to `"draft": false` (basis token_ids)
+- B1 cache on turns: resumed from cached prompt tokens [13, 16, 16, 13, 24, 18, 3406]
+- B1 cache off drafts: 8 of 8 equal to `"draft": false` (basis token_ids)
+- B1 cache off fresh: 7 of 7 resumed replies equal the fresh ones
+- M cache on concurrent: concurrent equals solo 156/0 (unverified 0); drafted equals `"draft": false` 56/0
+- M cache on golden: concurrent equals solo 13/0 (unverified 0); drafted equals `"draft": false` 24/0
+- M cache on drafts: 8 of 8 equal to `"draft": false` (basis token_ids)
+- M cache on turns: resumed from cached prompt tokens [13, 16, 16, 13, 24, 18, 3406]
+- M cache off drafts: 8 of 8 equal to `"draft": false` (basis token_ids)
+- M cache off fresh: 7 of 7 resumed replies equal the fresh ones
+- B0: replies equal over pass A's greedy cells (token_sha): 528 equal, 0 unequal
+- B1: replies equal over pass A's greedy cells (token_sha): 528 equal, 0 unequal
+- B1/M: replies equal over pass A's greedy cells (token_sha): 528 equal, 0 unequal

@@ -43,6 +43,7 @@ pub fn add(s: *Set) !void {
     try s.raw("flashnext", "grammar", @import("../src/families/flashnext/grammar.zig").source);
     try s.raw("flashnext", "tp", @import("../src/families/flashnext/tp_source.zig").source);
     try s.raw("flashnext", "gx", ks.flashnext_gx);
+    try s.raw("flashnext", "gx-mb2", try @import("../src/families/flashnext/gx_mb2.zig").text(s.a, ks.flashnext_gx, false));
     try s.raw("flashnext", "rotary-producer", try rotary.producer(s.a));
     inline for (.{ "flashnext_select", "flashnext_pool_pos", "flashnext_mrope" }) |name| for ([_]bool{ false, true }) |cached|
         try s.raw("flashnext", name, try rotary.source(s.a, @field(ks, name), cached));

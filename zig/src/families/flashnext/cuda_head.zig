@@ -2,15 +2,13 @@
 const std = @import("std");
 const Tensor = @import("core").safetensors.Tensor;
 
+/// TF_FLASHNEXT_SHARD_HEAD: unset, blank or 0 keeps the whole output head on each rank, 1 keeps only its half.
 pub fn setting(value: ?[]const u8) !bool {
-    const v = value orelse return false;
-    if (std.mem.eql(u8, v, "0")) return false;
-    if (std.mem.eql(u8, v, "1")) return true;
-    return error.BadHeadSharding;
+    return @import("sys").environment.value(bool, "TF_FLASHNEXT_SHARD_HEAD", value, false) catch return error.BadHeadSharding;
 }
 
 pub fn enabled() !bool {
-    return setting(if (std.c.getenv("TF_FLASHNEXT_SHARD_HEAD")) |v| std.mem.span(v) else null);
+    return setting(@import("sys").environment.rawText("TF_FLASHNEXT_SHARD_HEAD"));
 }
 
 pub fn shard(t: Tensor, world: usize, rank: usize) !Tensor {
@@ -44,5 +42,26 @@ test "head partitions preserve every BF16 byte in global vocabulary order" {
     try std.testing.expect(!try setting(null));
     try std.testing.expect(!try setting("0"));
     try std.testing.expect(try setting("1"));
+    // an empty or whitespace-only value is unset, so it keeps the default off, as every other setting here does
+    try std.testing.expect(!try setting(""));
+    try std.testing.expect(!try setting(" \t"));
     try std.testing.expectError(error.BadHeadSharding, setting("2"));
+    try std.testing.expectError(error.BadHeadSharding, setting("on"));
+}
+
+test "head split: the production reader takes its own environment, blank as unset and junk refused" {
+    const env = @import("sys").env;
+    defer _ = env.unsetenv("TF_FLASHNEXT_SHARD_HEAD");
+    _ = env.unsetenv("TF_FLASHNEXT_SHARD_HEAD");
+    try std.testing.expect(!try enabled());
+    _ = env.setenv("TF_FLASHNEXT_SHARD_HEAD", "1", 1);
+    try std.testing.expect(try enabled());
+    _ = env.setenv("TF_FLASHNEXT_SHARD_HEAD", "0", 1);
+    try std.testing.expect(!try enabled());
+    _ = env.setenv("TF_FLASHNEXT_SHARD_HEAD", "", 1);
+    try std.testing.expect(!try enabled());
+    _ = env.setenv("TF_FLASHNEXT_SHARD_HEAD", " \t", 1);
+    try std.testing.expect(!try enabled());
+    _ = env.setenv("TF_FLASHNEXT_SHARD_HEAD", "on", 1);
+    try std.testing.expectError(error.BadHeadSharding, enabled());
 }

@@ -168,6 +168,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     native_ocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native.import_table.get("glm_ocr").?, .filters = &.{"GLM-OCR native admission:"} })).step);
     b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
+    @import("hip_followers.zig").steps(b, &.{ host.serve, host.flashnext, host.nemotron });
     @import("dots_mocr.zig").hipTests(b, host.hip, test_step);
     b.step("test-dots-native-host", "dots.mocr registry, reasoning, and unsupported flags without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{ "dots refuses", "every registered family", "a HIP family declares replies without reasoning" } })).step);
     @import("lighton_hip.zig").host(b, host.lighton, test_step);
@@ -189,9 +190,12 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
     test_step.dependOn(&family_host.step);
     b.step("test-qwen35-hip-host", "Qwen HIP family CPU tests with inert kernels").dependOn(&family_host.step);
+    b.step("test-qwen35-hip-faults-host", "Qwen HIP page-reference rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{"Qwen HIP page faults:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
+    b.step("test-nemotron-hip-faults-host", "Nemotron HIP adoption rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP page faults:"} })).step);
+    b.step("test-nemotron-hip-resume-host", "Nemotron HIP prompt-cache resumes and the MTP head's shared rows without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP resume:"} })).step);
     const qwen3_host = b.addRunArtifact(b.addTest(.{ .root_module = host.qwen3 }));
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
@@ -277,14 +281,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "core", .module = gpu.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = gpu.lighton } },
     }) });
     b.step("tf-lighton-hip-capture", "Capture native HIP LightOnOCR stages against a local reference fixture").dependOn(&b.addInstallArtifact(lighton_capture, .{}).step);
-    const qwen_capture_host = captureQwen(b, b.graph.host, host);
+    const qwen_capture_host = @import("lighton_hip.zig").captureQwen(b, b.graph.host, host);
     b.step("check-qwen-hip-capture-host", "Compile the Qwen HIP fixture capture without device execution").dependOn(&qwen_capture_host.step);
-    const qwen_capture_gpu = captureQwen(b, target, gpu);
+    const qwen_capture_gpu = @import("lighton_hip.zig").captureQwen(b, target, gpu);
     b.step("tf-qwen-hip-capture", "Capture native Qwen HIP stages against local reference fixtures").dependOn(&b.addInstallArtifact(qwen_capture_gpu, .{}).step);
     for ([_][]const u8{ "lighton", "qwen" }) |family_name| {
-        const exact_host = exactTool(b, b.graph.host, host, family_name);
+        const exact_host = @import("lighton_hip.zig").exactTool(b, b.graph.host, host, family_name);
         b.step(b.fmt("check-{s}-hip-exact-host", .{family_name}), "Compile native HIP image consistency checks without execution").dependOn(&exact_host.step);
-        const exact_gpu = exactTool(b, target, gpu, family_name);
+        const exact_gpu = @import("lighton_hip.zig").exactTool(b, target, gpu, family_name);
         b.step(b.fmt("tf-{s}-hip-exact", .{family_name}), "Build native HIP image consistency checks").dependOn(&b.addInstallArtifact(exact_gpu, .{}).step);
     }
     const native = server(b, target, gpu, build_options);
@@ -308,7 +312,7 @@ fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/npy_from_core.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = e.hip.import_table.get("core").? }} }) } },
+        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/npy_from_core.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = e.hip.import_table.get("core").? }} }) } },
     }) });
 }
 fn clefExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, e: Engine) *std.Build.Step.Compile {
@@ -466,35 +470,17 @@ pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_
     const engines = e.native;
     const tokenizer = e.hip.import_table.get("core").?.import_table.get("tokenizer").?;
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    const checkpoint_cli = @import("cuda.zig").checkpointCli(b, target, .ReleaseSafe, null, engines, e.hip.import_table.get("core").?);
     const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
-        .imports = &.{ .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, e.hip.import_table.get("core").?), .{ .name = "core", .module = e.hip.import_table.get("core").? } } }) } },
+        .imports = &.{ .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = checkpoint_cli } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
     _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
     return exe;
-}
-fn captureQwen(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine) *std.Build.Step.Compile {
-    return b.addExecutable(.{ .name = "tf-qwen-hip-capture", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/lighton_hip/qwen_capture.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
-    }) });
-}
-fn exactTool(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, family_name: []const u8) *std.Build.Step.Compile {
-    const file = if (std.mem.eql(u8, family_name, "lighton")) "exact.zig" else "qwen_exact.zig";
-    return b.addExecutable(.{ .name = b.fmt("tf-{s}-hip-exact", .{family_name}), .root_module = b.createModule(.{
-        .root_source_file = b.path(b.fmt("zig/tests/lighton_hip/{s}", .{file})),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = e.lighton }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
-    }) });
 }
 /// A group's source and whether it compiles with IEEE arithmetic (`strict`: -O2 -fno-fast-math, IEEE denormals).
 const Source = struct { path: []const u8, strict: bool = false };
@@ -516,18 +502,21 @@ const groups = [_]Source{
     .{ .path = "lighton_ocr.hip", .strict = true },
     .{ .path = "qwen_vision.hip", .strict = true },
     .{ .path = "draft/draft.hip" },
+    .{ .path = "exl3/exl3.hip" },
+    .{ .path = "decode/plan_rows.hip" },
+    .{ .path = "inkling2/attention.hip", .strict = true },
+    .{ .path = "deepseek_v41/topk512.hip" },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
-    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",      "decode/plan.hpp",               "ops/attention.hpp",
-    "ops/common.hpp",             "ops/draw.hpp",          "ops/tp.hpp",            "ops/elementwise.hpp",           "ops/linear.hpp",
-    "ops/moe.hpp",                "ops/norms.hpp",         "ops/rope.hpp",          "common/arch.hpp",               "common/dot2.hpp",
-    "common/vec.hpp",             "common/wmma.hpp",       "quant/act.hpp",         "quant/mlx.hpp",                 "quant/mlx_decoder.hpp",
-    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",        "tiles/epilogue.hpp",            "tiles/gemm.hpp",
-    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/matrix_item.hpp", "tiles/plan.hpp",                "tiles/stream.hpp",
-    "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp", "flashnext/sparse.hpp",          "ops/nemotron_moe.hpp",
-    "quant/bf16_decoder.hpp",     "quant/dense_tiles.hpp", "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",
-    "columns_controls.hpp",       "ops/vision.hpp",        "ops/dense_text.hpp",    "ops/vl_position.hpp",           "flashnext/sparse_lanes.hpp",
+    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",              "decode/plan.hpp",       "ops/attention.hpp",    "ops/common.hpp",
+    "ops/draw.hpp",               "ops/tp.hpp",            "ops/elementwise.hpp",           "ops/linear.hpp",        "ops/moe.hpp",          "ops/norms.hpp",
+    "ops/rope.hpp",               "common/arch.hpp",       "common/dot2.hpp",               "common/vec.hpp",        "common/wmma.hpp",      "quant/act.hpp",
+    "quant/mlx.hpp",              "quant/mlx_decoder.hpp", "quant/mlx_pieces.hpp",          "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",       "tiles/epilogue.hpp",
+    "tiles/gemm.hpp",             "tiles/gemm_kp.hpp",     "tiles/matrix_gemm.hpp",         "tiles/matrix_item.hpp", "tiles/plan.hpp",       "tiles/stream.hpp",
+    "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp",         "flashnext/sparse.hpp",  "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
+    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",       "columns_controls.hpp", "ops/vision.hpp",
+    "ops/dense_text.hpp",         "ops/vl_position.hpp",   "flashnext/sparse_lanes.hpp",    "tiles/wmma12_step.hpp", "inkling2/tile.hpp",
 };
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
@@ -543,7 +532,6 @@ pub fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u
     }
     return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
 }
-
 /// The HIP compiler as the build found it, the device bitcode it links, and whether gfx1100 relaxes branches earlier.
 pub const Hipcc = struct { name: []const u8, resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool = false };
 

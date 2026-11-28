@@ -158,7 +158,7 @@ fn failure(mode: usize, copy: usize, waits: usize) !void {
     const px = try std.testing.allocator.alloc(f32, 4 * v.patch_width);
     defer std.testing.allocator.free(px);
     @memset(px, 0.25);
-    const result = v.media.Media.init(t.gpa, .{ .ctx = &t, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = M.encode }, &.{ 7, 52, 50, 53, 9 }, &.{.{ .pixels = px, .gh = 2, .gw = 2, .tokens = 1, .at = 2 }}, .{});
+    const result = v.media.Media.init(t.gpa, .{ .ctx = &t, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = M.encode }, &.{ 7, 52, 50, 53, 9 }, &.{.{ .pixels = px, .gh = 2, .gw = 2, .tokens = 1, .at = 2 }}, .{}, 0);
     if (result) |value| {
         var m = value;
         m.deinit();
@@ -175,7 +175,7 @@ fn failure(mode: usize, copy: usize, waits: usize) !void {
     M.mode = 0;
     M.fail_copy = 0;
     M.fail_waits = 0;
-    var again = try v.media.Media.init(t.gpa, .{ .ctx = &t, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = M.encode }, &.{ 7, 52, 50, 53, 9 }, &.{.{ .pixels = px, .gh = 2, .gw = 2, .tokens = 1, .at = 2 }}, .{});
+    var again = try v.media.Media.init(t.gpa, .{ .ctx = &t, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = M.encode }, &.{ 7, 52, 50, 53, 9 }, &.{.{ .pixels = px, .gh = 2, .gw = 2, .tokens = 1, .at = 2 }}, .{}, 0);
     again.deinit();
     try std.testing.expectEqual(@as(usize, 0), M.live);
 }
@@ -210,7 +210,7 @@ fn uploadWait(follower: bool) !void {
         const px = try std.testing.allocator.alloc(f32, 4 * v.patch_width);
         defer std.testing.allocator.free(px);
         const images = [_]@import("lanes").stream.Image{.{ .pixels = px, .gh = 2, .gw = 2, .tokens = 1, .at = 2 }};
-        try std.testing.expectError(error.NotReady, v.media.Media.init(t.gpa, enc, &.{ 7, 52, 50, 53, 9 }, &images, .{}));
+        try std.testing.expectError(error.NotReady, v.media.Media.init(t.gpa, enc, &.{ 7, 52, 50, 53, 9 }, &images, .{}, 0));
     }
     const bad = M.bad_free;
     const owed = M.busy();
@@ -280,4 +280,53 @@ test "a stream and context that never complete end the process before an owner i
         std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
     }
     return error.ChildTimeout;
+}
+
+/// A tower that counts its calls, with the pixels and the feature row each wrote.
+const Count = struct {
+    n: usize = 0,
+    outs: [4]u64 = undefined,
+    pixels: [4][*]const f32 = undefined,
+
+    fn encode(p: *anyopaque, px: []const f32, _: []const v.Grid, out: u64) anyerror!void {
+        const c: *Count = @ptrCast(@alignCast(p));
+        c.outs[c.n] = out;
+        c.pixels[c.n] = px.ptr;
+        c.n += 1;
+    }
+};
+
+test "a resumed prompt sends only the images past its resume through the tower, to a cold pass's rows" {
+    const t_ = std.testing;
+    var d: cuda.Driver = undefined;
+    var t: v.Tower = undefined;
+    M.setup(&d, &t);
+    M.fail_copy = 0;
+    M.fail_waits = 0;
+    M.pending_default = false;
+    M.pending_encoder = false;
+    const px = try t_.allocator.alloc(f32, 8 * v.patch_width);
+    defer t_.allocator.free(px);
+    @memset(px[0 .. 4 * v.patch_width], 0.25);
+    @memset(px[4 * v.patch_width ..], 0.5);
+    const ids = [_]u32{ 7, 52, 50, 53, 8, 52, 50, 53, 9 };
+    const images = [_]@import("lanes").stream.Image{
+        .{ .pixels = px[0 .. 4 * v.patch_width], .gh = 2, .gw = 2, .tokens = 1, .at = 2 },
+        .{ .pixels = px[4 * v.patch_width ..], .gh = 2, .gw = 2, .tokens = 1, .at = 6 },
+    };
+    var cold: Count = .{};
+    var warm: Count = .{};
+    var a = try v.media.Media.init(t.gpa, .{ .ctx = &cold, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = Count.encode }, &ids, &images, .{}, 0);
+    defer a.deinit();
+    // a kept state at 4 holds the first image: only the second goes through the tower
+    var b = try v.media.Media.init(t.gpa, .{ .ctx = &warm, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = Count.encode }, &ids, &images, .{}, 4);
+    defer b.deinit();
+    try t_.expectEqual(@as(usize, 2), cold.n); // main encodes both, resumed or not
+    try t_.expectEqual(@as(usize, 1), warm.n);
+    try t_.expect(warm.pixels[0] == images[1].pixels.ptr);
+    try t_.expectEqual(cold.outs[1] - a.features.ptr, warm.outs[0] - b.features.ptr);
+    // the splice rows, positions and delta stay a cold pass's, from every image
+    try t_.expectEqualSlices(i32, a.plan.src, b.plan.src);
+    try t_.expectEqualSlices(i32, a.plan.pos, b.plan.pos);
+    try t_.expectEqual(a.plan.delta, b.plan.delta);
 }

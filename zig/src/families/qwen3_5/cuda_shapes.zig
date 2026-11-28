@@ -15,6 +15,9 @@ pub const Shape = struct {
     paged: bool = false,
     mt2: bool = false,
     join: bool = false, // a paged forward whose streams share pages (Seg.share): the rows kernels' join variants
+    unread: bool = false, // a prompt chunk nothing reads: its last layer stops at the state writes
+    /// In a MTP prompt cut, rows before this local index are not consumed by the drafter.
+    tap_from: ?usize = null,
     /// A pipeline stage's piece of the forward (cuda_stage_forward.zig); one engine runs the whole.
     part: @import("cuda_stage_forward.zig").Part = .whole,
 
@@ -26,15 +29,15 @@ pub const Shape = struct {
     }
 
     pub fn key(s: Shape) u64 {
-        // captured shapes only: a window bucket's rows fit the low byte
+        // Captured shapes only: prompt tap_from is live; a window bucket's rows fit the low byte.
         return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31 | @as(u64, @intFromBool(s.join)) << 32;
     }
 };
 
-/// The measured FP8 row-tile envelope: 8,192+ cached tokens, one row included; limits and prompt tiles unchanged.
+/// The measured FP8 row-tile envelope: 8,192+ cached tokens; 2-16 rows through 131,071 cached; prompt tiles unchanged.
 pub fn useMt2(qualified: bool, fp8: bool, prompt: bool, rows: usize, segments: usize, cached: usize) bool {
     return qualified and fp8 and !prompt and segments == 1 and rows > 0 and
-        cached >= 8192 and (rows == 1 or (rows <= 16 and cached < 65536));
+        cached >= 8192 and (rows == 1 or (rows <= 16 and cached <= 131071));
 }
 
 test "MT2 dispatch keeps context boundaries and graph identities separate" {
@@ -42,15 +45,16 @@ test "MT2 dispatch keeps context boundaries and graph identities separate" {
     var after = before;
     after.mt2 = true;
     try std.testing.expectEqual(@as(u64, 1) << 29, before.key() ^ after.key());
-    for ([_]usize{ 8192, 32768, 65535 }) |n| try std.testing.expect(useMt2(true, true, false, 16, 1, n));
-    for ([_]usize{ 0, 8191, 65536, 131071 }) |n| try std.testing.expect(!useMt2(true, true, false, 16, 1, n));
+    for ([_]usize{ 8192, 32768, 65535, 65536, 131071 }) |n| try std.testing.expect(useMt2(true, true, false, 16, 1, n));
+    for ([_]usize{ 0, 8191, 131072 }) |n| try std.testing.expect(!useMt2(true, true, false, 16, 1, n));
     for ([_]usize{ 0, 1, 512, 8191 }) |n| try std.testing.expect(!useMt2(true, true, false, 1, 1, n));
-    for ([_]usize{ 8192, 32768, 131071 }) |n| try std.testing.expect(useMt2(true, true, false, 1, 1, n));
+    for ([_]usize{ 8192, 32768, 131071, 131072, 262144 }) |n| try std.testing.expect(useMt2(true, true, false, 1, 1, n));
     try std.testing.expect(!useMt2(false, true, false, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, false, false, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, true, true, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, true, false, 16, 2, 8192));
     try std.testing.expect(!useMt2(true, true, false, 17, 1, 8192));
+    try std.testing.expect(!useMt2(true, true, false, 17, 1, 65536));
 }
 
 test "Qwen stage: the head piece keys its own graph, apart from the layers' and the whole model's" {

@@ -72,16 +72,20 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
       for (int i = 0; i < 8; i++) SO[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
 }
 
-// Decode attention by key slices: one subgroup per (slice, K/V head, query part, row). Grid y is AKV * QPARTS.
+// Decode attention by key slices: one subgroup per (row, K/V head, query part, slice). Grid y is AKV * QPARTS.
 #define SPLIT 32
+#if Q27_QPG > 8
+#error "attn_decode keeps head a's running max in lanes a and a + 8: at most 8 heads"
+#endif
 KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
                             global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
                             global const ulong *MT, global const int *POS, int cap) {
   // MT (if non-null): several streams, one row each; with TREE, tree windows; cap > 0: int8 cache (256 bytes per row).
 #if Q27_QPARTS == 1
-  const int sp = get_group_id(0), hk = get_group_id(1), t = get_group_id(2), lane = get_sub_group_local_id();
+  // Grid (rows, heads, slices): the tree rows of one key slice run back to back and share its K/V rows in L2.
+  const int sp = get_group_id(2), hk = get_group_id(1), t = get_group_id(0), lane = get_sub_group_local_id();
 #else
-  const int sp = get_group_id(0), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(2), lane = get_sub_group_local_id();
+  const int sp = get_group_id(2), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(0), lane = get_sub_group_local_id();
   const int qh0 = hk * Q27_GQA + (get_group_id(1) % Q27_QPARTS) * Q27_QPG; // the first query head held
 #endif
   int base = p0, wf = 0;
@@ -92,7 +96,7 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     base = TREE ? POS[wf] : 0x7fffffff;
   }
   const int last = MT ? POS[t] : p0 + DEPTH(t), j0 = sp * SPLIT, j1 = min(j0 + SPLIT, last + 1);
-  float q[Q27_QPG][16], o[Q27_QPG][16], m[Q27_QPG], l[Q27_QPG];
+  float q[Q27_QPG][16], o[Q27_QPG][16], l[Q27_QPG], mv = -INFINITY; // mv: head a's running max in lanes a and a + 8
   for (int a = 0; a < Q27_QPG; a++) {
     for (int i = 0; i < 16; i++) {
 #if Q27_QPARTS == 1
@@ -102,7 +106,6 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
 #endif
       o[a][i] = 0.0f;
     }
-    m[a] = -INFINITY;
     l[a] = 0.0f;
   }
   for (int j = j0; j < j1; j++) {
@@ -126,12 +129,16 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
       for (int i = 0; i < 16; i++) kv[i] = (float)v8[i * 16 + lane] * vs;
     } else
       for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[(kr * Q27_AKV + hk) * 256 + i * 16 + lane]);
+    // The running maxima sit in lanes a and a + 8 of mv, the scores in sv: all the exponentials are one vector exp.
+    float sv = -INFINITY;
+    for (int a = 0; a < Q27_QPG; a++) sv = select(sv, sc[a], (int)((lane & 7) == a));
+    const float mn = fmax(mv, sv);
+    const float e = exp((lane < 8 ? mv : sv) - mn); // lanes below 8: exp(m - mn), the others: exp(sc - mn)
+    mv = mn;
     for (int a = 0; a < Q27_QPG; a++) {
-      const float mn = fmax(m[a], sc[a]);
-      const float al = exp(m[a] - mn), p = exp(sc[a] - mn);
+      const float al = sub_group_broadcast(e, a), p = sub_group_broadcast(e, a + 8);
       l[a] = l[a] * al + p;
       for (int i = 0; i < 16; i++) o[a][i] = o[a][i] * al + p * kv[i];
-      m[a] = mn;
     }
   }
   for (int a = 0; a < Q27_QPG; a++) {
@@ -140,30 +147,38 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
 #else
     const long base = ((long)t * Q27_AQ + qh0 + a) * NS + sp;
 #endif
+    const float ma = sub_group_broadcast(mv, a);
     if (lane == 0) {
-      PM[base] = m[a];
+      PM[base] = ma;
       PL[base] = l[a];
     }
     for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
   }
 }
 
-// Merge of the slices, in order: O bf16 [T, Q27_AQ, 256]. One subgroup per (head, row).
+// Merge of the slices in order: O bf16 [T, Q27_AQ, 256], 16 subgroups per (head, row), 16 of the 256 dims each.
 KERNEL(16) void attn_merge(global const float *PM, global const float *PL, global const float *PO, global ushort *O,
                            int p0, int NS, global const int *TREE, global const int *POS) {
-  const int hh = get_group_id(0), t = get_group_id(1), lane = get_sub_group_local_id();
+  const int hh = get_group_id(0) / 16, g = get_group_id(0) % 16, t = get_group_id(1), lane = get_sub_group_local_id();
   const int used = (POS ? POS[t] : p0 + DEPTH(t)) / SPLIT + 1; // non-empty slices of row t
   const long base = ((long)t * Q27_AQ + hh) * NS;
   float m = -INFINITY;
-  for (int s = 0; s < used; s++) m = fmax(m, PM[base + s]);
-  float l = 0.0f, o[16];
-  for (int i = 0; i < 16; i++) o[i] = 0.0f;
-  for (int s = 0; s < used; s++) {
-    const float w = exp(PM[base + s] - m);
-    l += PL[base + s] * w;
-    for (int i = 0; i < 16; i++) o[i] += PO[(base + s) * 256 + i * 16 + lane] * w;
+  for (int s0 = 0; s0 < used; s0 += 16) m = fmax(m, sub_group_reduce_max(s0 + lane < used ? PM[base + s0 + lane] : -INFINITY));
+  float l = 0.0f, o = 0.0f;
+  for (int s0 = 0; s0 < used; s0 += 16) {
+    const bool ok = s0 + lane < used;
+    const float wj = ok ? exp(PM[base + s0 + lane] - m) : 0.0f, lj = ok ? PL[base + s0 + lane] : 0.0f;
+    float v[16];
+    #pragma unroll
+    for (int k = 0; k < 16; k++) v[k] = s0 + k < used ? PO[(base + s0 + k) * 256 + g * 16 + lane] : 0.0f;
+    #pragma unroll
+    for (int k = 0; k < 16; k++) {
+      const float w = sub_group_broadcast(wj, k); // 0 past the last slice, with a 0 value: adds an exact zero
+      l += sub_group_broadcast(lj, k) * w;
+      o += v[k] * w;
+    }
   }
-  for (int i = 0; i < 16; i++) O[((long)t * Q27_AQ + hh) * 256 + i * 16 + lane] = f2bf(o[i] / l);
+  O[((long)t * Q27_AQ + hh) * 256 + g * 16 + lane] = f2bf(o / l);
 }
 
 // Commit of a kept path: its K, V rows move to positions p0 + depth in depth order, never overwriting an unread row.
@@ -373,9 +388,9 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
   const int tq = lane % 8, hq = 2 * g + lane / 8;
   const int qpos = p0 + t0 + tq;
   const bool qok = t0 + tq < T;
-  global const float *KS = (global const float *)(KC + (long)cap * 1024), *VS = (global const float *)(VC + (long)cap * 1024);
+  global const float *KS = (global const float *)(KC + (long)cap * Q27_KVROW), *VS = (global const float *)(VC + (long)cap * Q27_KVROW);
   if (qk && kh == 0) {                                 // the lane's query, Q in int8
-    global const ushort *qrow = Q + ((long)(t0 + tq) * 24 + hk * 6 + hq) * 256;
+    global const ushort *qrow = Q + ((long)(t0 + tq) * Q27_AQ + hk * 6 + hq) * 256;
     float mq = 0.0f;
     if (qok)
       for (int e = 0; e < 16; e++) {
@@ -409,7 +424,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
         __attribute__((opencl_unroll_hint))
         for (int h2 = 0; h2 < 2; h2++) {
           ushort ka[32];                               // 32 keys × 32 bytes: 4 A tiles of 8 keys
-          intel_sub_group_2d_block_read_16b_32r16x1c((global void *)(KC + hk * 256), 256, nkeys, 4 * 256,
+          intel_sub_group_2d_block_read_16b_32r16x1c((global void *)(KC + hk * 256), 256, nkeys, Q27_AKV * 256,
                                                      (int2)(ds * 16, kb + h2 * 32), ka);
           __attribute__((opencl_unroll_hint))
           for (int b = 0; b < 4; b++) {
@@ -422,7 +437,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       float ksc[4];                                    // scales of the 64 keys, 4 per lane
       for (int c = 0; c < 4; c++) {
         const int key = kb + c * 16 + lane;
-        ksc[c] = key < nkeys ? KS[(long)key * 4 + hk] : 0.0f;
+        ksc[c] = key < nkeys ? KS[(long)key * Q27_AKV + hk] : 0.0f;
       }
       float8 s[8];
       float mx = -INFINITY;
@@ -443,7 +458,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       float vsc[4];
       for (int c = 0; c < 4; c++) {
         const int key = kb + c * 16 + lane;
-        vsc[c] = key < nkeys ? VS[(long)key * 4 + hk] : 0.0f;
+        vsc[c] = key < nkeys ? VS[(long)key * Q27_AKV + hk] : 0.0f;
       }
       float sum = 0.0f;
       local ushort *pt = P + (hq * 8) * 128 + tq * 16;
@@ -479,7 +494,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       __attribute__((opencl_unroll_hint))
       for (int dt = 0; dt < 2; dt++) {
         uint w8[8];                                    // lane: dimension 16 (2 sg + dt) + lane; word j: keys 4j … 4j + 3
-        intel_sub_group_2d_block_read_transform_8b_32r16x1c((global void *)(VC + hk * 256), 256, nkeys, 4 * 256,
+        intel_sub_group_2d_block_read_transform_8b_32r16x1c((global void *)(VC + hk * 256), 256, nkeys, Q27_AKV * 256,
                                                             (int2)((sg * 2 + dt) * 16, k0 + c2 * 32), w8);
         __attribute__((opencl_unroll_hint))
         for (int hc = 0; hc < 2; hc++) {               // 16 keys: 8 fp16 pairs (keys 2j, 2j + 1), int8 → fp16 exact
@@ -508,7 +523,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
     for (int r = 0; r < 8; r++) {
       if (t0 + r >= T) break;
       const float inv = A[i * 8 + r];
-      global ushort *dst = O + ((long)(t0 + r) * 24 + hk * 6 + i) * 256 + sg * 32 + lane;
+      global ushort *dst = O + ((long)(t0 + r) * Q27_AQ + hk * 6 + i) * 256 + sg * 32 + lane;
       dst[0] = f2bf(o[i][0][r] * inv);
       dst[16] = f2bf(o[i][1][r] * inv);
     }

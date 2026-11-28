@@ -35,6 +35,14 @@ pub const Features = struct {
     pub const Space = enum { host, device };
     pub const Dtype = enum { bf16, f16, f32, u32 };
     pub const Fence = union(enum) { none, cuda_event: u64, metal_event: u64 };
+    /// A short-lived normalized row view; keep its bytes valid until reads are queued on the same ordered stream.
+    pub const Normalized = struct {
+        buffer: u64,
+        byte_offset: u64 = 0,
+        start: u64,
+        rows: u32,
+        row_bytes: u32,
+    };
     buffer: u64, // a host pointer, or a device pointer on `device`
     offset: u64 = 0, // bytes into `buffer` where the first row starts
     rows: u32, // packed rows, row-major
@@ -43,6 +51,7 @@ pub const Features = struct {
     device: i32 = 0, // the drafter must run on this device
     dtype: Dtype,
     ready: Fence = .none, // .none: written; else the fence to wait on before reading, kind naming the backend
+    normalized: ?Normalized = null, // optional already-normalized view of some or all rows in this request
 };
 
 /// Takes a prompt chunk's tapped rows, the first at position `start`, while they are still held.
@@ -78,10 +87,14 @@ pub const Backend = struct {
     first_before_draft: bool = false,
     /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
     defer_lone_draft: bool = false,
+    /// Commit a fully accepted lone chain; Inkling 2 Mini needs this transaction commit.
+    keep_full_lone: bool = false,
     /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
     penalties: bool = false,
     /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
     chunk_invariant: bool = false,
+    /// Whether image requests may run a background warm prefill; wrappers preserve the target policy.
+    warm_images: bool = true,
     ptr: *anyopaque,
     vtable: *const VTable,
 

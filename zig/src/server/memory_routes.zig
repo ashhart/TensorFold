@@ -11,15 +11,24 @@ const Allocator = std.mem.Allocator;
 pub fn get(srv: *Server, conn: *Conn, a: Allocator) !void {
     var device: ?api.Memory = null;
     var info: api.Info = srv.info;
+    var status: api.Status = .{};
     if (srv.idle_manager) |m| {
         device = m.readMemory(srv, false); // the manager lock guards the read; parked: no engine holds device memory
         info = m.readInfo(srv);
-    } else device = srv.engine.memory(false);
-    const value = try snapshot(a, info, process.read(), device);
+        m.readStatus(srv, &status, &.{});
+    } else {
+        device = srv.engine.memory(false);
+        srv.engine.status(&status, &.{});
+    }
+    const value = try snapshotWithCache(a, info, process.read(), device, status.prompt_cache);
     routes.sendValue(conn, a, 200, value);
 }
 
 fn snapshot(a: Allocator, info: api.Info, proc: ?process.Snapshot, device: ?api.Memory) !json.Value {
+    return snapshotWithCache(a, info, proc, device, null);
+}
+
+fn snapshotWithCache(a: Allocator, info: api.Info, proc: ?process.Snapshot, device: ?api.Memory, cache: ?api.Status.PromptCache) !json.Value {
     const o = try json.newObject(a);
     try o.put(a, "schema_version", try json.intValue(a, 1));
     if (info.context_window > 0) try o.put(a, "context_window", try json.intValue(a, info.context_window));
@@ -39,6 +48,14 @@ fn snapshot(a: Allocator, info: api.Info, proc: ?process.Snapshot, device: ?api.
         try m.put(a, "peak_scope", .{ .string = "since_start_or_health_reset" });
         // a configured bound, not a measurement
         if (d.limit) |limit| try m.put(a, "load_limit_bytes", try json.intValue(a, limit));
+        if (info.cuda_pool_after_warmup) |s| {
+            const p = try json.newObject(a);
+            try p.put(a, "source", .{ .string = "cuda_driver_and_existing_host_budget" });
+            try p.put(a, "phase", .{ .string = "after_warmup_with_initial_pool_resident" });
+            inline for (@typeInfo(api.CudaPoolSizing).@"struct".field_names) |field|
+                try p.put(a, field, try json.intValue(a, @field(s, field)));
+            try m.put(a, "pool_after_warmup", .{ .object = p });
+        }
         try o.put(a, "device", .{ .object = m });
     }
     if (info.prompt_cache_plan) |plan| {
@@ -51,6 +68,10 @@ fn snapshot(a: Allocator, info: api.Info, proc: ?process.Snapshot, device: ?api.
             if (@field(plan, field)) |n| try m.put(a, field, try json.intValue(a, n));
         }
         try o.put(a, "prompt_cache_plan", .{ .object = m });
+    }
+    if (cache) |c| {
+        try o.put(a, "prompt_cache_keeping_new_states", .{ .bool = !c.hold });
+        try o.put(a, "prompt_cache_hold_reason", if (c.hold) .{ .string = "memory_pressure" } else .null);
     }
     return .{ .object = o };
 }
@@ -110,4 +131,45 @@ test "physical cache plan preserves the applied sizing inputs without runtime or
     try std.testing.expect(plan.get("over_cap").?.bool);
     try std.testing.expectEqual(@as(usize, 9), plan.object.count());
     try std.testing.expectEqual(@as(usize, 3), value.object.count());
+}
+
+test "CUDA pool after warmup: device report retains frozen sizing phases and omits the unset scope" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const off = try snapshot(a, .{}, null, .{});
+    try std.testing.expect(off.get("device").?.get("pool_after_warmup") == null);
+    const on = try snapshot(a, .{ .cuda_pool_after_warmup = .{
+        .estimated_free_bytes = 1000,
+        .measured_free_bytes = 200,
+        .final_free_bytes = 72,
+        .reserve_bytes = 64,
+        .growth_room_bytes = 136,
+        .estimated_pages = 2,
+        .measured_pages = 4,
+        .page_bytes = 64,
+        .page_tokens = 128,
+    } }, null, .{});
+    const p = on.get("device").?.get("pool_after_warmup").?;
+    try std.testing.expectEqualStrings("after_warmup_with_initial_pool_resident", p.get("phase").?.string);
+    try std.testing.expectEqual(@as(i64, 1000), p.get("estimated_free_bytes").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 200), p.get("measured_free_bytes").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 4), p.get("measured_pages").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 136), p.get("growth_room_bytes").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 72), p.get("final_free_bytes").?.int64().?);
+}
+
+test "memory pressure: /memory says whether new prompt states are kept and why not" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const normal = try snapshotWithCache(a, .{}, null, null, .{});
+    try std.testing.expect(normal.get("prompt_cache_keeping_new_states").?.bool);
+    try std.testing.expect(normal.get("prompt_cache_hold_reason").? == .null);
+    const held = try snapshotWithCache(a, .{}, null, null, .{ .hold = true });
+    try std.testing.expect(!held.get("prompt_cache_keeping_new_states").?.bool);
+    try std.testing.expectEqualStrings("memory_pressure", held.get("prompt_cache_hold_reason").?.string);
+    const absent = try snapshot(a, .{}, null, null);
+    try std.testing.expect(absent.get("prompt_cache_keeping_new_states") == null);
+    try std.testing.expect(absent.get("prompt_cache_hold_reason") == null);
 }

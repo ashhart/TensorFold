@@ -6,6 +6,9 @@ import unittest
 from unittest.mock import patch
 import pr_check as pc
 
+CYCLES = dict(cycle_base=0, cycle_head=0, new_cycle=0, closing_cycle=0, removed_cycle=0, unresolved=0,
+              family_base=0, family_head=0, new_family=0, removed_family=0, allowed_family=0)
+
 
 class ContributorChecks(unittest.TestCase):
     def checks(self, name, text, baseline=None, pr=12, changelog='## Unreleased\n\n- Change (#12).\n'):
@@ -46,7 +49,7 @@ class ContributorChecks(unittest.TestCase):
         found = [f for name, text in examples for f in pc.private_additions(name, [(1, text)])]
         self.assertEqual(len(found), 4)
         self.assertTrue(all(level == 'WARN' for level, _ in found))
-        counts = dict(merge_base='base', changed_files=4, lean_base=0, lean_head=0, new_lean=0)
+        counts = dict(merge_base='base', changed_files=4, lean_base=0, lean_head=0, new_lean=0, **CYCLES)
         with patch.object(pc, 'check', return_value=(found, counts)):
             self.assertEqual(pc.main([]), 0)
 
@@ -76,6 +79,14 @@ class ContributorChecks(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0][0], 'ERROR')
         self.assertIn('block comment', found[0][1])
+
+    def test_the_current_cycle_checker_runs_on_both_trees(self):
+        root, a, b = Path(__file__).parents[1], {'zig/src/a/a.zig': '@import("b")'}, {'zig/src/b/b.zig': '@import("a")'}
+        found, counts = pc.import_cycles(root, {**a, 'zig/src/b/b.zig': ''}, {**a, **b})
+        self.assertEqual([level for level, _ in found], ['ERROR', 'ERROR'])
+        self.assertEqual(counts['new_cycle'], 2)
+        found, counts = pc.import_cycles(root, {**a, **b}, {**a, 'zig/src/b/b.zig': ''})
+        self.assertEqual((found, counts['removed_cycle']), ([], 2))
 
     def test_duplicate_lean_findings_count_and_line_moves_do_not(self):
         a = Counter({('zig/a.zig', 'block comment'): 1})
@@ -109,7 +120,8 @@ class ContributorChecks(unittest.TestCase):
         with patch.object(pc, 'git', git), patch.object(pc, 'merge_base', return_value='base'), \
              patch.object(pc, 'base_text', return_value={'zig/deleted.zig': 'x'}), \
              patch.object(pc, 'worktree_text', return_value=current), patch.object(pc.runpy, 'run_path', return_value={}), \
-             patch.object(pc, 'lean_counts', return_value=Counter()):
+             patch.object(pc, 'lean_counts', return_value=Counter()), \
+             patch.object(pc, 'import_cycles', return_value=([], CYCLES)):
             found, counts = pc.check(root)
         self.assertEqual(counts['changed_files'], len(names))
         self.assertTrue(any('600 lines' in m for _, m in found))
@@ -117,7 +129,7 @@ class ContributorChecks(unittest.TestCase):
         self.assertTrue(any(level == 'WARN' and 'new.md' in m for level, m in found))
 
     def test_advisories_exit_zero_errors_exit_one_and_incomplete_exit_two(self):
-        counts = dict(merge_base='base', changed_files=1, lean_base=1, lean_head=1, new_lean=0)
+        counts = dict(merge_base='base', changed_files=1, lean_base=1, lean_head=1, new_lean=0, **CYCLES)
         for level, expected in [('WARN', 0), ('ERROR', 1)]:
             with patch.object(pc, 'check', return_value=([(level, 'planted')], counts)):
                 self.assertEqual(pc.main([]), expected)

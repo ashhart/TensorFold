@@ -27,7 +27,7 @@ import { ModelComparisons } from './model-comparison'
 import { modelLaunchOptions } from './launch-options'
 import type { ModelBenchmarkInput, ModelBenchmarkReceipt, ModelBenchmarkSnapshot } from '../../../shared/model-benchmark'
 import { ModelBenchmarks } from './benchmark/controller'
-import { createModelBenchmarkStore, benchmarkWorkspace, readBenchmarkReceiptFile, type ModelBenchmarkStore } from './benchmark/storage'
+import { createModelBenchmarkStore, benchmarkWorkspace, readBenchmarkDetailsFile, readBenchmarkReceiptFile, type ModelBenchmarkStore } from './benchmark/storage'
 import { startBenchmarkProcess } from './benchmark/process'
 import { assertBundledBenchmarkVersion } from './benchmark/version'
 
@@ -111,7 +111,7 @@ export class EngineService {
     this.envOverridesApplied = this.preferences.get().envOverrides
     this.models = new ModelHub({
       endpoint: this.launch.endpoint, fetch: options.fetch, env: () => this.env, totalMemoryBytes: this.totalMemoryBytes,
-      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), cacheDir: () => this.hub,
+      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), installedRevision: (repo) => this.revisions.revision(repo), cacheDir: () => this.hub,
       memory: () => ({ limit: this.supervisor.memoryLimitBytes, budget: this.supervisor.memoryBudgetBytes, limitFor: (modelType) => this.supervisor.memoryPolicyFor(modelType) }),
     })
     this.revisions = new ModelRevisions(options.appHome, () => this.hub)
@@ -182,7 +182,7 @@ export class EngineService {
       reserve: () => this.supervisor.reserveSequence('local benchmark'),
       workspace: () => benchmarkWorkspace(options.appHome),
       process: (input, workspace, progress, signal) => startBenchmarkProcess({ binary: this.requireBinary(), input, ...workspace, workingDirectory: workspace.directory, env: this.env, progress, signal }),
-      readReceipt: (file, input) => readBenchmarkReceiptFile(file, input),
+      readReceipt: (file, input) => readBenchmarkReceiptFile(file, input), readDetails: (file, expected) => readBenchmarkDetailsFile(file, expected),
       store: options.benchmarkStore ?? createModelBenchmarkStore(options.appHome),
     })
   }

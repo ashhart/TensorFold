@@ -367,47 +367,43 @@ export async function downloadMedia(rawUrl: string, opts: DownloadMediaOptions):
       return { ...base, ok: true, path: fileTarget, kind, bytes: buf.byteLength, contentType }
     }
 
-    // Stream into a sibling temp file and rename on completion. A crash or overflow leaves a
-    // partial temp file (never a torn file under the content-hash name), so statSize can never
-    // promote a truncated download into a cache hit.
+    // Remove the unique temporary file on every exit until the atomic rename succeeds.
     const streamTemp = `${fileTarget}.tmp-${process.pid}-${randomUUID()}`
-    let written = 0
-    let overflowed = false
-    let head: Uint8Array | null = null
-    const handle = await fs.open(streamTemp, 'w', 0o600)
+    let renamed = false
     try {
-      // @ts-expect-error Web ReadableStream is async-iterable at runtime in Node 18+.
-      for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
-        const bytes = chunk.byteLength
-        if (wouldExceedSizeCap(written, bytes, capBytes)) {
-          overflowed = true
-          break
+      let written = 0
+      let overflowed = false
+      let head: Uint8Array | null = null
+      const handle = await fs.open(streamTemp, 'w', 0o600)
+      try {
+        // @ts-expect-error Web ReadableStream is async-iterable at runtime in Node 18+.
+        for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+          const bytes = chunk.byteLength
+          if (wouldExceedSizeCap(written, bytes, capBytes)) {
+            overflowed = true
+            break
+          }
+          if (!head && bytes > 0) head = chunk.slice(0, 16) // leading bytes for the magic-byte check
+          await handle.write(chunk)
+          written += bytes
         }
-        if (!head && bytes > 0) head = chunk.slice(0, 16) // leading bytes for the magic-byte check
-        await handle.write(chunk)
-        written += bytes
+      } finally {
+        await handle.close().catch(() => {})
       }
-    } finally {
-      await handle.close().catch(() => {})
-    }
-    if (overflowed) {
-      // Drop the partial temp file — never the content-addressed target — so the cap is
-      // enforced without leaving a torn blob at the cache path.
-      await fs.rm(streamTemp, { force: true })
-      return { ...base, ok: false, contentType, path: null, error: `Media exceeds the ${capBytes}-byte cap (truncated while streaming).` }
-    }
-    // Same magic-byte reconciliation as the buffer path above.
-    kind = head && head.byteLength >= 4 ? reconcileMediaKind(declaredKind, head) : declaredKind
-    fileTarget = mediaCachePath(opts.cacheRoot, kind, base.sourceUrl, contentType)
-    // The reconciled kind may differ from the declared one — its subdir may not exist yet.
-    await fs.mkdir(path.dirname(fileTarget), { recursive: true, mode: 0o700 })
-    try {
+      if (overflowed) {
+        return { ...base, ok: false, contentType, path: null, error: `Media exceeds the ${capBytes}-byte cap (truncated while streaming).` }
+      }
+      // Same magic-byte reconciliation as the buffer path above.
+      kind = head && head.byteLength >= 4 ? reconcileMediaKind(declaredKind, head) : declaredKind
+      fileTarget = mediaCachePath(opts.cacheRoot, kind, base.sourceUrl, contentType)
+      // The reconciled kind may differ from the declared one — its subdir may not exist yet.
+      await fs.mkdir(path.dirname(fileTarget), { recursive: true, mode: 0o700 })
       await fs.rename(streamTemp, fileTarget)
-    } catch (e) {
-      await fs.rm(streamTemp, { force: true }).catch(() => {})
-      throw e
+      renamed = true
+      return { ...base, ok: true, path: fileTarget, kind, bytes: written, contentType }
+    } finally {
+      if (!renamed) await fs.rm(streamTemp, { force: true }).catch(() => {})
     }
-    return { ...base, ok: true, path: fileTarget, kind, bytes: written, contentType }
   } catch (e: any) {
     return { ...base, ok: false, path: null, error: String(e?.message ?? e) }
   } finally {

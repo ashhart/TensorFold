@@ -23,7 +23,7 @@ pub fn boundary(e: *const E.Engine) boot.Boundary {
 
 /// The shapes every stage runs: a prompt chunk and a round at most `max_rows` rows, `parallel` slots of `context`.
 pub fn shapes(parallel: u32, context: u32) boot.Shapes {
-    return .{ .prompt_chunk = E.max_rows, .max_rows = E.max_rows, .parallel = parallel, .context = context };
+    return .{ .prompt_chunk = E.grid_rows, .max_rows = E.grid_rows, .parallel = parallel, .context = context };
 }
 
 pub fn kvDtype(e: *const E.Engine) stage.payload.Dtype {

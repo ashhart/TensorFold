@@ -8,7 +8,7 @@ const config = @import("config.zig");
 const segments = @import("../../core/segments.zig");
 const snapshot = @import("snapshot.zig");
 const CallLog = @import("call_log.zig").CallLog;
-const tp_settings = @import("tp_settings.zig");
+const tp_settings = @import("../../core/tp_settings.zig");
 const follow_mod = @import("follow.zig");
 const marks_mod = @import("marks.zig");
 const pack_io = @import("pack_io.zig");
@@ -133,6 +133,7 @@ pub const Engine = struct {
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
     draw_at: Buf, // a sampled window's draw positions (sample.zig)
+    penalties: ?@import("penalties.zig").Rows = null, // shared rounds' presence and frequency entries, once asked
     rows_w: [MAXR + 1]Buf,
     mdims_w: [MAXR + 1]Buf,
     host: struct { rows: Buf, mdims: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, slots: [2 * MAXR]Slot },
@@ -279,6 +280,8 @@ pub const Engine = struct {
         e.peer_kept.deinit(gpa);
         e.snap_pool.deinit();
         e.peer_drops.deinit(gpa);
+        if (e.penalties) |*p| p.deinit(gpa);
+        if (e.r.gx) |g| g.logCounts();
         e.r.deinit();
         e.r.device.deinit();
         e.arena_state.deinit();

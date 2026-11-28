@@ -23,6 +23,13 @@ projections and experts in groups of 32 or 64; unsupported formats are refused b
 and checked again at load. CUDA supports the named 4-bit/group-64 checkpoint. The native engine serves the named
 checkpoint on Metal, CUDA and HIP, and NVIDIA's NVFP4 export on CUDA.
 
+On CUDA, NVIDIA's NVFP4 export serves the same way:
+
+```bash
+tensorfold pull nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+tensorfold serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 --name bench
+```
+
 On Metal the native engine also serves MLX checkpoints at a width per module (2, 3, 4, 5, 6 or 8 bits, not 7, in groups
 of 32, 64 or 128), such as `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`, `-oQ6` and `-oQ8`, the three
 measured. A matrix at 4-bit in groups of 64 runs on the kernels above. Any other width runs on the shared row kernels in
@@ -58,7 +65,7 @@ the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests shar
 `--mtp-drafts` (at most 15 for this model) and `--mtp-confidence` set MTP drafts in lone and shared rounds; see the
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda).
 
-CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls
+In 0.6.6, CUDA read this model's MLX 4-bit checkpoint only, not its NVFP4 and EXL3 exports. Its prompt matmuls
 have no FP8 kernel, so prompt precision does not change and `--prefill-fp8` is refused.
 
 Use the [CUDA container setup](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#nvidia-gpus). One or two
@@ -263,3 +270,22 @@ servers plus one `--no-drafts` server):
 | `bench_openai` code / chat (`--no-drafts`) | median tok/s | 86.2 / 86.1 | 87.9 / 87.9 | 1.00 token/round (1.828 GB read/token, ~160.7 GB/s greedy) |
 | `bench_concurrent` 1 / 2 / 4 streams | aggregate tok/s | 124.4 / 136.0-137.0 / 168.4-168.9 | 131.5-132.4 / 146.5 / 175.5-176.4 | 84/84 concurrent=alone; 48/48 alone=`"draft": false` |
 | `bench_cache` 2,048 / 7,099 / 28,333 tokens | cold TTFT (s) | — | 0.731-0.732 / 2.672-2.676 / 13.130-13.205 | 2,797-2,800 / 2,653-2,657 / 2,146-2,158 tok/s (repeated cold) |
+
+## Deep MTP drafts on HIP (opt-in)
+
+On one HIP rank (`--tp 1`), Nemotron 3.5 Lightning keeps its four-row verify window and three MTP drafts by default so latency, GTT memory and shared-round throughput stay as before. Passing `--mtp-drafts N` from `4` to `15` widens each stream's verify window to `N + 1` rows (up to sixteen) for a lone decoding stream, while shared multi-stream rounds stay capped at three head drafts per stream and 32 rows in the round plan (or `4 * streams` above eight streams; above `--tp 1`, `--mtp-drafts` remains capped at `3` and `--mtp-drafts 16` is refused by name).
+
+Measured on a Strix Halo (`gfx1151`, `TENSORFOLD_MEMORY_RESERVE_GIB=4 --context 131072 --parallel 4 --prompt-cache-gib 0`, greedy and sampled 256-token replies):
+
+| Checkpoint | Prompt suite (`L=1` unless noted) | `d=3` (default) | `d=5` | `d=7` | `d=11` | `d=15` |
+|---|---|---|---|---|---|---|
+| `Lightning-30B-A3B-MLX-4bit` | Edit copy (`T=1.0 / T=0.0`, tok/s) | `149.0 / 149.6` | `165.5 / 164.8` | `184.3 / 179.4` | `212.6 / 207.8` | `229.1 / 214.0` |
+| `Lightning-30B-A3B-MLX-4bit` | Edit copy `L=2` agg (`T=1.0 / T=0.0`) | `151.6 / 156.6` | `178.3 / 170.4` | `187.0 / 182.8` | `172.8 / 175.2` | `188.7 / 187.1` |
+| `Lightning-30B-A3B-MLX-4bit` | General `bench_prompts` (`T=1.0 / T=0.0`) | `125.5 / 131.4` | `125.9 / 131.3` | `125.5 / 133.0` | `124.9 / 134.4` | `124.6 / 135.2` |
+| `Lightning-30B-A3B-MLX-4bit` | `fibonacci-raw` / `gpu-chat` (`T=0.0`) | `122.6 / 98.8` | `125.3 / 94.5` | `132.0 / 94.5` | `135.2 / 94.5` | `136.6 / 94.5` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | Edit copy (`T=1.0 / T=0.0`, tok/s) | `132.9 / 134.3` | `151.9 / 153.3` | `165.1 / 167.9` | `186.3 / 198.0` | `194.0 / 204.7` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | Edit copy `L=2` agg (`T=1.0 / T=0.0`) | `144.0 / 145.1` | `163.2 / 170.5` | `179.0 / 178.4` | `163.0 / 163.5` | `175.3 / 184.0` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | General `bench_prompts` (`T=1.0 / T=0.0`) | `104.8 / 124.1` | `110.7 / 125.0` | `110.5 / 123.8` | `110.0 / 122.6` | `109.6 / 120.9` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | `fibonacci-raw` / `gpu-chat` (`T=0.0`) | `122.8 / 91.8` | `123.3 / 95.8` | `122.5 / 96.4` | `123.9 / 94.7` | `122.7 / 96.8` |
+
+General prose and plain prompts are mixed or slightly slower at higher depth (`gpu-chat` at `T=0` drops from `98.8` to `94.5` tok/s on `Lightning-30B-A3B-MLX-4bit`, and `bench_prompts` at `T=0` drops from `124.1` to `120.9` tok/s on `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP`), whereas copy-heavy edits gain `43–54%` at one stream (`229.1` vs `149.0` tok/s on `MLX-4bit`; `204.7` vs `134.3` on `oQ4e`) and `20–27%` at two. Idle GTT across four `--parallel 4` streams grows by `+2,243.3 MiB` from `--mtp-drafts 3` (`1.15 GiB` per stream) to `--mtp-drafts 15` (`1.70 GiB` per stream). Every checked reply kept identical tokens across depths `3..15`, solo runs, concurrent runs, and `"draft": false` baselines (`100%` across `84` OpenAI, `588` concurrent/alone, and `336` serial checks per checkpoint) as well as across `12` prompt-cache reuse runs (`42/42` reused rows at `--mtp-drafts 7, 11, 15` with `--prompt-cache-gib 8`).

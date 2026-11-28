@@ -15,8 +15,8 @@ pub const Shard = struct { words: []const u8, scales: []const u8, biases: []cons
 /// A gather copies the checkpoint's rows in id order: a staging too small, or a row past the last shard.
 const Error = error{ StagingTooSmall, NgramRowOutOfRange };
 
-/// Parts a gather spreads over at most, and rows a part takes before the gather stops adding parts.
-const max_parts = 32;
+/// Parts a gather spreads over at most (all the pool's: its page reads wait together), and rows a part takes first.
+const max_parts = pool.max_parts;
 const rows_per_part = 2;
 
 /// The shards' rows as mapped: what a gather reads, apart from the hasher that names the rows.

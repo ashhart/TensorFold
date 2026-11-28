@@ -21,8 +21,8 @@ pub const Media = struct {
     pos: []i32, // [3][prompt]: t, h, w
     delta: i32,
 
-    /// `images` (the request's, in prompt order) through the tower; the prompt's positions as get_rope_index lays them.
-    pub fn init(gpa: std.mem.Allocator, v: *vision.Vision, prompt: []const u32, images: []const Image) !Media {
+    /// `images` through the tower but runs a kept state at `from` holds; positions from all images (get_rope_index).
+    pub fn init(gpa: std.mem.Allocator, v: *vision.Vision, prompt: []const u32, images: []const Image, from: usize) !Media {
         const layout = try Layout.init(prompt, images, v.ids(), merge);
         for (images) |img| {
             if (@as(usize, img.gh) * img.gw > max_patches) return error.BadImageGrid;
@@ -39,36 +39,28 @@ pub const Media = struct {
         errdefer gpa.free(m.src);
         m.pos = try gpa.alloc(i32, 3 * n);
         errdefer gpa.free(m.pos);
-        // the tower: runs of whole images within one call's patches, in prompt order
-        var done: usize = 0; // feature rows written
-        var i: usize = 0;
-        while (i < images.len) {
-            var j = i;
-            var patches: usize = 0;
-            while (j < images.len) : (j += 1) {
-                const more = @as(usize, images[j].gh) * images[j].gw;
-                if (j > i and patches + more > max_patches) break;
-                patches += more;
-            }
-            const grids = try gpa.alloc(Grid, j - i);
-            defer gpa.free(grids);
-            for (images[i..j], grids) |img, *g| g.* = .{ .h = img.gh, .w = img.gw };
-            const out = m.features.ptr + done * c.out_hidden * 2;
-            if (j - i == 1) {
-                try v.tower.encode(images[i].pixels, grids, out);
-            } else {
-                const px = try gpa.alloc(f32, patches * patch_width);
-                defer gpa.free(px);
+        const Tower = struct {
+            gpa: std.mem.Allocator,
+            v: *vision.Vision,
+            base: u64,
+            width: usize,
+            fn run(t: @This(), run_images: []const Image, patches: usize, row: usize) !void {
+                const grids = try t.gpa.alloc(Grid, run_images.len);
+                defer t.gpa.free(grids);
+                for (run_images, grids) |img, *g| g.* = .{ .h = img.gh, .w = img.gw };
+                const out = t.base + row * t.width;
+                if (run_images.len == 1) return t.v.tower.encode(run_images[0].pixels, grids, out);
+                const px = try t.gpa.alloc(f32, patches * patch_width);
+                defer t.gpa.free(px);
                 var at: usize = 0;
-                for (images[i..j]) |img| {
+                for (run_images) |img| {
                     @memcpy(px[at..][0..img.pixels.len], img.pixels);
                     at += img.pixels.len;
                 }
-                try v.tower.encode(px, grids, out);
+                try t.v.tower.encode(px, grids, out);
             }
-            for (images[i..j]) |img| done += img.tokens;
-            i = j;
-        }
+        };
+        try runs(images, from, Tower{ .gpa = gpa, .v = v, .base = m.features.ptr, .width = c.out_hidden * 2 });
         fill(&layout, images, m.src, m.pos);
         return m;
     }
@@ -79,6 +71,26 @@ pub const Media = struct {
         m.gpa.free(m.pos);
     }
 };
+
+/// The tower's runs of whole images (one call's patches each), `enc.run` at their first row, but runs before `from`.
+pub fn runs(images: []const Image, from: usize, enc: anytype) !void {
+    var done: usize = 0; // feature rows laid out
+    var i: usize = 0;
+    while (i < images.len) {
+        var j = i;
+        var patches: usize = 0;
+        while (j < images.len) : (j += 1) {
+            const more = @as(usize, images[j].gh) * images[j].gw;
+            if (j > i and patches + more > max_patches) break;
+            patches += more;
+        }
+        // a run ending by `from` is in the kept state; others keep a cold pass's members (cuBLASLt picks by shape)
+        const last = images[j - 1];
+        if (@as(usize, last.at) + last.tokens > from) try enc.run(images[i..j], patches, done);
+        for (images[i..j]) |img| done += img.tokens;
+        i = j;
+    }
+}
 
 /// Each prompt row's feature row (-1 for text) and its t, h and w positions ([3][n]) from `layout`.
 pub fn fill(layout: *const Layout, images: []const Image, src: []i32, pos: []i32) void {
@@ -136,4 +148,53 @@ test "placeholders that do not match their images are refused before the tower" 
     const short: Image = .{ .pixels = &px, .gh = 4, .gw = 6, .at = 1, .tokens = 5 };
     const prompt = [_]u32{ 52, 50, 50, 50, 50, 50, 50, 53 };
     try std.testing.expectError(error.BadImagePlaceholders, Layout.init(&prompt, &[_]Image{short}, ids, merge));
+}
+
+/// A stand-in tower: each run's members and first row are recorded, and each image's rows hold its position and row.
+const Runs = struct {
+    rows: []u32,
+    calls: usize = 0,
+    firsts: [4]u32 = undefined,
+    sizes: [4]usize = undefined,
+
+    fn run(r: *Runs, run_images: []const Image, _: usize, row: usize) !void {
+        r.firsts[r.calls] = run_images[0].at;
+        r.sizes[r.calls] = run_images.len;
+        r.calls += 1;
+        var at = row;
+        for (run_images) |img| for (0..img.tokens) |k| {
+            r.rows[at] = img.at * 1000 + @as(u32, @intCast(k));
+            at += 1;
+        };
+    }
+};
+
+test "a resumed image prompt skips only the tower runs its kept state holds, and splices a cold pass's rows" {
+    const t = std.testing;
+    const px: []const f32 = &.{};
+    // two 64x128 grids fill one call's patches; the third starts a run of its own
+    const images = [_]Image{
+        .{ .pixels = px, .gh = 64, .gw = 128, .at = 10, .tokens = 4 },
+        .{ .pixels = px, .gh = 64, .gw = 128, .at = 20, .tokens = 4 },
+        .{ .pixels = px, .gh = 64, .gw = 128, .at = 40, .tokens = 4 },
+    };
+    var cold_rows: [12]u32 = @splat(0xdead);
+    var cold: Runs = .{ .rows = &cold_rows };
+    try runs(&images, 0, &cold);
+    try t.expectEqual(@as(usize, 2), cold.calls);
+    for ([_]usize{ 30, 22 }) |from| { // past both images of the first run, then inside its second image
+        var warm_rows: [12]u32 = @splat(0xdead);
+        var warm: Runs = .{ .rows = &warm_rows };
+        try runs(&images, from, &warm);
+        // a run is skipped whole or kept whole, with a cold pass's members
+        try t.expectEqual(@as(usize, if (from == 30) 1 else 2), warm.calls);
+        try t.expectEqual(@as(u32, if (from == 30) 40 else 10), warm.firsts[0]);
+        for (0..warm.calls) |c| try t.expectEqual(cold.sizes[cold.calls - warm.calls + c], warm.sizes[c]);
+        // every row a chunk from `from` splices is a cold pass's
+        var row: usize = 0;
+        for (images) |img| {
+            for (0..img.tokens) |k| if (img.at + k >= from) try t.expectEqual(cold_rows[row + k], warm_rows[row + k]);
+            row += img.tokens;
+        }
+    }
 }

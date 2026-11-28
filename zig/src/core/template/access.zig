@@ -103,6 +103,31 @@ fn index(i: i64, n: usize) ?usize {
     return if (k >= 0 and k < @as(i64, @intCast(n))) @intCast(k) else null;
 }
 
+/// `index(i, uni.count(s))`, a non-negative index counting only the code points up to it (a chat's `content.0`).
+fn strIndex(s: []const u8, i: i64) ?usize {
+    if (i < 0) return index(i, uni.count(s));
+    var seen: usize = 0;
+    for (s) |c| {
+        seen += @intFromBool(c & 0xC0 != 0x80);
+        if (seen > i) return @intCast(i);
+    }
+    return null;
+}
+
+test "string index: counting to the index equals counting every code point" {
+    var prng = std.Random.DefaultPrng.init(0x737472);
+    const r = prng.random();
+    var buf: [24]u8 = undefined;
+    for (0..2000) |_| {
+        const s = buf[0..r.uintLessThan(usize, buf.len)];
+        // UTF-8 leads, continuations and ASCII mixed, malformed sequences included
+        for (s) |*c| c.* = ([_]u8{ 'a', 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x80, 0xFF })[r.uintLessThan(usize, 10)];
+        const n: i64 = @intCast(s.len);
+        var i = -n - 2;
+        while (i <= n + 2) : (i += 1) try std.testing.expectEqual(index(i, uni.count(s)), strIndex(s, i));
+    }
+}
+
 fn intKey(key: Value) ?i64 {
     return switch (key) {
         .int => |i| i,
@@ -120,7 +145,7 @@ pub fn getitem(rt: *Rt, obj: Value, key: Value) Error!Value {
             if (index(i, l.count())) |k| return l.at(k);
         },
         .str => |s| if (intKey(key)) |i| {
-            if (index(i, uni.count(s.s))) |k| {
+            if (strIndex(s.s, i)) |k| {
                 const at = uni.offset(s.s, k);
                 var end = at;
                 _ = uni.next(s.s, &end);

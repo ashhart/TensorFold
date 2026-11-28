@@ -1,4 +1,4 @@
-import type { Provider, Seat } from './types'
+import type { Provider, ReasoningEffortSetting, Seat } from './types'
 import { resolveProviderModel, selectProviderAccount } from './provider-accounts'
 
 // Cross-model delegation routing (Traycer-style): a single spawn binds provider/account/model,
@@ -10,6 +10,7 @@ export interface DelegationRouteBase {
   // "fall back to the active/default account" while null means "no account".
   providerAccountId?: string | null
   model: string
+  reasoningEffort?: ReasoningEffortSetting
 }
 
 export interface DelegationRouteOverride {
@@ -49,10 +50,14 @@ export function resolveDelegationRoute(
     const seat = seats?.find((candidate) => candidate.name === targetSeat)
     if (!seat) return { error: `unknown seat "${targetSeat}"` }
     route = { providerId: seat.providerId, providerAccountId: seat.providerAccountId, model: seat.model }
+    if (seat.reasoningEffort !== undefined) route.reasoningEffort = seat.reasoningEffort
   }
   // A same-provider override keeps the inherited account; only a cross-provider switch
   // resets it (the account id is meaningless on the new provider).
-  if (providerId && providerId !== route.providerId) route = { providerId, model: route.model }
+  if (providerId && providerId !== route.providerId) {
+    route = { providerId, model: route.model,
+      ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }) }
+  }
   const provider = providers.find((candidate) => candidate.id === route.providerId)
   if (!provider) return { error: `unknown provider "${route.providerId}"` }
   if (localOnly && provider.kind !== 'local') return { error: `provider "${provider.name}" must be a local provider for this local-only project` }

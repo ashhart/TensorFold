@@ -109,6 +109,50 @@ over 213.6M tokens. On Kolibri's held-out recordings it accepts 1.937 / 1.321 / 
 German), against 1.38 / 1.23 / 0.95 for the chain drafter it replaced. Those slices chose the checkpoint, so they are
 development numbers, not a test set.
 
+## Adapting a released drafter
+
+In the Qwen3.8-27B DSpine-b16 pilot below, no adapted checkpoint beat the released drafter on the independent agent set:
+the short budget lost the least rather than gaining. Budget a warm-started adaptation from a few passes over the
+scarcest class at a low learning rate, rather than from throughput times a time budget. With replacement and fixed class
+quotas, estimate
+`expected draws per context = class batch slots * training steps / available class contexts`.
+These draws are not complete epochs. Save early checkpoints and follow each class's held-out curve before extending
+the run; a first snapshot taken after many repeats can miss the useful part of an adaptation.
+
+In the [pilot][dspine-pilot], 203 agent contexts with four of nine batch slots had about 13 expected draws each by the
+first checkpoint at step 662 of two 5,300-step runs at peak learning rate 3e-5. A 660-step run at peak learning rate
+1e-5, with one agent slot, ended at about 3.3 draws per context. Offline tree acceptance on the independent agent set
+(110 prompts, 48 SWE instances), tokens per round, with the paired difference to the released drafter and its 95%
+group-bootstrap interval:
+
+| Checkpoint | Steps | Tokens per round | Difference |
+| --- | ---: | ---: | --- |
+| Released DSpine-b16 | none | 6.079 | |
+| Short run, peak LR 1e-5 | 660 | 6.053 | -0.026 [-0.116, +0.048] |
+| Long run, SpecForge PR 1038 objective, first checkpoint | 662 of 5,300 | 5.922 | -0.157 [-0.226, -0.091] |
+| Long run, loss cut at the first miss, final checkpoint | 5,296 of 5,300 | 5.868 | -0.211 [-0.317, -0.126] |
+
+The short run stayed closest to the released drafter; both long runs fell significantly below it. The schedule,
+objective and class quotas changed together: this supports a short adaptation budget, not an isolated learning-rate
+effect or a universal setting. Five later checkpoints were also scored on this set after the first three (a 660-step
+run at 5e-6, a 1,320-step run at 1e-5 and three of the expanded-agent run below); none beat the released drafter
+either (-0.013 to -0.085).
+
+Split agent development data by session or repository, and check transfer on a scaffold and tool format absent from
+training. Later turns repeat earlier context, and repository holdout alone does not test a different agent framework.
+Keep the independent set out of training and checkpoint ranking, and disclose retrospective selection. If that
+framework later enters the training mix, label the result as held-out task/repository transfer instead.
+
+More framework variety is a hypothesis to test. The later expanded-agent run's [selected checkpoint][am]
+(step 823) still did not demonstrate improved transfer: on the same 110 prompts its offline delta was -0.0745 tokens
+per round, with a paired 95% group-bootstrap interval of [-0.1758, +0.0197]. Mini-SWE was now represented in training,
+and duration and quotas changed too, so this was neither an unseen-framework test nor a data-only ablation. An
+interval spanning zero does not establish non-regression. Qualify served speed separately, per class, with unchanged
+replies; offline acceptance estimates alone do not establish a speedup.
+
+[dspine-pilot]: https://github.com/ashhart/TensorFold/issues/2667#issuecomment-6822414789
+[am]: https://huggingface.co/Maxrio/Qwen3.8-27B-DSpine-b16-TF4bit-AgentMix/tree/a494b31c665d66719b9fc963f167e9cd7c8419d1
+
 ## Check it in TensorFold
 
 - **Replies.** Drafted replies equal `"draft": false` ones, greedy and sampled with a seed, solo and concurrent, and a

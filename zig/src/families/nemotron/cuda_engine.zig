@@ -39,6 +39,7 @@ pub const Options = struct {
     slide: bool = false, // Sliding Weights asked for: refused for a checkpoint the learner cannot read
     vision: ?@import("cuda_vision.zig").Limits = null, // --vision: the checkpoint's image tower (an omni checkpoint's)
     precision: ?@import("config.zig").Precision = null, // --precision; null: the checkpoint's math where it is built
+    place: ?latent.At = null, // the server's resolved launch; null: the tools' TF_NEMOTRON_* (latent.place)
 };
 
 const prompt_hooks = @import("cuda_prompt_hooks.zig");
@@ -46,11 +47,16 @@ pub const Cancel = prompt_hooks.Cancel;
 pub const Keep = prompt_hooks.Keep;
 pub const Taps = prompt_hooks.Taps;
 
+/// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
+pub fn finalTap(c: Config) u32 {
+    return @intCast(c.layers);
+}
+
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
-/// Streams a shared window holds at most (their rows together at most state.windowRows).
-pub const max_streams = 8;
+/// Streams a shared window holds at most (their rows together at most state.sharedRows; 8 without the wide switch).
+pub const max_streams = @import("cuda_wide.zig").wide_streams;
 
 // pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then a shared window's streams
 const pin_meta = 0;
@@ -59,8 +65,10 @@ pub const pin_sampled = pin_ids + state.max_rows;
 const window_words = pin_sampled + state.max_rows; // a window's words, as a shared window's stream lays its own out
 pub const pin_prompt = window_words;
 const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
-// a shared window's batched draw: a Rule a row, a position a row, then its tokens
-const pin_draw = pin_shared + max_streams * window_words;
+/// Where a shared window's batched draw (a Rule a row, a position a row, its tokens) begins: past the switch's streams.
+pub fn pinDraw(c: Config) usize {
+    return pin_shared + @import("cuda_wide.zig").streams(c) * window_words;
+}
 const draw_rules_words = state.max_rows * 8;
 const draw_meta_words = state.max_rows;
 const draw_tokens_words = state.max_rows;
@@ -123,6 +131,7 @@ pub const Engine = struct {
     benchmark_group: ?[]const u8 = null,
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
     vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
+    audio: ?*@import("cuda_audio.zig").Audio = null, // a Transcribe checkpoint's audio rows for the prompt pass
     snap_host: bool = false, // kept prompt states in pinned host memory (cuda_reuse.zig), set when the host opens the engine
     load_pending: ?*weights.PendingLoad = null,
     load_has_weights: bool = false,
@@ -135,9 +144,9 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer if (!keep_owner) gpa.destroy(e);
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
-        e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
+        e.trace = (@import("sys").environment.Process{}).get("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
-        try latent.place(&e.c);
+        if (opts.place) |at| try latent.placeAt(&e.c, at) else try latent.place(&e.c);
         var load_cache = @import("core").checkpoint.cache.Load.begin(io, e.c.world > 1);
         defer load_cache.deinit();
         if (e.c.rank > 0) return error.RankServesExperts; // ranks past 0 run cuda_worker.serve, not an engine
@@ -157,11 +166,16 @@ pub const Engine = struct {
             e.side.join.deinit();
         };
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
+        const wide = @import("cuda_wide.zig");
+        e.c.wide_rounds = wide.on() and wide.allowed(e.c, e.k.gb10, opts.slide); // before any buffer
+        e.k.wide = e.c.wide_rounds;
+        if (wide.on()) if (wide.refusal(e.c, e.k.gb10, opts.slide)) |why| std.log.warn("TF_NEMOTRON_WIDE_ROUNDS is set but rounds stay at 8 streams: {s}", .{why});
         errdefer if (!keep_owner) e.k.deinit();
         if (e.c.format == .modelopt) {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
         }
+        if (e.c.salm) try e.k.loadBf16Experts(ctx);
         if (e.c.latent > 0) try e.k.loadLatent();
         if (e.c.ck) try e.k.loadCk(ctx);
         // the ranks' lines first: a rank that never comes, refuses, fails or dies is named, not waited on
@@ -209,6 +223,12 @@ pub const Engine = struct {
             }) orelse return error.VisionRefused;
         }
         errdefer if (!keep_owner) if (e.vision) |v| v.deinit();
+        // a Transcribe checkpoint's audio encoder and its rows, loaded before the caches plan their memory
+        if (e.c.salm) {
+            const audio = @import("cuda_audio.zig");
+            e.audio = try audio.Audio.load(gpa, io, ctx.d, model_dir, audio.limitFor(opts.context orelse default_context), e.c.hidden);
+        }
+        errdefer if (!keep_owner) if (e.audio) |a| a.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer if (!keep_owner) e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
@@ -216,7 +236,7 @@ pub const Engine = struct {
         errdefer if (!keep_owner) if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
         e.bound = &e.own;
-        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_draw + draw_rules_words + draw_meta_words + draw_tokens_words) * 4);
+        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pinDraw(e.c) + draw_rules_words + draw_meta_words + draw_tokens_words) * 4);
         errdefer if (!keep_owner) e.pinned.free();
         e.history = try cuda.HostBuffer.allocMapped(ctx.d, (@as(usize, e.max_len) + state.max_rows) * 4);
         errdefer if (!keep_owner) e.history.free();
@@ -259,38 +279,7 @@ pub const Engine = struct {
         head: struct { h: *Head, rows: usize, j: usize, vocab: @import("cuda_mtp.zig").Vocab },
     };
 
-    /// One graph of `body` on the bound sequence's buffers, instantiated and uploaded.
-    pub fn record(e: *Engine, body: Body) !cuda.graph.Exec {
-        const t0 = std.Io.Clock.awake.now(e.io);
-        try cuda.graph.beginCapture(e.stream, .thread_local);
-        e.recordBody(body) catch |err| {
-            if (cuda.graph.endCapture(e.stream)) |g| {
-                var x = g;
-                x.deinit();
-            } else |_| {}
-            return err;
-        };
-        var g = try cuda.graph.endCapture(e.stream);
-        defer g.deinit();
-        const exec = try g.instantiate();
-        try exec.upload(e.stream);
-        try e.stream.synchronize();
-        e.stats.captures += 1;
-        e.stats.capture_ns += @intCast(std.Io.Clock.awake.now(e.io).toNanoseconds() - t0.toNanoseconds());
-        return exec;
-    }
-
-    fn recordBody(e: *Engine, body: Body) !void {
-        switch (body) {
-            .window => |w| {
-                const f = e.forward(null);
-                try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = w.rows, .sampled = f.sampled, .mask = w.mask, .slot = f.slot, .untaught = f.untaught }});
-                if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
-                try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
-            },
-            .head => |x| try x.h.level(x.rows, x.j, x.vocab),
-        }
-    }
+    pub const record = seq_graphs.record;
 
     /// Step `id`: the own sequence launches `own`; another launches its own capture of `body`, made the first time.
     pub fn launchGraph(e: *Engine, own: cuda.graph.Exec, id: u32, body: Body) !void {
@@ -336,6 +325,7 @@ pub const Engine = struct {
         e.side.join.deinit();
         if (e.tp) |*g| g.close();
         if (e.vision) |v| v.deinit();
+        if (e.audio) |a| a.deinit();
         e.stream.deinit();
         if (e.benchmark_group) |b| e.gpa.free(b);
         e.gpa.destroy(e);
@@ -421,6 +411,7 @@ pub const Engine = struct {
         f.untaught = e.bound.untaught;
         f.tp = if (e.tp) |*g| g else null;
         f.vision = e.vision;
+        f.audio = e.audio;
         if (dump == null and (e.c.latent > 0 or (e.c.experts <= 128 and e.c.slots() <= 8))) f.side = e.side; // tf_plan_routed's bounds; a latent MoE plans without it
         return f;
     }
@@ -491,15 +482,16 @@ pub const Engine = struct {
 
     /// Several streams' windows in one forward (eager): each stream's rows read its own caches, state and rule.
     pub fn verifyShared(e: *Engine, parts: []const Shared) !void {
-        if (parts.len < 1 or parts.len > max_streams) return error.BadWindow;
+        if (parts.len < 1 or parts.len > @import("cuda_wide.zig").streams(e.c)) return error.BadWindow;
         var total: usize = 0;
         for (parts) |p| {
-            if (p.rows < 1 or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
+            // a stream's rows stride at windowRows in its own buffers (ids, hidden, Mamba rows), however wide the round
+            if (p.rows < 1 or p.rows > state.windowRows(e.c) or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
             total += p.rows;
         }
-        if (total > state.windowRows(e.c)) return error.WindowTooWide;
+        if (total > state.sharedRows(e.c)) return error.WindowTooWide;
         try e.copied.synchronize();
-        const host = e.pinned.slice(u32)[pin_shared..][0 .. max_streams * window_words];
+        const host = e.pinned.slice(u32)[pin_shared..][0 .. parts.len * window_words];
         var views: [max_streams]state.Buffers = undefined;
         var parts_f: [max_streams]Seg = undefined;
         var row0: usize = 0;
@@ -522,13 +514,13 @@ pub const Engine = struct {
             e.draw_at[k] = @intCast(draw_row);
             draw_row += p.rows;
         }
-        var batch = if (parts.len > 1) @import("cuda_shared_draw.zig").batch(sd[0..parts.len], e.pinned, e.b.draw_rules, e.b.draw_meta, e.b.draw_tokens, pin_draw, pin_draw + draw_rules_words) else null;
+        var batch = if (parts.len > 1) @import("cuda_shared_draw.zig").batch(sd[0..parts.len], e.pinned, e.b.draw_rules, e.b.draw_meta, e.b.draw_tokens, pinDraw(e.c), pinDraw(e.c) + draw_rules_words) else null;
         if (batch) |b| try @import("cuda_shared_draw.zig").upload(b, e.ops());
         try e.copied.record(e.stream);
         var f = e.forward(null);
         f.batch = if (batch) |*b| b else null;
         try f.windowSegs(parts_f[0..parts.len]);
-        const slab = e.pinned.slice(u32)[pin_draw + draw_rules_words + draw_meta_words ..][0..draw_row];
+        const slab = e.pinned.slice(u32)[pinDraw(e.c) + draw_rules_words + draw_meta_words ..][0..draw_row];
         if (batch != null) {
             try e.ops().download(std.mem.sliceAsBytes(slab), e.b.draw_tokens);
         } else for (parts, 0..) |p, k| {
@@ -545,7 +537,7 @@ pub const Engine = struct {
     /// Part k's drawn ids from the last shared window (row r: the token at its position + r + 1).
     pub fn sharedTokens(e: *Engine, k: usize, rows: usize) ![]const u32 {
         try e.sampled_ready.synchronize();
-        return e.pinned.slice(u32)[pin_draw + draw_rules_words + draw_meta_words + e.draw_at[k] ..][0..rows];
+        return e.pinned.slice(u32)[pinDraw(e.c) + draw_rules_words + draw_meta_words + e.draw_at[k] ..][0..rows];
     }
 
     /// The window's meta row as the kernels read it: position, buffer parity, previous keep, a spare word.

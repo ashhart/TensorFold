@@ -223,8 +223,8 @@ test "every tensor of a tiny NVFP4, MXFP8 and bf16 checkpoint maps" {
 }
 
 /// The checkpoint at the `env` directory: 72 sublayers, an mlp last, its end tokens.
-fn pinnedMaps(env: [*:0]const u8) !void {
-    const dir = @import("sys").getenv(env) orelse return error.SkipZigTest;
+fn pinnedMaps(env: [:0]const u8) !void {
+    const dir = (@import("sys").environment.Process{}).get(env) orelse return error.SkipZigTest;
     const c = try Config.read(testing.allocator, io, dir);
     var ck = try Checkpoint.openModel(testing.allocator, io, dir);
     defer ck.close();

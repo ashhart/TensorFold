@@ -25,7 +25,7 @@ export async function request(url, { token, method = 'GET', body, limit = 2 * 10
       if (!ASSETS.has(new URL(url).hostname)) throw new Error('Unexpected asset redirect.');
       continue;
     }
-    if (!response.ok) { await response.body?.cancel(); throw new Error(`Release transport failed, HTTP ${response.status}.`); }
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`Release transport failed, HTTP ${response.status} from ${target.hostname}.`); }
     const length = response.headers.get('content-length');
     if (length && (!/^\d+$/.test(length) || Number(length) > limit)) {
       await response.body?.cancel(); throw new Error('Release response exceeded its bounds.');

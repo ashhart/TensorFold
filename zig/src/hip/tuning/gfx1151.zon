@@ -15,8 +15,11 @@
 // The 64-row routed tile's items of 8 rows or fewer take its K-parallel passes (measured on gfx1151).
 // A plain prompt of 1 or 2 rows takes the 2-row K-parallel tile (measured on gfx1151),
 // but 1 row of 2-bit or 3-bit codes keeps the 1-row tile, which is ahead there.
+// prompt_block_from: the fewest rows a prompt pass's routed plan cuts at the 128-row GEMM tile (64 where unset);
+// it serves only the chip the table is named after (measured on gfx1151).
 .{
     .gfx = "gfx1151",
+    .prompt_block_from = 33,
     .entries = .{
         // a lane round or a call of few rows: the stream tile takes what it can; matrix cores take 16 rows and up
         .{ .id = "mlx.project.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },

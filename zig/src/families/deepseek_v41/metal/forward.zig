@@ -6,12 +6,15 @@ const ctx_ = @import("ctx.zig");
 const weights = @import("weights.zig");
 const pipelines = @import("pipelines.zig");
 const layer = @import("layer.zig");
+const segs = @import("segs.zig");
 
 const Config = host.config.Config;
 const Ctx = ctx_.Ctx;
 const Ref = ctx_.Ref;
 const g = pipelines.glue;
 const cl = @import("calls.zig");
+const round_prof = @import("round_prof.zig");
+const round_clock_prof = @import("round_clock_prof.zig");
 const eng = pipelines.engram;
 const cv = ctx_.cv;
 const R = pipelines.max_rows;
@@ -20,7 +23,7 @@ const R = pipelines.max_rows;
 pub const Model = struct { top: *const weights.Top, layers: []const weights.Layer };
 
 /// Where Engram rows come from: the family's hashes over the token history, then a row source (null: index rows).
-pub const Lookup = struct { a: std.mem.Allocator, host: *const host.engram_host.Host, source: ?host.engram_host.Source };
+pub const Lookup = struct { a: std.mem.Allocator, host: *const host.engram_host.Host, source: ?host.engram_host.Source, stats: ?*const host.engram_rows.Stats = null };
 
 /// The Engram call of a launch's rows: hash columns of 256 values in, a key per stream and one value out.
 pub fn engramCall(c: *const Config, rows: u32) eng.Call {
@@ -107,6 +110,12 @@ pub const Piece = struct { ids: []const u32, lookback: []const u32 };
 
 /// `prepare` for several slots' rows, pieces one after another in row order.
 pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !void {
+    const l = try prepareIds(b, c, pieces, lk) orelse return;
+    for (0..c.engram_layers.len) |li| try fillRows(b, c, pieces, l, li);
+}
+
+/// The launch's ids, checked, pieces one after another in row order; the Engram lookup its rows need (null: none).
+pub fn prepareIds(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !?Lookup {
     var n: usize = 0;
     for (pieces) |pc| {
         if (pc.ids.len == 0) return error.BadRows;
@@ -120,17 +129,26 @@ pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: 
         @memcpy(all[at..][0..pc.ids.len], pc.ids);
         at += pc.ids.len;
     }
-    if (c.engram_layers.len == 0) return;
-    const l = lk orelse return error.EngramLookupMissing;
+    if (c.engram_layers.len == 0) return null;
+    return lk orelse error.EngramLookupMissing;
+}
+
+/// Engram layer index `li`'s rows of the pieces into rows[li] (a source's reads in flight are waited for).
+pub fn fillRows(b: *const Bufs, c: *const Config, pieces: []const Piece, l: Lookup, li: usize) !void {
     const K = c.hashCols() * c.engram_head_dim;
-    for (c.engram_layers.items(), 0..) |id, li| {
-        const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
-        var r0: usize = 0;
-        for (pieces) |pc| {
-            try l.host.windowRows(l.a, l.source, pc.ids, pc.lookback, id, 0, 1, c.engram_head_dim, out[r0 * K ..][0 .. pc.ids.len * K]);
-            r0 += pc.ids.len;
-        }
+    var n: usize = 0;
+    for (pieces) |pc| n += pc.ids.len;
+    const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
+    var r0: usize = 0;
+    for (pieces) |pc| {
+        try l.host.windowRows(l.a, l.source, pc.ids, pc.lookback, c.engram_layers.items()[li], 0, 1, c.engram_head_dim, out[r0 * K ..][0 .. pc.ids.len * K]);
+        r0 += pc.ids.len;
     }
+}
+
+/// Starts reading every Engram layer's rows of the pieces from the source (no source: nothing to start).
+pub fn prefetchRows(pieces: []const Piece, l: Lookup) void {
+    for (pieces) |pc| l.host.prefetch(l.a, l.source, pc.ids, pc.lookback, 0, 1);
 }
 
 /// The tokens' embedding rows into all four streams of streams[0], and the one-hot pre mix.
@@ -166,7 +184,12 @@ fn engram(x: *const Ctx, e: mtl.ComputeEncoder, b: *const Bufs, w: weights.Engra
     if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
     try eng.encodeAq(p, e, cv(eng.Ref, b.rows[li]), cv(eng.Ref, b.emb), call);
     e.barrier();
-    try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
+    // the projection on the MMA tile at the rows it takes (the same bits), else on the row kernel
+    const t = pipelines.fp8_tile;
+    const tc: t.Call = .{ .k = w.wkv.k, .n = w.wkv.n, .rows = x.rows, .out = .bf16 };
+    if (t.takes(tc, 1)) {
+        try t.encode(&x.p.tile, e, cv(t.Ref, b.emb), cv(t.Ref, w.wkv.w), cv(t.Ref, w.wkv.s), cv(t.Ref, b.ekv), tc, .{});
+    } else try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
     e.barrier();
     try eng.encodeGate(p, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, b.mask), cv(eng.Ref, b.gate), call);
     e.barrier();
@@ -190,6 +213,7 @@ pub fn encodeHead(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs
 pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
+    segs.declare(x, e);
     try encodeEmbed(x, e, m, b);
     e.barrier();
     for (0..m.layers.len) |i| try encodeLayer(x, e, m, b, i);
@@ -210,37 +234,89 @@ pub fn chunkEnd(lo: usize, n: usize) usize {
 
 /// The decode forward in about `buffers` command buffers, each committed once encoded; waits for the last.
 pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
+    return runWith(x, q, m, b, .{ .ctx = undefined });
+}
+
+/// A forward's side work: Engram rows written just before the buffer that reads them, work queued after the last.
+pub const Hooks = struct {
+    ctx: *anyopaque,
+    rows: ?*const fn (ctx: *anyopaque, li: usize) anyerror!void = null,
+    then: ?*const fn (ctx: *anyopaque) void = null,
+};
+
+/// `run` with `h`'s Engram rows and queued work.
+pub fn runWith(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, h: Hooks) !void {
+    return runTimed(x, q, m, b, h, null);
+}
+
+pub fn runTimed(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, h: Hooks, rec: ?*round_prof.Round) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
     var cbs: [max_buffers]mtl.CommandBuffer = undefined;
     var n: usize = 0;
     defer for (cbs[0..n]) |cb| cb.release();
+    const t0 = round_clock_prof.begin();
+    var name: [24]u8 = undefined;
+    q.roundBegin(std.fmt.bufPrint(&name, "decode {d} rows", .{x.rows}) catch "decode");
+    var committed: [max_buffers]u64 = undefined;
     var lo: usize = 0;
     while (true) {
         const hi = chunkEnd(lo, m.layers.len);
         if (n == max_buffers) return error.TooManyBuffers;
+        if (h.rows) |f| for (x.c.engram_layers.items(), 0..) |id, li| if (id >= lo and id < hi) f(h.ctx, li) catch |err| {
+            if (n > 0) cbs[n - 1].wait();
+            return err;
+        };
         const cb = q.commandBuffer();
         const e = cb.compute(.concurrent);
+        segs.declare(x, e);
         const ok = encodeRange(x, e, m, b, lo, hi);
         e.end();
         ok catch |err| {
             if (n > 0) cbs[n - 1].wait();
             return err;
         };
+        if (rec) |r| committed[n] = r.now();
         cb.commit();
         cbs[n] = cb.retain();
         n += 1;
         if (hi == m.layers.len) break;
         lo = hi;
     }
+    if (rec) |r| r.lap(.encode);
+    if (h.then) |f| f(h.ctx);
     cbs[n - 1].wait();
+    q.roundEnd();
+    if (t0) |t| round_clock_prof.end(t, x.rows, cbs[0], cbs[n - 1]);
+    if (rec) |r| {
+        r.lap(.wait);
+        bookBuffers(r, cbs[0..n], committed[0..n]);
+        r.skip();
+    }
     for (cbs[0..n]) |cb| if (cb.failure()) |msg| {
         std.debug.print("dsv41 metal window failed: {s}\n", .{msg});
         return error.CommandBufferFailed;
     };
 }
 
-const max_buffers = 16;
+const max_buffers = round_prof.max_cbs;
+
+/// Each buffer's span on the GPU's clock, the idle time between them, and its wall time from commit to now.
+fn bookBuffers(r: *round_prof.Round, cbs: []const mtl.CommandBuffer, committed: []const u64) void {
+    const done = r.now();
+    var prev_end: f64 = 0;
+    for (cbs, committed, 0..) |cb, at, i| {
+        const t0 = cb.gpuStart();
+        const t1 = cb.gpuEnd();
+        r.buffer(done -| at, secondsNs(t1 - t0));
+        r.book(.gpu, secondsNs(t1 - t0));
+        if (i > 0) r.book(.gap, secondsNs(t0 - prev_end));
+        prev_end = t1;
+    }
+    r.book(.commit_done, done -| committed[0]);
+}
+
+const secondsNs = round_prof.secondsNs;
 
 /// Layers lo .. hi of the forward, the embedding before layer 0 and the head after the last.
 fn encodeRange(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs, lo: usize, hi: usize) !void {

@@ -7,6 +7,8 @@ const q = tf.qwen35;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
+const metal_witness = @import("metal_witness.zig");
+const mem_ctrl = @import("memory_controller.zig");
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -24,10 +26,14 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null,
+    witness: ?*metal_witness.Witness = null, // --execution-witness on its path, closed before the model
+    folded_mem: ?*mem_ctrl.Holder = null,
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        if (h.witness) |w| w.close();
+        if (h.folded_mem) |fm| fm.deinit();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         if (h.metal.pages) |p| {
@@ -45,6 +51,48 @@ const Host = struct {
 /// TF_QWEN35_METAL_KV_PAGES=1: the streams' keys and values in pages of the core KV pool.
 fn pagesOn() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN35_METAL_KV_PAGES", false);
+}
+
+fn chunkRows(_: std.mem.Allocator, window: usize, problem: *[]const u8) !usize {
+    const settings = @import("sys").environment;
+    comptime settings.registered("TF_QWEN35_CHUNK");
+    const chunk = settings.read(usize, "TF_QWEN35_CHUNK", 128) catch |err| {
+        if (err == error.InvalidEnvironment) {
+            problem.* = "TF_QWEN35_CHUNK: a whole number 1 to the model's context window; unset for the shipped 128";
+            return error.InvalidChunk;
+        }
+        return err;
+    };
+    if (chunk == 0 or chunk > window) {
+        problem.* = "TF_QWEN35_CHUNK: a whole number 1 to the model's context window; unset for the shipped 128";
+        return error.InvalidChunk;
+    }
+    return chunk;
+}
+
+test "TF_QWEN35_CHUNK is parsed through platform/environment.zig" {
+    const settings = @import("sys").environment;
+    try std.testing.expectEqual(@as(?u64, null), try settings.parse("TF_QWEN35_CHUNK", null));
+    try std.testing.expectEqual(@as(?u64, 512), try settings.parse("TF_QWEN35_CHUNK", "512"));
+    try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_QWEN35_CHUNK", "0"));
+    try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_QWEN35_CHUNK", "4k"));
+}
+
+test "qwen35 startup: TF_QWEN35_CHUNK refuses before the checkpoint loader runs" {
+    const env = @import("sys").env;
+    const saved = std.c.getenv("TF_QWEN35_CHUNK");
+    defer if (saved) |v| {
+        _ = env.setenv("TF_QWEN35_CHUNK", std.mem.span(v), 1);
+    } else {
+        _ = env.unsetenv("TF_QWEN35_CHUNK");
+    };
+    try std.testing.expectEqual(@as(c_int, 0), env.setenv("TF_QWEN35_CHUNK", "4k", 1));
+    var problem: []const u8 = "";
+    try std.testing.expectError(error.InvalidChunk, chunkRows(std.testing.allocator, 8192, &problem));
+    try std.testing.expectEqualStrings(
+        "TF_QWEN35_CHUNK: a whole number 1 to the model's context window; unset for the shipped 128",
+        problem,
+    );
 }
 
 /// The pool beside the model under the load limit: kv_pool's plan of the streams and pages, made now; why not, or null.
@@ -69,30 +117,42 @@ fn gib(bytes: u64) f64 {
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (try o.slideRefusal(a, "Macs")) |why| {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, .{ .metal = true })) |why| {
         problem.* = why;
         return null;
     }
+    if (o.slide and mem_ctrl.useLegacyPocket()) if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    };
+    const cfg = q.config.Config.read(a, io, o.dir) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "the native Qwen engine cannot read this checkpoint ({s})", .{@errorName(err)});
+        return null;
+    };
+    const window: i64 = o.context orelse @intCast(cfg.context);
+    if (window < 1 or window > cfg.context) {
+        problem.* = "--context must fit the Qwen checkpoint's positive context window";
+        return null;
+    }
+    const chunk = chunkRows(a, @intCast(@max(window, 1)), problem) catch return null;
+    const chunk_u32: u32 = @intCast(chunk);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    const witness = if (metal_witness.wanted(o)) try metal_witness.openOrFailed(gpa, io, o.dir) else null; // before the load
+    defer metal_witness.release(witness);
     const model = q.Model.load(gpa, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Qwen engine cannot load this checkpoint ({s})", .{@errorName(err)});
         return null;
     };
     errdefer model.deinit();
-    const window: i64 = o.context orelse @intCast(model.config.context);
-    if (window < 1 or window > model.config.context) {
-        model.deinit();
-        problem.* = "--context must fit the Qwen checkpoint's positive context window";
-        return null;
-    }
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
     h.resident = null;
-    const chunk = 128;
-    h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
+    h.witness = null;
+    h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk_u32, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     // TF_QWEN35_METAL_KV_PAGES: the page plan sets the streams; otherwise each stream's whole cache is admitted at load
     const paged = try pagesOn();
@@ -110,12 +170,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     if (!paged) h.metal.options.streams = @max(served, 2);
+    const bound = metal_witness.bound(witness, model.device, .{ @intCast(window), served, chunk, h.metal.width, @intFromBool(paged) });
     h.config = try lanes.Config.init(gpa, h.metal.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .decode_share = o.decode_share, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk_u32, .decode_share = o.decode_share, .structures = true, .witness = metal_witness.source(bound) });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     if (o.prompt_cache_gib) |budget_gib| {
@@ -134,7 +195,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
             h.cache = api.prompt_cache.Store.init(gpa, .{
                 .ptr = h.metal,
                 .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop },
-            }, .{ .planned = true, .grid = chunk, .chunk = chunk, .warm_usable = true }, plan.budget_bytes);
+            }, .{ .planned = true, .grid = chunk_u32, .chunk = chunk_u32, .warm_usable = true }, plan.budget_bytes);
             h.host.cache = &h.cache.?;
         }
     }
@@ -143,6 +204,18 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     try mtl.resident.streams.hold(h, io, "qwen3.5");
     errdefer mtl.resident.streams.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    h.folded_mem = null;
+    if (o.slide) { // a saved bank alone never attaches it: --slide asks for learning
+        const adapter = try q.memory_adapter.Adapter.init(gpa, h.metal);
+        errdefer adapter.deinit(gpa);
+        const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, q.memory_adapter.Adapter.deinitOpaque);
+        h.folded_mem = holder;
+        h.host.folded_memory = holder.controller();
+        h.host.info_.folded_memory = true;
+    }
+    errdefer if (h.folded_mem) |fm| fm.deinit();
     try h.host.start();
+    h.witness = bound;
+    if (bound) |w| w.adopted = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }

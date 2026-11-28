@@ -47,10 +47,16 @@ const columns = @import("launches/columns.zig");
 const vision = @import("launches/vision.zig");
 const dense_text = @import("launches/dense_text.zig");
 pub const draft = @import("launches/draft.zig");
+pub const exl3 = @import("launches/exl3.zig");
+pub const dsv41 = @import("launches/dsv41.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
 pub const PlanRef = plan.PlanRef;
+/// Rows of one slot a block of the shared-row score kernels takes.
+pub const score_rows = plan.score_rows;
+/// Rows of one slot a block of the shared-row values kernels takes.
+pub const apply_rows = plan.apply_rows;
 pub const PlanKeep = plan.Keep;
 /// The stream tile's columns a lane, for launches that copy its geometry.
 pub const stream_pick = @import("launches/stream_pick.zig");
@@ -110,6 +116,10 @@ pub const Launcher = struct {
     nemo: nemotron_moe.Fns,
     /// The DFlash2 drafter's kernels (draft/draft.hip).
     draft: draft.Fns,
+    /// EXL3 projections for decode rows (exl3/exl3.hip).
+    exl3: exl3.Fns,
+    /// DeepSeek-V4.1's indexer top-512 (deepseek_v41/topk512.hip).
+    dsv41: dsv41.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -121,9 +131,17 @@ pub const Launcher = struct {
         score_act: [2]Function,
         score2: [2]Function, // the same at two keys a warp, for short spans
         score2_act: [2]Function,
+        score256: [2]Function, // d 256 on long spans, kScoreSteps steps a block
+        score256_act: [2]Function,
+        /// score256, q fp32, in a multi-row launch (plan_rows.hip): one-row slots' rows, then the others' chunks
+        score256_lone: [2]Function,
+        score256_rows: [2]Function,
         sum_act: Function,
         attend: [2]Function,
         apply: [2]Function,
+        /// apply at d 256 on long spans, q fp32, in a multi-row launch (plan_rows.hip): as score256_lone and _rows
+        apply_lone: [2]Function,
+        apply_rows: [2]Function,
         keep: Function,
         gather: Function,
         gdn: [2]Function, // dk 128, 16
@@ -200,6 +218,7 @@ pub const Launcher = struct {
         const pre = l.mods[@backingInt(kernels.Group.prefill)];
         const dec = l.mods[@backingInt(kernels.Group.decode)];
         const pl = l.mods[@backingInt(kernels.Group.plan)];
+        const plr = l.mods[@backingInt(kernels.Group.plan_rows)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
         l.edge = edge_pass;
@@ -213,9 +232,15 @@ pub const Launcher = struct {
             .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
             .score2 = .{ try pl.function("tf_plan_score2_f16"), try pl.function("tf_plan_score2_bf16") },
             .score2_act = .{ try pl.function("tf_plan_score2_act_f16"), try pl.function("tf_plan_score2_act_bf16") },
+            .score256 = .{ try pl.function("tf_plan_score256_f16"), try pl.function("tf_plan_score256_bf16") },
+            .score256_act = .{ try pl.function("tf_plan_score256_act_f16"), try pl.function("tf_plan_score256_act_bf16") },
+            .score256_lone = .{ try plr.function("tf_plan_lone_score256_f16"), try plr.function("tf_plan_lone_score256_bf16") },
+            .score256_rows = .{ try plr.function("tf_plan_rows_score256_f16"), try plr.function("tf_plan_rows_score256_bf16") },
             .sum_act = try pl.function("tf_sum_partials_act"),
             .attend = .{ try pl.function("tf_plan_attend_f16"), try pl.function("tf_plan_attend_bf16") },
             .apply = .{ try pl.function("tf_plan_apply_f16"), try pl.function("tf_plan_apply_bf16") },
+            .apply_lone = .{ try plr.function("tf_plan_lone_apply_f16"), try plr.function("tf_plan_lone_apply_bf16") },
+            .apply_rows = .{ try plr.function("tf_plan_rows_apply_f16"), try plr.function("tf_plan_rows_apply_bf16") },
             .keep = try pl.function("tf_plan_keep"),
             .gather = try pl.function("tf_plan_gather"),
             .gdn = .{ try gd.function("tf_gdn_plan_128"), try gd.function("tf_gdn_plan_16") },
@@ -327,6 +352,8 @@ pub const Launcher = struct {
         l.sum_partials = try att.function("tf_sum_partials");
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
         l.draft = try draft.Fns.load(l.mods[@backingInt(kernels.Group.draft)]);
+        l.exl3 = try exl3.Fns.load(l.mods[@backingInt(kernels.Group.exl3)]);
+        l.dsv41 = try dsv41.Fns.load(l.mods[@backingInt(kernels.Group.dsv41)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
@@ -383,6 +410,8 @@ pub const Launcher = struct {
     pub const planKvWrite = plan.planKvWrite;
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;
+    pub const planScore = plan.planScore;
+    pub const planApply = plan.planApply;
     pub const planKvWriteAct = plan.planKvWriteAct;
     pub const planTap = plan.planTap;
     pub const tapRows = plan.tapRows;

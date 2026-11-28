@@ -362,6 +362,14 @@ pub const sites = [_]Site{
         .out = "std.mem.sliceAsBytes(logits[twin])[0..win.len * V * 2]",
     },
     .{
+        .path = "zig/tests/cuda/glm_cap_tests.zig",
+        .source = @embedFile("../tests/cuda/glm_cap_tests.zig"),
+        .ordinal = 1,
+        .setup = "const gpu = .{ .d = &rig.d }; const V: usize = 17; const win = .{ .len = @as(usize, 3) }; const twin: usize = 1; const logits = [_][]u16{ rig.dest(u16, win.len * V), rig.dest(u16, win.len * V) }; const e = .{ .bd = .{ .logits = rig.src } };",
+        .at = "e.bd.logits",
+        .out = "std.mem.sliceAsBytes(logits[twin])[0..win.len * V * 2]",
+    },
+    .{
         .path = "zig/tests/cuda/glm_tap_tests.zig",
         .source = @embedFile("../tests/cuda/glm_tap_tests.zig"),
         .ordinal = 1,
@@ -424,6 +432,14 @@ pub const sites = [_]Site{
         .setup = "const r = .{ .gpu = .{ .d = &rig.d } }; const n: usize = 77; const out = rig.dest(u8, n); const ptr = rig.src;",
         .at = "ptr",
         .out = "std.mem.sliceAsBytes(out)[0..n]",
+    },
+    .{
+        .path = "zig/tests/cuda/audio_check.zig",
+        .source = @embedFile("../tests/cuda/audio_check.zig"),
+        .ordinal = 1,
+        .setup = "const c = .{ .d = &rig.d }; const raw = rig.dest(u8, 46); const at = rig.src;",
+        .at = "at",
+        .out = "raw",
     },
     .{
         .path = "zig/tests/cuda/radio_tests.zig",

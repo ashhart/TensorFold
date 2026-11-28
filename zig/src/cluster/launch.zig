@@ -57,6 +57,22 @@ pub const Saved = struct {
     }
 };
 
+/// A literal POSIX-shell argument, including quotes and newlines, with NUL refused.
+fn shellQuote(a: Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidShellArgument;
+    var safe = text.len > 0;
+    for (text) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "_./+,-", ch) == null) {
+        safe = false;
+        break;
+    };
+    if (safe) return text;
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(a, '\'');
+    for (text) |ch| if (ch == '\'') try out.appendSlice(a, "'\\''") else try out.append(a, ch);
+    try out.append(a, '\'');
+    return out.items;
+}
+
 /// ssh with only the key: no passwords, no prompts; nodes with `via` go through their jump host.
 pub fn sshArgv(a: Allocator, c: config.Config, n: config.Node, remote: []const u8) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -65,9 +81,10 @@ pub fn sshArgv(a: Allocator, c: config.Config, n: config.Node, remote: []const u
     try argv.appendSlice(a, &.{ "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15" });
     if (n.via) |via| {
         const j = c.nodes[c.find(via).?];
-        const key = if (c.ssh.key) |k| try std.fmt.allocPrint(a, "-i {s} ", .{k}) else "";
-        try argv.appendSlice(a, &.{ "-o", try std.fmt.allocPrint(a, "ProxyCommand=ssh {s}-o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p {s}", .{ key, try target(a, c, j) }) });
+        const key = if (c.ssh.key) |k| try std.fmt.allocPrint(a, "-i {s} ", .{try shellQuote(a, k)}) else "";
+        try argv.appendSlice(a, &.{ "-o", try std.fmt.allocPrint(a, "ProxyCommand=ssh {s}-o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p {s}", .{ key, try shellQuote(a, try target(a, c, j)) }) });
     }
+    try argv.append(a, "--");
     try argv.append(a, try target(a, c, n));
     try argv.append(a, remote);
     return argv.items;
@@ -160,7 +177,7 @@ pub fn discover(a: Allocator, r: Runner, c: config.Config) !struct { config: con
 pub fn nodeCommand(a: Allocator, json: []const u8, bin: []const u8, name: []const u8, leader: []const u8, model: []const u8) ![]const u8 {
     const b64 = try a.alloc(u8, std.base64.standard.Encoder.calcSize(json.len));
     _ = std.base64.standard.Encoder.encode(b64, json);
-    return std.fmt.allocPrint(a, "mkdir -p ~/.config/tensorfold ~/.cache/tensorfold && printf %s {s} | base64 --decode > ~/.config/tensorfold/cluster.json && {{ nohup {s} node --name {s} --leader {s} --model {s} --cluster ~/.config/tensorfold/cluster.json >> ~/.cache/tensorfold/node.log 2>&1 < /dev/null & echo started $!; }}", .{ b64, bin, name, leader, model });
+    return std.fmt.allocPrint(a, "mkdir -p ~/.config/tensorfold ~/.cache/tensorfold && printf %s {s} | base64 --decode > ~/.config/tensorfold/cluster.json && {{ nohup {s} node --name {s} --leader {s} --model {s} --cluster ~/.config/tensorfold/cluster.json >> ~/.cache/tensorfold/node.log 2>&1 < /dev/null & echo started $!; }}", .{ try shellQuote(a, b64), try shellQuote(a, bin), try shellQuote(a, name), try shellQuote(a, leader), try shellQuote(a, model) });
 }
 
 pub const Started = struct { name: []const u8, argv: []const []const u8, ok: bool };

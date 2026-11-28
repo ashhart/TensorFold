@@ -48,6 +48,11 @@ fn copyIn(_: *anyopaque, saved: pc.Saved, ranges: []const rows.image.Range, in: 
 const image: rows.Image = .{ .parts = parts, .gather = copyOut, .blank = blank, .scatter = copyIn };
 const vtable: pc.Snapshots.VTable = .{ .bytes = bytes, .save = save, .restore = restore, .drop = drop, .rows = &image };
 
+/// A live prompt cache with eight-byte host snapshots and no GPU callbacks.
+pub fn promptCache(context: *u8) pc.Store {
+    return pc.Store.init(a, .{ .ptr = context, .vtable = &vtable }, .{ .lookahead = 1 }, 1 << 20);
+}
+
 /// `data` over `sub_path` in place, then its mtime one second on: a coarse clock cannot hide the rewrite.
 pub fn rewrite(dir: std.Io.Dir, sub_path: []const u8, data: []const u8) !void {
     const io = std.testing.io;

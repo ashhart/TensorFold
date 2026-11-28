@@ -77,6 +77,13 @@ pub fn main(init: std.process.Init) !u8 {
     tile_f32_fixture.name = "vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations";
     tile_f32_fixture.tiled = true;
     tile_f32_fixture.act_f32 = true;
+    var f32_pipeline = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_f32, layout);
+    defer f32_pipeline.deinit();
+    if (!std.mem.eql(u32, &f32_pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
+    var f32_fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &f32_pipeline);
+    defer f32_fixture.deinit();
+    f32_fixture.name = "vulkan qmm_f32 affine q4 g64 transposed f32 activations";
+    f32_fixture.act_f32 = true;
     const control_layout: vk.dispatch.Layout = .{ .bindings = 3, .push_bytes = 8, .writes = 1 << 2 };
     var p_fmax = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_fmax, control_layout);
     defer p_fmax.deinit();
@@ -116,7 +123,7 @@ pub fn main(init: std.process.Init) !u8 {
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fp16, .fp16_accum),
     };
     defer for (&controls) |*control| control.deinit();
-    var kernels: [13]g.Kernel = undefined;
+    var kernels: [14]g.Kernel = undefined;
     kernels[0] = fixture.kernel();
     kernels[1] = vec4_fixture.kernel();
     kernels[2] = tile_fixture.kernel();
@@ -126,6 +133,7 @@ pub fn main(init: std.process.Init) !u8 {
     kernels[10] = writes_b.kernel();
     kernels[11] = skips_tail.kernel();
     kernels[12] = tile_f32_fixture.kernel();
+    kernels[13] = f32_fixture.kernel();
     const start = std.Io.Clock.awake.now(init.io);
     tally.controls += gate5_controls;
     tally.caught += gate5_controls;

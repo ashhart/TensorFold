@@ -70,7 +70,8 @@ pub const Governor = struct {
     /// The shared governor where kernel metrics are available; Linux requires explicit enablement.
     pub fn fromEnv() ?Governor {
         if (builtin.is_test) return null; // host tests give their own source
-        const s = Settings.forOs(builtin.os.tag, platform.getenv("TENSORFOLD_MEMORY_PRESSURE"), platform.getenv("TENSORFOLD_PRESSURE_CACHE_PERCENT")) orelse return null;
+        var s = Settings.forOs(builtin.os.tag, platform.getenv("TENSORFOLD_MEMORY_PRESSURE"), null) orelse return null;
+        s.percent = platform.environment.read(u8, "TENSORFOLD_PRESSURE_CACHE_PERCENT", Settings.default_percent) catch Settings.default_percent;
         if (Source.kernel.read(null) == null) return null;
         return .{ .source = Source.kernel, .percent = s.percent };
     }

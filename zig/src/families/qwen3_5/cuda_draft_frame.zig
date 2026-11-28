@@ -6,6 +6,7 @@ const draft = @import("cuda_draft.zig");
 const tree = @import("cuda_draft_tree.zig");
 const layers = @import("cuda_layers.zig");
 const sig = @import("cuda_signatures.zig");
+pub const ql_span = @import("cuda_draft_ql_span.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 const lp_words = 43;
@@ -89,6 +90,27 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     errdefer cuda.completion.drain(e.d, e.stream, "a failed DFlash frame did not drain before its pinned staging was reused");
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.ids, st.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.segments, st.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync");
+    const rows = items.len * (c.block - 1);
+    const mixed = mixedHeadPath(d, contexts);
+    const spanned = try draft.graphs.hold(d, items.len, contexts, narrow(contexts), kernels);
+    if (!mixed) try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
+    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
+    try e.stream.synchronize();
+    if (spanned != null or mixed) for (contexts, 0..) |ctx, i| if (spanned != null or !ctx.wide) {
+        for (0..c.block - 1) |r| {
+            const row = i * (c.block - 1) + r;
+            const w = std.mem.bytesAsSlice(u32, st[words_at + row * lp_words * 4 ..][0 .. lp_words * 4]);
+            for (w[2..][0..c.topk]) |*id| id.* = columnId(id.*);
+        }
+    };
+    try publish(d, items, contexts);
+}
+
+/// A hold frame's kernels, from the embedding to the selector rows; the packed logits when spanned.
+fn kernels(d: anytype, streams: usize, contexts: []const *draft.Ctx) !?u64 {
+    const c = d.c;
+    const e = d.e;
+    const B = streams * c.block;
     try e.embed(d.ids, d.h, B, 0);
     for (d.w.layers, 0..) |l, i| {
         try d.norm(d.h, l.input_norm, d.x, B);
@@ -108,24 +130,213 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try d.projAgain(l.down, d.act, d.o, B);
         try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
     }
-    const rows = items.len * (c.block - 1);
+    const rows = streams * (c.block - 1);
     var masked = d.h + c.hidden * 2;
-    if (items.len > 1) {
+    if (streams > 1) {
         try e.run(d.fns.mask_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.h, d.h2, @as(c_int, @intCast(c.hidden)), @as(c_int, @intCast(c.block)) });
         masked = d.h2;
     }
     try d.norm(masked, d.w.final_norm, d.x, rows);
-    const spanned = try logitsOf(d, contexts, d.x, d.logits, rows);
-    try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
+    const mixed = mixedHeadPath(d, contexts);
+    const spanned = if (mixed) blk: {
+        try mixedHead(d, contexts, d.staged.bytes);
+        break :blk null;
+    } else try logitsOf(d, contexts, d.x, d.logits, rows);
+    if (!mixed) try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
-    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
-    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
-    try e.stream.synchronize();
-    if (spanned != null) for (0..rows) |r| {
-        const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
-        for (w[2..][0..c.topk]) |*id| id.* = columnId(id.*);
+    return spanned;
+}
+
+/// Mixed holds default to one full head; TF_QWEN_DRAFT_FULL_HEAD=0 restores splitting; all-narrow holds never split.
+pub fn mixedHeadPath(d: anytype, contexts: []const *draft.Ctx) bool {
+    return mixedHeadEligible(d.e.head, contexts) and !d.full_head;
+}
+
+/// Mixed contexts use the same head-width class as an otherwise identical homogeneous frame.
+pub fn mixedHeadEligible(h: layers.Proj, contexts: []const *draft.Ctx) bool {
+    const supported = switch (h) {
+        .a4 => |q| q.n == spans[1][1] and q.k % 64 == 0,
+        .x3 => |q| q.n == spans[1][1] and q.k % 128 == 0,
+        .an, .ql, .tfq3, .bf => false,
     };
-    try publish(d, items, contexts);
+    if (!supported) return false;
+    var wide = false;
+    var has_narrow = false;
+    for (contexts) |ctx| if (ctx.wide) {
+        wide = true;
+    } else {
+        has_narrow = true;
+    };
+    return wide and has_narrow;
+}
+
+/// Stream indices in their original order for one vocabulary-width class.
+pub fn headGroup(contexts: []const *draft.Ctx, wide: bool, out: *[max_streams]usize) []const usize {
+    var n: usize = 0;
+    for (contexts, 0..) |ctx, i| if (ctx.wide == wide) {
+        out[n] = i;
+        n += 1;
+    };
+    return out[0..n];
+}
+
+/// Rebuild affine-4 group sums when a frame compacts rows; EXL3 projections do not consume `xs`.
+pub fn rebuildProjectionSums(d: anytype, x: u64, rows: usize) !void {
+    switch (d.e.head) {
+        .a4 => {},
+        else => return,
+    }
+    const k = d.c.hidden;
+    try d.e.run(d.e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(k)), @as(u64, 0) });
+}
+
+/// Project and pick each width class separately, returning words to their original staging rows.
+pub fn mixedHead(d: anytype, contexts: []const *draft.Ctx, st: []u8) !void {
+    const e = d.e;
+    const c = d.c;
+    const per = c.block - 1;
+    const input_bytes = per * c.hidden * 2;
+    const word_bytes = per * lp_words * 4;
+    for ([_]bool{ false, true }) |wide| {
+        var indices: [max_streams]usize = undefined;
+        const group = headGroup(contexts, wide, &indices);
+        for (group, 0..) |i, at| try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(d.h2 + at * input_bytes, d.x + i * input_bytes, input_bytes, e.stream.handle), "cuMemcpyDtoDAsync");
+        const rows = group.len * per;
+        try rebuildProjectionSums(d, d.h2, rows);
+        const spanned = if (wide) try full(d, d.h2, d.logits, rows) else try head(d, d.h2, d.logits, rows);
+        try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
+        for (group, 0..) |i, at| try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at + i * word_bytes, d.words + at * word_bytes, word_bytes, e.stream.handle), "cuMemcpyDtoHAsync");
+    }
+}
+
+test "DFlash mixed EXL3 head projects both spans and restores reversed stream order" {
+    const Trace = struct {
+        const Copy = struct { dst: u64, src: u64, bytes: usize };
+        const Projection = struct { n: usize, k: usize, rows: usize, x: u64, out: u64 };
+        const Topk = struct { logits: u64, columns: usize, rows: usize, out: u64 };
+        var device: [2]Copy = undefined;
+        var device_count: usize = 0;
+        var host: [2]Copy = undefined;
+        var host_count: usize = 0;
+        var projections: [3]Projection = undefined;
+        var projection_count: usize = 0;
+        var topks: [2]Topk = undefined;
+        var topk_count: usize = 0;
+        var copies2d: usize = 0;
+
+        fn copyDevice(dst: u64, src: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            device[device_count] = .{ .dst = dst, .src = src, .bytes = bytes };
+            device_count += 1;
+            return cuda.abi.success;
+        }
+        fn copyHost(dst: ?*anyopaque, src: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            host[host_count] = .{ .dst = @intFromPtr(dst.?), .src = src, .bytes = bytes };
+            host_count += 1;
+            return cuda.abi.success;
+        }
+        fn copy2d(_: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            copies2d += 1;
+            return cuda.abi.success;
+        }
+    };
+    const Draws = struct {
+        fn topkRows(_: *@This(), _: cuda.Stream, logits: u64, column_count: usize, _: u8, _: u64, out: u64, rows: usize) !void {
+            Trace.topks[Trace.topk_count] = .{ .logits = logits, .columns = column_count, .rows = rows, .out = out };
+            Trace.topk_count += 1;
+        }
+    };
+    const E = struct {
+        d: *cuda.Driver,
+        stream: cuda.Stream,
+        head: layers.Proj,
+        affine: struct { pdl: bool },
+        fns: struct { sums: cuda.Function },
+        draws: Draws,
+
+        pub fn run(_: *@This(), _: cuda.Function, _: [3]usize, _: [3]usize, _: anytype) !void {}
+
+        pub fn projSums(_: *@This(), l: layers.Proj, x: u64, _: u64, out: u64, rows: usize, _: bool, _: u64) !void {
+            const q = switch (l) {
+                .x3 => |weight| weight,
+                else => unreachable,
+            };
+            Trace.projections[Trace.projection_count] = .{ .n = q.n, .k = q.k, .rows = rows, .x = x, .out = out };
+            Trace.projection_count += 1;
+        }
+
+        pub fn projManySums(_: *@This(), _: []const layers.Proj, _: u64, _: u64, _: []const u64, _: usize, _: bool, _: u64) !void {}
+    };
+    const D = struct {
+        e: *E,
+        c: struct { block: usize, hidden: usize, vocab: usize, topk: usize },
+        x: u64,
+        h2: u64,
+        logits: u64,
+        xs: u64,
+        parts: u64,
+        words: u64,
+    };
+    var driver: cuda.Driver = undefined;
+    driver.api.cuMemcpyDtoDAsync_v2 = Trace.copyDevice;
+    driver.api.cuMemcpyDtoHAsync_v2 = Trace.copyHost;
+    driver.api.cuMemcpy2DAsync_v2 = Trace.copy2d;
+    const q = cuda.exl3;
+    const st = q.strides(5120, 248320, 12, false);
+    const weight: q.Weight = .{ .trellis = 0x8000, .suh = 0x9000, .svh = 0xa000, .k = 5120, .n = 248320, .halves = 12, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
+    var e = E{ .d = &driver, .stream = .{ .d = &driver, .handle = null }, .head = .{ .x3 = weight }, .affine = .{ .pdl = false }, .fns = .{ .sums = .{ .d = &driver, .handle = null } }, .draws = .{} };
+    const d = D{ .e = &e, .c = .{ .block = 8, .hidden = 64, .vocab = 248320, .topk = 2 }, .x = 0x100000, .h2 = 0x200000, .logits = 0x300000, .xs = 0x400000, .parts = 0x500000, .words = 0x600000 };
+    var contexts: [2]draft.Ctx = .{ .{ .ring = undefined, .wide = true }, .{ .ring = undefined } };
+    const refs = [_]*draft.Ctx{ &contexts[0], &contexts[1] };
+    var storage: [stagedLen(2)]u8 align(8) = undefined;
+    Trace.device_count = 0;
+    Trace.host_count = 0;
+    Trace.projection_count = 0;
+    Trace.topk_count = 0;
+    Trace.copies2d = 0;
+    try mixedHead(&d, &refs, &storage);
+
+    const rows = d.c.block - 1;
+    const tail_n = spans[1][1] - x3_tail_at;
+    const span_logits = d.logits + rows * (spans[0][1] + tail_n) * 2;
+    const input_bytes = rows * d.c.hidden * 2;
+    const word_bytes = rows * 43 * 4;
+    const views = try x3Views(weight);
+    try std.testing.expectEqual(@as(usize, 2), Trace.device_count);
+    try std.testing.expectEqual(@as(usize, 2), Trace.host_count);
+    try std.testing.expectEqual(@as(usize, 3), Trace.projection_count);
+    try std.testing.expectEqual(@as(usize, 2), Trace.topk_count);
+    try std.testing.expectEqual(@as(usize, 2), Trace.copies2d);
+    try std.testing.expectEqual(spans[0][1], Trace.projections[0].n);
+    try std.testing.expectEqual(views.first.k, Trace.projections[0].k);
+    try std.testing.expectEqual(views.tail.n, Trace.projections[1].n);
+    try std.testing.expectEqual(views.tail.k, Trace.projections[1].k);
+    try std.testing.expectEqual(weight.n, Trace.projections[2].n);
+    try std.testing.expectEqual(d.logits, Trace.projections[0].out);
+    try std.testing.expectEqual(d.logits + rows * spans[0][1] * 2, Trace.projections[1].out);
+    try std.testing.expectEqual(d.logits, Trace.projections[2].out);
+    for (Trace.projections) |projection| {
+        try std.testing.expectEqual(rows, projection.rows);
+        try std.testing.expectEqual(d.h2, projection.x);
+    }
+    try std.testing.expectEqual(span_logits, Trace.topks[0].logits);
+    try std.testing.expectEqual(span_width, Trace.topks[0].columns);
+    try std.testing.expectEqual(d.logits, Trace.topks[1].logits);
+    try std.testing.expectEqual(d.c.vocab, Trace.topks[1].columns);
+    for (Trace.topks) |topk| {
+        try std.testing.expectEqual(rows, topk.rows);
+        try std.testing.expectEqual(d.words, topk.out);
+    }
+    try std.testing.expectEqual(d.h2, Trace.device[0].dst);
+    try std.testing.expectEqual(d.x + input_bytes, Trace.device[0].src);
+    try std.testing.expectEqual(input_bytes, Trace.device[0].bytes);
+    try std.testing.expectEqual(d.h2, Trace.device[1].dst);
+    try std.testing.expectEqual(d.x, Trace.device[1].src);
+    try std.testing.expectEqual(input_bytes, Trace.device[1].bytes);
+    for ([_]usize{ 1, 0 }, 0..) |stream, group| {
+        try std.testing.expectEqual(d.words, Trace.host[group].src);
+        try std.testing.expectEqual(@intFromPtr(&storage) + words_at + stream * word_bytes, Trace.host[group].dst);
+        try std.testing.expectEqual(word_bytes, Trace.host[group].bytes);
+    }
 }
 
 /// A lane stream's prompt and reply tokens since the last scan: one outside the spans marks the stream wide.
@@ -189,7 +400,19 @@ fn head(d: anytype, x: u64, logits: u64, rows: usize) !?u64 {
             const v = try x3Views(q);
             break :blk .{ .{ .x3 = v.first }, .{ .x3 = v.tail }, x3_tail_at };
         },
-        .an, .ql, .bf => return full(d, x, logits, rows),
+        .ql => |w| blk: {
+            if (!ql_span.enabled()) return full(d, x, logits, rows);
+            const v = ql_span.views(w, spans[0][1], tail_tile, spans[1][1]) orelse return full(d, x, logits, rows);
+            break :blk .{ .{ .ql = v.first }, .{ .ql = v.tail }, tail_tile };
+        },
+        .tfq3 => |q| blk: {
+            if (q.n != spans[1][1] or q.k % 128 != 0) return full(d, x, logits, rows);
+            const tfq3_tail_at: u32 = @intCast(spans[1][0] / 128 * 128);
+            const first_w = q.sliceRows(0, @intCast(spans[0][1])) catch return full(d, x, logits, rows);
+            const tail_w = q.sliceRows(tfq3_tail_at, @intCast(spans[1][1] - tfq3_tail_at)) catch return full(d, x, logits, rows);
+            break :blk .{ .{ .tfq3 = first_w }, .{ .tfq3 = tail_w }, tfq3_tail_at };
+        },
+        .an, .bf => return full(d, x, logits, rows),
     };
     const tail_n = spans[1][1] - tail_at;
     const a = logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592

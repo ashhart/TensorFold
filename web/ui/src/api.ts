@@ -181,17 +181,10 @@ export type SetupCheck = { id: string; label: string; status: 'pass' | 'warn' | 
 export type CheckResult = { id: string; label: string; ok: boolean; skipped?: boolean; detail: string; seconds: number }
 export type ConnectInfo = { engine_url: string; lan_url: string | null; share: boolean; api_key: string | null; relay_key?: string | null; key_pending_restart: boolean; studio_token_set: boolean; snippets: Snippet[]; kinds?: Record<string, string>; window?: number | null; where?: 'here' | 'away' }
 
-// Read the token once, retain it locally and remove it from the address before links can share it.
+// Only the durable token kept locally authorizes later requests; addresses use one-time codes.
 const TOKEN_KEY = 'tfs-token'
 export function webToken(): string | null {
-  try {
-    const fromUrl = new URLSearchParams(location.search).get('token')
-    if (fromUrl) {
-      localStorage.setItem(TOKEN_KEY, fromUrl)
-      const clean = new URL(location.href); clean.searchParams.delete('token'); history.replaceState(null, '', clean.toString())
-    }
-    return localStorage.getItem(TOKEN_KEY)
-  } catch { return null }
+  try { return localStorage.getItem(TOKEN_KEY) } catch { return null }
 }
 export function setWebToken(t: string) { try { localStorage.setItem(TOKEN_KEY, t) } catch {                  } }
 

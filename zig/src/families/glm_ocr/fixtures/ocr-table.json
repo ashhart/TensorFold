@@ -1,0 +1,13 @@
+{
+  "text": "<table border=\"1\"><tr><td>Item</td><td>Quantity</td></tr><tr><td>Apples</td><td>3</td></tr><tr><td>Pears</td><td>5</td></tr></table>",
+  "original": [
+    560,
+    252
+  ],
+  "frame": [
+    560,
+    252
+  ],
+  "source": "glm_ocr_reference.py capture, examples.json case table (Table Recognition:)",
+  "prompt_sha256": "9e485ad53e473bd38f054ecfab4feb5a571bfbb4cc1e6f9c4e8597b2bfdb8f07"
+}

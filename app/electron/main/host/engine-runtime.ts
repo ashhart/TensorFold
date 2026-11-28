@@ -1,5 +1,5 @@
 import { activeEngineModelSettings } from '../../../shared/model-profiles'
-import { app } from 'electron'
+import { app, session } from 'electron'
 import os from 'node:os'
 import { EngineService } from '../../agent/engine/service'
 import { resolveEngineBinaryPath } from '../../agent/engine/paths'
@@ -10,6 +10,7 @@ import { store } from '../state'
 import { persistSettings } from './persistence'
 import { sendToRenderer } from './renderer-events'
 import { loweredEngineMemoryBudget } from '../../agent/engine/memory-budget'
+import { setPullProxyResolver } from '../../agent/engine/pull-network'
 
 // The one EngineService for this app process: binary from the bundle (or build/engine in dev), engine
 // events to the renderer, and the built-in provider's model list kept equal to what `models` reports.
@@ -35,6 +36,7 @@ function syncProviderModels(repos: string[]): void {
 
 export function createEngineRuntime(): EngineService {
   if (service) return service
+  setPullProxyResolver((url) => session.defaultSession.resolveProxy(url))
   const binaryPath = resolveEngineBinaryPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot: app.getAppPath(), env: process.env })
   service = new EngineService({
     binaryPath,

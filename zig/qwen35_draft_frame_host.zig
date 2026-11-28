@@ -83,19 +83,35 @@ test "Draft frames: a common frame stages each stream's own ring positions and p
 }
 
 const Record = struct {
+    const HeadProjection = struct { columns: c_int, rows: c_int };
     var counts: [16]usize = @splat(0);
     var max_rows: u32 = 0;
     var uploads: usize = 0;
-    var downloads: usize = 0;
+    pub var downloads: usize = 0;
     var waits: usize = 0;
-    var fail: bool = false;
+    pub var fail: bool = false;
     var last_norm_input: u64 = 0;
+    pub var token_bias: u32 = 0;
     var block: usize = 8;
+    pub var staged_words: usize = 0;
+    var head_projections: [8]HeadProjection = undefined;
+    var head_projection_count: usize = 0;
     fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const id = @intFromPtr(f);
         if (id < counts.len) counts[id] += 1;
         if (id == 13) last_norm_input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
         if (id == 1) max_rows = @max(max_rows, x);
+        if (id == 14) {
+            const parts = @as(*const cuda.qlinear.Parts, @ptrCast(@alignCast(args.?[2].?))).*;
+            const columns = parts.p[0].n;
+            if (columns > 256) {
+                head_projections[head_projection_count] = .{
+                    .columns = columns,
+                    .rows = @as(*const c_int, @ptrCast(@alignCast(args.?[3].?))).*,
+                };
+                head_projection_count += 1;
+            }
+        }
         if (id == 5) {
             std.debug.assert(z == 9 and threads == 128);
             if (fail) return cuda.abi.error_not_ready;
@@ -106,16 +122,26 @@ const Record = struct {
         uploads += 1;
         return cuda.abi.success;
     }
+    fn copyDevice(_: u64, _: u64, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return cuda.abi.success;
+    }
+    fn copy2d(_: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return cuda.abi.success;
+    }
     fn download(dst: ?*anyopaque, _: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         const data = @as([*]u8, @ptrCast(dst.?))[0..bytes];
         @memset(data, 0);
-        if (downloads == 0) {
+        const at = @intFromPtr(data.ptr);
+        const word_download = if (staged_words == 0) downloads == 0 else at >= staged_words and at < staged_words + q.draft.frame.max_rows * 43 * 4;
+        if (word_download) {
             const words = std.mem.bytesAsSlice(u32, data);
-            for (0..words.len / 43) |row| {
-                words[row * 43 + 2] = @intCast(17 + row / (block - 1));
-                words[row * 43 + 3] = @intCast(128 + row / (block - 1));
-                words[row * 43 + 22] = @bitCast(@as(f32, 1));
-                words[row * 43 + 23] = @bitCast(@as(f32, 0));
+            const base = if (staged_words == 0) 0 else (@intFromPtr(data.ptr) - staged_words) / 4;
+            for (0..words.len / 43) |local| {
+                const row = base / 43 + local;
+                words[local * 43 + 2] = @intCast(17 + Record.token_bias + row / (block - 1));
+                words[local * 43 + 3] = @intCast(128 + Record.token_bias + row / (block - 1));
+                words[local * 43 + 22] = @bitCast(@as(f32, 1) + @as(f32, @floatFromInt(Record.token_bias)));
+                words[local * 43 + 23] = @bitCast(@as(f32, @floatFromInt(Record.token_bias)));
             }
         }
         downloads += 1;
@@ -133,7 +159,7 @@ fn weight() cuda.qlinear.Affine4 {
     return .{ .w = 1, .s = 2, .b = 3, .n = 256, .k = 256, .npad = 256 };
 }
 
-test "Draft frames: the real hold adapter emits one frame for every stream and invalidates drafts on failure" {
+test "Draft frames: actual holds group mixed head widths and invalidate drafts on failure" {
     for ([_]usize{ 8, 16 }) |block| try actualFrame(block);
 }
 fn actualFrame(block: usize) !void {
@@ -143,6 +169,8 @@ fn actualFrame(block: usize) !void {
     driver.api.cuLaunchKernel = Record.launch;
     driver.api.cuMemcpyHtoDAsync_v2 = Record.upload;
     driver.api.cuMemcpyDtoHAsync_v2 = Record.download;
+    driver.api.cuMemcpyDtoDAsync_v2 = Record.copyDevice;
+    driver.api.cuMemcpy2DAsync_v2 = Record.copy2d;
     driver.api.cuStreamSynchronize = Record.wait;
     var e: q.engine.Engine = undefined;
     e.kit = null;
@@ -155,13 +183,26 @@ fn actualFrame(block: usize) !void {
     e.embed_w = 1;
     e.embed_s = 2;
     e.embed_b = 3;
-    e.affine.mlp128 = false;
-    e.affine.prefill_fn = function(&driver, 11);
-    e.affine.group_fn = function(&driver, 10);
-    e.affine.gemv_fn = function(&driver, 7);
-    e.affine.split = null;
-    e.affine.pdl = false;
-    e.affine.wide_verify = false;
+    e.affine = .{
+        .group_fn = function(&driver, 10),
+        .mlp128_fn = function(&driver, 10),
+        .gemv_fn = function(&driver, 7),
+        .verify_fn = function(&driver, 10),
+        .verify64_fn = function(&driver, 10),
+        .verify128_fn = function(&driver, 10),
+        .split_fn = function(&driver, 10),
+        .seg_fn = function(&driver, 10),
+        .many_fn = function(&driver, 10),
+        .prefill_fn = function(&driver, 11),
+        .prefill22_fn = function(&driver, 10),
+        .prefill_many_fn = function(&driver, 10),
+        .words_fn = function(&driver, 10),
+        .scales_fn = function(&driver, 10),
+        .gemv_blocks = 0,
+        .split = null,
+        .pdl = false,
+        .wide_verify = false,
+    };
     e.fns.norm = function(&driver, 13);
     e.head = .{ .a4 = weight() };
     e.draws.logprob_rows_fn = function(&driver, 9);
@@ -169,6 +210,8 @@ fn actualFrame(block: usize) !void {
     e.draws.topk_merge_fn = function(&driver, 12);
     var d: q.draft.Draft = undefined;
     d.projection_role = .proposal;
+    d.full_head = false;
+    d.graphs = .{};
     d.frame_streams = 128;
     d.scratch_one = 0;
     d.target_taps = 0;
@@ -179,6 +222,7 @@ fn actualFrame(block: usize) !void {
     d.c.block = block;
     d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
     d.streams = .empty;
+    d.trace = null;
     defer d.streams.deinit(a);
     d.selection_base = 0;
     inline for (@typeInfo(@TypeOf(d.fns)).@"struct".field_names) |name| @field(d.fns, name) = function(&driver, 10);
@@ -205,6 +249,7 @@ fn actualFrame(block: usize) !void {
     d.w.successor = &book;
     var storage: [F.stagedLen(2)]u8 align(16) = undefined;
     d.staged = .{ .d = &driver, .bytes = &storage };
+    Record.staged_words = @intFromPtr(&storage) + F.words_at;
     const measured = try d.layout(false);
     d.scratch = .{ .d = &driver, .ptr = 0x100000, .len = measured };
     try std.testing.expectEqual(measured, try d.layout(true));
@@ -259,10 +304,132 @@ fn actualFrame(block: usize) !void {
         try std.testing.expectEqual(@as(usize, 0), ctx.held_n);
         try std.testing.expectEqual(@as(usize, 0), ctx.grown);
     }
+
+    // The pre-fix hold path sends both contexts through the full head.
+    e.head = .{ .a4 = .{ .w = 1, .s = 2, .b = 3, .n = 248320, .k = 256, .npad = 248320 } };
+    d.c.vocab = 248320;
+    d.scratch.len = try d.layout(false);
+    _ = try d.layout(true);
+    contexts[0].wide = false;
+    contexts[1].wide = true;
+    e.affine.group_fn = function(&driver, 14);
+    Record.downloads = 0;
+    Record.head_projection_count = 0;
+    Record.fail = false;
+    try d.drafter().hold(holds[0..2]);
+
+    const per = block - 1;
+    var narrow_rows: usize = 0;
+    var tail_rows: usize = 0;
+    var full_rows: usize = 0;
+    for (Record.head_projections[0..Record.head_projection_count]) |projection| {
+        switch (projection.columns) {
+            98304 => narrow_rows += @intCast(projection.rows),
+            320 => tail_rows += @intCast(projection.rows),
+            248320 => full_rows += @intCast(projection.rows),
+            else => unreachable,
+        }
+    }
+    try std.testing.expectEqual(per, full_rows);
+    try std.testing.expectEqual(per, narrow_rows);
+    try std.testing.expectEqual(per, tail_rows);
+    const bytes = 2 * per * 43 * 4;
+    var split_words: [2 * 15 * 43 * 4]u8 = undefined;
+    @memcpy(split_words[0..bytes], storage[F.words_at..][0..bytes]);
+    var split_held: [2][15]u32 = @splat(@splat(0));
+    var split_n: [2]usize = undefined;
+    for (contexts[0..2], 0..) |ctx, i| {
+        split_n[i] = ctx.held_n;
+        @memcpy(split_held[i][0..ctx.held_n], ctx.held[0..ctx.held_n]);
+    }
+    try std.testing.expectEqual(@as(usize, 3), Record.downloads);
+    d.full_head = true;
+    Record.downloads = 0;
+    Record.head_projection_count = 0;
+    narrow_rows = 0;
+    tail_rows = 0;
+    full_rows = 0;
+    try d.drafter().hold(holds[0..2]);
+    for (Record.head_projections[0..Record.head_projection_count]) |projection| switch (projection.columns) {
+        98304 => narrow_rows += @intCast(projection.rows),
+        320 => tail_rows += @intCast(projection.rows),
+        248320 => full_rows += @intCast(projection.rows),
+        else => unreachable,
+    };
+    try std.testing.expectEqual(@as(usize, 2), Record.downloads);
+    try std.testing.expectEqual(2 * per, full_rows);
+    try std.testing.expectEqual(@as(usize, 0), narrow_rows + tail_rows);
+    try std.testing.expectEqualSlices(u8, split_words[0..bytes], storage[F.words_at..][0..bytes]);
+    for (contexts[0..2], 0..) |ctx, i| {
+        try std.testing.expectEqual(split_n[i], ctx.held_n);
+        try std.testing.expectEqualSlices(u32, split_held[i][0..ctx.held_n], ctx.held[0..ctx.held_n]);
+    }
+    if (block == 16) try traceRounds(&d, contexts[0..2], holds[0..2]);
+}
+
+fn traceRounds(d: *q.draft.Draft, contexts: []q.draft.Ctx, source: []lanes.drafter.Hold) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first = try lanes.Stream.init(a, .{ .id = "first", .prompt = &.{1}, .max_new = 8 });
+    defer first.deinit(a);
+    var second = try lanes.Stream.init(a, .{ .id = "second", .prompt = &.{1}, .max_new = 8 });
+    defer second.deinit(a);
+    try d.streams.put(a, &first, &contexts[0]);
+    try d.streams.put(a, &second, &contexts[1]);
+    defer {
+        if (comptime @hasField(q.draft.Ctx, "trace_snapshot")) for (contexts) |*ctx| ctx.trace_snapshot.deinit(a);
+    }
+    var holds: [2]lanes.drafter.Hold = undefined;
+    @memcpy(&holds, source);
+    holds[0].stream = &first;
+    holds[1].stream = &second;
+    holds[0].lanes = null;
+    holds[0].depth = 1;
+    holds[1].depth = 1;
+    holds[0].sampling = .{ .seed = 0x123456789abcdef, .temperature = 0.75 };
+    holds[1].sampling = .{ .seed = 0x76543210, .temperature = 1.25 };
+    try @import("qwen35_draft_trace_host.zig").run(Record, d, &holds, tmp);
+    try traceSaveFailure(d, &holds, tmp);
+}
+
+fn traceSaveFailure(d: *q.draft.Draft, holds: *const [2]lanes.drafter.Hold, tmp: std.testing.TmpDir) !void {
+    const t = try @import("qwen35_draft_trace_host.zig").enableTrace(d, tmp, "failed.jsonl");
+    defer q.draft.trace.drop(&d.trace);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    d.gpa = failing.allocator();
+    defer d.gpa = a;
+    Record.fail = false;
+    Record.downloads = 0;
+    var failed_hold = holds[0];
+    failed_hold.position = d.streams.get(failed_hold.stream).?.end + 1;
+    try d.drafter().hold(&.{failed_hold});
+    if (comptime @hasField(q.draft.trace.Trace, "dropped")) {
+        try std.testing.expectEqual(@as(u64, 1), t.dropped);
+        try std.testing.expect(t.broken);
+    }
+    try std.testing.expect(!d.streams.get(holds[0].stream).?.trace_active);
+    const accepted = [_]u32{41};
+    const item: lanes.drafter.Absorb = .{
+        .stream = failed_hold.stream,
+        .features = .{ .buffer = 1, .rows = 0, .row_bytes = 0, .space = .device, .dtype = .bf16 },
+        .start = failed_hold.position - 1,
+        .follow = &accepted,
+        .offered = 1,
+        .prompt = false,
+    };
+    try d.drafter().absorb(&.{item});
+    if (comptime @hasField(q.draft.trace.Trace, "dropped")) try std.testing.expectEqual(@as(u64, 1), t.dropped);
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/failed.jsonl", .{tmp.sub_path});
+    defer a.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1));
+    defer a.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), bytes.len);
 }
 
 test {
     _ = @import("qwen35_draft_equality.zig");
+    _ = @import("qwen35_draft_frame_mixed_host.zig");
+    _ = @import("qwen35_draft_graphs_host.zig");
 }
 
 test "Draft frames: combined target rows above capacity refuse before even settling an earlier round" {
@@ -381,4 +548,48 @@ test "Draft frames: an EXL3 head's span views plan their K split as the whole he
         try std.testing.expectEqual(whole, x3.plan(v.tail.k, v.tail.n, 192, 8));
         try std.testing.expect(F.x3_tail_at <= 248032 and F.x3_tail_at + v.tail.n == w.n);
     }
+}
+
+test "Draft frames: a ModelOpt head's span views read the whole head's tiles on its K slices" {
+    const Q = cuda.qmmf;
+    const S = q.draft.frame.ql_span;
+    const n = 248320;
+    const k = 5120;
+    const kg = k / 64;
+    const fp4 = cuda.nvfp4.weight(0x10000, 0x8000000000, 2.5, n, k);
+    const fp8 = cuda.modelopt.fp8Weight(0x10000, 0.5, n, k);
+    for ([_]cuda.qlinear.Weight{ .{ .nvfp4 = fp4 }, .{ .fp8 = fp8 } }) |w| {
+        const whole = switch (w) {
+            .nvfp4, .fp8 => |x| x,
+            else => unreachable,
+        };
+        const v = S.views(w, 98304, 248000, n).?;
+        const first = switch (v.first) {
+            .nvfp4, .fp8 => |x| x,
+            else => unreachable,
+        };
+        const tail = switch (v.tail) {
+            .nvfp4, .fp8 => |x| x,
+            else => unreachable,
+        };
+        const bytes: usize = if (whole.mode == .fp4) 64 * 64 / 2 else 64 * 64;
+        for (0..tail.n / 64) |t| for (0..kg) |g| {
+            try std.testing.expectEqual(whole.codes + ((248000 / 64 + t) * kg + g) * bytes, tail.codes + (t * kg + g) * bytes);
+            if (whole.mode == .fp4) try std.testing.expectEqual(whole.scales + ((248000 / 64 + t) * kg + g) * 256, tail.scales + (t * kg + g) * 256);
+        };
+        try std.testing.expectEqual(whole.codes, first.codes);
+        try std.testing.expectEqual(whole.scale, tail.scale);
+        for (1..Q.fused_rows) |m| for ([_]bool{ false, true }) |cl| {
+            try std.testing.expectEqual(Q.planFor(m, whole, cl), Q.planFor(m, first, cl));
+            try std.testing.expectEqual(Q.planFor(m, whole, cl), Q.planFor(m, tail, cl));
+        };
+    }
+    try std.testing.expectEqual(@as(u32, 8), Q.splitK(320, k)); // unpinned, the tail would sum eight slices
+    var scaled = fp8;
+    scaled.act = 1.5;
+    try std.testing.expect(S.views(.{ .fp8 = scaled }, 98304, 248000, n) == null);
+    try std.testing.expect(S.views(.{ .bf16 = cuda.modelopt.bf16Weight(0x10000, n, k) }, 98304, 248000, n) == null);
+    try std.testing.expect(S.views(.{ .nvfp4 = fp4 }, 98304, 248032, n) == null);
+    try std.testing.expect(S.views(.{ .nvfp4 = cuda.nvfp4.weight(0x10000, 0x20000, 1, n - 64, k) }, 98304, 248000, n) == null);
+    try std.testing.expect(!S.enabled());
 }

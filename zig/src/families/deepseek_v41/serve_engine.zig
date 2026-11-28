@@ -51,7 +51,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (@import("sys").experimental.refusal(o.model_type, @import("sys").getenv("TF_EXPERIMENTAL"))) |text| {
+    const experimental = @import("sys").environment.rawText("TF_EXPERIMENTAL");
+    if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41")) {
+        _ = @import("sys").environment.parse("TF_EXPERIMENTAL", experimental) catch {
+            problem.* = @import("sys").experimental.deepseek_message;
+            return null;
+        };
+    }
+    if (@import("sys").experimental.refusal(o.model_type, experimental)) |text| {
         problem.* = text;
         return null;
     }
@@ -146,7 +153,7 @@ pub const Served = struct {
         s.core = lanes.Engine.init(gpa, &s.cfg, s.x.backend(), s.clock.clock());
         s.x.attach(&s.core);
         const window: u32 = @intCast(@min(context orelse m.f.opts.limit, m.f.opts.limit));
-        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .benchmark_ranks = m.session.nccl.size, .benchmark_group = m.benchmark_group, .name = "dsv41-cuda", .lanes = m.slots, .context_window = window, .prefill_step = m.gt.prefill_rows });
+        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .benchmark_ranks = m.session.nccl.size, .benchmark_group = m.benchmark_group, .name = "dsv41-cuda", .lanes = m.slots, .context_window = window, .prefill_step = m.gt.prefill_rows, .structures = m.grammar != null });
         s.host.info_.draft_sources = draftSources(m.pass != null, s.cfg.max_copy > 0);
         // the lanes run on LaneHost's thread: the model's CUDA context must be current there
         s.host.on_thread = .{ .ctx = m, .run = bindContext };
@@ -177,7 +184,7 @@ pub const Served = struct {
             pl.* = lookup.Planner.init(ls, &s.x.policy.depth.costs, m.pass != null);
             s.lookup = pl;
             s.host.proposers = .{ .ctx = pl, .make = makeLookup, .free = freeLookup };
-            std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s})", .{ ls.min_match, ls.max_rows, if (ls.lookup) "" else ", lookup off" });
+            std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s}{s})", .{ ls.min_match, ls.max_rows, if (ls.copy_drafter) ", copy drafter" else "", if (ls.lookup) "" else ", lookup off" });
         }
         try s.host.start();
         s.rec = Recorder.init(gpa, io, s.host.engine());

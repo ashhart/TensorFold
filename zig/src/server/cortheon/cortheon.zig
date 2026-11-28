@@ -63,6 +63,7 @@ pub const Turn = struct {
     research: bool,
     client_tools: bool,
     user_key: u64,
+    salt: u64 = 0, // the request's cache salt: its memory keys and the planner's own request keep apart under it
     today: []const u8,
     hidden: std.ArrayList(Value) = .empty,
     sources: std.ArrayList([]const u8) = .empty,
@@ -135,7 +136,7 @@ pub const Turn = struct {
         @memcpy(list[0 .. list.len - 1], input.messages.array);
         list[list.len - 1] = message;
         const text = json.stringify(a, .{ .array = t.hidden.items }, .{ .ascii = false }) catch return;
-        const key = memory.replyKey(a, list, list.len - 1) catch return;
+        const key = (memory.replyKey(a, list, list.len - 1) catch return) ^ t.salt;
         t.state.memory.put(key, text);
     }
 
@@ -155,16 +156,21 @@ fn roleIs(m: Value, r: []const u8) bool {
 
 /// The request's turn, its input given the note, the tools and earlier hidden messages; null when Cortheon stays out.
 pub fn begin(srv: *Server, a: Allocator, raw: Value, id: []const u8, is_chat: bool, input: *chat.Input) ?*Turn {
-    const state = srv.cortheon orelse return null;
-    if (!is_chat or input.prompt != null or input.messages != .array or input.messages.array.len == 0) return null;
-    if (raw.get("cortheon")) |v| if (v == .bool and !v.bool) return null;
+    if (!engages(srv, a, raw, is_chat, input)) return null;
+    return start(srv.cortheon.?, srv, a, id, input) catch null;
+}
+
+/// Whether Cortheon takes the request (``begin``'s choice, with nothing started).
+pub fn engages(srv: *const Server, a: Allocator, raw: Value, is_chat: bool, input: *const chat.Input) bool {
+    if (srv.cortheon == null) return false;
+    if (!is_chat or input.prompt != null or input.messages != .array or input.messages.array.len == 0) return false;
+    if (raw.get("cortheon")) |v| if (v == .bool and !v.bool) return false;
     const choice = raw.get("tool_choice");
-    if (tool_specs.choiceDisables(choice) or (tool_specs.choiceRequiresCall(a, choice) catch true)) return null;
-    for (grammar.fields) |k| if (json.truthyField(raw, k)) return null;
-    if (json.truthyField(raw, "logprobs")) return null;
-    if (raw.get("priority")) |p| if (p == .string and std.mem.eql(u8, p.string, "background")) return null;
-    if (prompt_mod.isTitle(input.messages, input.tools.len > 0) or utility(a, input)) return null;
-    return start(state, srv, a, id, input) catch null;
+    if (tool_specs.choiceDisables(choice) or (tool_specs.choiceRequiresCall(a, choice) catch true)) return false;
+    for (grammar.fields) |k| if (json.truthyField(raw, k)) return false;
+    if (json.truthyField(raw, "logprobs")) return false;
+    if (raw.get("priority")) |p| if (p == .string and std.mem.eql(u8, p.string, "background")) return false;
+    return !(prompt_mod.isTitle(input.messages, input.tools.len > 0) or utility(a, input));
 }
 
 /// A tool-less ask to transform text the request carries, named by its system prompt or a long user turn.
@@ -179,7 +185,7 @@ fn utility(a: Allocator, input: *const chat.Input) bool {
 }
 
 fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat.Input) !*Turn {
-    const spliced = try memory.splice(a, &state.memory, input.messages.array);
+    const spliced = try memory.splice(a, &state.memory, input.messages.array, input.cache_salt);
     var first: ?[]const u8 = null;
     var latest: []const u8 = "";
     for (spliced) |m| if (roleIs(m, "user")) {
@@ -198,7 +204,8 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
         .goal = latest[0..@import("html.zig").cutAt(latest, 4000)], // the cap does not split a character
         .research = fresh_turn and latest_task.frontier and std.mem.trim(u8, latest, " \t\r\n").len >= 12,
         .client_tools = input.tools.len > 0,
-        .user_key = try memory.userKey(a, spliced),
+        .user_key = try memory.userKey(a, spliced) ^ input.cache_salt,
+        .salt = input.cache_salt,
         .today = try today(a, srv.io),
     };
     for (spliced) |m| if (!roleIs(m, "assistant")) try t.seen.addFrom(a, try memory.text(a, m));

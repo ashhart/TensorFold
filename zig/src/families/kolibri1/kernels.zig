@@ -143,6 +143,13 @@ pub const Ops = struct {
         try o.k.qk.rows(o.s, a.rows, .{ .h = h, .hk = hk, .dim = d }, shape, a.pos, a.slots, .{ .q = a.q, .k = a.k, .v = a.v, .kc = a.kc, .vc = a.vc, .len = a.len }, n);
     }
 
+    /// q alone, RMS-normed, no RoPE: a layer reading another's K and V (`rows` [n, h * d], no k or v columns).
+    pub fn qOnly(o: Ops, rows: u64, norms: u64, pos: u64, q: u64, n: usize, h: usize, d: usize, eps: f32) !void {
+        const ld: i64 = @intCast(h * d);
+        const src: cuda.qk_rows.Src = .{ .q = rows, .q_ld = ld, .q_hs = @intCast(d), .k = 0, .k_ld = 0, .k_hs = 0 };
+        try o.k.qk.rowsFrom(o.s, src, .{ .h = h, .hk = 0, .dim = d }, .{ .norms = norms, .eps = eps }, pos, null, .{ .q = q, .k = 0, .v = 0 }, n);
+    }
+
     /// Rows k, v [n, hk * d] into a paged layer's pages at their positions and slots (`w.pg`: every slot's table).
     pub fn put(o: Ops, k: u64, v: u64, kc: u64, vc: u64, pos: u64, slots: u64, w: cuda.window_attention.Window, n: usize) !void {
         try o.k.win.put(o.s, k, v, kc, vc, pos, slots, w, n);

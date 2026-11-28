@@ -4,13 +4,14 @@ const json = @import("json");
 const reply_text = @import("reply_text.zig");
 const tool_dsml = @import("tool_dsml.zig");
 const Value = json.Value;
+const tool_params = @import("tool_params.zig");
 const Allocator = std.mem.Allocator;
 
 const string_flag = "\" string=\"true\">";
 const json_flag = "\" string=\"false\">";
 
 /// What the Streamer does after the DSML state machine ran: go on, wait for text, or parse the block at its closer.
-pub const Next = enum { more, wait, rejected, outside };
+pub const Next = enum { more, wait, rejected, invalid, outside };
 
 /// A DSML block's place: between invokes, in a name, between parameters, in a key, or in a value.
 pub const Stage = enum { invokes, name, params, key, value };
@@ -26,6 +27,9 @@ pub const Dsml = struct {
     sent: usize = 0, // the block's headers that went out
     typed: bool = false, // the open value is JSON (``string="false"``)
     value_sent: usize = 0, // the open value's next byte to send
+    output_start: usize = 0, // deltas belonging to earlier blocks stay if this one is invalid
+    index_start: i64 = -1,
+    streamed_start: bool = false,
 };
 
 /// The reply's ``text`` so far: the deltas the open DSML block adds, and what the Streamer should do next.
@@ -163,6 +167,7 @@ fn value(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Err
             .ok => |v| v,
             .err => return .rejected,
         };
+        if (!tool_params.finiteJson(s.buffer.items) or !tool_params.finiteDecoded(v)) return .invalid;
         try send(s, out, try json.stringify(s.a, v, .{ .ascii = false, .compact = true }));
     } else try send(s, out, "\"");
     d.at = e + d.sp.param_close.len;

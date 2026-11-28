@@ -213,12 +213,22 @@ pub fn attention(e: *Emitter, L: u32) !void {
     // a KV source's compressor projection outlives its layer: keep() carries the accepted row (ratio 2)
     const comp = if (ratio == 2) try e.buf("w.L{d}.comp", .{L}, .bf16, &.{ n, cw }) else try e.buf("L.comp", .{}, .bf16, &.{ n, cw });
     var ps: [4]Proj = undefined;
-    for (xg.ws, 0..) |w, i| ps[i] = .{ .w = w, .x = x, .k = @intCast(D), .n = @intCast(xg.ns[i]), .y = switch (i) {
-        0 => qa,
-        1 => kv,
-        else => comp,
-    }, .col = if (i == 3) @intCast(hd) else 0 };
-    try e.fused("x", ps[0..xg.ws.len]);
+    var fused_n: usize = 0;
+    for (xg.ws, 0..) |w, i| {
+        const p: Proj = .{ .w = w, .x = x, .k = @intCast(D), .n = @intCast(xg.ns[i]), .y = switch (i) {
+            0 => qa,
+            1 => kv,
+            else => comp,
+        }, .col = if (i == 3) @intCast(hd) else 0 };
+        // a float projection leaves the fused group for its own launch, into the same columns of the same buffer
+        if (e.w.plain(w)) {
+            try e.plain(p);
+            continue;
+        }
+        ps[fused_n] = p;
+        fused_n += 1;
+    }
+    if (fused_n > 0) try e.fused("x", ps[0..fused_n]);
     const qn = try e.buf("L.qn", .{}, .bf16, &.{ n, e.cfg.q_lora });
     const kvn = try e.buf("L.kvn", .{}, .bf16, &.{ n, hd });
     // `r1` (RMS_FOLD): no launch here; q_norm runs in its consumers' rot_in, kv_norm beside the SWA store
@@ -255,7 +265,11 @@ pub fn attention(e: *Emitter, L: u32) !void {
         });
         try e.kvStore(lat, L, ratio);
         const kp = try e.buf("L.ix_k", .{}, .bf16, &.{ n, ID });
-        try e.upstream(try e.fmt("L{d}.attn.ix_wk", .{L}), lat, hd, ID, kp);
+        const ix_wk = try e.fmt("L{d}.attn.ix_wk", .{L});
+        if (e.w.plain(ix_wk))
+            try e.plain(.{ .w = ix_wk, .x = lat, .y = kp, .k = @intCast(hd), .n = @intCast(ID) })
+        else
+            try e.upstream(ix_wk, lat, hd, ID, kp);
         const kpg = try e.paging(ratio, false);
         try e.triton("_index_k", .{ n, 1, 1 }, &.{
             .{ .name = "KP", .arg = kp },                                                    .{ .name = "k_stride", .arg = .{ .i = ID } },

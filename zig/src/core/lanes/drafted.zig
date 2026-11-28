@@ -72,7 +72,7 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.first_rows) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .keep_full_lone = x.target.keep_full_lone, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .warm_images = x.target.warm_images, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.first_rows) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -109,6 +109,7 @@ pub const Drafted = struct {
         m.allocate_shared_drafts = true;
         m.drafts = @min(d.depth, if (target.exact_width > 1) target.exact_width - 1 else 0);
         m.mtp_step_ms = d.step_ms;
+        m.fixed_draft_block = d.fixed_block;
         m.draft_prior = d.prior;
         m.plain_guard = d.plain_guard;
         m.draft_streams = d.batched;
@@ -138,8 +139,8 @@ pub const Drafted = struct {
     }
 
     /// Device bytes an admitted stream takes: the target's own and the drafter's for the same stream.
-    pub fn streamBytes(x: *const Drafted, target: usize) usize {
-        return target + x.drafter.facts().stream_bytes;
+    pub fn streamBytes(x: *const Drafted, target: usize) !usize {
+        return std.math.add(usize, target, x.drafter.facts().stream_bytes) catch error.StreamSizeOverflow;
     }
 
     fn clearProposals(ptr: *anyopaque, s: *Stream) void {
@@ -336,6 +337,13 @@ pub const Drafted = struct {
             }
             try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .plan = r.plan, .lanes = r.lanes, .tokens = r.stream.context.items, .sampling = r.stream.sampling });
         }
+        if (x.drafter.vtable.draft_round) |f| {
+            if ((x.drafter.proposal_head == null or x.drafter.proposal_head.?.mode == .legacy) and
+                (x.absorbs.items.len > 0 or x.holds.items.len > 0))
+            {
+                return f(x.drafter.ptr, x.absorbs.items, x.holds.items);
+            }
+        }
         if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
         if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
     }
@@ -375,3 +383,71 @@ pub const Drafted = struct {
         self(ptr).dropStream(s);
     }
 };
+
+test "draft_round fuses absorb and hold" {
+    const gpa = std.testing.allocator;
+    const Mock = struct {
+        rounds: u32 = 0,
+        absorbs: u32 = 0,
+        holds: u32 = 0,
+        rows: [4]u32 = .{ 1, 2, 3, 4 },
+        fn cast(ptr: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ptr));
+        }
+        fn taps(_: *anyopaque) []const u32 {
+            return &.{0};
+        }
+        fn facts(_: *anyopaque) dr.Facts {
+            return .{ .depth = 2, .step_ms = 0.5 };
+        }
+        fn open(_: *anyopaque, _: *Stream) anyerror!void {}
+        fn absorb(ptr: *anyopaque, _: []const dr.Absorb) anyerror!void {
+            cast(ptr).absorbs += 1;
+        }
+        fn hold(ptr: *anyopaque, _: []const dr.Hold) anyerror!void {
+            cast(ptr).holds += 1;
+        }
+        fn draftRound(ptr: *anyopaque, absorbs: []const dr.Absorb, holds: []const dr.Hold) anyerror!void {
+            const m = cast(ptr);
+            m.rounds += 1;
+            try std.testing.expectEqual(@as(usize, 1), absorbs.len);
+            try std.testing.expectEqual(@as(usize, 1), holds.len);
+        }
+        fn held(_: *anyopaque, _: []const *Stream, _: []const []u32) anyerror!void {}
+        fn release(_: *anyopaque, _: *Stream) void {}
+        fn prefill(_: *anyopaque, _: *Stream) anyerror!void {}
+        fn prefillFeatures(ptr: *anyopaque, s: *Stream, _: []const u32, sink: be.FeatureSink) anyerror!void {
+            const m = cast(ptr);
+            try sink.take(sink.ptr, s, .{ .buffer = @intFromPtr(&m.rows), .rows = 4, .row_bytes = 4, .space = .host, .dtype = .u32 }, 0);
+        }
+        fn features(ptr: *anyopaque, _: *Stream, _: []const u32, _: u64, n: u32) anyerror!be.Features {
+            return .{ .buffer = @intFromPtr(&cast(ptr).rows), .rows = n, .row_bytes = 4, .space = .host, .dtype = .u32 };
+        }
+        fn first(_: *anyopaque, _: *Stream, _: u64) anyerror!u64 {
+            return 0;
+        }
+        fn queue(_: *anyopaque, _: *Stream, _: be.Feed, _: u64) anyerror!u64 {
+            return 0;
+        }
+        fn read(_: *anyopaque, _: u64) anyerror!u32 {
+            return 7;
+        }
+        fn verify(_: *anyopaque, _: []const be.Window, _: []be.Verified) anyerror!void {}
+        fn keep(_: *anyopaque, _: []const be.Window, _: []const []const u32) anyerror!void {}
+        fn draftFn(_: *anyopaque, _: []const be.DraftRequest) anyerror!void {}
+    };
+    var mock: Mock = .{};
+    const target: be.Backend = .{ .ptr = &mock, .vtable = &.{ .prefill = Mock.prefill, .prefill_features = Mock.prefillFeatures, .features = Mock.features, .first = Mock.first, .queue = Mock.queue, .read = Mock.read, .verify = Mock.verify, .keep = Mock.keep, .draft = Mock.draftFn, .release = Mock.release } };
+    const drafter: dr.Drafter = .{ .ptr = &mock, .vtable = &.{ .taps = Mock.taps, .facts = Mock.facts, .open = Mock.open, .absorb = Mock.absorb, .hold = Mock.hold, .draft_round = Mock.draftRound, .held = Mock.held, .release = Mock.release } };
+    var x = try Drafted.init(gpa, target, drafter);
+    defer x.deinit();
+    var s = try Stream.init(gpa, .{ .id = "dr", .prompt = &.{ 10, 20, 30, 40 }, .max_new = 4 });
+    defer s.deinit(gpa);
+    try x.backend().prefill(&s);
+    defer x.backend().release(&s);
+    try std.testing.expectEqual(@as(u32, 1), mock.absorbs);
+    try x.backend().draft(&.{.{ .stream = &s, .follow = &.{}, .first = .{ .value = 50 }, .rows = null, .start = 4, .position = 5, .depth = 2 }});
+    try std.testing.expectEqual(@as(u32, 1), mock.rounds);
+    try std.testing.expectEqual(@as(u32, 1), mock.absorbs);
+    try std.testing.expectEqual(@as(u32, 0), mock.holds);
+}

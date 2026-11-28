@@ -4,9 +4,9 @@ import ast
 import ctypes
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
-import os
-import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -83,6 +83,73 @@ def selected_pci(torch):
     return text.value.decode().lower()
 
 
+def has_flash():
+    """Whether flash-attn is installed (else flash_or_stand_in puts a stand-in in its place)."""
+    try:
+        importlib.metadata.version("flash-attn")
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+
+def tower_config(checkpoint, attention):
+    """The checkpoint's config, its tower on `attention` when flash-attn is installed, else on SDPA (no flash-attn)."""
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True, local_files_only=True)
+    config.vision_config.attn_implementation = attention if has_flash() else "sdpa"
+    return config
+
+
+def sdpa_backend(torch, name):
+    """Torch's own SDPA choice ("auto"), or the math kernel alone ("math"): flash, memory-efficient and cuDNN off."""
+    if name == "math":
+        for enable in (torch.backends.cuda.enable_flash_sdp, torch.backends.cuda.enable_mem_efficient_sdp,
+                       torch.backends.cuda.enable_cudnn_sdp):
+            enable(False)
+
+
+def load_model(torch, checkpoint, config, attention):
+    """Load the pinned model on cuda:0; an SDPA tower refuses a block whose attention is not VisionSdpaAttention."""
+    from transformers import AutoModelForCausalLM
+    model = AutoModelForCausalLM.from_pretrained(checkpoint, config=config, attn_implementation=attention, torch_dtype=torch.bfloat16,
+                                                 device_map="cuda:0", trust_remote_code=True, local_files_only=True).eval()
+    if config.vision_config.attn_implementation != "sdpa":
+        return model
+    sdpa = sys.modules[type(model.vision_tower).__module__].VisionSdpaAttention
+    if wrong := [i for i, block in enumerate(model.vision_tower.blocks) if type(block.attn) is not sdpa]:
+        raise RuntimeError(f"tower blocks {wrong} do not use VisionSdpaAttention")
+    return model
+
+
+class SdpaProbe:
+    """Count the backend Torch's dispatcher picks for each SDPA call: the tower's are 3-D, the decoder's 4-D."""
+
+    def __init__(self, torch):
+        self.torch, self.calls = torch, {}
+        self.original = torch.nn.functional.scaled_dot_product_attention
+        self.names = {int(v): k for k, v in torch.nn.attention.SDPBackend.__members__.items()}
+
+    def __call__(self, *args, **kwargs):
+        q, mask = args[0], args[3] if len(args) > 3 else kwargs.get("attn_mask")
+        choice = self.names.get(int(self.torch._fused_sdp_choice(*args, **kwargs)), "unknown")
+        entry = self.calls.setdefault("tower" if q.dim() == 3 else "decoder", {"first_q": [list(q.shape), str(q.dtype)], "backends": {},
+                                      "first_mask": None if mask is None else [list(mask.shape), str(mask.dtype)]})
+        entry["backends"][choice] = entry["backends"].get(choice, 0) + 1
+        return self.original(*args, **kwargs)
+
+    def __enter__(self):
+        self.torch.nn.functional.scaled_dot_product_attention = self
+        return self
+
+    def __exit__(self, *_exc):
+        self.torch.nn.functional.scaled_dot_product_attention = self.original
+
+    def summary(self):
+        cuda, names = self.torch.backends.cuda, ["flash", "mem_efficient", "math", "cudnn"]
+        flags = {f"{name}_sdp_enabled": getattr(cuda, f"{name}_sdp_enabled")() for name in names}
+        return {"calls": self.calls, "flags": {**flags, "bf16_reduction_math": cuda.fp16_bf16_reduction_math_sdp_allowed()}}
+
+
 class Scores:
     """Retain the scores used for greedy selection without a growing device tensor history (a LogitsProcessor)."""
 
@@ -115,116 +182,6 @@ class Scores:
     def close(self):
         self.header()
         self.file.close()
-
-
-def oracle(args):
-    """Run the checkpoint's Hugging Face example and retain native-comparison inputs."""
-    require(ORACLE_VERSIONS)
-    source_sha256 = pinned(args.checkpoint)
-    import torch
-    from qwen_vl_utils import process_vision_info
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
-    from transformers.generation import LogitsProcessorList
-
-    pci = selected_pci(torch)
-    if pci != args.pci.lower():
-        raise RuntimeError(f"selected GPU {pci} differs from requested GPU {args.pci}")
-    args.output.mkdir(parents=True, exist_ok=False)
-    prompt = args.prompt.read_text(encoding="utf-8") if args.prompt else example_prompt(args.checkpoint)
-    image_paths = [args.image, *args.extra_image]
-    messages = [{"role": "user", "content": [*({"type": "image", "image": str(p)} for p in image_paths),
-                                               {"type": "text", "text": prompt}]}]
-    processor = AutoProcessor.from_pretrained(args.checkpoint, trust_remote_code=True, local_files_only=True, use_fast=False)
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs = process_vision_info(messages)
-    prepared_images = []
-    for i, image in enumerate(image_inputs):
-        path = args.output / f"prepared-image-{i}.png"
-        image.save(path)
-        prepared_images.append({"size": list(image.size), "sha256": sha(path)})
-    inputs = processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
-    for key, tensor in inputs.items():
-        np.save(args.output / f"input-{key}.npy", tensor.cpu().numpy())
-    config = AutoConfig.from_pretrained(args.checkpoint, trust_remote_code=True, local_files_only=True)
-    config.vision_config.attn_implementation = args.attention
-    patch_rows = inputs.pixel_values.shape[0]
-    image_arrays = (config.vision_config.num_hidden_layers + 2 if args.vision_only else 3)
-    disk_required = image_arrays * patch_rows * config.hidden_size * 4 + (2 << 30)
-    if not args.vision_only:
-        disk_required += args.max_new_tokens * config.vocab_size * 4
-    if shutil.disk_usage(args.output).free < disk_required:
-        raise RuntimeError(f"oracle needs {disk_required} free disk bytes including headroom")
-    # Scores go directly to disk. Reserve weights, maximum KV, tower scratch, and 2 GiB device headroom.
-    kv_bytes = 0 if args.vision_only else 2 * config.num_hidden_layers * 2 * config.num_key_value_heads * (
-        config.hidden_size // config.num_attention_heads) * (inputs.input_ids.shape[1] + args.max_new_tokens)
-    required = 6_078_358_528 + (1 << 30) + (2 << 30) + kv_bytes
-    free, _ = torch.cuda.mem_get_info()
-    if free < required:
-        raise RuntimeError(f"oracle needs {required} free bytes including headroom, found {free}")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint, config=config, attn_implementation=args.attention, torch_dtype=torch.bfloat16,
-        device_map="cuda:0", trust_remote_code=True, local_files_only=True,
-    ).eval()
-    captured = set()
-
-    def capture(name):
-        def hook(_module, _args, output):
-            if name in captured:
-                return
-            captured.add(name)
-            tensor = output[0] if isinstance(output, tuple) else output
-            np.save(args.output / f"{name}.npy", tensor.detach().float().cpu().numpy())
-        return hook
-
-    hooks = [model.vision_tower.patch_embed.register_forward_hook(capture("vision-patch")),
-             model.vision_tower.blocks[0].register_forward_hook(capture("vision-block0")),
-             model.vision_tower.post_trunk_norm.register_forward_hook(capture("vision-norm")),
-             model.vision_tower.register_forward_hook(capture("vision-merged")),
-             model.model.layers[0].register_forward_hook(capture("text-block0")),
-             model.model.norm.register_forward_hook(capture("text-norm"))]
-    if args.vision_only:
-        hooks.extend(block.register_forward_hook(capture(f"vision-block{i}"))
-                     for i, block in enumerate(model.vision_tower.blocks) if i != 0)
-    recorder = None if args.vision_only else Scores(args.output / "generation-scores.npy", config.vocab_size)
-    try:
-        inputs = inputs.to("cuda:0")
-        started = time.monotonic()
-        with torch.inference_mode():
-            if args.vision_only:
-                model.vision_tower(inputs.pixel_values, inputs.image_grid_thw)
-            else:
-                generated = model.generate(**inputs, max_new_tokens=args.max_new_tokens,
-                                           return_dict_in_generate=True, output_scores=False, do_sample=False,
-                                           logits_processor=LogitsProcessorList([recorder]))
-        torch.cuda.synchronize()
-        seconds = time.monotonic() - started
-    finally:
-        if recorder is not None:
-            recorder.close()
-        for hook in hooks:
-            hook.remove()
-    ids = [] if args.vision_only else generated.sequences[0, inputs.input_ids.shape[1]:].cpu().tolist()
-    ends = model.generation_config.eos_token_id
-    end_ids = ends if isinstance(ends, list) else [ends]
-    if recorder is not None and recorder.count != len(ids):
-        raise RuntimeError("score row count differs from the generated token count")
-    output_text = processor.batch_decode([ids], skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-    result = {
-        "checkpoint_revision": REVISION, "source_sha256": source_sha256,
-        "image_sha256": sha(args.image), "images_sha256": [sha(p) for p in image_paths],
-        "prepared_images": prepared_images, "prompt": prompt, "rendered_text": text,
-        "prompt_ids": inputs.input_ids[0].cpu().tolist(), "output_ids": ids, "text": output_text,
-        "max_new_tokens": args.max_new_tokens, "do_sample": False, "attn_implementation": args.attention,
-        "vision_only": args.vision_only,
-        "eos_reached": bool(ids and ids[-1] in end_ids),
-        "seconds": seconds, "peak_device_bytes": torch.cuda.max_memory_allocated(),
-        "device": torch.cuda.get_device_name(), "pci": pci, "hip_version": torch.version.hip,
-        "flash_triton_amd": os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE"),
-        "versions": {p: importlib.metadata.version(p) for p in
-                     ["torch", "transformers", "flash-attn", "qwen-vl-utils", "numpy", "pillow"]},
-    }
-    (args.output / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
-    print(json.dumps({"output_tokens": len(ids), "seconds": seconds, "text": output_text}, ensure_ascii=False), flush=True)
 
 
 def pages(args):
@@ -314,9 +271,9 @@ def text(args):
     """Greedy ids and scores for a text-only prompt: the decoder's own reference, on a HIP or CUDA GPU."""
     require(ORACLE_VERSIONS)
     source_sha256 = pinned(args.checkpoint)
-    flash = text_only_flash()
+    flash = flash_or_stand_in()
     import torch
-    from transformers import AutoModelForCausalLM, AutoProcessor
+    from transformers import AutoProcessor
     from transformers.generation import LogitsProcessorList
 
     pci = selected_pci(torch)
@@ -329,10 +286,7 @@ def text(args):
                                              tokenize=False, add_generation_prompt=True)
     inputs = processor.tokenizer([rendered], return_tensors="pt")
     np.save(args.output / "input-input_ids.npy", inputs.input_ids.cpu().numpy())
-    model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint, attn_implementation=args.attention, torch_dtype=torch.bfloat16,
-        device_map="cuda:0", trust_remote_code=True, local_files_only=True,
-    ).eval()
+    model = load_model(torch, args.checkpoint, tower_config(args.checkpoint, args.attention), args.attention)
     rotary = model.model.rotary_emb
     np.save(args.output / "rope-inv_freq.npy", rotary.inv_freq.detach().float().cpu().numpy())
     with torch.inference_mode():
@@ -370,48 +324,45 @@ def text(args):
     print(json.dumps({"prompt_tokens": len(result["prompt_ids"]), "output_tokens": len(ids), "seconds": seconds}), flush=True)
 
 
-def text_only_flash():
-    """The installed flash-attn version, or a stand-in that refuses calls: the tower imports it, text never calls it."""
+def flash_or_stand_in():
+    """The installed flash-attn version, or a stand-in that refuses calls: the tower imports it, SDPA never calls it."""
     try:
         return importlib.metadata.version("flash-attn")
     except importlib.metadata.PackageNotFoundError:
-        import sys
         import types
         from importlib.machinery import ModuleSpec
 
         def refuse(*_args, **_kwargs):
-            raise RuntimeError("flash_attn is not installed: the text-only reference cannot run the vision tower")
-
+            raise RuntimeError("flash_attn is not installed: only the SDPA tower can run")
         stand_in = types.ModuleType("flash_attn")
         stand_in.__spec__ = ModuleSpec("flash_attn", None)
         stand_in.flash_attn_varlen_func = refuse
         sys.modules["flash_attn"] = stand_in
-        return "absent: a stand-in that refuses calls (text only)"
+        return "absent: a stand-in that refuses calls (SDPA tower)"
 
 
 def score(args):
-    """HF's teacher-forced logits for every native id after a reference's prompt: exact, one BF16 step, or fail."""
+    """HF's teacher-forced logits for each native id after a reference's prompt and pixels: exact, one step, or fail."""
     require(ORACLE_VERSIONS)
     pinned(args.checkpoint)
-    text_only_flash()
+    flash_or_stand_in()
     import torch
-    from transformers import AutoModelForCausalLM
-
+    reference_images = image_modes().reference_images
     reference = json.loads((args.reference_dir / "result.json").read_text())
     ids = json.loads(args.native_ids.read_text())
-    model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint, attn_implementation=args.attention, torch_dtype=torch.bfloat16,
-        device_map="cuda:0", trust_remote_code=True, local_files_only=True,
-    ).eval()
+    config = tower_config(args.checkpoint, args.attention)
     prompt = reference["prompt_ids"]
     saved = np.load(args.reference_dir / "input-input_ids.npy", allow_pickle=False)
     if saved.ndim != 2 or saved.shape[0] != 1 or saved[0].tolist() != prompt:
         raise ValueError("the reference's input-input_ids.npy and result.json prompt_ids differ")
-    if not prompt or not ids or not all(isinstance(t, int) and 0 <= t < model.config.vocab_size for t in ids):
+    if not prompt or not ids or not all(isinstance(t, int) and 0 <= t < config.vocab_size for t in ids):
         raise ValueError("the reference prompt and the native ids must be non-empty lists of vocabulary ids")
-    with torch.inference_mode():
+    images = reference_images(torch, args.reference_dir, prompt, config)
+    model = load_model(torch, args.checkpoint, config, args.attention)
+    sdpa_backend(torch, args.sdpa_backend)
+    with torch.inference_mode(), SdpaProbe(torch) as probe:
         sequence = torch.tensor([prompt + ids], device="cuda:0")
-        logits = model(input_ids=sequence, use_cache=False).logits[0, len(prompt) - 1:-1].float().cpu().numpy()
+        logits = model(input_ids=sequence, use_cache=False, **images).logits[0, len(prompt) - 1:-1].float().cpu().numpy()
     if logits.shape[0] != len(ids) or not np.isfinite(logits).all():
         raise ValueError("the teacher-forced logits do not line up with the native ids")
     counts, worst = {"exact": 0, "one step": 0, "fail": 0}, []
@@ -423,8 +374,11 @@ def score(args):
         counts[kind] += 1
         if kind != "exact":
             worst.append({"at": i, "native": token, "gap": gap, "step": step, "kind": kind})
-    args.output.write_text(json.dumps({"ids": len(ids), **counts, "differences": worst}, indent=2) + "\n")
-    print(json.dumps({"ids": len(ids), **counts, "first_differences": worst[:16], "all_in": str(args.output)}, indent=2))
+    count = int(images["image_grid_thw"].shape[0]) if images else 0
+    args.output.write_text(json.dumps({"ids": len(ids), "images": count, **counts, "differences": worst,
+                                       "sdpa_backend": args.sdpa_backend, "sdpa": probe.summary()}, indent=2) + "\n")
+    print(json.dumps({"ids": len(ids), "images": count, **counts, "first_differences": worst[:16],
+                      "all_in": str(args.output)}, indent=2))
     if counts["fail"]:
         raise SystemExit(f"{counts['fail']} native ids score more than one BF16 step below HF's top")
 
@@ -474,6 +428,25 @@ def compare(args):
     }, indent=2))
 
 
+def image_modes():
+    """The sibling dots_mocr_images.py by path, since python -I puts no script directory on sys.path."""
+    if (loaded := sys.modules.get("dots_mocr_images")) is not None:
+        return loaded
+    sys.modules.setdefault("dots_mocr_reference", sys.modules[__name__])  # its helpers: this module, not a second copy
+    spec = importlib.util.spec_from_file_location("dots_mocr_images", Path(__file__).with_name("dots_mocr_images.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["dots_mocr_images"] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules["dots_mocr_images"]
+        raise
+    return module
+
+
+SDPA_BACKEND = "auto: Torch picks each SDPA kernel; math: the math kernel alone (flash, memory-efficient and cuDNN off)"
+
+
 def positive(text):
     if (value := int(text)) <= 0:
         raise argparse.ArgumentTypeError("must be positive")
@@ -481,9 +454,10 @@ def positive(text):
 
 
 def main():
+    images = image_modes()
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
-    mode = modes.add_parser("oracle", help=oracle.__doc__, description=oracle.__doc__)
+    mode = modes.add_parser("oracle", help=images.oracle.__doc__, description=images.oracle.__doc__)
     mode.add_argument("checkpoint", type=Path)
     mode.add_argument("image", type=Path)
     mode.add_argument("output", type=Path)
@@ -491,9 +465,10 @@ def main():
     mode.add_argument("--prompt", type=Path, help="a UTF-8 prompt file in place of the model card's example prompt")
     mode.add_argument("--attention", choices=["flash_attention_2", "sdpa"], default="flash_attention_2")
     mode.add_argument("--pci", required=True, help="the selected GPU's PCI address, checked before model allocation")
-    mode.add_argument("--vision-only", action="store_true", help="capture every vision block without decoder generation")
+    mode.add_argument("--vision-only", action="store_true", help="capture every vision block and the patch bias rounding, without decoder generation")
     mode.add_argument("--extra-image", type=Path, action="append", default=[], help="append another image to test independent image spans")
-    mode.set_defaults(run=oracle)
+    mode.add_argument("--sdpa-backend", choices=["auto", "math"], default="auto", help=SDPA_BACKEND)
+    mode.set_defaults(run=images.oracle)
     mode = modes.add_parser("sources", help=sources.__doc__, description=sources.__doc__)
     mode.add_argument("checkpoint", type=Path)
     mode.set_defaults(run=sources)
@@ -526,11 +501,17 @@ def main():
     mode.add_argument("native_ids", type=Path, help="a JSON list of the native reply ids")
     mode.add_argument("output", type=Path, help="new JSON file for every difference")
     mode.add_argument("--attention", choices=["flash_attention_2", "sdpa"], default="sdpa")
+    mode.add_argument("--sdpa-backend", choices=["auto", "math"], default="auto", help=SDPA_BACKEND)
     mode.set_defaults(run=score)
     mode = modes.add_parser("compare", help=compare.__doc__, description=compare.__doc__)
     mode.add_argument("reference_dir", type=Path)
     mode.add_argument("native_prefix", type=Path)
     mode.set_defaults(run=compare)
+    mode = modes.add_parser("stages", help=images.stages.__doc__, description=images.stages.__doc__)
+    mode.add_argument("reference_dir", type=Path, help="an oracle --vision-only output directory")
+    mode.add_argument("native_dir", type=Path, help="native taps under the same names, as <u2 BF16 bit patterns")
+    mode.add_argument("--output", type=Path, help="also write the report to this JSON file")
+    mode.set_defaults(run=images.stages)
     args = parser.parse_args()
     args.run(args)
 

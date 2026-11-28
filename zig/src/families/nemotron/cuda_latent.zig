@@ -85,14 +85,22 @@ pub fn partFloats(c: Config, rows: usize) usize {
     return rows * c.top_k * own * c.latent + rows * own * c.hidden;
 }
 
-/// TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD into `c`: both or neither; a world must hold whole shares.
+/// The tools' place (cli, tf-cuda-test): TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD, both or neither, their input as before.
 pub fn place(c: *Config) !void {
-    const r = std.c.getenv("TF_NEMOTRON_RANK");
-    const w = std.c.getenv("TF_NEMOTRON_WORLD");
+    const env = @import("sys").environment;
+    const r = try env.read(?u64, "TF_NEMOTRON_RANK", null);
+    const w = try env.read(?u64, "TF_NEMOTRON_WORLD", null);
     if (r == null and w == null) return;
     if (r == null or w == null) return error.NoRank;
-    c.rank = std.fmt.parseInt(usize, std.mem.span(r.?), 10) catch return error.NoRank;
-    c.world = std.fmt.parseInt(usize, std.mem.span(w.?), 10) catch return error.NoRank;
+    return placeAt(c, .{ .rank = @intCast(r.?), .world = @intCast(w.?) });
+}
+
+pub const At = struct { rank: usize, world: usize };
+
+/// `at` into `c` (the server's resolved launch, or a tool's variables): a world must hold whole shares.
+pub fn placeAt(c: *Config, at: At) !void {
+    c.rank = at.rank;
+    c.world = at.world;
     if (c.world < 1 or c.rank >= c.world) return error.NoRank;
     if (c.world == 1) return;
     if (c.latent == 0) {
@@ -326,10 +334,18 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
     try f.ops.k.latent.?.picks(g.s, rows <= state.max_rows, b.part, m.bias, b.pick, b.wts, rows, c.routed_scaling, c.experts, sk, c.top_k, c.ownShares(), c.norm_topk);
 }
 
-/// One share set's expert rows into `out` (fp32 a share, or four.summed's bf16 sums): routed pairs, then the shared's.
-pub fn partials(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+/// One share set's expert rows into `out` (fp32 a share, or summed bf16): routed pairs; the shared's beside, on `side`.
+pub fn partials(o: kern.Ops, side: ?fwd.Side, t: Tables, s: Scratch, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    const sh = out + @as(u64, rows * c.top_k * own) * c.latent * 4;
+    const sd = if (s.shared_plan != null) side else null; // a plan built here would share `s.plan` with the routed pairs
+    if (sd) |x| {
+        try x.fork.record(o.s);
+        try x.s.wait(x.fork);
+        try sharedRows(.{ .k = o.k, .s = x.s }, t, s, hidden, rows, own, c, sh);
+        try x.join.record(x.s);
+    }
     try routed(o, t, s, picks, lat, rows, own, c, out);
-    try sharedRows(o, t, s, hidden, rows, own, c, out + @as(u64, rows * c.top_k * own) * c.latent * 4);
+    if (sd) |x| try o.s.wait(x.join) else try sharedRows(o, t, s, hidden, rows, own, c, sh);
 }
 
 /// `picks`' pairs through the routed experts into `out` (partials' first region).

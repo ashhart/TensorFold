@@ -20,9 +20,9 @@ test "residency owner Qwen27: actual lazy rollback bank joins, grows and leaves 
         const device = record.device();
         const shape = try abi.Shape.init(geometry());
         const budget = try Budget.init(shape, 1, 3, 16);
-        var pool: bank.Pool = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined };
+        var pool: bank.Pool = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined, .scratch = bank.Pool.emptyScratch(a) };
         defer {
-            pool.releaseBefore();
+            pool.deinitScratch();
             for (pool.buffers) |b| b.deinit();
         }
         var owner = (try mtl.resident.Resident.hold(a, std.testing.io, device, record.queue(), &pool.buffers, "qwen27")).?;
@@ -173,21 +173,28 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             try model.kernels.lanes.put(a, .{ .kind = .projection, .k = 128 }, cached);
             model.frame = try @import("src/families/qwen27/gpu_frame.zig").Frame.init(device, model.config, 16);
             defer model.frame.deinit();
-            var r: round_mod.Runner = undefined;
-            r.model = &model;
-            r.slots = 1;
-            r.ready = 1;
-            r.caches = &.{};
-            r.owned = .empty;
-            r.residency = null;
-            r.failed = false;
-            r.active = null;
-            r.reading = @splat(null);
             var offsets = [_]u32{1};
-            r.offsets = &offsets;
+            var r: round_mod.Runner = .{
+                .allocator = a,
+                .model = &model,
+                .gdn = undefined,
+                .attention = undefined,
+                .scratch = undefined,
+                .bindings = &.{},
+                .caches = &.{},
+                .linear_index = &.{},
+                .attention_index = &.{},
+                .offsets = &offsets,
+                .owned = .empty,
+                .taps = undefined,
+                .slots = 1,
+                .ready = 1,
+                .capacity = 16,
+            };
             const budget = try Budget.init(try abi.Shape.init(model.config), 1, 1, 16);
-            r.gdn = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined };
+            r.gdn = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined, .scratch = bank.Pool.emptyScratch(a) };
             defer for (r.gdn.buffers) |b| b.deinit();
+            defer r.gdn.deinitScratch();
             const limits: attn.Limits = .{ .rows = 16, .streams = 1, .keys = 32 };
             r.scratch = try attn.Scratch.init(device, limits);
             defer r.scratch.deinit();
@@ -231,6 +238,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
                 b.staged = null;
                 b.context = .{ .cache = 1, .begin = 0, .end = 0 };
                 b.attention.part = try owned.take();
+                b.attention_full = null; // the model is undefined, so its null default is not there: no v1 full layer
                 b.topk.part = try owned.take();
                 b.head.owned = .empty;
                 try b.head.owned.append(a, try owned.take());

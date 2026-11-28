@@ -71,6 +71,14 @@ pub fn Owner(comptime Metal: type) type {
             r.held.leave(buffer);
         }
 
+        /// Commit several departures before their buffers change purgeable state or leave wired storage.
+        pub fn removeNow(r: *Self, buffers: []const mtl.Buffer) void {
+            r.mutex.lockUncancelable(r.io);
+            defer r.mutex.unlock(r.io);
+            for (buffers) |buffer| r.held.leave(buffer);
+            r.held.flush();
+        }
+
         /// Follow later allocations and frees; the Resident must stay at the same address.
         pub fn follow(r: *Self) mtl.ResidencySet.Follow {
             return .{ .ctx = r, .join = joinOne, .leave = leaveOne };

@@ -16,6 +16,11 @@ pub const Scopes = packed struct(u8) {
 
 /// Every key without a scope list, from a flag, the environment or a plain file line.
 pub const full: Scopes = .{ .admin = true };
+
+/// Automatic learning takes an admin key's turns (no keys: every turn), any key's only with TF_SLIDE_AUTO_ALL.
+pub fn learnsFrom(scopes: Scopes) bool {
+    return scopes.admin or (@import("sys").environment.read(bool, "TF_SLIDE_AUTO_ALL", false) catch false);
+}
 pub const Label = struct { name: []const u8, scopes: Scopes };
 pub const ParseError = error{ InvalidLabel, InvalidScopes };
 
@@ -57,14 +62,15 @@ fn validLabel(label: []const u8) bool {
 }
 
 const listing = [_][]const u8{ "/models", "/v1/models", "/v1/voices", "/api/tags", "/api/ps", "/api/version" };
-const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest", "/api/show" };
+const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest", "/api/show", "/v1/execution/witness" };
 const inferring = [_][]const u8{
     "/chat/completions",      "/v1/chat/completions", "/completions",           "/v1/completions",
     "/messages",              "/v1/messages",         "/messages/count_tokens", "/v1/messages/count_tokens",
     "/responses",             "/v1/responses",        "/tokenize",              "/v1/tokenize",
     "/detokenize",            "/v1/detokenize",       "/v1/audio/speech",       "/v1/embeddings",
     "/v1/images/generations", "/decisions",           "/v1/decisions",          "/systemone",
-    "/v1/systemone",          "/rerank",              "/v1/rerank",             "/v1/ocr",
+    "/v1/systemone",          "/rerank",              "/v1/rerank",             "/ocr",
+    "/v1/ocr",                "/v2/rerank",           "/score",                 "/v1/score",
     "/api/chat",              "/api/generate",        "/api/embed",             "/api/show",
     "/apply-template",        "/v1/apply-template",
 };
@@ -74,11 +80,20 @@ pub fn allows(scopes: Scopes, method: []const u8, raw_path: []const u8) bool {
     if (scopes.admin) return true;
     const route = routePath(raw_path);
     if (std.mem.eql(u8, method, "GET")) {
-        if ((scopes.inference or scopes.read) and oneOf(route, &listing)) return true;
+        if ((scopes.inference or scopes.read) and (oneOf(route, &listing) or modelId(route) != null)) return true;
         return scopes.read and oneOf(route, &reading);
     }
     const put = std.mem.eql(u8, method, "PUT") and putRoute(route);
     return scopes.inference and (std.mem.eql(u8, method, "POST") or put) and oneOf(route, &inferring);
+}
+
+/// The id in GET /v1/models/{id} or /models/{id}, still escaped; a path ending in /models stays the listing's alias.
+pub fn modelId(route: []const u8) ?[]const u8 {
+    if (std.mem.endsWith(u8, route, "/models")) return null;
+    for ([_][]const u8{ "/v1/models/", "/models/" }) |head| {
+        if (route.len > head.len and std.mem.startsWith(u8, route, head)) return route[head.len..];
+    }
+    return null;
 }
 
 /// A key that may open a Responses WebSocket: admin, or inference (each create is checked again over the socket).
@@ -96,7 +111,7 @@ fn oneOf(route: []const u8, names: []const []const u8) bool {
     return false;
 }
 
-pub const Denial = enum { route, response_history, response_storage };
+pub const Denial = enum { route, response_history, response_storage, execution_witness };
 
 /// The stored Responses are the server's, so a restricted key's request must be stateless: store false, no parent.
 pub fn responseDenial(scopes: Scopes, body: json.Value) ?Denial {
@@ -105,4 +120,11 @@ pub fn responseDenial(scopes: Scopes, body: json.Value) ?Denial {
     const store = body.get("store") orelse return .response_storage;
     if (store != .bool or store.bool) return .response_storage;
     return null;
+}
+
+/// The witness is read-scoped, so a reply binds it only for a key that may read it: admin, or one with read.
+pub fn witnessDenial(scopes: Scopes, body: json.Value) ?Denial {
+    if (scopes.admin or scopes.read or body != .object) return null;
+    const asked = body.get("execution_witness") orelse return null;
+    return if (asked == .bool and asked.bool) .execution_witness else null;
 }

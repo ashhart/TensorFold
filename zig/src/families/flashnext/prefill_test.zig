@@ -8,6 +8,7 @@ test "flashnext prefill: actual backend advertises completed prompt steps" {
         const callbacks = @import("prefill.zig").Callbacks(Backend);
         try std.testing.expect(b.backend().vtable.prefill_step == callbacks.one);
         try std.testing.expect(b.backend().vtable.prefill == callbacks.whole);
+        try std.testing.expect(b.backend().vtable.cancel_prefill != null);
         try std.testing.expect(b.backend().vtable.reports_fill); // the status page's totals and srpt's row time read it
     } else return error.SkipZigTest;
 }
@@ -148,6 +149,18 @@ test "flashnext prefill: cancellation at every seam frees its owner without affe
             return c.stopped;
         }
     };
+    const Kept = struct {
+        at: ?u32 = null,
+        normal: usize = 0,
+        fn hit(ptr: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ptr));
+            k.at = at;
+        }
+        fn ordinary(ptr: *anyopaque, _: *lanes.Stream, _: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ptr));
+            k.normal += 1;
+        }
+    };
     const tokens: [33]u32 = @splat(5);
     for (0..4) |seam| {
         var f: Fake = .{};
@@ -157,6 +170,8 @@ test "flashnext prefill: cancellation at every seam frees its owner without affe
         defer s.deinit(a);
         s.chunks = &.{ 1, 7, 17, 32 };
         s.cancel_check = .{ .ptr = &c, .check = Cancel.check };
+        var kept: Kept = .{};
+        s.reuse.hook = .{ .ptr = &kept, .at = Kept.ordinary, .interrupted = Kept.hit };
         var other = try stream(&tokens, "survivor");
         defer other.deinit(a);
         other.chunks = &.{17};
@@ -165,6 +180,8 @@ test "flashnext prefill: cancellation at every seam frees its owner without affe
         const before = s.fill_at.load(.monotonic);
         c.stopped = true;
         try std.testing.expectError(error.Cancelled, fill.step(&f, &s, 0));
+        try std.testing.expectEqual(if (before == 0) @as(?u32, null) else before, kept.at);
+        try std.testing.expectEqual(@as(usize, 0), kept.normal);
         try std.testing.expectEqual(before, s.fill_at.load(.monotonic));
         try std.testing.expectEqual(@as(u32, 17), other.fill_at.load(.monotonic));
         try std.testing.expect(!f.filling.contains(&s));

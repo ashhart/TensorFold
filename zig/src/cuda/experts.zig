@@ -7,6 +7,7 @@ const kernels = @import("kernels.zig");
 const grouped = @import("grouped.zig");
 const driver = @import("driver.zig");
 const ggml = @import("ggml.zig");
+const prompt_layout = @import("experts_prompt_layout.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -15,21 +16,24 @@ const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 const Affine3Experts = @import("experts3.zig").Affine3Experts;
 pub const Bf16Experts = @import("experts_bf16.zig").Bf16Experts;
+pub const Mxfp4Experts = @import("experts_mxfp4.zig").Mxfp4Experts;
 
-pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs, bf16 };
+pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs, bf16, mxfp4 };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
 pub const Layer = struct {
     format: Format,
     exl3: ?@import("exl3_experts.zig").Layer = null,
     up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]; nvfp4_csf0 [E][NI/32] blocks (experts32.zig); iq2xxs [E][NI/16][D/256][1056] bytes (ggml.zig); bf16 [E][NI/32][D/32][4][32] uint4
+    // mxfp4's up: [E][2][NI][D/2] (gate, then up) and down: [E][D][NI/2] E2M1 bytes as stored.
     down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; nvfp4_csf0 [E][D/32] blocks; iq2xxs [E][D/16][NI/256][1056]; bf16 [E][D/32][NI/32][4][32]
-    up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
-    down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]
+    up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2]; mxfp4 [E][2][NI][D/32] E8M0; affine4: in blocks
+    down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]; mxfp4 [E][D][NI/32] E8M0
     width: usize, // NI
     dims: usize, // D
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
+    situ: [2]f32 = .{ 0, 0 }, // mxfp4: up's SiTU beta and linear beta (ERNIE 5.5's 4 and 25); 0: no up
     after: bool = false, // exl3: clamp silu's output (min(silu(g), L): Ling), not its input (silu(min(g, L))); others refuse it
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up; iq2xxs: always
     swiglu: bool = false, // affine4: up is gate and up interleaved per group ([E][NI/32][D/64][2][288]) under SwiGLU
@@ -38,7 +42,7 @@ pub const Layer = struct {
     shared_down: u64 = 0,
 };
 
-/// A call's epilogue: up with its format's activation (affine4 relu^2, else SwiGLU), down to fp32 or to bf16 sums.
+/// A call's epilogue: up with its format's activation (affine4 relu^2, mxfp4 SiTU, else SwiGLU), down to fp32 or bf16.
 pub const Epi = enum { up, down_f32, down_bf16 };
 
 /// The rows in: bf16 `x` rows `stride` apart; `up` reads token rows (`slots` pairs a row), down reads pair rows.
@@ -54,6 +58,7 @@ pub const Grouped = struct {
     nvfp4_csf0: ?*const @import("experts32.zig").Nvfp4b32Experts = null,
     iq2xxs: ?*const Iq2xxsExperts = null,
     bf16: ?*const Bf16Experts = null,
+    mxfp4: ?*const Mxfp4Experts = null,
 
     /// Decode rows: `items` bounds the plan, `pairs` its picks; `tile` 16 or 64 (EXL3 only); `skip` an expert or -1.
     pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, pairs: usize, tile: usize, skip: i32) !void {
@@ -80,6 +85,7 @@ pub const Grouped = struct {
             .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, false, epi, in, l, p, out, items, skip),
             .bf16 => return (g.bf16 orelse return error.FormatNotLoaded).run(s, false, epi, in, l, p, out, items, skip),
+            .mxfp4 => return (g.mxfp4 orelse return error.FormatNotLoaded).run(s, false, epi, in, l, p, out, items, skip),
         }
     }
 
@@ -108,6 +114,7 @@ pub const Grouped = struct {
             .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, true, epi, in, l, p, out, items, skip),
             .bf16 => return (g.bf16 orelse return error.FormatNotLoaded).run(s, true, epi, in, l, p, out, items, skip),
+            .mxfp4 => return (g.mxfp4 orelse return error.FormatNotLoaded).run(s, true, epi, in, l, p, out, items, skip),
         }
     }
 };
@@ -115,7 +122,7 @@ pub const Grouped = struct {
 /// Pairs a prompt item holds, per format (the Python engines' prompt tiles).
 pub fn promptTile(f: Format) usize {
     return switch (f) {
-        .affine4, .affine3, .fp8g, .nvfp4, .nvfp4_csf0, .exl3, .iq2xxs, .bf16 => 64,
+        .affine4, .affine3, .fp8g, .nvfp4, .nvfp4_csf0, .exl3, .iq2xxs, .bf16, .mxfp4 => 64,
     };
 }
 
@@ -344,6 +351,7 @@ pub const Nvfp4Experts = struct {
     fns: [7]Function, // by Epi, then relu^2 up, then experts_waves.zig's
     resident: [7]usize, // blocks the grid may hold: per SM times SMs
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
+    pair_fns: [2]Function, // paired prompt SwiGLU gate-up and bf16 down, 128 pairs an item
     fact_fns: [2]Function, // the decode form's sums on prompt tiles: SwiGLU gate-up, fp32 down
     warps: usize = 4,
 
@@ -357,6 +365,7 @@ pub const Nvfp4Experts = struct {
         pub const up_relu2 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi1ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const prompt = [3][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down" };
         pub const fact = [2][:0]const u8{ "tf_nvfp4_fact_swiglu", "tf_nvfp4_fact_down_f32" };
+        pub const pair_prompt = [2][:0]const u8{ "tf_nvfp4_pair_prompt_swiglu", "tf_nvfp4_pair_prompt_down" };
     };
 
     /// The fact entries' warps a CTA (32-column blocks): SwiGLU gate-up, fp32 down; their parts, 2 and 1.
@@ -364,23 +373,19 @@ pub const Nvfp4Experts = struct {
 
     /// The prompt entries' warps (32-column blocks) a CTA: relu^2 up, SwiGLU gate-up, down (GB10's fastest tiles).
     pub const prompt_wn = [3]usize{ 8, 4, 8 };
+    pub const pair_prompt_wn = [2]usize{ 4, 8 };
 
-    /// Prompt4<M, 4, 1, WN>'s dynamic shared bytes: stages of 64 rows' 64 inputs, then WN x 2 blocks of `parts`.
     pub fn promptSmem(parts: usize, wn: usize) u32 {
-        const stage: u32 = @intCast((64 * 8 + wn * 2 * parts * 36) * 16);
-        const stages: u32 = if (stage * 4 <= 49152) 4 else if (stage * 3 <= 49152) 3 else 2;
-        return stages * stage;
+        return prompt_layout.promptSmem(parts, wn);
     }
 
     pub fn decodeWarps(value: ?[]const u8) !usize {
-        const v = value orelse return 4;
-        if (std.mem.eql(u8, v, "1")) return 1;
-        if (std.mem.eql(u8, v, "4")) return 4;
-        return error.BadExpertWarps;
+        const selected = @import("sys").environment.parse("TF_NVFP4_DECODE_WARPS", value) catch return error.BadExpertWarps;
+        return if (selected) |index| @as(usize, if (index == 0) 1 else 4) else 4;
     }
 
     pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
-        const value = if (std.c.getenv("TF_NVFP4_DECODE_WARPS")) |v| std.mem.span(v) else null;
+        const value = @import("sys").environment.rawText("TF_NVFP4_DECODE_WARPS");
         return loadWarps(d, sms, try decodeWarps(value));
     }
 
@@ -390,7 +395,7 @@ pub const Nvfp4Experts = struct {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
-        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .fact_fns = undefined, .warps = warps };
+        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .pair_fns = undefined, .fact_fns = undefined, .warps = warps };
         for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 } ++ @import("experts_waves.zig").symbols, 0..) |name, i| {
             var narrow: [256]u8 = undefined;
             const selected = if (warps == 1) blk: {
@@ -405,11 +410,15 @@ pub const Nvfp4Experts = struct {
         }
         for (symbols.prompt, &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
-            try f.allowDynamicShared(promptSmem(parts, wn));
+            try f.allowDynamicShared(prompt_layout.promptSmem(parts, wn));
+        }
+        for (symbols.pair_prompt, &e.pair_fns, [2]usize{ 2, 1 }, pair_prompt_wn) |name, *f, parts, wn| {
+            f.* = try mod.function(name);
+            try f.allowDynamicShared(prompt_layout.pairPromptSmem(parts, wn));
         }
         for (symbols.fact, &e.fact_fns, [2]usize{ 2, 1 }, fact_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
-            try f.allowDynamicShared(promptSmem(parts, wn));
+            try f.allowDynamicShared(prompt_layout.promptSmem(parts, wn));
         }
         return e;
     }
@@ -461,7 +470,7 @@ pub const Nvfp4Experts = struct {
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
         const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
-        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = promptSmem(parts, prompt_wn[fi]) };
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = prompt_layout.promptSmem(parts, prompt_wn[fi]) };
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
     }
 
@@ -563,9 +572,6 @@ test "nvfp4 rows of either kind are refused when the format is not loaded" {
     try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 64, -1));
     try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 16, -1));
     try std.testing.expectEqual(@as(usize, 2 * 2 * 3 * 144 * 4), Nvfp4Experts.bytes(2, 64, 96, 1));
-    try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(1, 8)); // 64 rows x 64 inputs, 8 x 2 blocks
-    try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(2, 4));
-    try std.testing.expectEqual(@as(u32, 3 * 12800), Nvfp4Experts.promptSmem(1, 4));
 }
 
 test "a packed fp8 expert puts each word where fp8/experts.py's pack does" {

@@ -7,6 +7,7 @@ import { makeHarness, seedModel, waitFor } from './test-fixtures/harness'
 
 const SHA = 'd'.repeat(40)
 const OTHER = 'e'.repeat(40)
+const NEWER = 'b'.repeat(40)
 const REPO = 'Org/Reviewed'
 const PRIMARY = 'TensorFold/Qwen3.8-27B-MLX-4bit'
 const DRAFTER = 'z-lab/Qwen3.8-27B-DFlash2'
@@ -25,9 +26,10 @@ function reviewedFetch(options: { invalidSha?: boolean; missingDrafter?: boolean
       if (route === `/${ownerRepo}/resolve/${sha}/config.json`) body = { model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 } }
       if (ownerRepo === DRAFTER && options.missingDrafter) body = undefined
     }
+    if (route === `/api/models/${REPO}/revision/newer`) body = { sha: NEWER }
     if (route === `/api/models/${REPO}/revision/unsupported`) body = { sha: OTHER }
-    if ([`/api/models/${REPO}/tree/${SHA}`, `/api/models/${REPO}/tree/${OTHER}`].includes(route)) body = [{ type: 'file', path: 'model.safetensors', size: 8192 }]
-    if (route === `/${REPO}/resolve/${SHA}/config.json`) body = { model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 } }
+    if ([`/api/models/${REPO}/tree/${SHA}`, `/api/models/${REPO}/tree/${OTHER}`, `/api/models/${REPO}/tree/${NEWER}`].includes(route)) body = [{ type: 'file', path: 'model.safetensors', size: 8192 }]
+    if ([`/${REPO}/resolve/${SHA}/config.json`, `/${REPO}/resolve/${NEWER}/config.json`].includes(route)) body = { model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 } }
     if (route === `/${REPO}/resolve/${OTHER}/config.json`) body = { model_type: 'gemma4' }
     return body ? new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }) : new Response('missing', { status: 404 })
   }) as typeof fetch
@@ -44,7 +46,11 @@ async function main() {
     await waitFor(() => service.pullList().find((p) => p.repo === REPO && p.state === 'done'))
     const pull = (await h.records()).find((r) => r.kind === 'pull')
     assert.equal(pull.revision, SHA, 'the actual child must pull the immutable checkpoint whose format and memory were reviewed')
-    await service.preflight(REPO) // Re-populate the main-review cache after the completed pull invalidates it.
+    const sameRevision = await service.preflight(REPO)
+    assert.equal(sameRevision.verdict, 'installed', 'the selected immutable revision stays installed')
+    const newerRevision = await service.preflight(REPO, 'newer')
+    assert.equal(newerRevision.resolvedRevision, NEWER)
+    assert.equal(newerRevision.verdict, 'ok', 'a different immutable revision remains available for download')
     await assert.rejects(() => service.pull(REPO, 'unsupported'), /serves no gemma4/, 'a cached main preflight cannot authorize another revision')
 
     const registry = path.join(h.root, 'engine', 'model-revisions.json')

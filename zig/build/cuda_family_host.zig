@@ -3,6 +3,17 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    @import("prefill_ledger_host.zig").steps(b, cuda, mods.qwen35, step);
+    const sm110 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"SM110"} }));
+    b.step("test-qwen35-sm110-host", "SM110 startup refusals without device or weight loading").dependOn(&sm110.step);
+    step.dependOn(&sm110.step);
+    const sm110_driver = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cuda/driver_sm110_host_test.zig"),
+        .target = host,
+        .link_libc = true,
+    }), .filters = &.{"SM110 CUDA driver:"} }));
+    b.step("test-cuda-driver-sm110-host", "SM110 CUDA device matching without loading a driver").dependOn(&sm110_driver.step);
+    step.dependOn(&sm110_driver.step);
     @import("prefill_widths_cuda.zig").tests(b, cuda, mods, step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
@@ -16,11 +27,15 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&wiring.step);
 
     b.step("test-qwen35-request-starts-host", "Request-start and shared-KV startup refusal without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"request starts:"} })).step);
+    b.step("test-qwen-pdl-policy-host", "Qwen3.8 PDL environment and compute-capability launch policy without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen PDL policy:", "a Qwen launch keeps", "TF_QWEN_PDL changes only" } })).step);
     b.step("test-memory-pressure-host", "Shared memory-pressure governor, admission and cache shedding without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.api, .filters = &.{"memory pressure:"} })).step);
-    b.step("test-qwen35-shapes-host", "Captured window buckets for one and 2-8 rows without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"one-row and 2-8-row"} })).step);
+    b.step("test-qwen35-shapes-host", "Captured window buckets for one and 2-8 rows, and the MT2 envelope, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "one-row and 2-8-row", "MT2 dispatch" } })).step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
+    @import("idol_cuda.zig").hostTests(b, cuda, mods.core, step);
+    @import("inkling2.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
+    @import("ricursive_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
-    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:", "a yielded pass keeps its completed prefix" } }));
+    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:", "a yielded pass keeps its completed prefix", "MTP suffix filtering", "MTP tap boundary", "partial tap capture", "qwen3_5 prompt tail:" } }));
     b.step("test-qwen35-prefill-host", "Stepped, whole, opening and interrupted prompt lifecycle without devices").dependOn(&prefill.step);
     step.dependOn(&prefill.step);
     const warm_turns = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen warm turns:"} }));
@@ -43,7 +58,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&dspine.step);
     step.dependOn(&dspine_core.step);
     step.dependOn(&dspine_lanes.step);
-    const ct_admit = b.createModule(.{ .root_source_file = b.path("zig/qwen35_modelopt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision }, .{ .name = "engine_api", .module = mods.qwen35.import_table.get("engine_api").? } } });
+    const ct_admit = b.createModule(.{ .root_source_file = b.path("zig/qwen35_modelopt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "living", .module = mods.living }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision }, .{ .name = "engine_api", .module = mods.qwen35.import_table.get("engine_api").? } } });
     const ct_run = b.addRunArtifact(b.addTest(.{ .root_module = ct_admit }));
     b.step("test-qwen35-modelopt-admission-host", "Synthetic stored-format admission and full-precision loading without devices").dependOn(&ct_run.step);
     step.dependOn(&ct_run.step);
@@ -85,6 +100,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&rules_run.step);
     @import("glm_contract_host.zig").host(b, cuda, mods.core, step);
     @import("dory.zig").host(b, @import("dory.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
+    @import("muse.zig").host(b, @import("muse.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));
     b.step("test-qwen35-attention-path-host", "Contiguous and paged CUDA attention selection and graph identity without devices").dependOn(&attention.step);
     step.dependOn(&attention.step);
@@ -99,6 +115,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const reuse_pages = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen paged reuse:"} }));
     b.step("test-qwen35-reuse-pages-host", "Paged prompt-state saves and restores into host or device copies without devices").dependOn(&reuse_pages.step);
     step.dependOn(&reuse_pages.step);
+    const kept_spares = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen kept spares:"} }));
+    b.step("test-qwen35-kept-spares-host", "Kept states' spare pinned buffers: reuse once drained, the cap and teardown, without devices").dependOn(&kept_spares.step);
+    step.dependOn(&kept_spares.step);
     const pending = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen pending keeps:"} }));
     pending.setEnvironmentVariable("TF_QWEN_KEEP_LATE", "1"); // deferred keeps are opt-in; the step tests them
     b.step("test-qwen35-pending-host", "Kept paths of every length inside the pending buffer and the log without devices").dependOn(&pending.step);
@@ -160,12 +179,20 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-stack-symbols-host", "The stack's new symbols' own numerical specs without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = stack_symbols })).step);
     const images = b.createModule(.{ .root_source_file = b.path("zig/qwen35_images_host.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
     b.step("test-qwen35-images-host", "The image planes' staging ABI at the device's row offsets without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = images })).step);
-    const launch_args = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_launch_args_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
+    const pdl_scan = b.createModule(.{ .root_source_file = b.path("zig/tests/pdl_kernel_scan.zig"), .target = host });
+    const launch_args = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_launch_args_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "cuda", .module = cuda }, .{ .name = "pdl_kernel_scan", .module = pdl_scan } } });
     const launch_args_run = b.addRunArtifact(b.addTest(.{ .root_module = launch_args }));
     launch_args_run.setCwd(b.path("."));
     launch_args_run.has_side_effects = true; // it reads the q35 sources and .cu kernels while it runs
-    b.step("test-qwen35-launch-args-host", "The q35 attention launches' argument lists against the .cu kernels' signatures without devices").dependOn(&launch_args_run.step);
+    const x3ld_pdl = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_x3ld_pdl_host.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "pdl_kernel_scan", .module = pdl_scan }} });
+    const x3ld_pdl_run = b.addRunArtifact(b.addTest(.{ .root_module = x3ld_pdl }));
+    x3ld_pdl_run.setCwd(b.path("."));
+    x3ld_pdl_run.has_side_effects = true;
+    const launch_args_step = b.step("test-qwen35-launch-args-host", "The q35 attention launches' argument lists against the .cu kernels' signatures without devices");
+    launch_args_step.dependOn(&launch_args_run.step);
+    launch_args_step.dependOn(&x3ld_pdl_run.step);
     step.dependOn(&launch_args_run.step);
+    step.dependOn(&x3ld_pdl_run.step);
     const startup = b.createModule(.{ .root_source_file = b.path("zig/cuda_startup_costs_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
     b.step("test-cuda-startup-costs-host", "Eager measured CUDA costs and transactional failure controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup })).step);
 
@@ -181,6 +208,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-decode-records-host", "Optimized Qwen decode launch records on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = decode_host })).step);
     b.step("test-shared-lane-regressions-host", "Every shared lane regression without device libraries").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.lanes })).step);
     b.step("test-qwen35-draft-trees-host", "Grown trees through the actual shared draft frame and wrapper").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_frame_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } }), .filters = &.{"Qwen CUDA contracts:"} })).step);
+    const trace_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_draft_trace_test.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+    const trace_run = b.addRunArtifact(b.addTest(.{ .root_module = trace_root }));
+    b.step("test-qwen35-dflash-trace-host", "Exact opt-in N15 proposal and accepted-path JSONL without devices").dependOn(&trace_run.step);
+    step.dependOn(&trace_run.step);
     const copies = b.createModule(.{ .root_source_file = b.path("zig/qwen35_copies_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen35", .module = mods.qwen35 } } });
     const copies_run = b.addRunArtifact(b.addTest(.{ .root_module = copies, .filters = &.{"Suffix copies:"} }));
     copies_run.has_side_effects = true;
@@ -215,6 +246,18 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const live_run = b.addRunArtifact(b.addTest(.{ .root_module = live }));
     live_run.has_side_effects = true;
     b.step("test-qwen35-live-host", "Live CUDA launch buckets and startup warmups without devices").dependOn(&live_run.step);
+    const mtp_coupled = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP coupled:"} }));
+    b.step("test-qwen35-mtp-coupled-host", "Target-coupled keyed-Gumbel MTP draft draws across solo, tree and batched rounds without devices").dependOn(&mtp_coupled.step);
+    step.dependOn(&mtp_coupled.step);
+    const mtp_selection = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP drafter selection:"} }));
+    b.step("test-qwen35-mtp-selection-host", "MTP/DFlash2 drafter admission and explicit unsupported-format refusal without devices").dependOn(&mtp_selection.step);
+    step.dependOn(&mtp_selection.step);
+    const mtp_lifecycle = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP context lifecycle:"} }));
+    b.step("test-qwen35-mtp-lifecycle-host", "MTP stream release and pooled context reset after interruption without devices").dependOn(&mtp_lifecycle.step);
+    step.dependOn(&mtp_lifecycle.step);
+    const mtp_memory = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP startup peak"} }));
+    b.step("test-qwen35-mtp-memory-host", "MTP startup device-memory accounting and overflow guards without a GPU").dependOn(&mtp_memory.step);
+    step.dependOn(&mtp_memory.step);
 }
 
 pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {
@@ -224,6 +267,9 @@ pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std
     b.step("test-cuda-warm-rules-host", "A family's warm rules and its own quiet wait without devices").dependOn(&warm_rules.step);
     step.dependOn(&warm_rules.step);
     b.step("test-glm-window-prices-host", "GLM timed lone and unchanged shared price values without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"GLM window prices:"} })).step);
+    const aliases = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "CUDA aliases:", "kolibri1_1 opens", "every model_type the registry knows" } }));
+    b.step("test-cuda-aliases-host", "CUDA aliases open their family and are listed for capabilities without a GPU").dependOn(&aliases.step);
+    step.dependOn(&aliases.step);
     const family_copies = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA lane copies:"} }));
     b.step("test-family-copies-host", "Actual CUDA family copy policies through the lane core").dependOn(&family_copies.step);
     b.step("test-glm-copies-host", "GLM copy facts, confidence and costs through the production lane core").dependOn(&family_copies.step);

@@ -17,6 +17,11 @@ pub const Held = struct {
         for (h.ids[layer][0..h.counts[layer]], 0..) |id, slot| out[id] = @intCast(slot);
         return out;
     }
+    pub fn total(h: *const Held) usize {
+        var n: usize = 0;
+        for (h.counts) |c| n += c;
+        return n;
+    }
 };
 
 pub fn parseHeld(value: std.json.Value) !Held {
@@ -43,8 +48,9 @@ pub fn heldMetadata(metadata: ?std.json.Value) !Held {
     return if (meta.object.get("drama_experts")) |v| try parseHeld(v) else .{};
 }
 
-pub fn checkNames(h: *const Held, names: anytype) !void {
-    var it = names;
+/// The stored experts are exactly the map's: none unlisted, and every listed one's three projections present.
+pub fn checkStored(h: *const Held, names: anytype) !void {
+    var it = names.keyIterator();
     const pre = "model.language_model.layers.";
     while (it.next()) |key| {
         const name = key.*;
@@ -57,6 +63,11 @@ pub fn checkNames(h: *const Held, names: anytype) !void {
         const e = std.fmt.parseInt(u8, parts.next() orelse return error.BadExpertMap, 10) catch return error.BadExpertMap;
         if (l >= cfg.layers or std.mem.indexOfScalar(u8, h.ids[l][0..h.counts[l]], e) == null) return error.UnlistedExpert;
     }
+    var buf: [96]u8 = undefined;
+    for (0..cfg.layers) |l| for (h.ids[l][0..h.counts[l]]) |e| for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |p| {
+        const name = std.fmt.bufPrint(&buf, pre ++ "{d}.mlp.experts.{d}.{s}.weight", .{ l, e, p }) catch unreachable;
+        if (!names.contains(name)) return error.MissingExpert;
+    };
 }
 
 pub fn nvfp4(w: Tensor, s: Tensor, g: Tensor, n: usize, k: usize) !void {

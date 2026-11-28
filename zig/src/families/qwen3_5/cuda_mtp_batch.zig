@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const geometry = @import("cuda_geometry.zig");
 const mtp = @import("cuda_mtp.zig");
+const mtp_draw = @import("cuda_mtp_draw.zig");
 
 const Mtp = mtp.Mtp;
 const Ctx = mtp.Ctx;
@@ -41,14 +42,19 @@ fn ringRow(d: *Mtp, ctx: *Ctx, end: u64, seg: usize) RingRow {
     return .{ .rk = d.ringK(ctx), .rv = d.ringV(ctx), .begin = @intCast(ctx.begin), .end = @intCast(end), .seg = @intCast(seg), .w = @intCast(d.capacity) };
 }
 
-/// The pass's tokens and ring table up from the batch's own staging (the last pass's fetch has waited on it).
-fn upload(d: *Mtp, ids: []const u32, tab: []const RingRow) !void {
+/// One pass's tokens and ring table use a unique pinned staging slot until the round's final readback waits.
+fn upload(d: *Mtp, ids: []const u32, tab: []const RingRow, slot: usize) !void {
     const e = d.e;
     const st = d.staged.bytes;
-    @memcpy(std.mem.bytesAsSlice(u32, st[Mtp.bids_at..][0 .. ids.len * 4]), ids);
-    @memcpy(st[Mtp.btab_at..][0 .. tab.len * @sizeOf(RingRow)], std.mem.sliceAsBytes(tab));
-    try cuda.copy_source.enqueue(e.d, d.ids, st[Mtp.bids_at..][0 .. ids.len * 4], e.stream);
-    try cuda.copy_source.enqueue(e.d, d.tab, st[Mtp.btab_at..][0 .. tab.len * @sizeOf(RingRow)], e.stream);
+    if (slot >= Mtp.batch_slots) return error.TooManyMtpBatchPasses;
+    const at = Mtp.batch_stage_at + slot * Mtp.batch_stage_stride;
+    if (ids.len > 0) {
+        @memcpy(std.mem.bytesAsSlice(u32, st[at..][0 .. ids.len * 4]), ids);
+        try cuda.copy_source.enqueue(e.d, d.ids, st[at..][0 .. ids.len * 4], e.stream);
+    }
+    const tab_at = at + Mtp.batch_tab_at;
+    @memcpy(st[tab_at..][0 .. tab.len * @sizeOf(RingRow)], std.mem.sliceAsBytes(tab));
+    try cuda.copy_source.enqueue(e.d, d.tab, st[tab_at..][0 .. tab.len * @sizeOf(RingRow)], e.stream);
 }
 
 /// Mtp.layer over every segment's rows at once: d.ids their tokens, d.hin their states; x gets their normed outputs.
@@ -61,8 +67,8 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     try e.embed(d.ids, d.emb, rows, 0);
     try d.norm(d.emb, 0, w.norm_e, d.en, rows);
     try d.norm(d.hin, 0, w.norm_h, d.hn, rows);
-    try d.proj(.{ .a4 = w.fc_e }, d.en, d.h, rows);
-    try d.proj(.{ .a4 = w.fc_h }, d.hn, d.r, rows);
+    try d.proj(w.fc_e, d.en, d.h, rows);
+    try d.proj(w.fc_h, d.hn, d.r, rows);
     try d.norm(d.h, d.r, w.input_norm, d.x, rows);
     try d.projQkv(rows);
     for (segs) |s| { // rope positions run from each segment's first slot
@@ -73,7 +79,7 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     try e.run(d.fns.attn_rows, .{ rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{ d.q, d.qraw, @as(c_int, @intCast(2 * aw)), d.kb, d.vb, d.tab, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(g.kv_heads)), d.att });
     try d.proj(w.o, d.att, d.r, rows);
     try d.norm(d.h, d.r, w.post_norm, d.x, rows);
-    try d.routed(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows);
+    try d.mlp(d.x, d.r, rows);
     try d.norm(d.h, d.r, w.norm, d.x, rows);
 }
 
@@ -84,28 +90,24 @@ fn ringPut(d: *Mtp, segs: []const Seg) !void {
     for (segs) |s| try e.run(d.ring_fns.ring_put, .{ s.rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb + s.first * kw * 2, d.vb + s.first * kw * 2, d.ringK(s.ctx), d.ringV(s.ctx), @as(c_int, @intCast(kw)), @as(c_longlong, @intCast(s.p0)), @as(c_int, @intCast(d.capacity)) });
 }
 
-/// Rows of `input` through the target's head, and each row's greedy token: one projection, one argmax launch.
-fn head(d: *Mtp, input: u64, rows: usize) !void {
-    const e = d.e;
-    try d.proj(e.head, input, d.logits, rows);
-    try e.run(e.fns.argmax, .{ rows, 1, 1 }, .{ 1024, 1, 1 }, .{ d.logits, @as(c_int, @intCast(e.g.vocab)), d.tok });
-}
-
-/// The first `rows` drawn tokens, read back with one synchronization.
-fn fetchRows(d: *Mtp, rows: usize) ![]align(1) const u32 {
-    const e = d.e;
-    const st = d.staged.bytes;
-    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + Mtp.tok_at, d.tok, rows * 4, e.stream.handle), "cuMemcpyDtoHAsync");
-    try e.stream.synchronize();
-    return std.mem.bytesAsSlice(u32, st[Mtp.tok_at..][0 .. rows * 4]);
-}
-
 /// The round's absorbs: up to `most` rows a pass, each stream's rows one segment; larger or empty ones as before.
 pub fn absorb(d: *Mtp, incoming: []const dr.Absorb) !void {
     const useful = try d.gpa.alloc(dr.Absorb, incoming.len);
     defer d.gpa.free(useful);
     const items = try @import("cuda_mtp_budget.zig").active(d, incoming, useful);
     if (items.len == 0) return;
+    // Direct prompt rows expire at the next target forward; read them serially on the shared stream.
+    var has_normalized = false;
+    for (items) |it| {
+        if (it.features.normalized != null) {
+            has_normalized = true;
+            break;
+        }
+    }
+    if (has_normalized) {
+        for (items) |item| try @import("cuda_mtp_absorb.zig").absorbOne(d, item);
+        return;
+    }
     const sizes = try d.gpa.alloc(usize, items.len);
     defer d.gpa.free(sizes);
     for (items, sizes) |it, *s| {
@@ -116,7 +118,7 @@ pub fn absorb(d: *Mtp, incoming: []const dr.Absorb) !void {
     defer d.gpa.free(passes);
     for (passes[0..plan(sizes, passes)]) |p| {
         if (sizes[p[0]] > most) {
-            try d.absorbOne(items[p[0]]);
+            try @import("cuda_mtp_absorb.zig").absorbOne(d, items[p[0]]);
             continue;
         }
         try absorbPass(d, items[p[0]..p[1]]);
@@ -147,8 +149,8 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
         if (it.rows) |rs| {
             var tr: mtp.TapRows = .{ .n = @intCast(n), .rows = @splat(0) };
             for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-            try e.run(d.ring_fns.gather_rows, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), out });
-        } else try e.run(d.ring_fns.gather_taps, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), out });
+            try e.run(d.ring_fns.gather_rows, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), out });
+        } else try e.run(d.ring_fns.gather_taps, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), out });
         for (0..n) |r| {
             tab[at + r] = ringRow(d, ctx, start, at);
             ids[at + r] = it.follow[r];
@@ -158,23 +160,27 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
     }
     const s = segs[0..items.len];
     try d.norm(d.taps_in, 0, e.final_norm, d.hin, at); // the target's final norm: the rows the head read
-    try upload(d, ids[0..at], tab[0..at]);
+    try upload(d, ids[0..at], tab[0..at], 0);
     try layerRows(d, s, at);
     try ringPut(d, s);
-    for (s, 0..) |seg, j| { // each stream's newest row: its state kept for the drafts, its row of the head's input
+    var specs: [most]mtp_draw.Spec = undefined;
+    for (s, items, 0..) |seg, it, j| { // each stream's newest row: its state kept, its row of the head's input
         const last = d.x + (seg.first + seg.rows - 1) * g.hidden * 2;
         try seg.ctx.last.copyFrom(0, last, g.hidden * 2, e.stream.handle);
         try d.scratch.copyFrom(d.hn - d.scratch.ptr + j * g.hidden * 2, last, g.hidden * 2, e.stream.handle);
         seg.ctx.end = seg.p0 + seg.rows;
+        specs[j] = .{ .sampling = it.stream.sampling, .position = seg.ctx.end + 1 };
     }
-    try head(d, d.hn, s.len);
-    const toks = try fetchRows(d, s.len);
-    for (s, toks) |seg, t| seg.ctx.cands[0] = t;
+    try mtp_draw.launch(d, d.hn, specs[0..s.len], false);
+    for (s, 0..) |seg, r| {
+        try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(seg.ctx.held_dev.ptr, d.tok + r * 4, 4, e.stream.handle), "cuMemcpyDtoDAsync");
+        seg.ctx.held_n = 1;
+    }
     d.batch_passes += 1;
 }
 
-/// A chain's stream and the drafts it asks for.
-const Chain = struct { ctx: *Ctx, pos0: u64, depth: usize };
+/// A chain's stream, sampling rule, and the drafts it asks for.
+const Chain = struct { ctx: *Ctx, pos0: u64, depth: usize, sampling: ?lanes.Sampling };
 
 /// The round's holds: each draft level's chains in passes of up to `most` streams; trees keep the serial path.
 pub fn hold(d: *Mtp, items: []const dr.Hold) !void {
@@ -184,18 +190,19 @@ pub fn hold(d: *Mtp, items: []const dr.Hold) !void {
     var deepest: usize = 0;
     for (items) |it| {
         const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
+        const sampling = it.sampling orelse it.stream.sampling;
         if (it.lanes != null) {
-            try d.hold(ctx, it.pending, it.position - 1, it.depth, it.lanes);
+            try d.holdSampled(ctx, it.pending, it.position - 1, it.depth, it.lanes, sampling);
             continue;
         }
         const pos0 = it.position - 1;
         if (ctx.end != pos0) return error.DraftContextBehind;
-        ctx.held[0] = ctx.cands[0];
         ctx.held_n = 1;
-        chains[n] = .{ .ctx = ctx, .pos0 = pos0, .depth = @min(it.depth, ctx.held.len) };
+        chains[n] = .{ .ctx = ctx, .pos0 = pos0, .depth = @min(it.depth, ctx.held.len), .sampling = sampling };
         deepest = @max(deepest, chains[n].depth);
         n += 1;
     }
+    var stage_slot: usize = 0;
     var k: usize = 1;
     while (k < deepest) : (k += 1) {
         var group: [most]Chain = undefined;
@@ -204,16 +211,21 @@ pub fn hold(d: *Mtp, items: []const dr.Hold) !void {
             group[rows] = c;
             rows += 1;
             if (rows == most) {
-                try holdPass(d, group[0..rows], k);
+                try holdPass(d, group[0..rows], k, stage_slot);
+                stage_slot += 1;
                 rows = 0;
             }
         };
-        if (rows > 0) try holdPass(d, group[0..rows], k);
+        if (rows > 0) {
+            try holdPass(d, group[0..rows], k, stage_slot);
+            stage_slot += 1;
+        }
     }
+    try fetchChains(d, chains[0..n]);
 }
 
 /// Draft level k of every chain in `group`, a row each: its previous state and draft at slot pos0 + k - 1.
-fn holdPass(d: *Mtp, group: []const Chain, k: usize) !void {
+fn holdPass(d: *Mtp, group: []const Chain, k: usize, stage_slot: usize) !void {
     const e = d.e;
     const g = e.g;
     const previous = d.projection_role;
@@ -221,27 +233,51 @@ fn holdPass(d: *Mtp, group: []const Chain, k: usize) !void {
     d.projection_role = .proposal;
     var segs: [most]Seg = undefined;
     var tab: [most]RingRow = undefined;
-    var ids: [most]u32 = undefined;
+    var specs: [most]mtp_draw.Spec = undefined;
     for (group, 0..) |c, r| {
         const src = if (k == 1) c.ctx.last.ptr else c.ctx.step.ptr;
         try d.scratch.copyFrom(d.hin - d.scratch.ptr + r * g.hidden * 2, src, g.hidden * 2, e.stream.handle);
         const p0 = c.pos0 + k - 1;
-        ids[r] = c.ctx.held[k - 1];
         tab[r] = ringRow(d, c.ctx, p0, r);
         segs[r] = .{ .ctx = c.ctx, .first = r, .rows = 1, .p0 = p0 };
+        specs[r] = .{ .sampling = c.sampling, .position = c.pos0 + k + 1 };
     }
     const s = segs[0..group.len];
-    try upload(d, ids[0..group.len], tab[0..group.len]);
+    try upload(d, &.{}, tab[0..group.len], stage_slot);
+    for (group, 0..) |c, r| {
+        try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(d.ids + r * 4, c.ctx.held_dev.ptr + (k - 1) * 4, 4, e.stream.handle), "cuMemcpyDtoDAsync");
+    }
     try layerRows(d, s, group.len);
     try ringPut(d, s);
     for (s) |seg| try seg.ctx.step.copyFrom(0, d.x + seg.first * g.hidden * 2, g.hidden * 2, e.stream.handle);
-    try head(d, d.x, group.len);
-    const toks = try fetchRows(d, group.len);
-    for (group, toks) |c, t| {
-        c.ctx.held[k] = t;
+    try mtp_draw.launch(d, d.x, specs[0..group.len], false);
+    for (group, 0..) |c, r| {
+        try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(c.ctx.held_dev.ptr + k * 4, d.tok + r * 4, 4, e.stream.handle), "cuMemcpyDtoDAsync");
         c.ctx.held_n = k + 1;
     }
     d.batch_passes += 1;
+}
+
+/// Every chain's token suffix is copied back after all levels finish, with one stream wait.
+fn fetchChains(d: *Mtp, chains: []const Chain) !void {
+    const e = d.e;
+    if (chains.len > Mtp.max_streams) return error.TooManyMtpStreams;
+    const st = d.staged.bytes;
+    var queued = false;
+    for (chains, 0..) |c, i| {
+        if (c.ctx.held_n == 0) continue;
+        const bytes = c.ctx.held_n * 4;
+        const at = Mtp.chain_tok_at + i * Mtp.max_chain_tokens * 4;
+        try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + at, c.ctx.held_dev.ptr, bytes, e.stream.handle), "cuMemcpyDtoHAsync");
+        queued = true;
+    }
+    if (queued) try e.stream.synchronize();
+    for (chains, 0..) |c, i| if (c.ctx.held_n > 0) {
+        const count = c.ctx.held_n;
+        const at = Mtp.chain_tok_at + i * Mtp.max_chain_tokens * 4;
+        const tokens = std.mem.bytesAsSlice(u32, st[at..][0 .. count * 4]);
+        @memcpy(c.ctx.held[0..c.ctx.held_n], tokens);
+    };
 }
 
 test "passes pack consecutive items up to 16 rows; a longer item runs alone" {

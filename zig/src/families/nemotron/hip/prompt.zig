@@ -12,15 +12,6 @@ pub fn chunk(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, 
     const n = to - from;
     try e.fresh();
     const o = e.ops(&e.arena);
-    if (l.resumed) {
-        l.resumed = false;
-        if (h.head) |hd| _ = try hd.absorb(
-            o,
-            &l.s,
-            .{ .ptr = l.hidden.base(), .kind = e.act },
-            prompt[from..][0..1],
-        );
-    }
     const dev = try e.ids(o, prompt[from..to]);
     var poll: Engine.Poll = undefined;
     const hidden = try h.runPrompt(
@@ -37,7 +28,7 @@ pub fn chunk(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, 
     if (h.head) |hd| if (pairs > 0) {
         _ = try hd.absorb(o, &l.s, hidden, prompt[from + 1 ..][0..pairs]);
     };
-    // the last row is kept for the head: the first token's pair, or a kept state's resume
+    // the last row is kept for the head: the first token's pair
     const width = m.dims.hidden * e.act.size();
     try hip.raw.copy(l.hidden, 0, hidden.ptr + (n - 1) * width, width, o.stream);
     if (!last) return null;

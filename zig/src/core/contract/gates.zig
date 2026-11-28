@@ -19,6 +19,10 @@ pub const Kernel = struct {
     ctx: *anyopaque,
     vt: *const VTable,
     control: ?Gate = null,
+    /// Related diagnostic arms share fixture inputs while keeping separate names and verdicts.
+    input_group: ?[]const u8 = null,
+    /// An initialization error to tally without reading ctx or vt.
+    init_error: ?anyerror = null,
 };
 
 /// The hooks a kernel's test gives the harness; the harness owns no device memory.
@@ -348,11 +352,28 @@ pub fn one(a: std.mem.Allocator, which: Gate, k: Kernel, seed: u64) !Verdict {
     };
 }
 
+/// By default names select independent fixtures; a group gives related diagnostic arms identical inputs.
+pub fn inputSeed(seed: u64, name: []const u8, group: ?[]const u8) u64 {
+    return std.hash.Wyhash.hash(seed, group orelse name);
+}
+
 /// Gates 1-4 on each kernel, and each control at its own gate (which must fail).
 pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tally) !void {
     for (kernels) |k| {
+        if (k.init_error) |err| {
+            if (k.control) |gate| {
+                t.controls += 1;
+                t.missed += 1;
+                if (!quiet) std.debug.print("CONTROL ERROR {s}: {t} at {t}, so it proves nothing\n", .{ k.spec.name, err, gate });
+            } else {
+                t.kernels += 1;
+                t.failed += 1;
+                if (!quiet) std.debug.print("FAIL init {s}: {t}\n", .{ k.spec.name, err });
+            }
+            continue;
+        }
         defer if (k.vt.release) |free| free(k.ctx);
-        const s = std.hash.Wyhash.hash(seed, k.spec.name);
+        const s = inputSeed(seed, k.spec.name, k.input_group);
         if (k.control) |g| {
             t.controls += 1;
             const v = one(a, g, k, s) catch |err| blk: {

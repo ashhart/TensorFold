@@ -1,6 +1,8 @@
 // glue._swiglu's rows by hand: silu with the clamp before it (GLM) or after it (Ling), and the 64-value group sums.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_triton.cuh"
 
 using namespace glm_triton;
@@ -32,7 +34,7 @@ __device__ __forceinline__ float swiglu1(float g, float u, float limit) {
 // glue._swiglu with BLOCK 512 (128 threads, 4 values each, 64-group sums over 16 lanes), column block blockIdx.y.
 #define TF_GLM_SWIGLU_512(NAME, AFTER)                                                                               \
   extern "C" __global__ void __launch_bounds__(128)                                                                  \
-      NAME(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {                         \
+      NAME(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) { glm_pdl::enter();       \
     const int64_t r = blockIdx.x, d0 = blockIdx.y * 512 + threadIdx.x * 4;                                           \
     const uint2 gv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + d0);                                           \
     const uint2 uv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + w + d0);                                       \
@@ -53,7 +55,7 @@ __device__ __forceinline__ float swiglu1(float g, float u, float limit) {
 // glue._swiglu with BLOCK 64 (the TP=3 shared expert's 704): one value a thread, the warp's butterfly, then 2 warps.
 #define TF_GLM_SWIGLU_64(NAME, AFTER)                                                                                \
   extern "C" __global__ void __launch_bounds__(64)                                                                   \
-      NAME(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {                         \
+      NAME(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) { glm_pdl::enter();       \
     __shared__ float smem[2];                                                                                        \
     const int64_t r = blockIdx.x, d = blockIdx.y * 64 + threadIdx.x;                                                 \
     const float a = glm_moe::swiglu1<AFTER>(bf(gu[r * 2 * w + d]), bf(gu[r * 2 * w + w + d]), limit);                \

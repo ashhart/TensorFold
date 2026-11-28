@@ -70,7 +70,7 @@ pub fn prefillPlan(soa_elements: u64, g_elements: u64, beta_elements: u64, h0_el
     if (soa_elements != soa or g_elements != rows or beta_elements != rows) return error.Invalid;
     if (h0_elements != Model.state_elements or hf_elements != Model.state_elements) return error.Invalid;
     if (y_elements != section) return error.Invalid;
-    const chunks = (tokens + chunk - 1) / chunk;
+    const chunks = 1 + (tokens - 1) / chunk;
     const snap = std.math.mul(u64, chunks - 1, Model.state_elements) catch return error.TooLarge;
     if (snap_elements != snap) return error.Invalid;
     return .{
@@ -154,12 +154,15 @@ test "prefillPlan derives chunks and the snapshot size, refusing snap mismatch" 
     const plan = try prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 2 * state, t, chunk);
     try testing.expectEqual(@as(u32, 3), plan.chunks);
     try testing.expectEqual(@as(u32, 64), plan.chunk);
-    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 3 * state, t, chunk)); // too many slots
-    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 1 * state, t, chunk)); // too few
-    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, chunk)); // chunks>1 needs snap
+    // the out-of-range slot counts: too many, too few, and an unsnapped zero (chunks > 1 needs a snap)
+    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 3 * state, t, chunk));
+    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 1 * state, t, chunk));
+    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, chunk));
     try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, 0));
     const single = try prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, t);
     try testing.expectEqual(@as(u32, 1), single.chunks);
+    // Large chunk near u64 max must not overflow ceiling division; cast32 refuses cleanly with TooLarge.
+    try testing.expectError(error.TooLarge, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, std.math.maxInt(u64)));
 }
 
 test "the common prefill graph admits decode and full prompt chunks" {

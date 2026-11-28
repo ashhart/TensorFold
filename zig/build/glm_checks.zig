@@ -3,7 +3,7 @@
 const std = @import("std");
 
 /// tf-glm-rows-check: the products at every MLX width against float64, every row's bits in every window and launch.
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, test_step: *std.Build.Step) void {
     const exe = b.addExecutable(.{ .name = "tf-glm-rows-check", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/glm_rows_check.zig"),
         .target = target,
@@ -29,6 +29,138 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         "tf-glm-rows-speed",
         "GLM-5.3-Flash one-row decode products at the checkpoints' shapes: GPU time a launch, GB/s, a token by class",
     ).dependOn(&b.addInstallArtifact(speed, .{}).step);
+    const index = b.addExecutable(.{ .name = "tf-glm-index-speed", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_index_speed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-index-speed", "GLM-5.3-Flash's decode indexer and sparse attention at long positions: GPU time a launch").dependOn(&b.addInstallArtifact(index, .{}).step);
+    const psel = b.addExecutable(.{ .name = "tf-glm-prompt-select", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_prompt_select.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-prompt-select", "GLM-5.3-Flash's prompt index scores and key lists at long positions, mark and merge against glm_index_select, bit for bit, GPU time").dependOn(&b.addInstallArtifact(psel, .{}).step);
+    const kda = b.addExecutable(.{ .name = "tf-glm-kda-speed", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_kda_speed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    const mrows = b.addExecutable(.{ .name = "tf-glm-moe-rows", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_moe_rows.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-moe-rows", "GLM-5.3-Flash's decode experts of 1-16 rows at two and four outputs a simdgroup, bit for bit, GPU time").dependOn(&b.addInstallArtifact(mrows, .{}).step);
+    const arows = b.addExecutable(.{ .name = "tf-glm-attn-rows", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_attn_rows.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-attn-rows", "GLM-5.3-Flash's dense latent attention of a window's rows in three launches against each row's own, bit for bit, GPU time").dependOn(&b.addInstallArtifact(arows, .{}).step);
+    const hrows = b.addExecutable(.{ .name = "tf-glm-hc-rows", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_hc_rows.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-hc-rows", "GLM-5.3-Flash's hyper-connection boundary of a decode window, the expand's parts on six threadgroups against one, bit for bit, GPU time").dependOn(&b.addInstallArtifact(hrows, .{}).step);
+    const route_one = b.addExecutable(.{ .name = "tf-glm-route-one", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_route_one.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-route-one", "GLM-5.3-Flash's router and indexer-gate logits of a one-row window against tf_route_logits, bit for bit, GPU time").dependOn(&b.addInstallArtifact(route_one, .{}).step);
+    const route_sel = b.addExecutable(.{ .name = "tf-glm-route-select", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_route_select.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-route-select", "GLM-5.3-Flash's route select of 1-16 rows against the kept reference kernel, byte for byte, GPU time").dependOn(&b.addInstallArtifact(route_sel, .{}).step);
+    const norms = b.addExecutable(.{ .name = "tf-glm-mla-norms", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_mla_norms.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "kernel_sources", .module = sources } },
+    }) });
+    b.step("tf-glm-mla-norms", "GLM-5.3-Flash's MLA key norm, indexer key norm and indexer weights in one launch against the kept kernels, bit for bit, GPU time").dependOn(&b.addInstallArtifact(norms, .{}).step);
+    const pick = b.addExecutable(.{ .name = "tf-glm-moe-pick", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_moe_pick.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-moe-pick", "GLM-5.3-Flash's one-row experts with the route select replayed in the gate/up groups against the select launch, byte for byte, GPU time").dependOn(&b.addInstallArtifact(pick, .{}).step);
+    b.step("tf-glm-kda-speed", "GLM-5.3-Flash's fused KDA decode step: the window kernel against kda_rows bit for bit, GPU time").dependOn(&b.addInstallArtifact(kda, .{}).step);
+    const mgroups = b.addExecutable(.{ .name = "tf-glm-mm-groups", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_mm_groups.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-mm-groups", "GLM-5.3-Flash's prompt experts and dense products in column groups against core/affine_mm.zig's, bit for bit, GPU time").dependOn(&b.addInstallArtifact(mgroups, .{}).step);
+    drafter(b, target, optimize, metal, engine, test_step);
+}
+
+/// The GLM DFlash2 drafter's host test (no GPU) and its synthetic device check, each under its own step.
+fn drafter(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, test_step: *std.Build.Step) void {
+    const imports: []const std.Build.Module.Import = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } };
+    const host = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_metal_dflash_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    const host_run = b.addRunArtifact(host);
+    b.step("test-glm-metal-dflash-host", "GLM DFlash2 drafter on Metal: config, schedule, taps and facts on the CPU").dependOn(&host_run.step);
+    test_step.dependOn(&host_run.step);
+    const tfq3_t = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_tfq3_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    const tfq3_run = b.addRunArtifact(tfq3_t);
+    b.step("test-glm-tfq3", "GLM TFQ3 format loader, run merging, and Metal decode/prefill parity").dependOn(&tfq3_run.step);
+    test_step.dependOn(&tfq3_run.step);
+    const synthetic = b.addExecutable(.{ .name = "tf-glm-metal-dflash-synthetic", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_metal_dflash_synthetic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    b.step("tf-glm-metal-dflash-synthetic", "Build the GLM DFlash2 synthetic device check").dependOn(&b.addInstallArtifact(synthetic, .{}).step);
+    b.step("test-glm-metal-dflash-synthetic", "GLM DFlash2 drafter on the GPU over synthetic weights: taps, frames, drafts").dependOn(&b.addRunArtifact(synthetic).step);
+    const speed = b.addExecutable(.{ .name = "tf-glm-dflash-speed", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_metal_dflash_speed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    const about = "GLM DFlash2 drafter passes at incoai's shapes on synthetic weights: ms a pass and a stage, bf16 and 4-bit";
+    b.step("tf-glm-dflash-speed", about).dependOn(&b.addInstallArtifact(speed, .{}).step);
 }
 
 /// tf-glm-sample-check and test-glm-sampling: the real GLM sampler against its host reference, no checkpoint.

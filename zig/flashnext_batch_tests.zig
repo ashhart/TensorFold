@@ -1,10 +1,12 @@
 test {
+    _ = @import("src/families/flashnext/gx.zig");
     _ = @import("src/families/flashnext/backend.zig");
     _ = @import("src/families/flashnext/single_session_test.zig");
 }
 
 test {
     _ = @import("src/families/flashnext/grammar_host_test.zig");
+    _ = @import("src/families/flashnext/penalties.zig");
 }
 
 test {

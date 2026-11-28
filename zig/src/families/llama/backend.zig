@@ -7,7 +7,7 @@ const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const budget = @import("budget.zig");
-const row = @import("../step5/backend.zig").row;
+const row = lanes.logprob.bf16Row;
 const gpu_full = lanes.gpu_full;
 const be = lanes.backend;
 
@@ -168,7 +168,7 @@ pub const Metal = struct {
     }
 
     /// Every step in flight landed: before the host reads caches or logits, or the GPU runs anything else.
-    fn drain(self: *Metal) !void {
+    pub fn drain(self: *Metal) !void {
         while (self.flights.items.len > 0) try self.land();
     }
 
@@ -237,7 +237,10 @@ pub const Metal = struct {
             if (err == error.LaneMemory) std.log.warn("llama: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need + admit.growth()), gib(self.ledger.held), gib(self.ledger.limit) });
             return err; // LaneMemory: the lane host queues the stream until another finishes, or fails it alone
         };
-        errdefer self.ledger.give(need);
+        errdefer { // as releaseFn: the bytes back and the prompt cache's room fitted to them (admission trimmed it)
+            self.ledger.give(need);
+            if (self.room) |r| r.fit(r.ctx, self.ledger.left(), null, &.{});
+        }
         const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
@@ -251,6 +254,7 @@ pub const Metal = struct {
             if (snap.at < ids.len) {
                 if (snapshot.restore(self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
+            if (stream.reuse_failed) try lanes.memory_restore.refuseFallback(stream); // never a placeholder row as text
         }
         try self.feed(cache, ids[cache.len..], stream);
     }

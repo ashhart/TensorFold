@@ -1,16 +1,19 @@
-//! Drama 3's checkpoint on the device: stacked bf16 projections, FP8 experts repacked for drama3_fp8.cu, a cut lm_head.
+//! Drama 3's checkpoint on the device: bf16 projections, FP8 experts repacked or NVFP4 as stored, a cut lm_head.
 const std = @import("std");
 const staging = @import("stager.zig");
 const cuda = @import("cuda");
 const core = @import("core");
 const cfg = @import("../config.zig");
 const shards = @import("../shards.zig");
+const quant = @import("../metal/quant_format.zig");
+const weight_names = @import("../weight_names.zig");
 
 const Shards = shards.Shards;
 const fp8 = core.quant.fp8;
 
-pub const Gdn = struct { proj: u64, conv: u64, a_log: u64, dt_bias: u64, norm: u64, out: u64 };
-pub const Attn = struct { qkv: u64, q_norm: u64, k_norm: u64, o: u64 };
+pub const Gdn = weight_names.Gdn;
+pub const Attn = weight_names.Attn;
+pub const TowerLayer = weight_names.TowerLayer;
 
 pub const Layer = struct {
     full: bool,
@@ -21,22 +24,7 @@ pub const Layer = struct {
     moe_in: u64, // [1288, 2048]
     shared_down: u64, // [2048, 512]
     experts: cuda.experts.Layer,
-};
-
-pub const TowerLayer = struct {
-    table: u64, // [4096, 2048] the code embedding (semantic_embedding / codebook_embedding)
-    enorm: u64,
-    hnorm: u64,
-    eh: u64, // [2048, 4096]
-    attn_norm: u64,
-    qkv: u64, // [9216, 2048]: q 4096 | gate 4096 | k 512 | v 512
-    q_norm: u64,
-    k_norm: u64,
-    wo: u64, // [2048, 4096]
-    ffn_norm: u64,
-    w13: u64, // [12288, 2048]
-    w2: u64, // [2048, 6144]
-    final_norm: u64,
+    slots: u64, // int32 [256]: an original expert id's held slot, -1 if not held; 0 when every expert is held
 };
 
 pub const Weights = struct {
@@ -51,6 +39,8 @@ pub const Weights = struct {
     layers: [cfg.layers]Layer,
     tower: [cfg.tower_layers]TowerLayer,
     heads: [cfg.codebooks - 1]u64, // [4096, 2048]
+    nvfp4_layers: usize, // layers whose routed experts are NVFP4 (the engine loads their kernels)
+    compact_layers: usize, // layers whose router masks to held experts (a pruned checkpoint)
     bytes: usize,
 
     pub fn deinit(w: *Weights) void {
@@ -82,7 +72,7 @@ const Loader = struct {
     }
 
     /// One bf16 tensor on the device as it is.
-    fn one(l: *Loader, name: []const u8, shape: []const usize) !u64 {
+    pub fn one(l: *Loader, name: []const u8, shape: []const usize) !u64 {
         const t = try l.sh.get(name);
         try expect(t, .bf16, shape, name);
         const b = try l.alloc(t.bytes.len);
@@ -92,7 +82,7 @@ const Loader = struct {
     }
 
     /// bf16 [rows_i, K] tensors stacked by rows into one [rows_total, K] matrix (pad rows zero).
-    fn stack(l: *Loader, parts: []const []const u8, rows: []const usize, k: usize, total_rows: usize) !u64 {
+    pub fn stack(l: *Loader, parts: []const []const u8, rows: []const usize, k: usize, total_rows: usize) !u64 {
         const b = try l.alloc(total_rows * k * 2);
         try l.stager.zero(b.ptr, b.len);
         var at: usize = 0;
@@ -105,11 +95,137 @@ const Loader = struct {
         }
         return b.ptr;
     }
+
+    fn upload(l: *Loader, comptime T: type, data: []const T) !u64 {
+        const b = try l.alloc(data.len * @sizeOf(T));
+        try b.upload(0, std.mem.sliceAsBytes(data));
+        return b.ptr;
+    }
+
+    /// A layer's held NVFP4 experts on the device as stored (packed, never widened), with its slot table if compact.
+    fn nvfp4Experts(l: *Loader, li: usize, held: *const quant.Held, threads: usize) !void {
+        const ids = held.ids[li][0..held.counts[li]];
+        var stage = try stageNvfp4(l.gpa, l.sh, li, ids, threads);
+        defer stage.deinit(l.gpa);
+        const L = &l.w.layers[li];
+        L.experts = .{ .format = .nvfp4, .up = try l.upload(u32, stage.up), .down = try l.upload(u32, stage.down), .up_scale = try l.upload(f32, stage.up_scale), .down_scale = try l.upload(f32, stage.down_scale), .width = cfg.expert_width, .dims = cfg.hidden, .experts = ids.len };
+        L.slots = if (compactSlots(held, li)) |slots| try l.upload(i32, &slots) else 0;
+        if (L.slots != 0) l.w.compact_layers += 1;
+    }
 };
 
-fn tn(buf: []u8, prefix: []const u8, idx: usize, suffix: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}{d}.{s}", .{ prefix, idx, suffix }) catch unreachable;
+/// A pruned layer's router slot table; null when every expert is held and the original router serves it.
+pub fn compactSlots(held: *const quant.Held, li: usize) ?[cfg.experts]i32 {
+    return if (held.counts[li] == cfg.experts) null else held.slots(li);
 }
+
+/// NVFP4 when a layer's first held gate is packed bytes; a compact map over FP8 experts is refused.
+pub fn nvfp4Layer(sh: *const Shards, li: usize, held: *const quant.Held) !bool {
+    var nb: [160]u8 = undefined;
+    const t = try sh.get(weight_names.expert(&nb, li, held.ids[li][0], "gate_proj", ""));
+    if (t.dtype == .u8) return true;
+    return if (held.counts[li] == cfg.experts) false else error.CompactFp8Experts;
+}
+
+/// One layer's held NVFP4 experts in slot order as nvfp4_experts.cu reads them; slot i is the map's i-th id.
+pub const Nvfp4Stage = struct {
+    up: []u32, // [held][512/32][2048/32][gate, up][144]
+    down: []u32, // [held][2048/32][512/32][1][144]
+    up_scale: []f32, // [held][gate, up] global scales
+    down_scale: []f32, // [held]
+
+    fn init(gpa: std.mem.Allocator, held: usize) !Nvfp4Stage {
+        const E = cuda.experts.Nvfp4Experts;
+        const up = try gpa.alloc(u32, E.bytes(held, cfg.expert_width, cfg.hidden, 2) / 4);
+        errdefer gpa.free(up);
+        const down = try gpa.alloc(u32, E.bytes(held, cfg.hidden, cfg.expert_width, 1) / 4);
+        errdefer gpa.free(down);
+        const up_scale = try gpa.alloc(f32, held * 2);
+        errdefer gpa.free(up_scale);
+        return .{ .up = up, .down = down, .up_scale = up_scale, .down_scale = try gpa.alloc(f32, held) };
+    }
+
+    pub fn deinit(s: *Nvfp4Stage, gpa: std.mem.Allocator) void {
+        gpa.free(s.up);
+        gpa.free(s.down);
+        gpa.free(s.up_scale);
+        gpa.free(s.down_scale);
+    }
+};
+
+/// Packs a layer's held NVFP4 experts (`ids`: the map's ascending original ids) on `threads` workers.
+pub fn stageNvfp4(gpa: std.mem.Allocator, sh: *const Shards, li: usize, ids: []const u8, threads: usize) !Nvfp4Stage {
+    var out = try Nvfp4Stage.init(gpa, ids.len);
+    errdefer out.deinit(gpa);
+    const n = @max(1, @min(threads, 64, ids.len));
+    const jobs = try gpa.alloc(Nvfp4Job, n);
+    defer gpa.free(jobs);
+    const workers = try gpa.alloc(std.Thread, n);
+    defer gpa.free(workers);
+    var spawned: usize = 0;
+    defer for (workers[0..spawned]) |t| t.join();
+    for (jobs, workers, 0..) |*j, *t, i| {
+        j.* = .{ .sh = sh, .layer = li, .ids = ids, .first = i, .stride = n, .out = &out };
+        t.* = try std.Thread.spawn(.{}, Nvfp4Job.run, .{j});
+        spawned += 1;
+    }
+    for (workers[0..spawned]) |t| t.join();
+    spawned = 0;
+    for (jobs) |j| if (j.err) |e| return e;
+    return out;
+}
+
+const Nvfp4Job = struct {
+    sh: *const Shards,
+    layer: usize,
+    ids: []const u8,
+    first: usize,
+    stride: usize,
+    out: *const Nvfp4Stage,
+    err: ?anyerror = null,
+
+    const projections = weight_names.projections;
+    const Part = struct { codes: []const u8, scales: []const u8, global: f32 };
+
+    fn run(j: *Nvfp4Job) void {
+        j.work() catch |e| {
+            j.err = e;
+        };
+    }
+
+    fn work(j: *Nvfp4Job) !void {
+        const E = cuda.experts.Nvfp4Experts;
+        const n = cfg.expert_width;
+        const k = cfg.hidden;
+        const per_up = E.bytes(1, n, k, 2) / 4;
+        const per_down = E.bytes(1, k, n, 1) / 4;
+        var slot = j.first;
+        while (slot < j.ids.len) : (slot += j.stride) {
+            const e = j.ids[slot];
+            const g = try j.part(e, 0, n, k);
+            const u = try j.part(e, 1, n, k);
+            const d = try j.part(e, 2, k, n);
+            E.packGateUp(j.out.up[slot * per_up ..][0..per_up], .{ g.codes, g.scales }, .{ u.codes, u.scales }, n, k);
+            E.packOne(j.out.down[slot * per_down ..][0..per_down], d.codes, d.scales, k, n);
+            j.out.up_scale[2 * slot] = g.global;
+            j.out.up_scale[2 * slot + 1] = u.global;
+            j.out.down_scale[slot] = d.global;
+            var nb: [160]u8 = undefined;
+            for (projections) |p| for ([_][]const u8{ "", "_scale", "_scale_2" }) |suffix|
+                j.sh.release(weight_names.expert(&nb, j.layer, e, p, suffix));
+        }
+    }
+
+    /// Projection `p` of expert `e` ([rows, cols] as stored), checked by the Metal loader's quant_format.nvfp4.
+    fn part(j: *const Nvfp4Job, e: u8, p: usize, rows: usize, cols: usize) !Part {
+        var nb: [3][160]u8 = undefined;
+        const w = try j.sh.get(weight_names.expert(&nb[0], j.layer, e, projections[p], ""));
+        const s = try j.sh.get(weight_names.expert(&nb[1], j.layer, e, projections[p], "_scale"));
+        const g = try j.sh.get(weight_names.expert(&nb[2], j.layer, e, projections[p], "_scale_2"));
+        try quant.nvfp4(w, s, g, rows, cols);
+        return .{ .codes = w.bytes, .scales = s.bytes, .global = @bitCast(std.mem.readInt(u32, g.bytes[0..4], .little)) };
+    }
+};
 
 fn fmt(buf: []u8, comptime f: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, f, args) catch unreachable;
@@ -150,9 +266,9 @@ const PackJob = struct {
         const k = cfg.hidden;
         var e = j.first;
         while (e < cfg.experts) : (e += j.stride) {
-            const base = "model.language_model.layers.{d}.mlp.experts.{d}.";
             var mb: [3][160]u8 = undefined;
-            const mods = [3][]const u8{ fmt(&mb[0], base ++ "gate_proj", .{ j.layer, e }), fmt(&mb[1], base ++ "up_proj", .{ j.layer, e }), fmt(&mb[2], base ++ "down_proj", .{ j.layer, e }) };
+            var mods: [3][]const u8 = undefined;
+            for (&mods, &mb, weight_names.projections) |*m, *b, p| m.* = weight_names.expertModule(b, j.layer, e, p);
             const g = try codes(j.sh, mods[0], n, k, null);
             const u = try codes(j.sh, mods[1], n, k, null);
             const dn = try codes(j.sh, mods[2], k, n, null);
@@ -166,10 +282,9 @@ const PackJob = struct {
             try scalesInto(j.sh, mods[1], n, k, us[per_us / 2 ..], null);
             const per_ds = (k / 128) * (n / 128);
             try scalesInto(j.sh, mods[2], k, n, j.down_scale[e * per_ds ..][0..per_ds], null);
-            for ([_][]const u8{ "gate_proj.weight", "up_proj.weight", "down_proj.weight" }) |suffix| {
+            for (weight_names.projections) |p| {
                 var nb2: [160]u8 = undefined;
-                const name = std.fmt.bufPrint(&nb2, "model.language_model.layers.{d}.mlp.experts.{d}.{s}", .{ j.layer, e, suffix }) catch unreachable;
-                j.sh.release(name);
+                j.sh.release(weight_names.expert(&nb2, j.layer, e, p, ""));
             }
         }
     }
@@ -180,6 +295,9 @@ pub const LoadOptions = struct { threads: usize = 16, log: bool = true };
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, c: cfg.Config, opt: LoadOptions) !*Weights {
     var sh = try Shards.open(gpa, io, dir);
     defer sh.close(io);
+    // a malformed, unordered or mismatched expert map fails here, before any device memory
+    const held = try quant.heldMetadata(sh.metadata);
+    try quant.checkStored(&held, sh.map);
     var stream = try cuda.Stream.init(d, false);
     defer stream.deinit();
     var stager = staging.Stager.init(gpa, d, stream);
@@ -191,19 +309,21 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     w.gpa = gpa;
     w.bufs = .empty;
     w.bytes = 0;
+    w.nvfp4_layers = 0;
+    w.compact_layers = 0;
     errdefer w.deinit();
     errdefer stream.synchronize() catch {};
     var l: Loader = .{ .gpa = gpa, .d = d, .sh = &sh, .w = w, .stager = &stager };
     const H = cfg.hidden;
-    var nb: [6][192]u8 = undefined;
 
-    w.embed = try l.one("model.language_model.embed_tokens.weight", &.{ cfg.vocab, H });
-    w.cb_emb = try l.one("audio_decoder.codebook_embeddings.weight", &.{ cfg.codebooks * cfg.codebook_size, H });
-    w.final_norm = try l.one("model.language_model.norm.weight", &.{H});
+    const t0 = try weight_names.top(&l);
+    w.embed = t0.embed;
+    w.cb_emb = t0.cb_emb;
+    w.final_norm = t0.final_norm;
     // lm_head's candidate rows: eos, then the semantic band (sorted ids, as the sampler's candidate list)
     {
-        const t = try sh.get("lm_head.weight");
-        try Loader.expect(t, .bf16, &.{ cfg.vocab, H }, "lm_head.weight");
+        const t = try sh.get(weight_names.lm_head);
+        try Loader.expect(t, .bf16, &.{ cfg.vocab, H }, weight_names.lm_head);
         const ids = try shards.candidateIds(gpa, c);
         defer gpa.free(ids);
         const n = ids.len;
@@ -217,7 +337,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
         const ib = try l.alloc(n * 4);
         try ib.upload(0, std.mem.sliceAsBytes(ids));
         w.cand_ids = ib.ptr;
-        sh.release("lm_head.weight");
+        sh.release(weight_names.lm_head);
     }
 
     // routed experts: host staging for one layer, packed by `threads` workers
@@ -239,31 +359,16 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     const threads = try gpa.alloc(std.Thread, nthreads);
     defer gpa.free(threads);
 
-    const pre = "model.language_model.layers.{d}.";
     for (0..cfg.layers) |li| {
         const L = &w.layers[li];
         L.full = c.full_attention[li];
-        L.in_norm = try l.one(fmt(&nb[0], pre ++ "input_layernorm.weight", .{li}), &.{H});
-        L.post_norm = try l.one(fmt(&nb[0], pre ++ "post_attention_layernorm.weight", .{li}), &.{H});
-        if (L.full) {
-            L.attn = .{
-                .qkv = try l.stack(&.{ fmt(&nb[0], pre ++ "self_attn.q_proj.weight", .{li}), fmt(&nb[1], pre ++ "self_attn.k_proj.weight", .{li}), fmt(&nb[2], pre ++ "self_attn.v_proj.weight", .{li}) }, &.{ 2 * cfg.heads * cfg.head_dim, cfg.kv_heads * cfg.head_dim, cfg.kv_heads * cfg.head_dim }, H, cfg.attn_proj),
-                .q_norm = try l.one(fmt(&nb[0], pre ++ "self_attn.q_norm.weight", .{li}), &.{cfg.head_dim}),
-                .k_norm = try l.one(fmt(&nb[0], pre ++ "self_attn.k_norm.weight", .{li}), &.{cfg.head_dim}),
-                .o = try l.one(fmt(&nb[0], pre ++ "self_attn.o_proj.weight", .{li}), &.{ H, cfg.heads * cfg.head_dim }),
-            };
-        } else {
-            L.gdn = .{
-                .proj = try l.stack(&.{ fmt(&nb[0], pre ++ "linear_attn.in_proj_qkv.weight", .{li}), fmt(&nb[1], pre ++ "linear_attn.in_proj_z.weight", .{li}), fmt(&nb[2], pre ++ "linear_attn.in_proj_b.weight", .{li}), fmt(&nb[3], pre ++ "linear_attn.in_proj_a.weight", .{li}) }, &.{ cfg.conv_channels, 4096, 32, 32 }, H, cfg.gdn_proj),
-                .conv = try l.one(fmt(&nb[0], pre ++ "linear_attn.conv1d.weight", .{li}), &.{ cfg.conv_channels, 1, cfg.conv_kernel }),
-                .a_log = try l.one(fmt(&nb[0], pre ++ "linear_attn.A_log", .{li}), &.{cfg.lin_v_heads}),
-                .dt_bias = try l.one(fmt(&nb[0], pre ++ "linear_attn.dt_bias", .{li}), &.{cfg.lin_v_heads}),
-                .norm = try l.one(fmt(&nb[0], pre ++ "linear_attn.norm.weight", .{li}), &.{cfg.lin_dim}),
-                .out = try l.one(fmt(&nb[0], pre ++ "linear_attn.out_proj.weight", .{li}), &.{ H, cfg.lin_v_heads * cfg.lin_dim }),
-            };
+        weight_names.setDense(L, try weight_names.dense(&l, li, L.full));
+        L.slots = 0;
+        if (try nvfp4Layer(&sh, li, &held)) {
+            try l.nvfp4Experts(li, &held, opt.threads);
+            w.nvfp4_layers += 1;
+            continue;
         }
-        L.moe_in = try l.stack(&.{ fmt(&nb[0], pre ++ "mlp.shared_expert.gate_proj.weight", .{li}), fmt(&nb[1], pre ++ "mlp.shared_expert.up_proj.weight", .{li}), fmt(&nb[2], pre ++ "mlp.gate.weight", .{li}), fmt(&nb[3], pre ++ "mlp.shared_expert_gate.weight", .{li}) }, &.{ cfg.shared_width, cfg.shared_width, cfg.experts, 1 }, H, cfg.moe_proj);
-        L.shared_down = try l.one(fmt(&nb[0], pre ++ "mlp.shared_expert.down_proj.weight", .{li}), &.{ H, cfg.shared_width });
         // experts
         for (jobs, 0..) |*j, ti| j.* = .{ .sh = &sh, .layer = li, .first = ti, .stride = nthreads, .up = up_h, .down = down_h, .up_scale = us_h, .down_scale = ds_h };
         var spawned: usize = 0;
@@ -288,28 +393,13 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     }
 
     // the tower: 4 shared layers, then 9 residual ones; 9 codebook heads
-    for (0..cfg.tower_layers) |ti| {
-        const shared = ti < cfg.shared_layers;
-        const idx = if (shared) ti else ti - cfg.shared_layers;
-        const p: []const u8 = if (shared) "audio_decoder_mtp_shared.layers." else "audio_decoder_mtp.layers.";
-        const T = &w.tower[ti];
-        T.table = try l.one(tn(&nb[0], p, idx, if (shared) "semantic_embedding.weight" else "codebook_embedding.weight"), &.{ cfg.codebook_size, H });
-        T.enorm = try l.one(tn(&nb[0], p, idx, "enorm.weight"), &.{H});
-        T.hnorm = try l.one(tn(&nb[0], p, idx, "hnorm.weight"), &.{H});
-        T.eh = try l.one(tn(&nb[0], p, idx, "eh_proj.weight"), &.{ H, 2 * H });
-        T.attn_norm = try l.one(tn(&nb[0], p, idx, "transformer_layer.attention_norm.weight"), &.{H});
-        T.qkv = try l.one(tn(&nb[0], p, idx, "transformer_layer.attention.wqkv.weight"), &.{ cfg.attn_proj, H });
-        T.q_norm = try l.one(tn(&nb[0], p, idx, "transformer_layer.attention.q_norm.weight"), &.{cfg.head_dim});
-        T.k_norm = try l.one(tn(&nb[0], p, idx, "transformer_layer.attention.k_norm.weight"), &.{cfg.head_dim});
-        T.wo = try l.one(tn(&nb[0], p, idx, "transformer_layer.attention.wo.weight"), &.{ H, cfg.heads * cfg.head_dim });
-        T.ffn_norm = try l.one(tn(&nb[0], p, idx, "transformer_layer.ffn_norm.weight"), &.{H});
-        T.w13 = try l.stack(&.{ tn(&nb[0], p, idx, "transformer_layer.feed_forward.w1.weight"), tn(&nb[1], p, idx, "transformer_layer.feed_forward.w3.weight") }, &.{ cfg.tower_ffn, cfg.tower_ffn }, H, 2 * cfg.tower_ffn);
-        T.w2 = try l.one(tn(&nb[0], p, idx, "transformer_layer.feed_forward.w2.weight"), &.{ H, cfg.tower_ffn });
-        T.final_norm = try l.one(tn(&nb[0], p, idx, "final_layernorm.weight"), &.{H});
-    }
-    for (0..cfg.codebooks - 1) |hi| w.heads[hi] = try l.one(fmt(&nb[0], "audio_decoder_mtp.heads.{d}.weight", .{hi}), &.{ cfg.codebook_size, H });
+    for (0..cfg.tower_layers) |ti| w.tower[ti] = try weight_names.tower(&l, ti);
+    for (0..cfg.codebooks - 1) |hi| w.heads[hi] = try weight_names.head(&l, hi);
     try stager.finish();
-    if (opt.log) std.log.info("drama3: weights on the device: {d:.2} GB", .{@as(f64, @floatFromInt(w.bytes)) / 1e9});
+    if (opt.log) {
+        std.log.info("drama3: weights on the device: {d:.2} GB", .{@as(f64, @floatFromInt(w.bytes)) / 1e9});
+        std.log.info("drama3: routed experts held {d} of {d}; routed experts NVFP4 in {d} of {d} layers; compact routers in {d} of {d} layers", .{ held.total(), cfg.layers * cfg.experts, w.nvfp4_layers, cfg.layers, w.compact_layers, cfg.layers });
+    }
     return w;
 }
 

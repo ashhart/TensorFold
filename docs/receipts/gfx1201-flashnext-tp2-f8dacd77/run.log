@@ -1,0 +1,262 @@
++ R0=0
++ R1=0
++ trap restore EXIT
++ '[' -f ~/.cache/huggingface/hub/models--TensorFold--Qwen3.8-Flash-Next-MLX-oQ2-MTP/snapshots/0a1bf6faa0a2f16a314da889e8e6c80226455dbf/model-00015-of-00015.safetensors ']'
+++ date -Is
++ echo '=== STOP radiance 2026-11-13T23:10:36+01:00'
+=== STOP radiance 2026-11-13T23:10:36+01:00
++ cd ~/radiance
++ docker compose -f docker-compose.prod.yml stop
+ Container radiance  Stopping
+ Container radiance  Stopped
+++ seq 1 30
++ for i in $(seq 1 30)
+++ rocm-smi --showmeminfo vram --csv
+++ awk -F, '($1=="card3"||$1=="card1") {s+=$3} END {print s+0}'
++ v=672952320
++ echo 'drain check: card1+card3 used = 672952320 bytes'
+drain check: card1+card3 used = 672952320 bytes
++ '[' 672952320 -lt 4000000000 ']'
++ break
+++ date -Is
++ echo '=== DECODE session 2026-11-13T23:10:37+01:00'
+=== DECODE session 2026-11-13T23:10:37+01:00
++ start_ranks 4 4096
++ local par=4 ctx=4096
++ cd ~/TensorFold
++ R0=147674
++ sleep 3
++ HIP_VISIBLE_DEVICES=3
++ ~/TensorFold/zig-out/native-hip/bin/tensorfold-native serve ~/.cache/huggingface/hub/models--TensorFold--Qwen3.8-Flash-Next-MLX-oQ2-MTP/snapshots/0a1bf6faa0a2f16a314da889e8e6c80226455dbf --tp 2 --rank 0 --master 127.0.0.1 --port 8092 --prompt-cache-gib 0 --parallel 4 --context 4096
++ R1=147739
++ wait_http 8092 120
++ local port=8092 tries=120
++ HIP_VISIBLE_DEVICES=0
++ ~/TensorFold/zig-out/native-hip/bin/tensorfold-native serve ~/.cache/huggingface/hub/models--TensorFold--Qwen3.8-Flash-Next-MLX-oQ2-MTP/snapshots/0a1bf6faa0a2f16a314da889e8e6c80226455dbf --tp 2 --rank 1 --master 127.0.0.1 --prompt-cache-gib 0 --parallel 4 --context 4096
+++ seq 1 120
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ return 0
+++ model_id
+++ python3 -c 'import json;print(json.load(open('\''~/.hermes/cache/scratch/tf-flashnext/models.json'\''))['\''data'\''][0]['\''id'\''])'
++ MID=0a1bf6faa0a2f16a314da889e8e6c80226455dbf
++ echo 'model id: 0a1bf6faa0a2f16a314da889e8e6c80226455dbf'
+model id: 0a1bf6faa0a2f16a314da889e8e6c80226455dbf
++ curl -s http://127.0.0.1:8092/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"Say OK."}],"max_tokens":20,"temperature":0}'
++ head -c 500
+{"id": "chatcmpl-bfe9d43c767c30e228fe70bc360436a3", "object": "chat.completion", "created": 1794607905, "model": "0a1bf6faa0a2f16a314da889e8e6c80226455dbf", "choices": [{"index": 0, "message": {"role": "assistant", "content": "", "reasoning_content": "The user simply said \"Say OK.\" This is a very simple, direct instruction. I should just"}, "finish_reason": "length"}], "usage": {"prompt_tokens": 55, "completion_tokens": 20, "total_tokens": 75, "prompt_tokens_details": {"cached_tokens": 0}, "co+ echo
+
+++ date -Is
++ echo '=== bench_openai 2026-11-13T23:11:46+01:00'
+=== bench_openai 2026-11-13T23:11:46+01:00
++ timeout 900 python3 ~/TensorFold/tools/bench_openai.py http://127.0.0.1:8092 0a1bf6faa0a2f16a314da889e8e6c80226455dbf --tokens 256 --reps 3 --temperatures 0 --label flashnext-tp2-decode --output ~/.hermes/cache/scratch/tf-flashnext/bench-openai.json
+{"label": "flashnext-tp2-decode", "prompt": "fibonacci-raw", "temperature": 0.0, "thinking": "not applicable", "thinking_off_requested": false, "decode_tps_median": 121.2099182020188, "decode_tps_all": [120.79, 121.21, 121.33], "ttft_s_median": 0.05374725300043792, "prompt_ttft_tps_median": 260.478, "prefill_tps_median": 260.478, "itl_mean_ms_median": null, "itl_p50_ms_median": null, "itl_p95_ms_median": null, "tpot_ms_median": null, "chunk_tpot_estimate_ms_median": 8.25, "round_gap_p50_ms_median": 20.802, "round_gap_p95_ms_median": 24.386, "tokens_per_chunk_median": 2.485, "headers_s_median": 0.002, "first_payload_s_median": 0.054, "first_content_s_median": 0.054, "first_reasoning_s_median": null, "first_tool_s_median": null, "first_output_s_median": 0.054, "last_output_s_median": 2.157}
+{"label": "flashnext-tp2-decode", "prompt": "gpu-chat-no-think", "temperature": 0.0, "thinking": "off", "thinking_off_requested": true, "decode_tps_median": 103.64492248773014, "decode_tps_all": [103.62, 103.64, 103.77], "ttft_s_median": 0.08953773200028081, "prompt_ttft_tps_median": 346.223, "prefill_tps_median": 346.223, "itl_mean_ms_median": null, "itl_p50_ms_median": null, "itl_p95_ms_median": null, "tpot_ms_median": null, "chunk_tpot_estimate_ms_median": 9.648, "round_gap_p50_ms_median": 18.135, "round_gap_p95_ms_median": 22.915, "tokens_per_chunk_median": 2.0, "headers_s_median": 0.002, "first_payload_s_median": 0.002, "first_content_s_median": 0.09, "first_reasoning_s_median": null, "first_tool_s_median": null, "first_output_s_median": 0.09, "last_output_s_median": 2.55}
+++ date -Is
++ echo '=== bench_concurrent 2026-11-13T23:12:05+01:00'
+=== bench_concurrent 2026-11-13T23:12:05+01:00
++ timeout 1500 python3 ~/TensorFold/tools/bench_concurrent.py http://127.0.0.1:8092 0a1bf6faa0a2f16a314da889e8e6c80226455dbf --tokens 256 --reps 3 --temperatures 0 --levels 1,4 --alone --serial --label flashnext-tp2-concurrent --output ~/.hermes/cache/scratch/tf-flashnext/bench-concurrent.json
+{"label": "flashnext-tp2-concurrent", "prompt": "code", "temperature": 0.0, "thinking": "not applicable", "thinking_off_requested": false, "thinking_switch": true, "thinking_applicable": true, "streams": 1, "failed": 0, "unmeasured": 0, "aggregate_tps": 121.5, "per_stream_tps": 121.5, "ttft_s_max": 0.05, "request": {"ttft_s": 0.055, "decode_tps": 121.497, "prompt_ttft_tps": 256.128, "prefill_tps": 256.128, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 8.231, "round_gap_p50_ms": 20.751, "round_gap_p95_ms": 24.352, "tokens_per_chunk": 2.485, "headers_s": 0.002, "first_payload_s": 0.055, "first_content_s": 0.055, "first_reasoning_s": null, "first_tool_s": null, "first_output_s": 0.055, "last_output_s": 2.153}, "pooled": {"aggregate_prompt_ttft_tps": 256.128, "aggregate_prefill_tps": 256.128, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 8.231, "round_gap_p50_ms": 20.751, "round_gap_p95_ms": 24.352, "tokens_per_chunk": 2.485}, "completions": {"truncated": 3}, "timing_valid": true, "end_to_end_tps": 118.85171429235959, "makespan_s": 2.153944530999979, "alone": {"equal": 3, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "flashnext-tp2-concurrent", "prompt": "code", "temperature": 0.0, "thinking": "not applicable", "thinking_off_requested": false, "thinking_switch": true, "thinking_applicable": true, "streams": 4, "failed": 0, "unmeasured": 0, "aggregate_tps": 213.2, "per_stream_tps": 54.0, "ttft_s_max": 0.21, "request": {"ttft_s": 0.135, "decode_tps": 53.924, "prompt_ttft_tps": 107.563, "prefill_tps": 107.563, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 18.545, "round_gap_p50_ms": 59.303, "round_gap_p95_ms": 59.842, "tokens_per_chunk": 3.16, "headers_s": 0.002, "first_payload_s": 0.135, "first_content_s": 0.135, "first_reasoning_s": null, "first_tool_s": null, "first_output_s": 0.135, "last_output_s": 4.841}, "pooled": {"aggregate_prompt_ttft_tps": 260.968, "aggregate_prefill_tps": 260.968, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 18.456, "round_gap_p50_ms": 59.313, "round_gap_p95_ms": 59.855, "tokens_per_chunk": 3.16}, "completions": {"truncated": 12}, "timing_valid": true, "end_to_end_tps": 211.41456054795898, "makespan_s": 4.8435642149997875, "steady_tps": 218.7, "alone": {"equal": 12, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "flashnext-tp2-concurrent", "prompt": "chat", "temperature": 0.0, "thinking": "off", "thinking_off_requested": true, "thinking_switch": true, "thinking_applicable": true, "streams": 1, "failed": 0, "unmeasured": 0, "aggregate_tps": 103.5, "per_stream_tps": 103.5, "ttft_s_max": 0.09, "request": {"ttft_s": 0.091, "decode_tps": 103.511, "prompt_ttft_tps": 341.716, "prefill_tps": 341.716, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 9.661, "round_gap_p50_ms": 18.124, "round_gap_p95_ms": 23.043, "tokens_per_chunk": 2.0, "headers_s": 0.003, "first_payload_s": 0.003, "first_content_s": 0.091, "first_reasoning_s": null, "first_tool_s": null, "first_output_s": 0.091, "last_output_s": 2.554}, "pooled": {"aggregate_prompt_ttft_tps": 341.716, "aggregate_prefill_tps": 341.716, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 9.661, "round_gap_p50_ms": 18.124, "round_gap_p95_ms": 23.043, "tokens_per_chunk": 2.0}, "completions": {"truncated": 3}, "timing_valid": true, "end_to_end_tps": 100.20627320425412, "makespan_s": 2.5547302759996455, "alone": {"equal": 3, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+{"label": "flashnext-tp2-concurrent", "prompt": "chat", "temperature": 0.0, "thinking": "off", "thinking_off_requested": true, "thinking_switch": true, "thinking_applicable": true, "streams": 4, "failed": 0, "unmeasured": 0, "aggregate_tps": 171.0, "per_stream_tps": 43.5, "ttft_s_max": 0.36, "request": {"ttft_s": 0.226, "decode_tps": 43.574, "prompt_ttft_tps": 142.786, "prefill_tps": 142.786, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 22.95, "round_gap_p50_ms": 58.529, "round_gap_p95_ms": 59.828, "tokens_per_chunk": 2.438, "headers_s": 0.003, "first_payload_s": 0.003, "first_content_s": 0.226, "first_reasoning_s": null, "first_tool_s": null, "first_output_s": 0.226, "last_output_s": 6.058}, "pooled": {"aggregate_prompt_ttft_tps": 345.424, "aggregate_prefill_tps": 345.424, "itl_mean_ms": null, "itl_p50_ms": null, "itl_p95_ms": null, "tpot_ms": null, "chunk_tpot_estimate_ms": 22.871, "round_gap_p50_ms": 58.512, "round_gap_p95_ms": 59.842, "tokens_per_chunk": 2.438}, "completions": {"truncated": 12}, "timing_valid": true, "end_to_end_tps": 168.95455255800715, "makespan_s": 6.060801467000601, "steady_tps": 178.8, "alone": {"equal": 12, "unequal": 0, "failed": 0}, "serial": {"equal": 1, "unequal": 0, "failed": 0}}
+++ date -Is
++ echo '=== PREFILL session 2026-11-13T23:13:05+01:00'
+=== PREFILL session 2026-11-13T23:13:05+01:00
++ stop_ranks
++ '[' 147674 -gt 0 ']'
++ kill 147674
++ '[' 147739 -gt 0 ']'
++ kill 147739
++ sleep 5
++ '[' 147674 -gt 0 ']'
++ kill -9 147674
++ '[' 147739 -gt 0 ']'
++ kill -9 147739
++ R0=0
++ R1=0
++ start_ranks 1 40960
++ local par=1 ctx=40960
++ cd ~/TensorFold
++ R0=149243
++ sleep 3
++ HIP_VISIBLE_DEVICES=3
++ ~/TensorFold/zig-out/native-hip/bin/tensorfold-native serve ~/.cache/huggingface/hub/models--TensorFold--Qwen3.8-Flash-Next-MLX-oQ2-MTP/snapshots/0a1bf6faa0a2f16a314da889e8e6c80226455dbf --tp 2 --rank 0 --master 127.0.0.1 --port 8092 --prompt-cache-gib 0 --parallel 1 --context 40960
++ R1=149276
++ wait_http 8092 120
++ local port=8092 tries=120
++ HIP_VISIBLE_DEVICES=0
++ ~/TensorFold/zig-out/native-hip/bin/tensorfold-native serve ~/.cache/huggingface/hub/models--TensorFold--Qwen3.8-Flash-Next-MLX-oQ2-MTP/snapshots/0a1bf6faa0a2f16a314da889e8e6c80226455dbf --tp 2 --rank 1 --master 127.0.0.1 --prompt-cache-gib 0 --parallel 1 --context 40960
+++ seq 1 120
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ sleep 5
++ for i in $(seq 1 "$tries")
++ curl -sf http://127.0.0.1:8092/v1/models -o ~/.hermes/cache/scratch/tf-flashnext/models.json
++ return 0
+++ model_id
+++ python3 -c 'import json;print(json.load(open('\''~/.hermes/cache/scratch/tf-flashnext/models.json'\''))['\''data'\''][0]['\''id'\''])'
++ MID=0a1bf6faa0a2f16a314da889e8e6c80226455dbf
++ cd ~/TensorFold
++ python3 - 0a1bf6faa0a2f16a314da889e8e6c80226455dbf
+TOKENIZED 200929 tokens from README+RUNBOOK+CHANGELOG
+PREFILL n=2048 rep=1 1.90s 1075 tok/s cached=0 prompt_tokens=2048
+PREFILL n=2048 rep=2 1.72s 1193 tok/s cached=0 prompt_tokens=2048
+PREFILL n=2048 rep=3 1.72s 1191 tok/s cached=0 prompt_tokens=2048
+PREFILL n=2048 median 1.72s 1191 tok/s
+PREFILL n=8192 rep=1 7.55s 1085 tok/s cached=0 prompt_tokens=8192
+PREFILL n=8192 rep=2 7.28s 1125 tok/s cached=0 prompt_tokens=8192
+PREFILL n=8192 rep=3 7.31s 1121 tok/s cached=0 prompt_tokens=8192
+PREFILL n=8192 median 7.31s 1121 tok/s
+PREFILL n=32768 rep=1 31.53s 1039 tok/s cached=0 prompt_tokens=32768
+PREFILL n=32768 rep=2 30.89s 1061 tok/s cached=0 prompt_tokens=32768
+PREFILL n=32768 rep=3 30.96s 1058 tok/s cached=0 prompt_tokens=32768
+PREFILL n=32768 median 30.96s 1058 tok/s
+++ date -Is
++ echo '=== TEST COMPLETE 2026-11-13T23:16:09+01:00'
+=== TEST COMPLETE 2026-11-13T23:16:09+01:00
++ exit 0
++ restore
++ stop_ranks
++ '[' 149243 -gt 0 ']'
++ kill 149243
++ '[' 149276 -gt 0 ']'
++ kill 149276
++ sleep 5
++ '[' 149243 -gt 0 ']'
++ kill -9 149243
++ '[' 149276 -gt 0 ']'
++ kill -9 149276
++ R0=0
++ R1=0
+++ date -Is
++ echo '=== RESTORE: radiance up 2026-11-13T23:16:14+01:00'
+=== RESTORE: radiance up 2026-11-13T23:16:14+01:00
++ cd ~/radiance
++ docker compose -f docker-compose.prod.yml up -d
+ Container radiance  Starting
+ Container radiance  Started
+++ seq 1 90
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=starting
++ '[' starting = healthy ']'
++ sleep 5
++ for i in $(seq 1 90)
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ s=healthy
++ '[' healthy = healthy ']'
++ break
+++ date -Is
+++ docker inspect -f '{{.State.Health.Status}}' radiance
++ echo '=== RESTORE DONE 2026-11-13T23:17:00+01:00 health=healthy'
+=== RESTORE DONE 2026-11-13T23:17:00+01:00 health=healthy

@@ -3,6 +3,8 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const config = @import("cli_config.zig");
 const t = std.testing;
+/// Owner-only fixtures on POSIX, whatever the umask; Windows files have no mode bits.
+const owner_only: std.Io.File.Permissions = if (@import("builtin").os.tag == .windows) .default_file else .fromMode(0o600);
 
 const Fixture = struct {
     arena: std.heap.ArenaAllocator = .init(t.allocator),
@@ -218,7 +220,8 @@ test "serve --config: a file parses as its flags typed by hand, and the command 
     }
     // a value the flag refuses is refused in the flag's own words, with the file's line
     try f.refused("model = \"m\"\n\nport = 99999\n", 3, "argument --port: invalid port: '99999'");
-    try f.refused("backend = \"metal\"\n", 1, "argument --backend: invalid choice: 'metal'");
+    // the ported stack serves "vulkan" as a choice; an unlisted backend keeps the invalid-choice refusal
+    try f.refused("backend = \"vbogus\"\n", 1, "argument --backend: invalid choice: 'vbogus'");
     try f.refused("port = 1\ntemperature = \"warm\"\n", 2, "argument --temperature: invalid float value: 'warm'");
     try f.refused("alias = [\"a\"]\nallowed-host = [\"ok.example\",\n  \"bad host:1\"]\n", 2, "argument --allowed-host: expected a hostname or bracketed IP without a port: 'bad host:1'");
     try f.refused("compact-at = 1.5\n", 1, "argument --compact-at: expected auto or a fraction in (0, 1]: '1.5'");
@@ -260,7 +263,7 @@ test "serve --config: expand reads the file, passes other commands through and n
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "serve.toml", .data = "model = \"org/Model\"\nport = 9000\n" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "serve.toml", .data = "model = \"org/Model\"\nport = 9000\n", .flags = .{ .permissions = owner_only } });
     const path = try std.fs.path.join(a, &.{ dir, "serve.toml" });
     const read = try config.expand(a, &.{ "--config", path, "--dashboard" }, &f.u);
     try t.expectEqual(@as(usize, 3), read.argv.len);
@@ -312,7 +315,7 @@ test "serve --config: expand reads the file, passes other commands through and n
     const filler = try a.alloc(u8, 3 * config.limit);
     @memset(filler, '#');
     for ([_]usize{ config.limit, config.limit + 1, 3 * config.limit }) |size| {
-        try tmp.dir.writeFile(t.io, .{ .sub_path = "big.toml", .data = filler[0..size] });
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "big.toml", .data = filler[0..size], .flags = .{ .permissions = owner_only } });
         const big = try std.fs.path.join(a, &.{ dir, "big.toml" });
         if (size == config.limit) {
             try t.expectEqual(@as(usize, 0), (try config.expand(a, &.{ "m", "--config", big }, &f.u)).options);

@@ -1,6 +1,7 @@
 //! Ling KDA mixer: k3_kda job (conv, gates, delta, RMS). D=128, 4 taps; host formula plus GPU check.
 const std = @import("std");
 const config = @import("config.zig");
+const pool_mod = @import("cpu_gguf_pool.zig");
 
 pub const dim = config.fixed.kda_dim;
 pub const taps = config.fixed.conv;
@@ -14,6 +15,7 @@ pub const Shape = struct {
     heads: u32,
     lower_bound: f32,
     eps: f32,
+    stored_rate: bool = false,
 
     pub fn of(c: *const config.Config) Shape {
         return .{ .heads = c.kda_heads, .lower_bound = c.lower_bound, .eps = c.eps };
@@ -57,22 +59,47 @@ fn mixAs(
     o_norm: []const f32,
     s: Shape,
     rows: u32,
+    history: ?[][3]T,
+) void {
+    const window_cap = 3 * max_width;
+    var local: [window_cap][3]T = @splat(.{ 0, 0, 0 });
+    mixAsRange(T, to_bf16, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, history orelse local[0 .. 3 * s.width()], 0, s.heads);
+}
+
+fn mixAsRange(
+    comptime T: type,
+    comptime to_bf16: bool,
+    y: []T,
+    S: []T,
+    proj: []const f32,
+    fgate: []const f32,
+    braw: []const f32,
+    g2: []const f32,
+    conv_q: []const f32,
+    conv_k: []const f32,
+    conv_v: []const f32,
+    A_log: []const f32,
+    dt_bias: []const f32,
+    o_norm: []const f32,
+    s: Shape,
+    rows: u32,
+    history: [][3]T,
+    h_lo: usize,
+    h_hi: usize,
 ) void {
     const W = s.width();
-    const H = s.heads;
-    const window_cap = 3 * max_width;
-    var windows: [window_cap][3]T = @splat(.{ 0, 0, 0 });
+    const windows = history;
     const scale: T = if (T == f32) q_scale else 1.0 / @sqrt(@as(T, @floatFromInt(dim)));
     const lower: T = @floatCast(s.lower_bound);
     const eps: T = @floatCast(s.eps);
 
     for (0..rows) |r| {
-        for (0..H) |h| {
+        for (h_lo..h_hi) |h| {
             var q: [dim]T = undefined;
             var k: [dim]T = undefined;
             var v: [dim]T = undefined;
             var a: [dim]T = undefined;
-            const rate = @exp(@as(T, @floatCast(A_log[h])));
+            const rate = if (s.stored_rate) @as(T, @floatCast(A_log[h])) else @exp(@as(T, @floatCast(A_log[h])));
             for (0..dim) |d| {
                 const ch_base = h * dim + d;
                 inline for (.{ 0, 1, 2 }, .{ &q, &k, &v }, .{ conv_q, conv_k, conv_v }) |part, slot, cw| {
@@ -89,7 +116,7 @@ fn mixAs(
                 const g = @as(T, @floatCast(fgate[r * W + ch_base])) + @as(T, @floatCast(dt_bias[ch_base]));
                 a[d] = @exp(lower * sig(T, rate * g));
             }
-            const beta = sig(T, @floatCast(braw[r * H + h]));
+            const beta = sig(T, @floatCast(braw[r * s.heads + h]));
             var ss_q: T = 0;
             var ss_k: T = 0;
             for (0..dim) |d| {
@@ -124,6 +151,70 @@ fn mixAs(
     }
 }
 
+const KdaPoolCtx = struct {
+    y: []f32,
+    S: []f32,
+    proj: []const f32,
+    fgate: []const f32,
+    braw: []const f32,
+    g2: []const f32,
+    conv_q: []const f32,
+    conv_k: []const f32,
+    conv_v: []const f32,
+    A_log: []const f32,
+    dt_bias: []const f32,
+    o_norm: []const f32,
+    s: Shape,
+    rows: u32,
+    history: [][3]f32,
+};
+
+fn kdaHeadWorker(raw: *anyopaque, h_lo: usize, h_hi: usize) void {
+    const c: *KdaPoolCtx = @ptrCast(@alignCast(raw));
+    mixAsRange(f32, true, c.y, c.S, c.proj, c.fgate, c.braw, c.g2, c.conv_q, c.conv_k, c.conv_v, c.A_log, c.dt_bias, c.o_norm, c.s, c.rows, c.history, h_lo, h_hi);
+}
+
+/// Incremental KDA parallelized across independent heads through the GGUF worker pool; byte-equal to mixState.
+pub fn mixStateOnPool(
+    pool: *pool_mod.Pool,
+    y: []f32,
+    S: []f32,
+    proj: []const f32,
+    fgate: []const f32,
+    braw: []const f32,
+    g2: []const f32,
+    conv_q: []const f32,
+    conv_k: []const f32,
+    conv_v: []const f32,
+    A_log: []const f32,
+    dt_bias: []const f32,
+    o_norm: []const f32,
+    s: Shape,
+    rows: u32,
+    history: [][3]f32,
+) error{ KdaWidthTooWide, KdaHistoryShape }!void {
+    if (s.width() > max_width) return error.KdaWidthTooWide;
+    if (history.len != 3 * s.width()) return error.KdaHistoryShape;
+    var ctx = KdaPoolCtx{
+        .y = y,
+        .S = S,
+        .proj = proj,
+        .fgate = fgate,
+        .braw = braw,
+        .g2 = g2,
+        .conv_q = conv_q,
+        .conv_k = conv_k,
+        .conv_v = conv_v,
+        .A_log = A_log,
+        .dt_bias = dt_bias,
+        .o_norm = o_norm,
+        .s = s,
+        .rows = rows,
+        .history = history,
+    };
+    pool.runHeads(@ptrCast(&ctx), kdaHeadWorker, s.heads, 1);
+}
+
 /// One stream of `rows` through one KDA layer, f32 with the kernel's bf16 rounds. `proj` is q|k|v at 3W.
 pub fn mix(
     y: []f32,
@@ -142,7 +233,30 @@ pub fn mix(
     rows: u32,
 ) error{KdaWidthTooWide}!void {
     if (s.width() > max_width) return error.KdaWidthTooWide;
-    mixAs(f32, true, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    mixAs(f32, true, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, null);
+}
+
+/// Incremental KDA carries the exact three preceding projections beside its recurrent matrix.
+pub fn mixState(
+    y: []f32,
+    S: []f32,
+    proj: []const f32,
+    fgate: []const f32,
+    braw: []const f32,
+    g2: []const f32,
+    conv_q: []const f32,
+    conv_k: []const f32,
+    conv_v: []const f32,
+    A_log: []const f32,
+    dt_bias: []const f32,
+    o_norm: []const f32,
+    s: Shape,
+    rows: u32,
+    history: [][3]f32,
+) error{ KdaWidthTooWide, KdaHistoryShape }!void {
+    if (s.width() > max_width) return error.KdaWidthTooWide;
+    if (history.len != 3 * s.width()) return error.KdaHistoryShape;
+    mixAs(f32, true, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, history);
 }
 
 /// Same mixer in float64, no extra rounding: oracle/kda_inner.py (copy of Model.kda, r = identity).
@@ -163,7 +277,7 @@ pub fn mixF64(
     rows: u32,
 ) error{KdaWidthTooWide}!void {
     if (s.width() > max_width) return error.KdaWidthTooWide;
-    mixAs(f64, false, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    mixAs(f64, false, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, null);
 }
 
 test "tiny KDA geometry is the k3_kda kernel's: 16 heads, D=128, 4 taps, lower_bound -5" {
@@ -276,7 +390,7 @@ fn checkOracle(bytes: []const u8) !void {
     const S_math = try a.alloc(f32, H * dim * dim);
     defer a.free(S_math);
     @memset(S_math, 0);
-    mixAs(f32, false, got_math, S_math, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    mixAs(f32, false, got_math, S_math, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, null);
     try gateMixMath(want, got_math, W, rows, H);
 
     const got32 = try a.alloc(f32, want_n);
@@ -285,6 +399,20 @@ fn checkOracle(bytes: []const u8) !void {
     defer a.free(S32);
     @memset(S32, 0);
     try mix(got32, S32, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    const rates = try a.alloc(f32, H);
+    defer a.free(rates);
+    for (rates, A_log) |*v, log| v.* = @exp(log);
+    const stored_y = try a.alloc(f32, want_n);
+    defer a.free(stored_y);
+    const stored_s = try a.alloc(f32, H * dim * dim);
+    defer a.free(stored_s);
+    @memset(stored_s, 0);
+    var rate_shape = s;
+    rate_shape.stored_rate = true;
+    try mix(stored_y, stored_s, proj, fgate, braw, g2, conv_q, conv_k, conv_v, rates, dt_bias, o_norm, rate_shape, rows);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(got32), std.mem.sliceAsBytes(stored_y));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(S32), std.mem.sliceAsBytes(stored_s));
+
     var row: u32 = 0;
     while (row < rows) : (row += 1) {
         var worst: f64 = 0;

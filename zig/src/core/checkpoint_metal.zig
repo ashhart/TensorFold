@@ -2,8 +2,8 @@
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
-const st = @import("safetensors.zig");
-const file_cache = @import("checkpoint_file_cache.zig");
+const st = @import("core").safetensors;
+const file_cache = @import("core").checkpoint_file_cache;
 
 pub const DType = st.DType;
 
@@ -47,6 +47,7 @@ pub const Checkpoint = struct {
     shards: std.ArrayList(Shard) = .empty,
     tensors: std.StringHashMapUnmanaged(Tensor) = .empty,
     deferred: std.StringHashMapUnmanaged(Deferred) = .empty,
+    selected_bytes: usize = 0, // what addFileSelected would hold: each file's span from its first selected tensor to its last
     files: std.ArrayList(File) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Checkpoint {
@@ -65,6 +66,12 @@ pub const Checkpoint = struct {
 
     /// As addFileSelected; with `later`, its named tensors stay in the file for `read`, the rest pack into one buffer.
     pub fn addFileSplit(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, selected: ?[]const u8, later: ?Later) !void {
+        const prefixes: []const []const u8 = if (selected) |s| &.{s} else &.{};
+        return self.addFileSplitPrefixes(device, path, prefix, prefixes, later);
+    }
+
+    /// As addFileSplit, selecting any tensor starting with one of `prefixes` (empty selects all).
+    pub fn addFileSplitPrefixes(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, prefixes: []const []const u8, later: ?Later) !void {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) {
             std.log.err("cannot open {s}", .{path});
@@ -89,16 +96,17 @@ pub const Checkpoint = struct {
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const entries = try st.parseHeaderPrefix(arena.allocator(), header, data_len, selected);
+        const entries = try st.parseHeaderPrefixes(arena.allocator(), header, data_len, prefixes);
         if (entries.count() == 0) return;
-        if (later) |pick| return self.split(device, fd, &held, data_start, entries, prefix, pick);
-        var begin: usize = if (selected == null) 0 else data_len;
-        var limit: usize = if (selected == null) data_len else 0;
+        var begin: usize = if (prefixes.len == 0) 0 else data_len;
+        var limit: usize = if (prefixes.len == 0) data_len else 0;
         for (entries.values()) |e| {
             begin = @min(begin, e.begin);
             limit = @max(limit, e.end);
         }
         const bytes = limit - begin;
+        self.selected_bytes += bytes;
+        if (later) |pick| return self.split(device, fd, &held, data_start, entries, prefix, pick);
         const buffer = try device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         var transferred = false;
         errdefer if (!transferred) buffer.deinit();
@@ -306,10 +314,13 @@ pub const Stage = struct {
     }
 };
 
+/// The most one pread asks for: macOS refuses a count above INT_MAX, so a longer span takes several calls.
+const max_pread = 1 << 30;
+
 fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, @min(dest.len - done, max_pread), @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
@@ -376,6 +387,7 @@ test "full and selected checkpoint views retain data, ownership and relative off
     try selected.addFileSelected(device, path, "", "text.");
     try std.testing.expectEqual(@as(usize, 30), full.residentBytes());
     try std.testing.expectEqual(@as(usize, 26), selected.residentBytes());
+    try std.testing.expectEqual(selected.residentBytes(), selected.selected_bytes);
     const a = try full.get("text.weight");
     const b = try selected.get("text.weight");
     try std.testing.expectEqual(@as(usize, 4), a.offset);
@@ -410,6 +422,7 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     defer split.deinit();
     try split.addFileSplit(device, path, "", "text.", Weights.later);
     try std.testing.expectEqual(@as(usize, 2), split.residentBytes());
+    try std.testing.expectEqual(@as(usize, 26), split.selected_bytes); // the span addFileSelected holds for "text."
     try std.testing.expect(split.has("text.weight"));
     try std.testing.expectError(error.DeferredTensor, split.get("text.weight"));
     try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try split.get("text.scales")).host(u16));
@@ -431,6 +444,26 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     try std.testing.expectError(error.ShardClosed, split.read("text.weight", 0, &part));
     try std.testing.expectEqualSlices(u32, (try full.get("text.weight")).host(u32), w.host(u32));
     try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try split.get("text.scales")).host(u16));
+}
+
+test "a span longer than one pread may ask for is read whole" {
+    const len: usize = (1 << 31) + 4096;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/sparse.bin", .{tmp.sub_path}, 0);
+    defer gpa.free(path);
+    const fd = platform.c.open(path, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(platform.c.mode_t, 0o600));
+    if (fd < 0) return error.SkipZigTest;
+    defer _ = platform.c.close(fd);
+    const tail = "the last bytes";
+    if (platform.c.pwrite(fd, tail.ptr, tail.len, @intCast(len - tail.len)) != tail.len) return error.SkipZigTest;
+    const dest = std.posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0) catch return error.SkipZigTest;
+    defer std.posix.munmap(dest);
+    try readAll(fd, dest, 0);
+    try std.testing.expectEqualStrings(tail, dest[len - tail.len ..]);
+    try std.testing.expectEqual(@as(u8, 0), dest[max_pread]);
+    try std.testing.expectError(error.ShortRead, readAll(fd, dest[0..2], len - 1));
 }
 
 test {

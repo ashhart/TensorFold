@@ -85,7 +85,23 @@ try {
   await fs.writeFile(path.join(wrongGeometry, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768, text_config: { hidden_size: 1024, num_hidden_layers: 24, vocab_size: 151936 } }))
   const servedGeometry = path.join(modelsDir, 'served-geometry')
   await checkpoint(servedGeometry)
-  await fs.writeFile(path.join(servedGeometry, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768, text_config: { hidden_size: 2048, num_hidden_layers: 24, vocab_size: 248320, intermediate_size: 6144, linear_num_key_heads: 16, linear_num_value_heads: 16, linear_key_head_dim: 128, linear_value_head_dim: 128, linear_conv_kernel_dim: 6144, num_attention_heads: 8, num_key_value_heads: 2, head_dim: 256, full_attention_interval: 4 } }))
+  const servedConfig = {
+    model_type: 'qwen3_5',
+    quantization: { bits: 4, group_size: 64 },
+    max_position_embeddings: 32768,
+    text_config: {
+      hidden_size: 2048, num_hidden_layers: 24, vocab_size: 248320, intermediate_size: 6144,
+      linear_num_key_heads: 16, linear_num_value_heads: 16, linear_key_head_dim: 128, linear_value_head_dim: 128,
+      linear_conv_kernel_dim: 4, num_attention_heads: 8, num_key_value_heads: 2, head_dim: 256, full_attention_interval: 4,
+    },
+  }
+  await fs.writeFile(path.join(servedGeometry, 'config.json'), JSON.stringify(servedConfig))
+  const wrongConvolution = path.join(modelsDir, 'wrong-convolution')
+  await checkpoint(wrongConvolution)
+  await fs.writeFile(path.join(wrongConvolution, 'config.json'), JSON.stringify({
+    ...servedConfig,
+    text_config: { ...servedConfig.text_config, linear_conv_kernel_dim: 6144 },
+  }))
   const incomplete = path.join(modelsDir, 'incomplete')
   await checkpoint(incomplete)
   await fs.writeFile(path.join(incomplete, 'model.safetensors.index.json'), JSON.stringify({ weight_map: { a: 'model-00001-of-00002.safetensors', b: 'model-00002-of-00002.safetensors' } }))
@@ -111,6 +127,10 @@ try {
   assert.match(refused.reason!, /hidden size is 1024/)
   assert.match(refused.reason!, /UnsupportedQwenGeometry/)
   assert.equal(selected.models.find((model) => model.path === servedGeometry)?.loadable, true, 'the geometry the engine serves stays offered')
+  const refusedConvolution = selected.models.find((model) => model.path === wrongConvolution)!
+  assert.equal(refusedConvolution.complete, true)
+  assert.equal(refusedConvolution.loadable, false)
+  assert.match(refusedConvolution.reason!, /linear conv kernel dim is 6144/)
   assert.equal(selected.models.find((model) => model.path === foreign)?.complete, true)
   assert.match(selected.models.find((model) => model.path === incomplete)!.reason!, /missing.*shards/)
   assert.match(selected.models.find((model) => model.path === invalid)!.reason!, /safetensors/)
@@ -179,6 +199,45 @@ try {
   assert.ok(escaped && !escaped.loadable, 'an entry without a memory verdict keeps its own reason through the refresh')
   const rescan = await lowMemory.scan()
   assert.deepEqual(rescan.models.map((model: any) => [model.id, model.loadable, model.reason]), lowered.models.map((model: any) => [model.id, model.loadable, model.reason]), 'a later rescan agrees with the refreshed state')
+
+  const qwen27 = {
+    hidden_size: 5120, vocab_size: 248320, num_hidden_layers: 64, intermediate_size: 17408,
+    linear_num_key_heads: 16, linear_num_value_heads: 48, linear_key_head_dim: 128,
+    linear_value_head_dim: 128, linear_conv_kernel_dim: 4, num_attention_heads: 24,
+    num_key_value_heads: 4, head_dim: 256, full_attention_interval: 4,
+  }
+  const qwen27Library = library({ appHome: path.join(root, 'qwen27-app') })
+  const qwen27Models = path.join(root, 'qwen27-models')
+  const qwen27Cases = [
+    { name: 'untied', tied: false, text: qwen27 },
+    { name: 'wrong-kv-heads', tied: false, text: { ...qwen27, num_key_value_heads: 2 } },
+    { name: 'wrong-interval', tied: false, text: { ...qwen27, full_attention_interval: 2 } },
+    { name: 'tied-root', tied: true, text: qwen27 },
+    { name: 'tied-tower', tied: false, text: { ...qwen27, tie_word_embeddings: true } },
+  ]
+  for (const { name, tied, text } of qwen27Cases) {
+    const folder = path.join(qwen27Models, name)
+    await checkpoint(folder)
+    await fs.writeFile(path.join(folder, 'config.json'), JSON.stringify({
+      model_type: 'qwen3_5', tie_word_embeddings: tied, quantization: { bits: 4, group_size: 64 },
+      text_config: text,
+    }))
+  }
+  const qwen27Entries = (await qwen27Library.addFolder(qwen27Models)).models
+  const untied = qwen27Entries.find((model) => model.path === path.join(qwen27Models, 'untied'))!
+  assert.equal(untied.loadable, true, 'the qualified untied 27B is available in the library')
+  assert.equal((await qwen27Library.resolve(untied.id)).path, untied.path)
+  const wrongHeads = qwen27Entries.find((model) => model.path === path.join(qwen27Models, 'wrong-kv-heads'))!
+  assert.equal(wrongHeads.loadable, false)
+  assert.match(wrongHeads.reason!, /num key value heads is 2.*UnqualifiedQwenShape/)
+  const wrongInterval = qwen27Entries.find((model) => model.path === path.join(qwen27Models, 'wrong-interval'))!
+  assert.equal(wrongInterval.loadable, false)
+  assert.match(wrongInterval.reason!, /layer types/)
+  for (const name of ['tied-root', 'tied-tower']) {
+    const tied = qwen27Entries.find((model) => model.path === path.join(qwen27Models, name))!
+    assert.equal(tied.loadable, false)
+    assert.match(tied.reason!, /UnsupportedQwenGeometry/)
+  }
 
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')

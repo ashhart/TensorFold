@@ -71,7 +71,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     defer refused.deinit(h.gpa);
     h.lock();
     // a stale device takes no reply (`learn.refuse` ends the queued ones), as in the default loop
-    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes and !pressure.holds(h)) {
+    if (!h.stale.load(.acquire) and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes and !pressure.holds(h) and !h.disk.holding()) {
         rd.vtable.begin_admit(rd.ctx);
         var free = h.info_.lanes - h.admitted.items.len;
         var i: usize = 0;
@@ -110,7 +110,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
         const behind: Rounds.Wait = rest orelse if (pressure.holds(h)) .memory_pressure else .engine_busy;
         for (h.queued.items[@min(i, h.queued.items.len)..]) |job| job.wait_reason = behind;
     } else {
-        const why: Rounds.Wait = if (h.stale) .engine_unavailable else if (pressure.holds(h)) .memory_pressure else .engine_busy;
+        const why: Rounds.Wait = if (h.stale.load(.acquire)) .engine_unavailable else if (pressure.holds(h)) .memory_pressure else .engine_busy;
         for (h.queued.items) |job| job.wait_reason = why;
     }
     h.unlock();
@@ -294,7 +294,13 @@ fn runFinals(h: *LaneHost) void {
 
 /// The engine thread under a round planner; an idle round waits for an arrival, a cancel or a short timeout.
 pub fn run(h: *LaneHost, rd: Rounds) void {
+    if (h.folded_memory == null) return loop(false, h, rd); // learning off: main's loop, memory ops compiled out
+    return loop(true, h, rd);
+}
+
+fn loop(comptime memory: bool, h: *LaneHost, rd: Rounds) void {
     while (true) {
+        @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
         var activity = @import("lane_activity.zig").Activity.enter(h.activity);
         defer activity.end();
         ends.takeCancels(h);
@@ -302,8 +308,9 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         rows_host.answer(h);
         @import("lane_host_score.zig").answer(h);
         learn.refuse(h);
+        if (memory) @import("lane_host_memory.zig").answerOneInFlight(h);
         h.lock();
-        if (h.closing) {
+        if (h.closing.load(.acquire)) {
             const left = h.queued.items.len + h.admitted.items.len;
             h.unlock();
             if (h.lesson_open) {
@@ -315,15 +322,19 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
             continue;
         }
         const work = h.admitted.items.len > 0 or (h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes);
+        if (memory and !work and @import("lane_host_memory.zig").ready(h)) {
+            h.unlock();
+            @import("lane_host_memory.zig").answer(h);
+            continue;
+        }
         if (!work and learn.ready(h)) {
             h.unlock();
             learn.step(h);
             continue;
         }
         if (!work) {
-            activity.end();
-            if (rows_host.idle(h)) continue;
-            if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            if (@import("lane_activity.zig").idleRows(h, &activity)) continue;
+            if (h.cancels.items.len == 0 and (!memory or h.mem_ops.asks.items.len == 0)) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();
             continue;
         }

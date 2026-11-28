@@ -96,7 +96,6 @@ pub const Core = struct {
         const v = try c.scratch.alloc(act, k.elements);
         try c.project(v, x, layer.v);
         const queries = try c.scratch.alloc(act, q.elements);
-        try vk.orExit(c.acc.attn.setBasePosition(c.cmds, c.staging, @intCast(base), c.timeout_ns));
         try vk.orExit(c.acc.attn.ropeQueries(c.cmds, queries, qn, rows, c.timeout_ns));
         try vk.orExit(c.acc.attn.cacheKV(c.cmds, s.keysFor(slot), s.valuesFor(slot), kn, v, rows, base, s.capacity, c.timeout_ns));
         const y = try c.scratch.alloc(act, q.elements);

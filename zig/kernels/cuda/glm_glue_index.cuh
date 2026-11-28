@@ -1,14 +1,19 @@
 // sparse.py's DSA indexer glue by hand: the index key write, the 4-token pools and the per-row top-512 pools.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_triton.cuh"
+#include "glm_index_rope.cuh"
 
 using namespace glm_triton;
 
-// sparse._index_write, a warp a row (D 128): LayerNorm of k_raw (div.full, sqrt.approx) into ik, gate row into ig.
+// sparse._index_write, a warp a row (D 128): LayerNorm of k_raw, dims below `rope` roped, into ik; gate row into ig.
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_index_write(const __nv_bfloat16* kr, int64_t k_stride, const float* gr, const __nv_bfloat16* lnw,
-                       const __nv_bfloat16* lnb, __nv_bfloat16* ik, __nv_bfloat16* ig, const int* pos, float eps) {
+                       const __nv_bfloat16* lnb, __nv_bfloat16* ik, __nv_bfloat16* ig, const int* pos, float eps,
+                       int rope, const float* inv) {
+  glm_pdl::enter();
   constexpr int D = 128;
   const int64_t r = blockIdx.x, at = (int64_t)pos[0] + r;
   const int d0 = threadIdx.x * 4;
@@ -27,21 +32,31 @@ extern "C" __global__ void __launch_bounds__(32)
   v = __fmaf_rn(xc[3], xc[3], v);
   for (int o = 16; o > 0; o >>= 1) v = v + __shfl_xor_sync(0xffffffffu, v, o);
   const float sd = sqrt_approx(fadd(eps, div_full(v, (float)D)));
+  float y[4];
+  for (int j = 0; j < 4; ++j) y[j] = __fmaf_rn(div_full(xc[j], sd), bf(lnw[d0 + j]), bf(lnb[d0 + j]));
+  if (d0 < rope)  // rope % 4 == 0: both of this lane's pairs
+    for (int j = 0; j < 4; j += 2) glm_rope::pair(y[j], y[j + 1], at, inv, (d0 + j) / 2);
   for (int j = 0; j < 4; ++j) {
     const int d = d0 + j;
-    ik[at * D + d] = __float2bfloat16_rn(__fmaf_rn(div_full(xc[j], sd), bf(lnw[d]), bf(lnb[d])));
+    ik[at * D + d] = __float2bfloat16_rn(y[j]);
     ig[at * D + d] = __float2bfloat16_rn(gr[r * D + d]);
   }
 }
 
-// sparse._pool_keys, a warp a completed pool: softmax of its 4 gate rows (+ ape) times bf16 keys, summed in order.
+// sparse._pool_keys, a warp a pool: softmax of its 4 gate rows (+ ape) times keys, in order; `pool` 1: keys as written.
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_pool_keys(const __nv_bfloat16* ik, const __nv_bfloat16* ig, const __nv_bfloat16* ape, __nv_bfloat16* pk,
-                     const int* pos, int64_t rows, const int* pt, int64_t ps) {
+                     const int* pos, int64_t rows, const int* pt, int64_t ps, int pool) {
+  glm_pdl::enter();
   constexpr int D = 128;
-  const int64_t P = pos[0], p = P / 4 + blockIdx.x;
-  if (4 * p + 3 > P + rows - 1) return;
-  __nv_bfloat16* out = pk + glm_pages::at<128>(pt, ps / 2, p, D);  // a page holds 512 rows' 128 pools
+  const int64_t P = pos[0], p = P / pool + blockIdx.x;
+  if (pool * p + pool - 1 > P + rows - 1) return;
+  const int64_t pp = 512 / pool;  // a page holds 512 rows' pools
+  __nv_bfloat16* out = pk + (pt ? (int64_t)pt[p / pp] * (ps / 2) + (p % pp) * D : p * D);
+  if (pool == 1) {
+    for (int j = 0; j < 4; ++j) out[threadIdx.x * 4 + j] = ik[p * D + threadIdx.x * 4 + j];
+    return;
+  }
   for (int j = 0; j < 4; ++j) {
     const int d = threadIdx.x * 4 + j;
     float l[4], e[4];
@@ -91,7 +106,8 @@ __device__ __forceinline__ int block_scan(int v, int (*wsum)[W], int slot, int* 
 
 // sparse._select_rows (VISIBLE), a row per T-thread block: K best visible pools by 8-bit radix select, ties to lower.
 template <int T>
-__device__ __forceinline__ void select_row(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
+__device__ __forceinline__ void select_row(const float* scores, int64_t* out, int64_t np, const int* pos, int k,
+                                           int pool) {
   __shared__ int hist[256];
   __shared__ uint32_t sh_prefix;
   __shared__ int sh_need, wsum[2][T / 32];
@@ -99,7 +115,7 @@ __device__ __forceinline__ void select_row(const float* scores, int64_t* out, in
   const float* row = scores + r * np;
   const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
   const unsigned below = (1u << lane) - 1;
-  const int64_t vis = ((int64_t)pos[0] + r + 1) / 4;
+  const int64_t vis = ((int64_t)pos[0] + r + 1) / pool;
   const int64_t limit = np < (vis > k ? vis : k) ? np : (vis > k ? vis : k);
   const bool vec = (reinterpret_cast<uintptr_t>(row) & 15) == 0;
   // The order keys of pools c + 8 t .. + 7 (0 past limit; callers test the index).
@@ -193,12 +209,14 @@ __device__ __forceinline__ void select_row(const float* scores, int64_t* out, in
 
 // sparse._select_rows (VISIBLE), a row per 4-warp block: K best visible pools by 8-bit radix select, ties to lower.
 extern "C" __global__ void __launch_bounds__(128)
-    tf_glm_select_rows(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
-  glm_index::select_row<128>(scores, out, np, pos, k);
+    tf_glm_select_rows(const float* scores, int64_t* out, int64_t np, const int* pos, int k, int pool) {
+  glm_pdl::enter();
+  glm_index::select_row<128>(scores, out, np, pos, k, pool);
 }
 
 // tf_glm_select_rows a row per 1,024-thread block, for a few rows over many pools (a decode step's): its bytes.
 extern "C" __global__ void __launch_bounds__(1024)
-    tf_glm_select_rows_wide(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
-  glm_index::select_row<1024>(scores, out, np, pos, k);
+    tf_glm_select_rows_wide(const float* scores, int64_t* out, int64_t np, const int* pos, int k, int pool) {
+  glm_pdl::enter();
+  glm_index::select_row<1024>(scores, out, np, pos, k, pool);
 }

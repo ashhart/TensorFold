@@ -81,8 +81,8 @@ test "stable profile: capabilities describe the shared paging variable by family
         const families = fields.get("families").?.array.items;
         if (fields.get("report_values").? == .null) {
             try std.testing.expectEqualStrings("auto", fields.get("syntax").?.string);
-            try std.testing.expectEqual(@as(usize, 1), families.len);
-            try std.testing.expectEqualStrings("glm5_next", families[0].string);
+            try std.testing.expectEqual(@as(usize, 2), families.len); // GLM-5.3-Flash, full GLM-5.3
+            for (families, [_][]const u8{ "glm5_next", "glm_moe_dsa" }) |f, want| try std.testing.expectEqualStrings(want, f.string);
         } else {
             const values = fields.get("report_values").?.array.items;
             try std.testing.expectEqual(@as(usize, 2), values.len);
@@ -137,12 +137,8 @@ test "vision image budget: explicit large budgets reach the engine, with bounded
     var u: Usage = .{};
     for ([_][]const u8{ "16", "16384", "65536", "262144" }) |value| {
         const n = try std.fmt.parseInt(u32, value, 10);
-        for ([_][]const []const u8{
-            &.{ "m", "--vision", "--vision-image-tokens", value },
-            &.{ "m", "--vision", try std.fmt.allocPrint(a, "--vision-image-tokens={s}", .{value}) },
-        }) |argv| {
-            const args = try parse(a, argv, &u);
-            const vision = (try request(a, "d", "t", args)).vision.?;
+        for ([_][]const []const u8{ &.{ "m", "--vision", "--vision-image-tokens", value }, &.{ "m", "--vision", try std.fmt.allocPrint(a, "--vision-image-tokens={s}", .{value}) } }) |argv| {
+            const vision = (try request(a, "d", "t", try parse(a, argv, &u))).vision.?; // both spellings reach the engine
             try std.testing.expectEqual(n, vision.image_tokens);
             try std.testing.expect(vision.image_tokens_set);
         }
@@ -150,6 +146,10 @@ test "vision image budget: explicit large budgets reach the engine, with bounded
     const normal = (try request(a, "d", "t", try parse(a, &.{ "m", "--vision" }, &u))).vision.?;
     try std.testing.expectEqual(@as(u32, 4096), normal.image_tokens);
     try std.testing.expect(!normal.image_tokens_set);
+    // --vision-image-share: the request's split by default, the fixed share on opt-in, and it needs --vision
+    try std.testing.expectEqual(api.ImageShare.request, normal.image_share);
+    try std.testing.expectEqual(api.ImageShare.fixed, (try request(a, "d", "t", try parse(a, &.{ "m", "--vision", "--vision-image-share=fixed" }, &u))).vision.?.image_share);
+    for ([_][]const []const u8{ &.{ "m", "--vision", "--vision-image-share", "half" }, &.{ "m", "--vision-image-share", "fixed" } }) |argv| try std.testing.expectError(error.Usage, parse(a, argv, &u));
     for ([_][]const u8{ "15", "262145", "-1", "4294967296", "many" }) |bad|
         try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision", "--vision-image-tokens", bad }, &u));
 }
@@ -283,8 +283,8 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqualStrings("notes", on.compact_memory.?);
     try std.testing.expectEqualStrings("graph.json", (try parse(a, &.{ "m", "--slide-graph", "graph.json" }, &u)).slide_graph.?);
     try std.testing.expect((try parse(a, &.{ "m", "--slide" }, &u)).slide);
-    try std.testing.expect((try parse(a, &.{ "m", "--cortheon" }, &u)).cortheon and !(try parse(a, &.{"m"}, &u)).cortheon);
-    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--cortheon\": {}") != null);
+    try std.testing.expect((try parse(a, &.{ "m", "--cortheon" }, &u)).cortheon and !(try parse(a, &.{"m"}, &u)).cortheon and !(try parse(a, &.{"m"}, &u)).log_json and (try parse(a, &.{ "m", "--log-json" }, &u)).log_json);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--cortheon\": {}") != null and std.mem.indexOf(u8, doc, "\"--log-json\": {}") != null);
     try std.testing.expectEqual(@as(?f64, 0.5), (try parse(a, &.{ "m", "--compact-at", "0.5" }, &u)).compact_fraction);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));

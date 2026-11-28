@@ -1,0 +1,30 @@
+[tensorfold] HIP rank 0 of 2: policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=1024,fill_rows=512; mtp drafts 3 under 0.3, 8 snapshots
+info: HIP memory budget from the card's memory: 31.8 of 31.9 GiB free, 1.0 GiB reserve
+[tensorfold] chat template: the checkpoint's
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] HIP gfx1201 device 0, rank 0 of 2: Flash Next, 27.00 GiB on the device, 1 stream of 41024 positions, 1.20 GiB each; prompts in 1024-row chunks
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving 0a1bf6faa0a2f16a314da889e8e6c80226455dbf at http://127.0.0.1:8092/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: MTP + copies; context: 40960; loaded in 69.1s)
+[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] done cmpl-7b7c3d44cd48b5ce1fe0e907625ff4b5 prompt=2048 cached=0 thinking=False effort=none tokens=1 sha=30e26cef13a6 finish=length rounds=0 accepted=0/0 ttft=1.728 decode=0.000 elapsed=1.728 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-9c9adaebe882e985ff049f75b8cde043 prompt=2048 cached=0 thinking=False effort=none tokens=1 sha=30e26cef13a6 finish=length rounds=0 accepted=0/0 ttft=1.677 decode=0.000 elapsed=1.677 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-8a9b8e694dd5d681b1d701adab326899 prompt=2048 cached=0 thinking=False effort=none tokens=1 sha=30e26cef13a6 finish=length rounds=0 accepted=0/0 ttft=1.679 decode=0.000 elapsed=1.679 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-a032778c057524e9f26f4f979824dbd2 prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=2452984f72ef finish=length rounds=0 accepted=0/0 ttft=7.040 decode=0.000 elapsed=7.040 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-e38d5f0fb1487adda109c6ef638021e7 prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=2452984f72ef finish=length rounds=0 accepted=0/0 ttft=7.008 decode=0.000 elapsed=7.008 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-7d3d763fa183345920f540d9f2326c5f prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=2452984f72ef finish=length rounds=0 accepted=0/0 ttft=7.030 decode=0.000 elapsed=7.030 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-bf62eef9083d76e10e42f077a35d6707 prompt=32768 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=30.317 decode=0.000 elapsed=30.317 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-b71ca836c02678ac17c32cb2643513e3 prompt=32768 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=30.365 decode=0.000 elapsed=30.365 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-9388391b8c8bf3a0e5e6092f3df8714e prompt=32768 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=30.452 decode=0.000 elapsed=30.452 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

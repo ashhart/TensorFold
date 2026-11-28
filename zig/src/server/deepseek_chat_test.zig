@@ -7,6 +7,17 @@ const f = @import("hf_eos_fixture.zig");
 const tf = @import("control_tokens_fixture.zig");
 const t = std.testing;
 
+// HF load reads TF_DSV41_SCHEMA_PROMPT: pin it so an ambient export can never move a golden.
+fn unsetSchemaPrompt(a: std.mem.Allocator) !?[:0]const u8 {
+    const saved = if (@import("sys").getenv("TF_DSV41_SCHEMA_PROMPT")) |v| try a.dupeSentinel(u8, v, 0) else null;
+    _ = @import("sys").env.unsetenv("TF_DSV41_SCHEMA_PROMPT");
+    return saved;
+}
+
+fn restoreSchemaPrompt(saved: ?[:0]const u8) void {
+    if (saved) |v| _ = @import("sys").env.setenv("TF_DSV41_SCHEMA_PROMPT", v, 1);
+}
+
 fn fixture(a: std.mem.Allocator, kind: []const u8) !f.Fixture {
     var out = try f.Fixture.init(a, t.io, null);
     errdefer out.deinit();
@@ -21,6 +32,8 @@ test "DeepSeek chat: missing Jinja uses the committed encoding.py text goldens" 
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const saved_schema = try unsetSchemaPrompt(a);
+    defer restoreSchemaPrompt(saved_schema);
     var tmp = try fixture(a, "deepseek_v4");
     defer tmp.deinit();
     var problem: []const u8 = "";
@@ -133,13 +146,27 @@ test "DeepSeek chat: an explicit override wins, a checkpoint Jinja does not, and
     // a server with image input: the part becomes the image token, which images.zig expands
     const served = try native.text().render(a, images, .{ .images = true }, &problem);
     const ids = try served.encode(native.text(), a, &problem);
-    try t.expect(std.mem.indexOfScalar(u32, ids, native.text().tokenId("<｜deepseek_image｜>").?) != null);
+    const image_token = "<｜deepseek_image｜>";
+    const image_id = native.text().tokenId(image_token).?;
+    try t.expect(std.mem.indexOfScalar(u32, ids, image_id) != null);
+    // a text part that spells the token beside an image part: two spellings, only the image's is the template's
+    const typed = (try json.parseText(a, "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<｜deepseek_image｜>\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"x\"}}]}]")).ok;
+    const both = try native.text().render(a, typed, .{ .images = true }, &problem);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, both.text, image_token));
+    const first = std.mem.indexOf(u8, both.text, image_token).?;
+    const second = std.mem.indexOfPos(u8, both.text, first + 1, image_token).?;
+    try t.expect(!both.isTemplate(first, first + image_token.len));
+    try t.expect(both.isTemplate(second, second + image_token.len));
+    const both_ids = try both.encode(native.text(), a, &problem);
+    try t.expectEqual(@as(usize, 1), std.mem.count(u32, both_ids, &.{image_id}));
 }
 
 test "DeepSeek chat: response_format shows its schema unless TF_DSV41_SCHEMA_PROMPT=0" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const saved_schema = try unsetSchemaPrompt(a);
+    defer restoreSchemaPrompt(saved_schema);
     var tmp = try fixture(a, "deepseek_v41");
     defer tmp.deinit();
     var problem: []const u8 = "";

@@ -7,6 +7,8 @@ const wts = @import("weights.zig");
 const st = @import("state.zig");
 const kern = @import("kernels.zig");
 const layers = @import("layers.zig");
+const pk = @import("prefill_kernels.zig");
+const bolt = @import("bolt.zig");
 const tree = @import("tree.zig");
 const encoder = @import("encoder.zig");
 const Sampling = @import("lanes").sampling.Sampling;
@@ -62,14 +64,23 @@ pub fn ints8(values: []const i32) [8]i32 {
     return out;
 }
 
+/// A stage of a forward a test tool can look at (tf-nemotron-forward --stages): each names the buffer just written.
+pub const Point = enum { h_in, x_in, in_proj, conv, scan, gnorm, qkv, attn, gate, route_idx, route_wt, shared, into, experts, combine, mixer_out, h_out, x_out };
+
+/// A test tool's copy of each stage's output (bytes from offset 0 of `src`); null in the engine.
+pub const Tap = struct { ctx: *anyopaque, at: *const fn (ctx: *anyopaque, f: Forward, e: *Enc, p: Point, src: Buffer, bytes: usize) void };
+
 pub const Forward = struct {
     c: cfg.Config,
     k: *const kern.Kernels,
+    p: ?*const pk.Kernels = null, // the MLX-exact ops (Bolt's gemv, route and combine)
+    tap: ?Tap = null, // tf-nemotron-forward --stages only
     w: *const wts.Weights,
     s: *st.Scratch,
     pool: *st.Pool,
     geometry: usize = 0, // routed experts' (rows, simdgroups) variant: 0 generated, i: kernels.geometries[i - 1]
     members: usize = 0, // routed experts' member rows a pass (2 or 4: the shared-unpack kernels; 0: one at a time)
+    serial_attention: bool = false, // pre-M5 paged host verify chains use the one-row attention program
     round: ?layers.RoundArgs = null, // a GPU-side round's Mamba tables and routed rows, written on the GPU (one segment)
     masks: ?*const Masks = null, // structured output's bits (segments with a mask_row)
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
@@ -235,7 +246,7 @@ pub const Forward = struct {
         std.debug.assert(rows >= 1 and rows <= s.rows);
         self.embed(e, rows, ids, ids_off, s.h);
         self.rms(e, rows, s.h, 0, d, self.w.norms[0], s.x, 0, d);
-        self.xsum(e, "xsum_2688", d, s.x, 0, s.xs, rows);
+        self.xsumHidden(e, s.x, 0, s.xs, rows);
         const t = layers.Tables.of(segs);
         var deepest: usize = 0;
         for (segs) |g| if (g.parents) |pp| {
@@ -246,20 +257,79 @@ pub const Forward = struct {
         var attention: usize = 0;
         for (0..c.layers) |i| {
             const next = if (i + 1 < c.layers) self.w.norms[i + 1] else self.w.norm_f;
+            self.tapAt(e, .h_in, s.h, rows * d * 2);
+            self.tapAt(e, .x_in, s.x, rows * d * 2);
+            switch (self.w.layers[i]) {
+                .mamba => |m| {
+                    layers.mamba(self, e, m, mamba, &t, rows);
+                    self.tapAt(e, .mixer_out, s.delta, rows * d * 2);
+                    self.norm(e, s.delta, next, rows, c.eps);
+                    mamba += 1;
+                },
+                .moe => |m| if (c.bolt) bolt.moe(self, e, m, next, rows, c.eps) else layers.moe(self, e, m, next, rows, c.eps),
+                .attention => |a| {
+                    var kvs: [st.max_rows]layers.Kvs = undefined;
+                    for (segs, 0..) |g, j| kvs[j] = .{ .kv = g.cache.kv[attention], .len = g.cache.len, .rows = g.rows, .tree = g.parents != null or g.gpu_tree != null, .deepest = deepest, .gpu = g.gpu, .gpu_tree = g.gpu_tree, .layer = attention };
+                    layers.attention(self, e, a, kvs[0..segs.len], rows);
+                    self.tapAt(e, .mixer_out, s.delta, rows * d * 2);
+                    self.norm(e, s.delta, next, rows, c.eps);
+                    attention += 1;
+                },
+            }
+            self.tapAt(e, .h_out, s.h, rows * d * 2);
+            self.tapAt(e, .x_out, s.x, rows * d * 2);
+        }
+    }
+
+    /// Partial forward to `layer_sem`; residuals at `layer_lex` -> `tap_lex`, `layer_sem` -> `scratch.h` (bf16).
+    pub fn bodyPartial(
+        forward: Forward,
+        e: *Enc,
+        segs: []const Seg,
+        ids: Buffer,
+        ids_off: usize,
+        layer_lex: usize,
+        layer_sem: usize,
+        tap_lex: Buffer,
+    ) void {
+        var self = forward;
+        self.segs = segs;
+        self.untaught = true;
+        const c = self.c;
+        const s = self.s;
+        const d = c.hidden;
+        var rows: usize = 0;
+        for (segs) |g| rows += g.rows;
+        std.debug.assert(rows >= 1 and rows <= s.rows);
+        std.debug.assert(layer_lex < layer_sem and layer_sem < c.layers);
+        self.embed(e, rows, ids, ids_off, s.h);
+        self.rms(e, rows, s.h, 0, d, self.w.norms[0], s.x, 0, d);
+        self.xsumHidden(e, s.x, 0, s.xs, rows);
+        const t = layers.Tables.of(segs);
+        var mamba: usize = 0;
+        var attention: usize = 0;
+        for (0..layer_sem + 1) |i| {
+            const next = if (i + 1 < c.layers) self.w.norms[i + 1] else self.w.norm_f;
             switch (self.w.layers[i]) {
                 .mamba => |m| {
                     layers.mamba(self, e, m, mamba, &t, rows);
                     self.norm(e, s.delta, next, rows, c.eps);
                     mamba += 1;
                 },
-                .moe => |m| layers.moe(self, e, m, next, rows, c.eps),
+                .moe => |m| if (c.bolt) bolt.moe(self, e, m, next, rows, c.eps) else layers.moe(self, e, m, next, rows, c.eps),
                 .attention => |a| {
                     var kvs: [st.max_rows]layers.Kvs = undefined;
-                    for (segs, 0..) |g, j| kvs[j] = .{ .kv = g.cache.kv[attention], .len = g.cache.len, .rows = g.rows, .tree = g.parents != null or g.gpu_tree != null, .deepest = deepest, .gpu = g.gpu, .gpu_tree = g.gpu_tree, .layer = attention };
+                    for (segs, 0..) |g, j| kvs[j] = .{ .kv = g.cache.kv[attention], .len = g.cache.len, .rows = g.rows, .tree = false, .deepest = 0, .gpu = null, .gpu_tree = null, .layer = attention };
                     layers.attention(self, e, a, kvs[0..segs.len], rows);
                     self.norm(e, s.delta, next, rows, c.eps);
                     attention += 1;
                 },
+            }
+            if (i == layer_lex) {
+                e.pipe(self.k.get("tf_copy_u32"));
+                e.buf(s.h, 0, 0);
+                e.buf(tap_lex, 0, 1);
+                e.run(.{ (rows * d) / 2, 1, 1 }, .{ 256, 1, 1 });
             }
         }
     }
@@ -275,8 +345,10 @@ pub const Forward = struct {
                 .none => {},
                 .last => {
                     const off = (at + g.rows - 1) * d * 2;
-                    self.xsum(e, "xsum_2688", d, s.x, off, s.hx, 1);
-                    self.coop(e, "head", self.w.head, s.x, off, s.hx, s.logits, 1);
+                    if (self.w.head_dense) |hd| self.denseHead(e, hd, off, 1) else {
+                        self.xsumHidden(e, s.x, off, s.hx, 1);
+                        self.coop(e, "head", self.w.head, s.x, off, s.hx, s.logits, 1);
+                    }
                     if (g.mask_row) |r| self.masks.?.encode(e, s.logits, 0, self.c.vocab, r, 1);
                     self.pick(e, 1, self.c.vocab, null, g.draw, out, put);
                     put += 4;
@@ -286,7 +358,7 @@ pub const Forward = struct {
             at += g.rows;
         }
         if (head != .all) return;
-        self.coop(e, "head", self.w.head, s.x, 0, s.xs, s.logits, at);
+        if (self.w.head_dense) |hd| self.denseHead(e, hd, 0, at) else self.coop(e, "head", self.w.head, s.x, 0, s.xs, s.logits, at);
         at = 0;
         for (segs) |g| {
             if (g.mask_row) |r| self.masks.?.encode(e, s.logits, at * self.c.vocab * 2, self.c.vocab, r, g.rows);
@@ -393,7 +465,7 @@ pub const Forward = struct {
     /// Residual add of `delta` into h, the next input norm (`next`), and its 64-group sums into xs.
     pub fn norm(self: Forward, e: *Enc, delta: Buffer, next: anytype, rows: usize, eps: f32) void {
         const s = self.s;
-        e.pipe(self.k.get("add_norm_xs"));
+        e.pipe(if (self.c.bolt) self.k.get("add_norm_xs_bolt") else self.k.get("add_norm_xs"));
         e.buf(s.h, 0, 0);
         e.buf(delta, 0, 1);
         e.buf(next.buffer, next.offset, 2);
@@ -402,7 +474,23 @@ pub const Forward = struct {
         e.buf(s.h, 0, 5);
         e.buf(s.x, 0, 6);
         e.buf(s.xs, 0, 7);
-        e.run(.{ 896 * mp(rows), 1, 1 }, .{ 896, 1, 1 });
+        const t: usize = if (self.c.bolt) 512 else 896; // the threadgroup the instantiation bakes (D / T whole)
+        e.run(.{ t * mp(rows), 1, 1 }, .{ t, 1, 1 });
+    }
+
+    /// The hidden rows' 64-group sums at the model's hidden width (Lightning 2688, Bolt 4096).
+    pub fn xsumHidden(self: Forward, e: *Enc, x: Buffer, x_off: usize, xs: Buffer, rows: usize) void {
+        if (self.c.hidden == 4096) self.xsum(e, "xsum_4096", 4096, x, x_off, xs, rows) else self.xsum(e, "xsum_2688", self.c.hidden, x, x_off, xs, rows);
+    }
+
+    /// logits = x . lm_head^T for a full-precision bf16 LM head (Bolt keeps lm_head unquantized).
+    fn denseHead(self: Forward, e: *Enc, hd: wts.Dense, x_off: usize, rows: usize) void {
+        bolt.gemv(self, e, hd, self.s.x, x_off, self.s.logits, rows);
+    }
+
+    /// Hands the stage just written to the test tool's tap, if any (nothing is encoded without one).
+    pub fn tapAt(self: Forward, e: *Enc, p: Point, src: Buffer, bytes: usize) void {
+        if (self.tap) |t| t.at(t.ctx, self, e, p, src, bytes);
     }
 
     /// u32 rows of `src` from `src_off` into `dst` at `dst_off` (window ids into a shared round's ids).

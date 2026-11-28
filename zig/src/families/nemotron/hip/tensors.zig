@@ -11,6 +11,11 @@ pub const lm_head = "lm_head";
 /// The MTP head's file beside the shards; its names have no `backbone.` prefix.
 pub const mtp_file = "mtp-4bit.safetensors";
 
+/// Whether a checkpoint's token table is stored unquantized (weight tensor with no scales).
+pub fn hasBf16Embed(has_weight: bool, has_scales: bool) bool {
+    return has_weight and !has_scales;
+}
+
 /// Block `i`'s stem: its norm is `{stem}.norm.weight`, its mixer's tensors `{stem}.mixer.*`.
 pub fn layer(buf: []u8, i: usize) ![]const u8 {
     return std.fmt.bufPrint(buf, "backbone.layers.{d}", .{i});
@@ -80,7 +85,8 @@ pub fn mixerNames(kind: Kind) struct { projections: []const []const u8, vectors:
 pub fn eachText(c: *const Config, ctx: anytype, comptime f: fn (@TypeOf(ctx), []const u8) anyerror!void) !void {
     var buf: [192]u8 = undefined;
     for (parts) |p| {
-        try f(ctx, try std.fmt.bufPrint(&buf, "{s}.{s}", .{ embed, p }));
+        // a bf16 token table is its weight alone
+        if (!c.embed_bf16 or std.mem.eql(u8, p, "weight")) try f(ctx, try std.fmt.bufPrint(&buf, "{s}.{s}", .{ embed, p }));
         try f(ctx, try std.fmt.bufPrint(&buf, "{s}.{s}", .{ lm_head, p }));
     }
     try f(ctx, norm_f);

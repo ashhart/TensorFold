@@ -15,6 +15,8 @@ pub fn steps(b: *std.Build) void {
     b.step("test-cache-replay-host", "Replay equivalence, ownership, accounting and selector witnesses without devices").dependOn(&b.addRunArtifact(tests).step);
     const existing = b.addTest(.{ .root_module = cache });
     b.step("test-prompt-cache-host", "The snapshot store's existing host suite without a device backend").dependOn(&b.addRunArtifact(existing).step);
+    const miss_tests = b.addTest(.{ .root_module = cache, .filters = &.{"miss reasons:"} });
+    b.step("test-prompt-cache-miss-host", "Prompt-cache miss attribution without a device backend").dependOn(&b.addRunArtifact(miss_tests).step);
     const store_tests = b.addTest(.{ .root_module = cache, .filters = &.{ "prompt_cache", "prompt_radix" } });
     b.step("test-cache-store-host", "Snapshot store lookup, lifetime, reservation and eviction tests without devices").dependOn(&b.addRunArtifact(store_tests).step);
     const agent = b.addExecutable(.{ .name = "tf-cache-agent-replay", .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_agent_replay.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }) });

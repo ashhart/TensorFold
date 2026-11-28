@@ -40,7 +40,7 @@ const runtime = createToolContextRuntime({
 
 // Execute the production nested functions with inert persistence collaborators, avoiding a model run.
 async function productionMemoryCallbacks(thread: Thread) {
-  const source = await readFile(new URL('./thread-runtime.ts', import.meta.url), 'utf8')
+  const source = (await Promise.all(['./thread-runtime.ts', './thread-run-execution.ts'].map((file) => readFile(new URL(file, import.meta.url), 'utf8')))).join('\n')
   const tree = ts.createSourceFile('thread-runtime.ts', source, ts.ScriptTarget.Latest, true)
   let postRun: ts.FunctionDeclaration | undefined, compaction: ts.ArrowFunction | undefined
   function visit(node: ts.Node) {

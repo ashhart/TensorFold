@@ -24,6 +24,7 @@ pub const Ask = struct {
 /// Questions waiting for the engine thread (under the host's lock).
 pub const Queue = struct {
     asks: std.ArrayList(*Ask) = .empty,
+    answered: std.Io.Condition = .init, // askers alone wait here, untimed: the lane thread's timed waits use `wake`
 };
 
 /// Engine.score: queued for the engine thread, which runs it between two rounds; Failed when the host is closing.
@@ -56,10 +57,11 @@ pub fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
 fn put(h: *LaneHost, ask: *Ask) error{Failed}!void {
     h.lock();
     defer h.unlock();
-    if (h.closing) return error.Failed;
+    if (h.closing.load(.acquire)) return error.Failed;
+    @import("lane_activity.zig").restoreWork(h) catch return error.Failed;
     h.scores.asks.append(h.gpa, ask) catch return error.Failed;
     h.wake.broadcast(h.io);
-    while (!ask.done) h.wake.waitUncancelable(h.io, &h.mutex);
+    while (!ask.done) h.scores.answered.waitUncancelable(h.io, &h.mutex);
     if (ask.failed) return error.Failed;
 }
 
@@ -80,7 +82,7 @@ pub fn answer(h: *LaneHost) void {
     for (list) |a| {
         // a drain's deadline stops the queue: the started score finishes, the rest fail without running
         h.lock();
-        const closing = h.closing;
+        const closing = h.closing.load(.acquire);
         h.unlock();
         if (closing) {
             a.failed = true;
@@ -115,19 +117,20 @@ pub fn answer(h: *LaneHost) void {
     }
     h.lock();
     for (list) |a| a.done = true;
-    h.wake.broadcast(h.io);
+    h.scores.answered.broadcast(h.io);
     h.unlock();
 }
 
 /// Questions left when the engine stops: each fails.
 pub fn close(h: *LaneHost) void {
     h.lock();
-    h.closing = true;
+    h.closing.store(true, .release);
     for (h.scores.asks.items) |a| {
         a.failed = true;
         a.done = true;
     }
     h.scores.asks.clearAndFree(h.gpa);
+    h.scores.answered.broadcast(h.io);
     h.wake.broadcast(h.io);
     h.unlock();
 }

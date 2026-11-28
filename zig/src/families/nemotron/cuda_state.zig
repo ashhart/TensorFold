@@ -10,18 +10,33 @@ const sampler = @import("cuda_sampler.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const latent = @import("cuda_latent.zig");
 const worker = @import("cuda_worker.zig");
+const wide = @import("cuda_wide.zig");
 
 pub const max_rows = 32; // a verify window's rows at most (the widest row tile of the row-parallel kernels)
 pub const prefill_rows = 2048; // rows of a staggered segment's chunk, and of a pass under dumps or lessons
 pub const pass_rows = 2 * prefill_rows; // rows a serial prompt pass runs at most (a row's bits are the same at any cut)
 pub const yield_rows = 256; // rows of a background pass's chunk: a request that arrives waits for one at most
 pub const chunk_keys = 512; // keys an attention chunk holds, at fixed absolute positions
-const shared_rows = cuda.qlinear.Affine4Kernels.max_rows; // rows a shared plan covers (windowRows without a latent MoE)
-const shared_words = 2 * shared_rows + 8 * shared_rows; // the shared expert's members, then (items, counts) a row count
+/// The shared plans' layout, as at load: main's 16 rows of 8 words with the switch off, 32 rows of 14 with it.
+const Plans = struct { rows: usize, per: usize, counts: usize };
+const narrow_plans: Plans = .{ .rows = cuda.qlinear.Affine4Kernels.max_rows, .per = 8, .counts = 6 };
+const wide_plans: Plans = .{ .rows = max_rows, .per = 14, .counts = 12 };
+fn plansOf(wide_rounds: bool) Plans {
+    return if (wide_rounds) wide_plans else narrow_plans;
+}
+/// Words the shared plans take: the shared expert's members, then (items, counts) a row count.
+fn planWords(p: Plans) usize {
+    return 2 * p.rows + p.per * p.rows;
+}
 
 /// Super verifies 32 rows; Bolt copies and non-latent affine models retain their qualified 16-row window.
 pub fn windowRows(c: Config) usize {
     return if (c.latent > 0 and !c.bolt) max_rows else cuda.qlinear.Affine4Kernels.max_rows;
+}
+
+/// A shared round's rows at most: windowRows, or 32 with TF_NEMOTRON_WIDE_ROUNDS (a lone window stays windowRows).
+pub fn sharedRows(c: Config) usize {
+    return if (c.wide_rounds) max_rows else windowRows(c);
 }
 
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
@@ -105,13 +120,13 @@ const scratch_count = 48;
 
 /// Bytes of the fixed shared plans: shared_words, or a latent MoE's (Bolt's too) plan for every row count.
 fn sharedBytes(c: Config) usize {
-    return (if (c.latent > 0) windowRows(c) * Buffers.latentPlanWords(c) else shared_words) * 4;
+    return (if (c.latent > 0) windowRows(c) * Buffers.latentPlanWords(c) else planWords(plansOf(c.wide_rounds))) * 4;
 }
 
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const R: usize = pass_rows;
-    const W: usize = windowRows(c);
+    const W: usize = sharedRows(c);
     const D: usize = c.hidden;
     const ns: usize = c.slots();
     const qd: usize = c.heads * c.head_dim;
@@ -292,6 +307,7 @@ pub const Buffers = struct {
     rule: u64, // the sequence's sampled rule, as sample.cu reads it
     table: u64, // the bound sequence's page table (0: contiguous KV planes)
     shared: u64, // the shared expert's fixed plans: one initialized plan per row count
+    wide_plans: bool = false, // their layout, the switch's at load (it can only turn off after, using fewer rows)
     pocket: u64, // the pocket's activations, fp32 [rows, pocket_width]
     lane_part: u64, // the lane matmul's fp32 slice partials on a card without clusters (rows short of fusing)
     lat: u64, // a latent MoE's rows in the latent width (bf16)
@@ -317,6 +333,7 @@ pub const Buffers = struct {
         var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
         errdefer a.buf.free();
         var b: Buffers = undefined;
+        b.wide_plans = c.wide_rounds;
         b.carved = carved;
         b.table = 0;
         b.state_bytes = own[0..7].*;
@@ -361,12 +378,13 @@ pub const Buffers = struct {
 
     /// The shared expert's plan at `rows` rows: halves `experts` and `experts + 1` over slots top_k and top_k + 1.
     pub fn sharedPlan(b: *const Buffers, rows: usize) kern.Plan {
-        const items = b.shared + (2 * shared_rows + 8 * @as(u64, rows - 1)) * 4;
-        return .{ .members = b.shared, .items = items, .counts = items + 6 * 4, .rank = 0, .hist = 0 };
+        const p = plansOf(b.wide_plans);
+        const items = b.shared + (2 * p.rows + p.per * @as(u64, rows - 1)) * 4;
+        return .{ .members = b.shared, .items = items, .counts = items + p.counts * 4, .rank = 0, .hist = 0 };
     }
 
     /// Words one row count's latent shared plan takes: the pairs of a window's rows, then their items and counts.
-    fn latentPlanWords(c: Config) usize {
+    pub fn latentPlanWords(c: Config) usize {
         return latentPlanAt(c).counts + 2;
     }
 
@@ -383,9 +401,14 @@ pub const Buffers = struct {
 
     /// A latent MoE's (or Bolt's) shared plan at `rows` rows (1 to windowRows), as initShared wrote it.
     pub fn latentPlan(b: *const Buffers, c: Config, rows: usize) kern.Plan {
+        return latentPlanFrom(b.shared, c, rows, b.plan.rank, b.plan.hist);
+    }
+
+    /// The shared plan at `rows` rows of plans laid out from `base` as initShared lays them; `rank`, `hist` build them.
+    pub fn latentPlanFrom(base: u64, c: Config, rows: usize, rank: u64, hist: u64) kern.Plan {
         const at = latentPlanAt(c);
-        const members = b.shared + (rows - 1) * latentPlanWords(c) * 4;
-        return .{ .members = members, .items = members + at.items * 4, .counts = members + at.counts * 4, .rank = b.plan.rank, .hist = b.plan.hist };
+        const members = base + (rows - 1) * latentPlanWords(c) * 4;
+        return .{ .members = members, .items = members + at.items * 4, .counts = members + at.counts * 4, .rank = rank, .hist = hist };
     }
 
     /// Writes every row count's shared plan: a latent MoE's (row, share) pairs by Ops.plan, else pairs in row order.
@@ -398,17 +421,20 @@ pub const Buffers = struct {
             for (1..windowRows(c) + 1) |rows| try ops.plan(b.sids, rows * sharedPairs(c), sharedPairs(c), 16, b.latentPlan(c, rows));
             return ops.s.synchronize();
         }
-        var w: [shared_words]u32 = undefined;
-        for (0..shared_rows) |r| {
+        const p = plansOf(b.wide_plans);
+        var buf: [planWords(wide_plans)]u32 = undefined;
+        const w = buf[0..planWords(p)];
+        for (0..p.rows) |r| {
             w[r] = @intCast(r * c.slots() + c.top_k);
-            w[shared_rows + r] = @intCast(r * c.slots() + c.top_k + 1);
+            w[p.rows + r] = @intCast(r * c.slots() + c.top_k + 1);
         }
-        for (1..shared_rows + 1) |rows| {
-            const at = 2 * shared_rows + 8 * (rows - 1);
+        for (1..p.rows + 1) |rows| {
+            const at = 2 * p.rows + p.per * (rows - 1);
             const n: u32 = @intCast(rows);
-            w[at..][0..8].* = .{ @intCast(c.experts), 0, n, @intCast(c.experts + 1), shared_rows, n, 2, 2 };
+            // off: main's own words; on: 16-row items past 16 rows (cuda_wide.sharedItems)
+            if (b.wide_plans) w[at..][0..14].* = wide.sharedItems(@intCast(c.experts), @intCast(p.rows), rows) else w[at..][0..8].* = .{ @intCast(c.experts), 0, n, @intCast(c.experts + 1), @intCast(p.rows), n, 2, 2 };
         }
-        try ops.upload(b.shared, std.mem.sliceAsBytes(&w));
+        try ops.upload(b.shared, std.mem.sliceAsBytes(w));
         try ops.s.synchronize();
     }
 
@@ -483,6 +509,29 @@ test "each row count's latent shared plan holds its pairs and items, apart from 
     }
 }
 
+test "an expert rank's latent shared plans from its own base sit as rank 0's do, inside the words it allocates" {
+    var c: Config = undefined;
+    c.latent = 1024;
+    c.bolt = false;
+    c.shares = 2;
+    c.world = 2;
+    var b: Buffers = undefined;
+    b.shared = 0x10000;
+    b.plan.rank = 0x20000;
+    b.plan.hist = 0x30000;
+    const base: u64 = 0x40000;
+    const bytes = windowRows(c) * Buffers.latentPlanWords(c) * 4; // cuda_worker.serve's slot
+    for (1..windowRows(c) + 1) |rows| {
+        const r0 = b.latentPlan(c, rows);
+        const r1 = Buffers.latentPlanFrom(base, c, rows, b.plan.rank, b.plan.hist);
+        try std.testing.expectEqual(r0.members - b.shared, r1.members - base);
+        try std.testing.expectEqual(r0.items - r0.members, r1.items - r1.members);
+        try std.testing.expectEqual(r0.counts - r0.members, r1.counts - r1.members);
+        try std.testing.expect(r1.items - r1.members >= rows * c.ownShares() * 4);
+        try std.testing.expect(r1.counts + 8 <= base + bytes);
+    }
+}
+
 test "Bolt's shared slot holds a plan for every window row count" {
     var c: Config = undefined;
     c.latent = 1024;
@@ -502,4 +551,22 @@ test "Bolt's shared slot holds a plan for every window row count" {
         const end = p.counts + 8;
         try std.testing.expect(if (rows < W) end <= b.latentPlan(c, rows + 1).members else end <= sharedBytes(c));
     }
+}
+
+test "wide rounds: with the switch off the shared plans are main's, in bytes and in where each row count's plan sits (REV83 2)" {
+    var c: Config = .{ .hidden = 8, .vocab = 16, .layers = 2, .mamba_heads = 2, .mamba_head_dim = 4, .groups = 1, .state = 4, .conv_kernel = 4, .heads = 2, .kv_heads = 1, .head_dim = 4, .experts = 4, .top_k = 2, .expert_width = 4, .shared_width = 8, .routed_scaling = 1, .eps = 1e-5 };
+    // main: 16 rows of members a half, then 8 words a row count (items at 0, counts at 6)
+    try std.testing.expectEqual(@as(usize, (2 * 16 + 8 * 16) * 4), sharedBytes(c));
+    var b: Buffers = undefined;
+    b.shared = 0x1000;
+    b.wide_plans = false;
+    for (1..17) |rows| {
+        const p = b.sharedPlan(rows);
+        try std.testing.expectEqual(@as(u64, 0x1000 + (2 * 16 + 8 * (rows - 1)) * 4), p.items);
+        try std.testing.expectEqual(p.items + 6 * 4, p.counts);
+    }
+    c.wide_rounds = true;
+    try std.testing.expectEqual(@as(usize, (2 * 32 + 14 * 32) * 4), sharedBytes(c));
+    b.wide_plans = true;
+    try std.testing.expectEqual(@as(u64, 0x1000 + (2 * 32 + 14 * 16) * 4), b.sharedPlan(17).items);
 }

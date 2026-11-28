@@ -47,3 +47,22 @@ test "Flash Next head scratch: reserve two rows per token through the 256-token 
         }
     }
 }
+
+test "Flash Next MTP lean prefill: the 3,072 ceiling keeps two scratch rows a token, default stays at 256" {
+    try std.testing.expectEqual(@as(usize, 3072), plan.prefill_piece_rows);
+    try std.testing.expectEqual(@as(usize, 32), plan.reservePrefillRows(1));
+    try std.testing.expectEqual(@as(usize, 6144), plan.reservePrefillRows(3072));
+    try std.testing.expectEqual(@as(usize, 6144), plan.reservePrefillRows(16384));
+    try std.testing.expectEqual(@as(usize, 512), plan.reserveRows(16384));
+}
+
+test "Flash Next MTP lean prefill: capacity quarters retain wide pieces without changing default planning" {
+    try std.testing.expectEqual(@as(usize, 1), plan.prefillPiece(0));
+    try std.testing.expectEqual(@as(usize, 8), plan.prefillPiece(32));
+    try std.testing.expectEqual(@as(usize, 768), plan.prefillPiece(3072));
+    try std.testing.expectEqual(@as(usize, 2048), plan.prefillPiece(8192));
+    try std.testing.expectEqual(@as(usize, 3072), plan.prefillPiece(12288));
+    try std.testing.expectEqual(@as(usize, 3072), plan.prefillPiece(16384));
+    try std.testing.expect(plan.prefillPiece(8192) > plan.piece_rows);
+    try std.testing.expectEqual(@as(usize, 256), plan.plan(8192, 3460).piece);
+}

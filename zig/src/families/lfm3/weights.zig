@@ -32,6 +32,8 @@ fn named(a: Allocator, out: *std.ArrayList(Expected), prefix: []const u8, suffix
 }
 
 fn affine(a: Allocator, out: *std.ArrayList(Expected), cfg: *const c.Config, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !void {
+    if (cfg.scheme == .modelopt_nvfp4) return modelopt(a, out, prefix, suffix, n, k);
+    if (cfg.scheme == .fp8_block) return fp8Block(a, out, prefix, suffix, n, k);
     var buf: [256]u8 = undefined;
     const module = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix });
     const q = try cfg.width(module);
@@ -40,6 +42,29 @@ fn affine(a: Allocator, out: *std.ArrayList(Expected), cfg: *const c.Config, pre
     try dense(a, out, try std.fmt.bufPrint(&name, "{s}.weight", .{module}), &.{ n, k * q.bits / 32 }, .u32);
     try dense(a, out, try std.fmt.bufPrint(&name, "{s}.scales", .{module}), &.{ n, k / q.group }, .bf16);
     try dense(a, out, try std.fmt.bufPrint(&name, "{s}.biases", .{module}), &.{ n, k / q.group }, .bf16);
+}
+
+/// ModelOpt NVFP4: the FFN's codes [n, k / 2], e4m3 scales [n, k / 16], fp32 scalar scales; the rest bf16 [n, k].
+fn modelopt(a: Allocator, out: *std.ArrayList(Expected), prefix: []const u8, suffix: []const u8, n: usize, k: usize) !void {
+    var name: [272]u8 = undefined;
+    if (!std.mem.startsWith(u8, suffix, "feed_forward.")) return dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, suffix }), &.{ n, k }, .bf16);
+    if (k % 16 != 0) return error.UnsupportedQuantization;
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, suffix }), &.{ n, k / 2 }, .u8);
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight_scale", .{ prefix, suffix }), &.{ n, k / 16 }, .f8_e4m3);
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight_scale_2", .{ prefix, suffix }), &.{}, .f32);
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.input_scale", .{ prefix, suffix }), &.{}, .f32);
+}
+
+/// Block FP8: q/k/v/o and the FFN as e4m3 [n, k] with bf16 scales [n / 128, k / 128]; the rest bf16 [n, k].
+fn fp8Block(a: Allocator, out: *std.ArrayList(Expected), prefix: []const u8, suffix: []const u8, n: usize, k: usize) !void {
+    var name: [272]u8 = undefined;
+    const quantized = std.mem.startsWith(u8, suffix, "feed_forward.") or
+        (std.mem.startsWith(u8, suffix, "self_attn.") and !std.mem.eql(u8, suffix, "self_attn.gate_proj"));
+    if (!quantized) return dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, suffix }), &.{ n, k }, .bf16);
+    const b = c.fp8_block;
+    if (n % b != 0 or k % b != 0) return error.UnsupportedQuantization;
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, suffix }), &.{ n, k }, .f8_e4m3);
+    try dense(a, out, try std.fmt.bufPrint(&name, "{s}{s}.weight_scale", .{ prefix, suffix }), &.{ n / b, k / b }, .bf16);
 }
 
 /// Expected metadata for one text decoder; allocate the returned names and list in a caller-owned arena.
@@ -59,7 +84,9 @@ pub fn schema(a: Allocator, cfg: *const c.Config, namespace: Namespace) ![]Expec
         if (kind == .conv) {
             try affine(a, &out, cfg, p, Module.conv_in.path(), 3 * c.hidden, c.hidden);
             try affine(a, &out, cfg, p, Module.conv_out.path(), c.hidden, c.hidden);
-            try named(a, &out, p, Module.conv.path(), &.{ c.hidden, c.conv_taps, 1 });
+            // MLX keeps the depthwise kernel as [channels, taps, 1], torch as [channels, 1, taps]: same values
+            const taps: []const usize = if (cfg.scheme != .mlx_affine) &.{ c.hidden, 1, c.conv_taps } else &.{ c.hidden, c.conv_taps, 1 };
+            try named(a, &out, p, Module.conv.path(), taps);
         } else {
             try affine(a, &out, cfg, p, Module.q_proj.path(), c.query_heads * c.head_dim, c.hidden);
             try affine(a, &out, cfg, p, Module.k_proj.path(), c.kv_heads * c.head_dim, c.hidden);
@@ -99,6 +126,12 @@ pub fn validate(a: Allocator, cfg: *const c.Config, header: *const st.Header) !M
         }
     }
     return .{ .namespace = namespace, .tensors = expected.len, .bytes = bytes };
+}
+
+/// The namespaces one shard packs: null, all of it, for a text checkpoint or a VL one whose tower `--vision` reads.
+pub fn packs(kind: c.Kind, tower: bool) ?[]const []const u8 {
+    if (kind == .text or tower) return null;
+    return &.{ "language_model.", "model." };
 }
 
 test {

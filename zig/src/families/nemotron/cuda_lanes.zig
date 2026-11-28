@@ -17,33 +17,34 @@ const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
 const lesson_route = @import("living").lesson_route;
 const Pages = @import("cuda_pages.zig").Pages;
+const fill = @import("cuda_lanes_fill.zig");
 const be = lanes.backend;
 const LogRow = lanes.LogprobRow;
 const row_words = lanes.logprob.words;
-/// Host-mapped words for every row a shared window holds, then the first token's row.
-const row_slots = engine.max_streams * state.max_rows + 1;
+/// Host-mapped words for every row a shared window holds (the switch's streams), then the first token's row.
+pub fn rowSlots(c: config.Config) usize {
+    return @import("cuda_wide.zig").streams(c) * state.max_rows + 1;
+}
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
 /// A stream's sequence (`own`: the engine's, the graphs' buffers; `paged`: the pool's) and its first logprob row.
 const Lane = struct { seq: *state.Seq, own: bool = false, paged: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
 /// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
 const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
-/// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
-pub fn finalTap(c: config.Config) u32 {
-    return @intCast(c.layers);
-}
+
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
     head: ?*Head,
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     own_free: bool = true, // no stream holds the engine's own sequence
+    fills: fill.Fills = .empty, // prompt passes a chunk a call (prefill_step), between their chunks
     pages: ?*Pages = null, // the other streams' sequences and KV pages, made at load (null: a window each, at prefill)
     paged_only: bool = false, // TF_KV_PAGES=all: every stream on pages, the engine's own sequence left idle (checks)
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
-    rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (row_slots of row_words)
+    rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (rowSlots of row_words)
     rows_dev: u64,
     prompt_out: cuda.HostBuffer, // a prompt pass's rows (batch_rows of row_words), then its picks; apart from pending window rows
     prompt_dev: u64,
@@ -54,14 +55,15 @@ pub const Cuda = struct {
     measured: ?costs.Measured = null, // a lone stream's depth rules price its rounds by these
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
-    bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
+    bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (rowSlots rows), made at first use
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
-        var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
+        const slots = rowSlots(e.c);
+        var pinned = try cuda.HostBuffer.alloc(e.ctx.d, @import("cuda_wide.zig").streams(e.c) * state.max_rows * 4);
         errdefer pinned.free();
-        var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, row_slots * row_words * 4);
+        var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, slots * row_words * 4);
         errdefer rows_out.free();
         var prompt_out = try cuda.HostBuffer.allocMapped(e.ctx.d, prompt_rows.batch_rows * (row_words + 1) * 4);
         errdefer prompt_out.free();
@@ -73,6 +75,7 @@ pub const Cuda = struct {
             _ = self.pages.?.close(l.seq);
         } else if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
+        self.fills.deinit(self.gpa); // passes left between their chunks
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
@@ -81,31 +84,37 @@ pub const Cuda = struct {
         self.prompt_out.free();
     }
     pub fn backend(self: *Cuda) be.Backend {
-        return .{ .ptr = self, .vtable = &.{
-            .prefill = prefillFn,
-            .first = firstFn,
-            .queue = queueFn,
-            .read = readFn,
-            .verify = verifyFn,
-            .keep = keepFn,
-            .draft = draftFn,
-            .release = releaseFn,
-            .first_row = firstRowFn,
-            .first_masked = firstMaskedFn,
-            .held = heldFn,
-            .probabilities = probabilitiesFn,
-            .prepare_features = prepareFeaturesFn,
-            .features = featuresFn,
-            .prompt_rows = true,
-        } };
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .prefill = prefillFn,
+                .prefill_step = fill.step,
+                .cancel_prefill = fill.keepCancelled,
+                .first = firstFn,
+                .queue = queueFn,
+                .read = readFn,
+                .verify = verifyFn,
+                .keep = keepFn,
+                .draft = draftFn,
+                .release = releaseFn,
+                .first_row = firstRowFn,
+                .first_masked = firstMaskedFn,
+                .held = heldFn,
+                .probabilities = probabilitiesFn,
+                .prepare_features = prepareFeaturesFn,
+                .features = featuresFn,
+                .prompt_rows = true,
+                .reports_fill = true, // each chunk's rows in fill_at: the host's accounting and Drafted's stepping read them
+            },
+        };
     }
     /// Structured output's bits for rows from `slot` (a forward's rows; a first token's: the last slot), device-read.
     pub fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
         const words = (self.e.c.vocab + 31) / 32;
         if (masks.len == 0) return .{};
-        if (masks.len % words != 0 or slot * words + masks.len > row_slots * words) return error.InvalidGrammarMasks;
+        if (masks.len % words != 0 or slot * words + masks.len > rowSlots(self.e.c) * words) return error.InvalidGrammarMasks;
         if (self.bits == null) {
-            self.bits = try cuda.HostBuffer.allocMapped(self.e.ctx.d, row_slots * words * 4);
+            self.bits = try cuda.HostBuffer.allocMapped(self.e.ctx.d, rowSlots(self.e.c) * words * 4);
             self.bits_dev = try self.bits.?.device();
         }
         @memcpy(self.bits.?.slice(u32)[slot * words ..][0..masks.len], masks);
@@ -118,7 +127,7 @@ pub const Cuda = struct {
         if (position != s.prompt_len) return error.PositionMismatch;
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         self.e.bind(l.seq);
-        return self.take(try self.e.redrawFirst(position, try self.putBits(row_slots - 1, mask)));
+        return self.take(try self.e.redrawFirst(position, try self.putBits(rowSlots(self.e.c) - 1, mask)));
     }
 
     /// The head's drafts in the stream's window rows after the pending one, once they land (Backend.held).
@@ -163,8 +172,9 @@ pub const Cuda = struct {
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
             .hidden_rows = true, // copy-only models retain the landed shared target forward
-            .batch_rows = @intCast(width),
-            .max_streams = engine.max_streams,
+            .batch_rows = @intCast(state.sharedRows(self.e.c)), // 32 with TF_NEMOTRON_WIDE_ROUNDS; 17-32 priced linearly
+            .learn_row_costs = self.e.c.wide_rounds, // 17-32 rows are unmeasured: learn their cost, not a fixed overhead
+            .max_streams = @intCast(@import("cuda_wide.zig").streams(self.e.c)),
         };
     }
 
@@ -213,7 +223,7 @@ pub const Cuda = struct {
         return l;
     }
 
-    fn take(self: *Cuda, token: u32) u64 {
+    pub fn take(self: *Cuda, token: u32) u64 {
         const h = self.next;
         self.drawn[h % ring] = token;
         self.next += 1;
@@ -232,19 +242,19 @@ pub const Cuda = struct {
     }
 
     /// A cancel, or a background pass stepping aside for a foreground request, stops the prompt at its next chunk.
-    fn cancelled(ptr: *anyopaque) bool {
+    pub fn cancelled(ptr: *anyopaque) bool {
         const s: *lanes.Stream = @ptrCast(@alignCast(ptr));
         return s.isCancelled() or s.yields();
     }
 
     /// The prompt pass stands at a keep: the lane host copies the GPU state there.
-    fn keptAt(ctx: *anyopaque, at: u32) void {
+    pub fn keptAt(ctx: *anyopaque, at: u32) void {
         const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
     }
 
     /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, or nothing restored).
-    fn restoreKept(self: *Cuda, s: *lanes.Stream, len: usize) usize {
+    pub fn restoreKept(self: *Cuda, s: *lanes.Stream, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         var target: reuse.Target = .{ .e = self.e, .head = self.head };
         if (s.reuse.at >= len) {
@@ -259,75 +269,17 @@ pub const Cuda = struct {
         return s.reuse.at;
     }
 
-    // -- the vtable ---------------------------------------------------------------------------------------------
-
     /// A new sequence for the stream, its sampling, then its prompt in chunks; the head absorbs every row but the last.
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
-        const self = of(ptr);
-        const e = self.e;
-        const ids = s.prompt();
-        if (ids.len == 0 or ids.len + s.max_new + state.max_rows > e.max_len) return error.PromptTooLong;
-        const gop = try self.lanes.getOrPut(self.gpa, s);
-        if (gop.found_existing) self.drop(gop.value_ptr.*);
-        // the engine's own sequence while it is free: its rounds replay the captured graphs
-        const own = self.own_free and e.serial != null and !s.untaught and !self.paged_only; // the own graphs carry the pocket
-        const seq = if (own) &e.own else if (self.pages) |p| p.open(ids.len, s.max_new, s.untaught) else e.newSeq();
-        gop.value_ptr.* = .{
-            .own = own,
-            .paged = !own and self.pages != null,
-            .stats = e.stats,
-            .seq = seq catch |err| {
-                self.lanes.removeByPtr(gop.key_ptr); // nothing held: a LaneMemory request waits for a stream to end
-                return err;
-            },
-        };
-        if (own) self.own_free = false;
-        gop.value_ptr.seq.untaught = s.untaught;
-        e.bind(gop.value_ptr.seq);
-        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
-        e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
-        try e.setSampling(s.sampling);
-        s.cached = 0;
-        const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len);
-        const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
-        if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
-        defer if (e.vision) |v| v.end();
-        var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
-        s.prompt_rows.clearRetainingCapacity();
-        if (s.prompt_logprobs) |k| {
-            // a logits buffer of its own takes batch_rows a head pass; without the memory, the window's rows
-            if (self.prompt_logits == null) self.prompt_logits = cuda.DeviceBuffer.alloc(e.ctx.d, prompt_rows.batch_rows * e.c.vocab * 2) catch null;
-            const rows: usize = if (self.prompt_logits != null) prompt_rows.batch_rows else state.windowRows(e.c);
-            const words = self.prompt_out.slice(u32);
-            const picks_at = rows * row_words; // after the rows
-            e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
-        }
-        defer e.prompt_rows = null;
-        var tap: TapSink = .{ .self = self, .taps = &gop.value_ptr.taps };
-        tap.taps.prompt.clearRetainingCapacity();
-        tap.taps.from = from;
-        tap.taps.verified = null;
-        if (self.tapped != null) e.taps = .{ .ctx = &tap, .call = TapSink.take };
-        defer e.taps = null;
-        const first = try servedPrefill(e, self.head, s, from, keep);
-        // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = ids.len - 1 - e.last_chunk;
-        try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
-        _ = self.take(first);
-        if (s.logprobs) |k| {
-            const at = (row_slots - 1) * row_words;
-            try e.ops().logprobRows(e.b.p_logits, e.c.vocab, e.b.p_sampled, k, false, self.rows_dev + at * 4, 1);
-            try e.stream.synchronize();
-            gop.value_ptr.first = LogRow.fromWords(self.rows_out.slice(u32)[at..][0..row_words], first, k);
-        }
+        return fill.whole(of(ptr), s);
     }
 
     /// A stream's prompt rows as the engine reads them back, in prompt order.
-    const PromptSink = struct {
+    pub const PromptSink = struct {
         gpa: std.mem.Allocator,
         s: *lanes.Stream,
 
-        fn take(ctx: *anyopaque, words: []const u32, picks: []const u32) anyerror!void {
+        pub fn take(ctx: *anyopaque, words: []const u32, picks: []const u32) anyerror!void {
             const p: *PromptSink = @ptrCast(@alignCast(ctx));
             for (picks, 0..) |pick, i| try p.s.prompt_rows.append(p.gpa, LogRow.fromWords(words[i * row_words ..][0..row_words], pick, p.s.prompt_logprobs.?));
         }
@@ -335,7 +287,7 @@ pub const Cuda = struct {
 
     pub fn servedPrefill(e: anytype, head: ?*Head, s: *lanes.Stream, from: usize, keep: ?engine.Keep) !u32 {
         const ids = s.prompt();
-        const first = e.prefillFrom(ids, from, null, head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep) catch |err| {
+        const first = e.prefillFrom(ids, from, null, head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep, lanes.cutPoints(s)) catch |err| {
             if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(e.pos));
             return err;
         };
@@ -344,11 +296,11 @@ pub const Cuda = struct {
     }
 
     /// A prompt chunk's rows copied to the stream's host rows, a staging buffer at a time.
-    const TapSink = struct {
+    pub const TapSink = struct {
         self: *Cuda,
         taps: *Taps,
 
-        fn take(ctx: *anyopaque, hidden: u64, row: usize, rows: usize) anyerror!void {
+        pub fn take(ctx: *anyopaque, hidden: u64, row: usize, rows: usize) anyerror!void {
             const p: *TapSink = @ptrCast(@alignCast(ctx));
             const e = p.self.e;
             const d = e.c.hidden * 2;
@@ -368,14 +320,14 @@ pub const Cuda = struct {
     /// Recording asks for the final norm's rows alone; their staging buffer is made here.
     fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) anyerror!void {
         const self = of(ptr);
-        if (taps.len != 1 or taps[0] != finalTap(self.e.c)) return error.UnsupportedTaps;
+        if (taps.len != 1 or taps[0] != engine.finalTap(self.e.c)) return error.UnsupportedTaps;
         if (self.tapped == null) self.tapped = try cuda.HostBuffer.alloc(self.e.ctx.d, state.pass_rows * self.e.c.hidden * 2);
     }
 
     /// The prompt's rows from the host until the first verify; then the last verify's, read from its sequence.
     fn featuresFn(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
         const self = of(ptr);
-        if (self.tapped == null or taps.len != 1 or taps[0] != finalTap(self.e.c)) return error.UnsupportedTaps;
+        if (self.tapped == null or taps.len != 1 or taps[0] != engine.finalTap(self.e.c)) return error.UnsupportedTaps;
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         const d = self.e.c.hidden * 2;
         const t = &l.taps;
@@ -457,7 +409,7 @@ pub const Cuda = struct {
     /// Several windows in one forward (Engine.verifyShared), each stream's rows on its own sequence.
     fn verifyShared(self: *Cuda, windows: []const be.Window, out: []be.Verified) !void {
         const e = self.e;
-        if (windows.len > engine.max_streams) return error.WindowTooWide;
+        if (windows.len > @import("cuda_wide.zig").streams(self.e.c)) return error.WindowTooWide; // 8 with the switch off
         var parts: [engine.max_streams]engine.Shared = undefined;
         var ids: [engine.max_streams][state.max_rows]u32 = undefined;
         var bits_row: usize = 0;
@@ -523,7 +475,7 @@ pub const Cuda = struct {
                 break :blk first[0..];
             };
             const v = h.vocab(r.stream.context.items);
-            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.windowRows(self.e.c)) {
+            if (drafting < 2 or r.depth == 0 or !@import("cuda_wide.zig").batches(self.e.c, batched, rows, follow.len)) {
                 try h.chain(follow, r.depth, v);
                 l.keep = h.keep;
                 continue;
@@ -540,13 +492,18 @@ pub const Cuda = struct {
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
-        const self = of(ptr);
+        of(ptr).release(s);
+    }
+
+    /// The stream's pass and lane gone once its GPU work has landed; again, nothing.
+    pub fn release(self: *Cuda, s: *const lanes.Stream) void {
+        fill.forget(self, s); // a pass released between its chunks
         const kv = self.lanes.fetchRemove(s) orelse return;
         self.e.stream.synchronize() catch {};
         self.drop(kv.value);
     }
 
-    fn drop(self: *Cuda, l: Lane) void {
+    pub fn drop(self: *Cuda, l: Lane) void {
         var taps = l.taps.prompt;
         taps.deinit(self.gpa);
         if (seq_graphs.logFromEnv()) {

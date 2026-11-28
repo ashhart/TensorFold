@@ -114,6 +114,15 @@ test "rope, cache and gate checkers refuse planted outputs" {
         };
         const krep = try f.checkKeys(kbits);
         try testing.expect(krep.worst <= 1);
+        // A 1-LSB tamper on a planted KV prefix must fail exact-bit verification (not pass under RoPE tolerance).
+        var planted: ?usize = null;
+        for (f.prefix, 0..) |is_pref, i| if (is_pref) {
+            planted = i;
+            break;
+        };
+        kbits[planted.?] ^= 1;
+        try testing.expectError(error.PrefixRowTouched, f.checkKeys(kbits));
+        kbits[planted.?] ^= 1;
         // a POISON row tamper must fail:
         var inactive: ?usize = null;
         for (f.active, 0..) |act, i| if (!act) {
@@ -243,7 +252,7 @@ test "causal sdpa: poisoned future keys are invisible; a one-key leak is caught"
         defer a.free(leak_out);
         for (leak.want, 0..) |w, i| leak_out[i] = c.toBf16(@floatCast(w));
         try testing.expectError(error.NonFiniteOutput, leak.check(leak_out));
-        try testing.expectError(error.NonFiniteOutput, base.check(leak_out)); // causal checker rejects the leaked output
+        try testing.expectError(error.NonFiniteOutput, base.check(leak_out)); // rejects the leak
     }
 }
 

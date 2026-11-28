@@ -13,17 +13,17 @@ const parse = @import("tool_parse.zig");
 const a = std.testing.allocator;
 const specs = "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"now\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]";
 
-const Text = struct {
+pub const Text = struct {
     form: enum { xml, json, gemma, lfm2, unknown } = .json,
-    fn text(t: *Text) mt.Text {
+    pub fn text(t: *Text) mt.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocab, .eos_ids = eos, .render = render, .template_source = source } };
     }
-    fn encode(_: *anyopaque, g: std.mem.Allocator, s: []const u8, _: bool) mt.Error![]u32 {
+    pub fn encode(_: *anyopaque, g: std.mem.Allocator, s: []const u8, _: bool) mt.Error![]u32 {
         const ids = try g.alloc(u32, s.len);
         for (s, ids) |ch, *id| id.* = if (ch == '\n') 95 else @as(u32, ch) - 32;
         return ids;
     }
-    fn decode(_: *anyopaque, g: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
+    pub fn decode(_: *anyopaque, g: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         for (ids) |id| if (id < 95) try out.append(g, @intCast(id + 32)) else if (id == 95) try out.append(g, '\n');
         return out.toOwnedSlice(g);
@@ -54,8 +54,8 @@ const Text = struct {
         })) };
     }
 };
-const Stub = struct {
-    fn engine(s: *Stub) api.Engine {
+pub const Stub = struct {
+    pub fn engine(s: *Stub) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(_: *anyopaque) api.Info {
@@ -74,12 +74,11 @@ const Stub = struct {
 };
 
 // The compiler boundary records the production grammar; no xgrammar library or GPU is loaded in this fixture.
-const Compile = struct {
-    fn compiler(c: *Compile) api.grammar.Compiler {
+pub const Compile = struct {
+    pub fn compiler(c: *Compile) api.grammar.Compiler {
         var out: api.grammar.Compiler = undefined;
         out.h = c;
         out.words = 4;
-        out.mutex = .init;
         out.f.compile = compile;
         out.f.free = free;
         out.f.close = free;
@@ -91,7 +90,7 @@ const Compile = struct {
     }
     fn free(_: *anyopaque) callconv(.c) void {}
 };
-fn value(g: std.mem.Allocator, s: []const u8) !json.Value {
+pub fn value(g: std.mem.Allocator, s: []const u8) !json.Value {
     return (try json.parse(g, s)).ok;
 }
 
@@ -163,7 +162,7 @@ test "required tools: an LFM2 template gets the Pythonic grammar, one call or se
     };
 }
 
-fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
+pub fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
     const History = struct {
         pub fn conversation(_: @This(), c: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
             return c.refuse("this fixture has no stored response");
@@ -490,7 +489,7 @@ test "grammar_budget: a boolean that marks a covered grammar, refused when malfo
         if (c.budget) |want| try std.testing.expectEqual(want, request.structure.?.budget) else try std.testing.expect(request.structure == null);
     }
     // a grammar past the library's work limit (2) is refused by name, never served with a partial mask
-    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never, overWork }, [_][]const u8{ "libtfgrammar", "token-level, budgeted", "passes the fixed work limit" }) |ready, why| {
+    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never, overWork }, [_][]const u8{ "libtfgrammar", "token-level, budgeted", "exceeded its work limit" }) |ready, why| {
         compiler.f.budget_ready = ready;
         var cx: errors.Cx = .{ .a = g };
         var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };

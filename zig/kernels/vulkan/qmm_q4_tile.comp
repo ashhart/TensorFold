@@ -1,20 +1,57 @@
 #version 460
-// qmm_q4_vec4 over tiled weights, 32 columns a tile: words [tile][k/32][lane], scales [tile][group][lane].
-// ACT_F32: x rows and the output are f32 (two vec4 a group of eight), scales and biases stay bf16.
+
+// Clean-room Q4 affine projection over tiled weights (issue #5215):
+// out[m, n] = sum_k x[m, k] * (q[n, k] * scale[n, k / 64] + bias[n, k / 64])
+// in float32. Weights, scales and biases arrive repacked by tile.zig into
+// 32-column tiles: vector j of column c lives at uvec4 index
+// ((c / 32) * (k / 32) + j) * 32 + c % 32; a group g parameter of column c
+// lives at element index ((c / 32) * (k / 64) + g) * 32 + c % 32.
+// Behaviour from spec-qmm-q4-4.md; ABI from zig/src/vulkan/ops_q4.zig.
+
+// BF16 halves ride the low and high 16 bits of each loaded word, and the
+// scale and bias streams stay BF16 uint16_t in every variant.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
+// Activations and outputs are BF16 unless -DACT_F32 selects float32 for both.
+#ifdef ACT_F32
+#define ACT_VEC vec4
+#define ACT_ELEMS 4u
+#define ACT_WRITE(f) (f)
+#else
+#define ACT_VEC uvec4
+#define ACT_ELEMS 8u
+#define ACT_WRITE(f) bf16_store(f)
+
+// Round-to-nearest-even f32 -> bf16: add 0x7fff + the kept lsb, then truncate;
+// a NaN keeps its class with the quiet bit set.
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16u) | 0x0040u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
+#endif
+
+// Activation element i of a loaded vector, one call per element so BF16 and
+// float32 share the accumulation loop.
+float act_elem(ACT_VEC v, uint i) {
+#ifdef ACT_F32
+  return v[i];
+#else
+  // Two packed BF16 activations per word: low half first, then high half.
+  uint word = v[i / 2u];
+  uint bits = i % 2u == 0u ? (word & 0xffffu) << 16u : word & 0xffff0000u;
+  return uintBitsToFloat(bits);
+#endif
+}
+
 layout(local_size_x = 256) in;
 
-#ifdef ACT_F32
 layout(set = 0, binding = 0, std430) readonly buffer InputX {
-  vec4 values[];
+  ACT_VEC values[];
 } input_x;
-#else
-layout(set = 0, binding = 0, std430) readonly buffer InputX {
-  uvec4 values[];
-} input_x;
-#endif
 layout(set = 0, binding = 1, std430) readonly buffer InputW {
   uvec4 values[];
 } input_w;
@@ -24,17 +61,15 @@ layout(set = 0, binding = 2, std430) readonly buffer Scales {
 layout(set = 0, binding = 3, std430) readonly buffer Biases {
   uint16_t values[];
 } biases;
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
 #ifdef ACT_F32
-layout(set = 0, binding = 4, std430) writeonly buffer Output {
   float values[];
-} output_data;
 #else
-layout(set = 0, binding = 4, std430) writeonly buffer Output {
   uint16_t values[];
-} output_data;
 #endif
+} output_data;
 
-layout(push_constant) uniform Params {
+layout(push_constant, std430) uniform Params {
   uint count;
   uint operation;
   uint lhs_size;
@@ -56,65 +91,45 @@ layout(push_constant) uniform Params {
   uint shape[4];
   uint in_strides[4];
   uint out_strides[4];
-} params;
-
-uint16_t bf16_store(float value) {
-  uint bits = floatBitsToUint(value);
-  if (isnan(value)) {
-    return uint16_t((bits >> 16) | 0x40u);
-  }
-  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
-}
-
-float bf16_value(uint16_t x) {
-  return uintBitsToFloat(uint(x) << 16u);
-}
+} p;
 
 void main() {
-  uint groups_per_row = params.matrix_k / 64u;
-  uint total = params.matrix_m * params.matrix_n;
-  uint stride = gl_NumWorkGroups.x * 256u;
-  for (uint index = gl_GlobalInvocationID.x; index < total; index += stride) {
-    uint row = index / params.matrix_n;
-    uint column = index - row * params.matrix_n;
-    uint tile = column >> 5u;
-    uint lane = column & 31u;
-    uint w_base = tile * params.matrix_k + lane;
-    uint x_vec = row * (params.matrix_k / 8u);
-    uint param_base = tile * (groups_per_row * 32u) + lane;
-    float accumulator = 0.0;
-    for (uint group = 0u; group < groups_per_row; ++group) {
-      float scale = bf16_value(scales.values[param_base + group * 32u]);
-      float bias = bf16_value(biases.values[param_base + group * 32u]);
-      for (uint half_group = 0u; half_group < 2u; ++half_group) {
-        uvec4 w4 = input_w.values[w_base + (group * 2u + half_group) * 32u];
-        for (uint t = 0u; t < 4u; ++t) {
-          uint word = w4[t];
-          uint x_at = x_vec + group * 8u + half_group * 4u + t;
-#ifdef ACT_F32
-          vec4 x_lo = input_x.values[x_at * 2u];
-          vec4 x_hi = input_x.values[x_at * 2u + 1u];
-          for (uint e = 0u; e < 8u; ++e) {
-            float xv = e < 4u ? x_lo[e] : x_hi[e - 4u];
-            accumulator += xv * (scale * float((word >> (e * 4u)) & 0xfu) + bias);
-          }
-#else
-          uvec4 x8 = input_x.values[x_at];
-          for (uint pair = 0u; pair < 4u; ++pair) {
-            uint x_pair = x8[pair];
-            accumulator += uintBitsToFloat(x_pair << 16u) *
-                (scale * float((word >> (pair * 8u)) & 0xfu) + bias);
-            accumulator += uintBitsToFloat(x_pair & 0xffff0000u) *
-                (scale * float((word >> (pair * 8u + 4u)) & 0xfu) + bias);
-          }
-#endif
+  uint tid = gl_GlobalInvocationID.x;
+  if (tid >= p.count) {
+    return;
+  }
+  uint m = tid / p.matrix_n;
+  uint c = tid % p.matrix_n;
+
+  uint vectors = p.matrix_k / 32u; // one uvec4 of codes per 32 columns
+  uint groups = p.matrix_k / 64u;
+  uint tile = c / 32u;
+  uint lane = c % 32u;
+
+  // Host repack and view slicing keep every stream 16-byte aligned.
+  uint x_vecs = p.lhs_offset / ACT_ELEMS + m * (p.matrix_k / ACT_ELEMS);
+  uint w_vecs = p.rhs_offset / 4u + tile * vectors * 32u + lane;
+  uint sb_base = p.aux_offset + tile * groups * 32u + lane;
+
+  float acc = 0.0;
+  for (uint g = 0u; g < groups; ++g) {
+    float s = uintBitsToFloat(uint(scales.values[sb_base + g * 32u]) << 16u);
+    float b = uintBitsToFloat(uint(biases.values[sb_base + g * 32u]) << 16u);
+    // Vector j covers codes 32*j..32*j+31 of the group: group g is j = 2g, 2g+1.
+    for (uint j = 0u; j < 2u; ++j) {
+      uvec4 packed_codes = input_w.values[w_vecs + (g * 2u + j) * 32u];
+      for (uint i = 0u; i < 4u; ++i) {
+        uint word = packed_codes[i];
+        for (uint e = 0u; e < 8u; ++e) {
+          uint k_idx = g * 64u + j * 32u + i * 8u + e;
+          float xv = act_elem(input_x.values[x_vecs + k_idx / ACT_ELEMS],
+                              k_idx % ACT_ELEMS);
+          // Dequantized weight per code: x * (q * s + b); factored goes NaN
+          // on (inf, q=0).
+          acc += xv * (float((word >> (4u * e)) & 0xfu) * s + b);
         }
       }
     }
-#ifdef ACT_F32
-    output_data.values[params.output_offset + index] = accumulator;
-#else
-    output_data.values[params.output_offset + index] = bf16_store(accumulator);
-#endif
   }
+  output_data.values[p.output_offset + m * p.matrix_n + c] = ACT_WRITE(acc);
 }

@@ -96,7 +96,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
 
     dl = Downloads()
 
-    proxy = Proxy(lambda: s.engine_url, eng.key_in_use, target=lambda: eng.target()[1:])
+    proxy = Proxy(lambda: settings_mod.engine_root(s.engine_url), eng.key_in_use, target=lambda: eng.target()[1:])
 
     def bench_target() -> tuple[str, str | None, str | None]:
         h = eng.status()
@@ -104,7 +104,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
         if h.status == "running":
             # a bare /health behind a key names no model: /v1/models does
             model = h.model or next(iter(engines.identify(s.engine_url, key=eng.key_in_use()).models), None)
-        return s.engine_url.rstrip("/").removesuffix("/v1"), eng.key_in_use(), model
+        return settings_mod.engine_root(s.engine_url), eng.key_in_use(), model
 
     runner = bench.Bench(bench_store or bench.Store(settings_mod.config_dir() / "bench.sqlite"), bench_target)
 
@@ -167,6 +167,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
 
 
     links = access_mod.Links()
+    app.state.access_links = links
 
     qd = quality.load()
 
@@ -410,7 +411,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
         h = eng.status()
         if h.status != "running" or not served_copy():
             raise RuntimeError("serve a living copy first (Teach, then Serve)")
-        base = s.engine_url.rstrip("/").removesuffix("/v1")
+        base = settings_mod.engine_root(s.engine_url)
         return living.Target(base, eng.key_in_use(), h.model or eng.model or "")
 
     # left halfway by a stopped TensorFold Web
@@ -470,7 +471,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
 
     def engine_get(path: str) -> httpx.Response:
         key = eng.key_in_use()
-        return httpx.get(trust_env=False, url=s.engine_url.rstrip("/").removesuffix("/v1") + path, timeout=10.0,
+        return httpx.get(trust_env=False, url=settings_mod.engine_root(s.engine_url) + path, timeout=10.0,
                          headers={"Authorization": f"Bearer {key}"} if key else {})
 
     def no_store(resp: Response) -> Response:

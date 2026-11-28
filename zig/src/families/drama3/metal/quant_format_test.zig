@@ -47,7 +47,7 @@ fn mapText(a: std.mem.Allocator, ids: []const u8, omit: bool) ![]u8 {
     return text.toOwnedSlice(a);
 }
 
-test "expert metadata is complete ascending unique and keeps at least eight original IDs" {
+test "expert metadata is complete ascending unique keeps at least eight original IDs and matches the stored experts" {
     const a = std.testing.allocator;
     const good = "[1,3,5,7,9,11,13,255]";
     for ([_][]const u8{ good, "[1,3,5,7,9,11,13,13]", "[3,1,5,7,9,11,13,15]", "[1,3,5,7,9,11,13,256]", "[1,3]", "[1,3,5,7,9,11,13,1.5]" }, 0..) |ids, i| {
@@ -60,10 +60,19 @@ test "expert metadata is complete ascending unique and keeps at least eight orig
             const slots = h.slots(0);
             try std.testing.expectEqual(@as(i32, -1), slots[0]);
             try std.testing.expectEqual(@as(i32, 7), slots[255]);
+            try std.testing.expectEqual(@as(usize, cfg.layers * 8), h.total());
+            var arena: std.heap.ArenaAllocator = .init(a);
+            defer arena.deinit();
             var names = std.StringHashMapUnmanaged(void).empty;
-            defer names.deinit(a);
-            try names.put(a, "model.language_model.layers.0.mlp.experts.0.gate_proj.weight", {});
-            try std.testing.expectError(error.UnlistedExpert, q.checkNames(&h, names.keyIterator()));
+            for (0..cfg.layers) |l| for ([_]u8{ 1, 3, 5, 7, 9, 11, 13, 255 }) |e| for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |p|
+                try names.put(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight", .{ l, e, p }), {});
+            try q.checkStored(&h, names);
+            const extra = "model.language_model.layers.0.mlp.experts.0.gate_proj.weight";
+            try names.put(arena.allocator(), extra, {});
+            try std.testing.expectError(error.UnlistedExpert, q.checkStored(&h, names));
+            _ = names.remove(extra);
+            _ = names.remove("model.language_model.layers.39.mlp.experts.255.down_proj.weight");
+            try std.testing.expectError(error.MissingExpert, q.checkStored(&h, names));
         } else try std.testing.expectError(error.BadExpertMap, q.parseHeld(tree.value));
     }
     const text = try mapText(a, good, true);

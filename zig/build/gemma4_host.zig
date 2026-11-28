@@ -32,6 +32,12 @@ pub fn tests(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     const head_run = b.addRunArtifact(b.addTest(.{ .root_module = head_root }));
     head_run.has_side_effects = true;
     b.step("test-gemma4-prompt-head-host", "Last prompt-row and decode projection bindings against synthetic layer logits").dependOn(&head_run.step);
+    // Metal's prompt pass a chunk a call (#3021): its cuts, a decode between chunks, a drafter's taps, on a fake
+    const step_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
+    const steps_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/prefill_steps.zig"), .target = b.graph.host, .imports = &.{.{ .name = "lanes", .module = step_lanes }} });
+    const steps_run = b.addRunArtifact(b.addTest(.{ .root_module = steps_root, .filters = &.{"Gemma Metal steps:"} }));
+    steps_run.has_side_effects = true;
+    b.step("test-gemma4-metal-steps-host", "Gemma 4 Metal's stepped prompt pass on a recording fake, no GPU").dependOn(&steps_run.step);
     return family_step;
 }
 
@@ -40,6 +46,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     runner.addImport("h3_kernels", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }));
     runner.addAnonymousImport("ling_metal", .{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") });
     runner.addAnonymousImport("ling_route", .{ .root_source_file = b.path("zig/src/families/ling/route.zig") });
+    @import("kernel_contract.zig").metalRootImports(b, engine, runner);
     runner.addImport("masked_sources", b.createModule(.{ .root_source_file = b.path("zig/masked_value_sources.zig"), .imports = &.{.{ .name = "kernel_sources", .module = sources }} }));
     const contract_root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_contract_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "runner", .module = runner }} });
     const contract_object = b.addObject(.{ .name = "gemma4-contract-compile", .root_module = contract_root });
@@ -49,6 +56,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     @import("disk_identity_host.zig").metal(b, metal, engine, api);
     const identity_root = b.createModule(.{ .root_source_file = b.path("zig/persistence_identity_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api } } });
+    identity_root.addImport("tensorfold", identity_root);
     const identity_filter = b.option([]const u8, "persistence-identity-filter", "One persisted-state identity regression");
     const identity_run = b.addRunArtifact(b.addTest(.{ .root_module = identity_root, .filters = if (identity_filter) |f| &.{f} else &.{"persistence identity:"} }));
     identity_run.has_side_effects = true;

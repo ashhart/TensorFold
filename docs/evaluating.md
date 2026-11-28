@@ -43,11 +43,16 @@ These need no GPU, driver or checkpoint:
 - `tensorfold capabilities --json` lists the backends, model families, formats, serve flags and
   `optional_libraries`, each with a `found` flag.
 - `tensorfold info REPO` prints a pulled checkpoint's family, format, context, weights size and memory floor.
+- From a source build (`tensorfold` built from source, or `tf-cluster`), `tensorfold config validate FILE`
+  reads a cluster.json, prints every problem, and does not plan models or probe hosts. The release
+  binary, `tensorfold-native`, does not have this command.
 
 ## Container
 
-The root [Dockerfile](../Dockerfile) installs a Linux release archive in an Ubuntu 24.04 image. The build stops unless
-the archive's checksum, the release signature over it and every unpacked file's checksum all match.
+The root [Dockerfile](../Dockerfile) installs a signed Linux release archive in a CUDA 13.0.2 / Ubuntu 24.04 image.
+The final stage adds pinned cuBLAS (including cuBLASLt) and NCCL runtime packages, not the CUDA compiler or development
+packages. Download and signature-verification tools stay in the separate fetch stage. The build stops unless the
+archive's checksum, the release signature over it and every unpacked file's checksum all match.
 It runs as the image's `ubuntu` user and keeps the Hugging Face cache in `/huggingface`, the directory to mount.
 
 ```sh
@@ -56,9 +61,13 @@ docker run --rm tensorfold
 docker run --rm tensorfold capabilities --json
 ```
 
-`--build-arg TENSORFOLD_VERSION=1.2.4` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
-archive from the build platform. To serve, the host needs NVIDIA driver R580 or newer and the NVIDIA Container Toolkit,
-which supplies `libcuda.so.1` to the container. Listen on all addresses inside the container:
+`--build-arg TENSORFOLD_VERSION=1.3.5` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
+archive from the build platform. The CUDA base is pinned by its multi-platform digest; cuBLAS and NCCL are pinned
+by package version for both architectures. NCCL is 2.30.7, the tested minimum for tensor-parallel ranks; NVIDIA
+ships it for CUDA 13 only as a CUDA 13.3 build, which the R580 driver runs under CUDA minor-version compatibility.
+To serve, the host still needs NVIDIA driver R580 or newer and the NVIDIA Container Toolkit, which supplies
+`libcuda.so.1` to the container. Do not install the host driver in the image. Listen on all addresses inside the
+container:
 
 ```sh
 docker run --rm --gpus all -p 8080:8080 \
@@ -67,8 +76,36 @@ docker run --rm --gpus all -p 8080:8080 \
 ```
 
 Add `--user "$(id -u):$(id -g)"` when your user ID is not 1000, so the server can write to the mounted cache.
-The image holds only the release archive. Features that need cuBLASLt, NCCL or the image decoders (see
-[optional shared libraries](../packaging/RUNTIME.md#optional-shared-libraries)) need an image that adds them.
+cuBLAS/cuBLASLt and NCCL are included for CUDA projections, vision towers and tensor-parallel ranks. Image/video/PDF
+decoders and RDMA providers remain separate [optional shared libraries](../packaging/RUNTIME.md#optional-shared-libraries).
+Their absence is reported by `capabilities --json`; a discoverable library is not proof of GPU or model qualification.
+
+### Published release images
+
+The [container workflow](../.github/workflows/container-release.yml) publishes
+`ghcr.io/ashhart/tensorfold:vX.Y.Z` when a stable `v1.x.y` GitHub release is **published**, not when a tag is pushed.
+It packages that release's signed archives; it does not rebuild the inference engine.
+There is no rolling `latest` tag, and a backfill refuses to replace an existing version tag.
+
+```sh
+docker pull ghcr.io/ashhart/tensorfold:v1.3.5
+docker run --rm ghcr.io/ashhart/tensorfold:v1.3.5 --version
+```
+
+The version tag names one manifest for Linux amd64 and arm64. Each architecture is built once, on its native
+GitHub-hosted Ubuntu runner, with provenance and an SBOM, and pushed to GHCR by digest without a tag. That pushed
+digest is then pulled and checked without a GPU: the expected version, loadable cuBLAS/cuBLASLt, NCCL and grammar
+libraries, the NCCL version reported by `ncclGetVersion` from the `libnccl.so.2` the image's loader resolves,
+an unprivileged user and a writable cache. Only digests that pass are recorded; the publish job combines those
+recorded digests into the version tag without rebuilding, after both architectures pass, and refuses an index whose
+platform manifests differ from the checked ones. These checks do not validate GPU inference.
+
+Pull requests affecting container inputs run the same build and smoke checks on a local image without publishing.
+A manual run accepts a published stable release tag; publication is opt-in and targets the running repository's own
+GHCR namespace. Forks can use this manual path to validate publication without writing to upstream's package.
+Automatic release publication is restricted to `ashhart/TensorFold`; pull requests never publish.
+The publishing repository must allow Actions to write packages and make the GHCR package public after its first publish.
+
 
 ## Tests that run without a GPU
 
@@ -99,6 +136,43 @@ and what it fixes.
 | `response_format` with a JSON schema | The reply matches the schema and equals its `"draft": false` reply. Needs `lib/` too. |
 
 The [API reference](api.md) lists every field and refusal.
+
+## Agent eval: a heat exchanger with tools
+
+`tools/eval_hx_entu.py` holds a five-turn conversation with a served model that has one tool, `run_python`. Each
+turn gives an exchanger's capacity rates, inlets (200 °C and 20 °C) and UA, asks the model to compute the answer with
+the tool, and wants one JSON line at the end of its reply:
+
+1. Counterflow, C_h = C_c = 500 W/K, UA = 1000 W/K: the duty q and both outlets. With equal capacity rates the
+   general counterflow effectiveness formula is 0/0; the right one there is NTU / (1 + NTU).
+2. The same exchanger in parallel flow.
+3. Counterflow with C_c = 1000 W/K.
+4. Sizing: the UA that brings the hot gas out at 100 °C, with equal capacity rates.
+5. The first exchanger split into 200 cells and solved numerically; its hot outlet must agree with turn 1.
+
+A turn passes when every value is within 0.5% of the reference, which the tool computes from the closed forms. Each
+turn also records its tool calls, how many were well-formed (JSON arguments holding a `code` string), the runs that
+failed, completion and thinking tokens, and wall time. A turn whose duty is zero or far off while both stream
+balances match it exactly is flagged as an energy balance by construction: outlets computed from a wrong q always
+balance, so the check proves nothing.
+
+```sh
+tensorfold serve REPO --name local-model
+python3 tools/eval_hx_entu.py --model local-model --runs 3 --out hx.json
+```
+
+- `--base-url` defaults to `http://127.0.0.1:8080/v1` and `--temperature` to 0.2. A turn ends when the model answers
+  without a tool call or after `--max-tool-calls` calls (8).
+- `--reasoning-effort` sends `reasoning_effort` (`none` turns thinking off). `--thinking-budget N` sends
+  `thinking_budget`, so the server closes the reasoning after N tokens. Thinking tokens are read from the reply's
+  `usage.completion_tokens_details.reasoning_tokens`.
+- The model's code runs as `python3 -I` in a new temporary directory with only `PATH` set, under a wall limit (30 s),
+  CPU, file-size and memory limits. On macOS it runs inside `sandbox-exec` with no network, no writes outside that
+  directory and no reads in the home folder. It also blocks launching apps and jobs through LaunchServices,
+  Apple Events and launchd. macOS refuses address-space limits, so memory is held by watching the program's resident size. On Linux it runs under `unshare -n`, which takes away the network only. Without either,
+  the tool refuses to run unless you pass `--unsafe-no-sandbox`.
+- It prints each turn's verdict with its values against the references, the totals, and how many turns each run
+  reached; a failed request ends that run. It exits 0 only when every run passes every turn.
 
 ## Memory
 

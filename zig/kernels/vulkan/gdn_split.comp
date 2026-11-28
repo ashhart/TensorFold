@@ -122,7 +122,8 @@ void main() {
     }
   }
 
-  if (lane == 0u) {
+  // The dispatch spans q, k and v workgroups sharing each hv slot, so only the value head stores the gates.
+  if (lane == 0u && !isq && !isk) {
     vec2 gates = oracle_gate(SPLIT_LOAD(ain.v[t * 16u + hv]),
                           SPLIT_LOAD(bin.v[t * 16u + hv]),
                           alog.v[hv],

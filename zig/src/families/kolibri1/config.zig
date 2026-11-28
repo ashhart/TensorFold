@@ -2,6 +2,8 @@
 const std = @import("std");
 const eos_ids = @import("core").tokenizer.eos;
 const rope_config = @import("rope_config");
+const v11_config = @import("config_v11.zig");
+pub const kolibri11 = v11_config;
 
 pub const max_layers = 64;
 pub const max_eos = 4;
@@ -40,9 +42,24 @@ pub const Config = struct {
     eps: f32,
     eos: [max_eos]u32 = @splat(0),
     eos_count: usize = 0,
+    /// Kolibri 1.1 (`kolibri1_1`, config_v11.zig): dense MLP layers, layers reading another's K and V, a context cap.
+    v11: bool = false,
+    dense: [max_layers]bool = @splat(false), // `mlp_only_layers`: a SwiGLU MLP `dense_width` wide, no router
+    dense_width: usize = 0,
+    kv_from: [max_layers]?u8 = @splat(null), // `kv_source_layers`: reads that layer's cache, no k/v of its own
+    max_context: usize = 0, // 0: none; 1.1: index_topk, where a query attends every key (K and V bf16, not NVFP4)
 
     pub fn qkvDim(self: Config) usize {
         return (self.heads + 2 * self.kv_heads) * self.head_dim;
+    }
+
+    /// Activation columns a row takes: its routed and shared experts side by side, or a dense layer's MLP if wider.
+    pub fn actWidth(self: Config) usize {
+        var dense: usize = 0;
+        for (self.dense[0..self.layers]) |d| if (d) {
+            dense = self.dense_width;
+        };
+        return @max((self.top_k + 1) * self.moe_width, dense);
     }
 
     pub fn fullCount(self: Config) usize {
@@ -126,8 +143,9 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
     defer parsed.deinit();
     const o = parsed.value.object;
     const mt = o.get("model_type") orelse return error.BadConfig;
-    if (mt != .string or !std.mem.eql(u8, mt.string, "kolibri1")) {
-        why.set("model_type {f} is not kolibri1", .{std.json.fmt(mt, .{})});
+    const v11 = mt == .string and std.mem.eql(u8, mt.string, "kolibri1_1");
+    if (mt != .string or !(v11 or std.mem.eql(u8, mt.string, "kolibri1"))) {
+        why.set("model_type {f} is not kolibri1 or kolibri1_1", .{std.json.fmt(mt, .{})});
         return error.NotKolibri1;
     }
     const q = if (o.get("quantization_config")) |v| (if (v == .object) v.object else null) else null;
@@ -184,13 +202,20 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
     }
     for (types.array.items, 0..) |t, i| {
         if (t != .string) return error.BadConfig;
-        if (std.mem.eql(u8, t.string, "full_attention")) {
+        if (std.mem.eql(u8, t.string, if (v11) "indexed_attention" else "full_attention")) {
             c.full[i] = true;
         } else if (!std.mem.eql(u8, t.string, "sliding_attention")) {
-            why.set("layer {d} is {s}; Kolibri-1 has full_attention and sliding_attention layers", .{ i, t.string });
+            why.set("layer {d} is {s}; {s} has {s} and sliding_attention layers", .{ i, t.string, mt.string, if (v11) "indexed_attention" else "full_attention" });
             return error.UnsupportedLayer;
         }
     }
+    if (v11) try v11_config.extend(&c, o, why) else if (o.get("kv_source_layers") != null or o.get("mlp_only_layers") != null) {
+        why.set("kv_source_layers and mlp_only_layers belong to kolibri1_1; this config says kolibri1", .{});
+        return error.BadConfig;
+    } else for (o.keys()) |key| if (std.mem.startsWith(u8, key, "index_")) {
+        why.set("{s} belongs to kolibri1_1's indexed layers; this config says kolibri1", .{key});
+        return error.BadConfig;
+    };
     const ids = try eos_ids.resolve(allocator, parsed.value, .null, c.vocab);
     defer allocator.free(ids);
     try setEos(&c, ids);

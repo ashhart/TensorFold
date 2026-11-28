@@ -25,6 +25,7 @@ pub const devices = [_]limits.VulkanDeviceLimits{
 
 pub const records = [_]Record{
     .{ .launch = .{ .name = "qmm_bf16", .local_size = .{ 256, 1, 1 } } },
+    .{ .launch = .{ .name = "qmm_f32", .local_size = .{ 256, 1, 1 } } },
     .{ .launch = .{ .name = "qmm_q4_vec4", .local_size = .{ 256, 1, 1 } } },
     .{ .launch = .{ .name = "qmm_q4_tile", .local_size = .{ 256, 1, 1 } } },
     .{ .launch = .{ .name = "qmm_q4_tile_rows", .local_size = .{ 256, 1, 1 } } },

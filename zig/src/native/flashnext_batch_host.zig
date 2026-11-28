@@ -140,7 +140,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     plan.room_bytes = final.room;
     plan.over_cap = final.over_cap;
     eng.snap_pool.max = plan.budget_bytes;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .decode_share = tf.flashnext_backend.decodeShare(decode_share, std.c.getenv("TENSORFOLD_PREFILL_SHARE") != null), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .decode_share = tf.flashnext_backend.decodeShare(decode_share, @import("sys").environment.rawText("TENSORFOLD_PREFILL_SHARE") != null), .prompt_cache_plan = plan, .structures = true, .penalties = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     h.back.fill_grows = h.host.share.p < 1; // a share of 1 asked for keeps today's small steps
     // FLASHNEXT_NO_LONE=1: lone requests on shared rounds. Images always; sampled, plain on tensor units (unmeasured).
     const measured = !eng.r.device.tensorUnits();
@@ -150,7 +150,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     h.cache = null;
     if (plan.budget_bytes > 0) {
         h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = Backend.snapBytes, .save = Backend.snapSave, .restore = Backend.snapRestore, .drop = Backend.snapDrop, .charged = Backend.snapCharged, .spare = Backend.snapSpare, .trim = Backend.snapTrim, .reuses = Backend.snapReuses, .rows = &state_image } }, .{ .lookahead = 1, .planned = true, .warm = .on }, plan.budget_bytes);
-        if (learn) |l| _ = try disk.attach(gpa, &h.cache.?, try disk.identity(gpa, io, dir, eng), l);
+        if (learn) |l| _ = try disk.attach(gpa, &h.cache.?, try disk.identity(gpa, io, dir, eng), l, h.host.info_.context_window);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.host.info_.warm_turns = true;

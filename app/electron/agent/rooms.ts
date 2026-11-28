@@ -1,279 +1,26 @@
+import { createRoomSeatTurn, compactSeatRuntime, type SeatRuntime } from './room-seat-runtime'
+import { seatHeartbeatIntervalSeconds, initSeatHeartbeat, recordSeatBeat, stalledSeatNames, rearmSeatHeartbeats, evaluateSeatHeartbeats } from './room-heartbeats'
+export { seatHeartbeatIntervalSeconds, initSeatHeartbeat, recordSeatBeat, stalledSeatNames, rearmSeatHeartbeats, evaluateSeatHeartbeats } from './room-heartbeats'
+export type { SeatRuntimeLike } from './room-heartbeats'
+import { buildPrimer, gateAction, renderForRoom, signature, blockerSignature, oneLine, roomTeamCue, escapeReg } from './room-protocol'
 import { randomUUID } from 'node:crypto'
-import { streamChat } from './openai'
-import { isExternalProvider } from '../../shared/provider-trust'
-import { PROJECT_CONTEXT_WITHHELD_NOTE } from './planning-guard'
-import { estimateTokens, kfmt, renderTranscript } from './compaction'
-import { VONTRA_STYLE_PROMPT, ensureTensorFoldStudioStylePrompt } from './prompt-style'
-import type { ApiMessage, Project, Provider, Room, RoomDeliberationEffort, RoomEventItem, RoomState, RoomStreamEvent, Seat, SeatHeartbeat } from './types'
-import { buildRoomMemoryDiff, buildRoomRunMemoryEntry, deliberationBudgetText, deliberationProfile, formatRoomMemory, inferSeatLane, mergeRoomMemory, normalizeCollaborationMode, normalizeDeliberationEffort, roomShouldCloseOut, seatCollaborationInstructions, updateRoomMemorySummary } from './room-collaboration'
+import { captureAgentReasoningEffort } from '../../shared/reasoning-effort'
+import type { streamChat } from './openai'
+import { kfmt } from './compaction'
+import type { Project, Provider, Room, RoomEventItem, RoomState, RoomStreamEvent, Seat, SeatHeartbeat } from './types'
+import { buildRoomMemoryDiff, buildRoomRunMemoryEntry, deliberationBudgetText, deliberationProfile, inferSeatLane, mergeRoomMemory, normalizeCollaborationMode, normalizeDeliberationEffort, roomShouldCloseOut, updateRoomMemorySummary } from './room-collaboration'
 import { validateRoomConfiguration, validateRoomTransition } from './room-invariants'
-import { roomModePromptBlock, roomOutcomeGate, roomOutcomeProfile } from './room-outcomes'
+import { roomOutcomeGate, roomOutcomeProfile } from './room-outcomes'
 import { renderSharedMemory } from './shared-room-memory'
-import { isCliSeatProvider, runCliSeatTurn, type CliSeatTurnParams } from './room-cli-seat'
+import type { CliSeatTurnParams } from './room-cli-seat'
 import { recordRoomEvent } from './orchestration-journal'
 import { emitRoomLifecycle } from '../main/host/orchestration-events'
-
-// Ported from LLMComposer's room/huddle engine: multiple provider-bound seats
-// deliberate on one shared problem as an attributed dialogue, with SENSE
-// injection so each seat knows it is one of several real teammates.
-
-const VERBS = new Set(['SPEAK', 'ASK', 'OBJECT', 'ASSIGN', 'CLAIM', 'CHECK', 'VOTE', 'YIELD', 'FINAL', 'TOOL'])
-
-interface SeatRuntime {
-  seat: Seat
-  messages: { role: 'system' | 'user' | 'assistant'; content: string }[]
-  recent: string[]
-  heartbeat: SeatHeartbeat
-}
-
-// Minimal shape the heartbeat helpers need — lets tests exercise stall detection
-// without standing up a full SeatRuntime (messages/recent are irrelevant here).
-export interface SeatRuntimeLike {
-  seat: Pick<Seat, 'id' | 'name'>
-  heartbeat: SeatHeartbeat
-}
 
 interface SeatModelRecovery {
   provider: Provider
   providerAccountId: string | null
   model: string
   notice: string
-}
-
-// Default grace after nextDueAt before a slow seat is flagged stalled (BUG #53).
-// Tolerates transient model latency so a normal slow turn does not false-positive.
-const SEAT_STALL_GRACE_SECONDS = 30
-
-// Heartbeat cadence derived from the room deliberation effort. Deeper sessions
-// expect longer per-turn thinking, so we widen the interval to avoid false stalls.
-export function seatHeartbeatIntervalSeconds(effort?: RoomDeliberationEffort | null): number {
-  switch (effort) {
-    case 'quick': return 30
-    case 'deep': return 90
-    case 'max': return 120
-    case 'normal':
-    default: return 60
-  }
-}
-
-// Seed a healthy heartbeat for a seat at room start.
-export function initSeatHeartbeat(seat: Pick<Seat, 'id' | 'name'>, intervalSeconds: number, now: number): SeatHeartbeat {
-  return {
-    seatId: seat.id,
-    seatName: seat.name,
-    intervalSeconds,
-    stallGraceSeconds: SEAT_STALL_GRACE_SECONDS,
-    required: true,
-    count: 0,
-    lastBeatAt: now,
-    nextDueAt: now + intervalSeconds * 1000,
-    missedSince: null,
-  }
-}
-
-// Record that a seat produced a turn: bump count, advance the clock, clear any stall.
-export function recordSeatBeat(hb: SeatHeartbeat, now: number): void {
-  hb.count++
-  hb.lastBeatAt = now
-  hb.nextDueAt = hb.required ? now + hb.intervalSeconds * 1000 : null
-  hb.missedSince = null
-}
-
-// Names of seats currently flagged stalled (missedSince set), excluding one seat
-// by name (the seat trying to FINAL is obviously alive). Used to block a premature
-// finalize while a teammate is hung (BUG #53).
-export function stalledSeatNames(runtimes: SeatRuntimeLike[], exclude?: string): string[] {
-  return runtimes
-    .filter((rt) => rt.heartbeat.required && rt.heartbeat.missedSince != null && rt.seat.name !== exclude)
-    .map((rt) => rt.seat.name)
-}
-
-// Re-arm the stall window for seats that actually took a turn in the previous pass.
-// A single pass over several slow models can take longer than interval+grace, so a
-// seat that beat last pass and is merely waiting its turn must not be false-flagged;
-// pushing its nextDueAt forward to this pass start prevents that. Crucially, seats
-// that did NOT run last pass (e.g. one that keeps timing out without ever calling
-// recordSeatBeat, or any seat on the very first pass) are left untouched so their
-// window keeps counting and evaluateSeatHeartbeats can actually flag a real stall —
-// re-arming every non-stalled seat unconditionally is what made stall detection dead
-// code (BUG #53 regression).
-export function rearmSeatHeartbeats(
-  runtimes: SeatRuntimeLike[],
-  ranLastPass: Set<string>,
-  passStart: number,
-): void {
-  for (const rt of runtimes) {
-    const hb = rt.heartbeat
-    if (hb.required && hb.missedSince == null && ranLastPass.has(rt.seat.id)) {
-      hb.nextDueAt = passStart + hb.intervalSeconds * 1000
-    }
-  }
-}
-
-// Detect seats whose turn is overdue past the grace window. Mutates each newly
-// stalled heartbeat's missedSince so a stall is reported once (not every tick),
-// and returns human-readable notices for the moderator to surface.
-export function evaluateSeatHeartbeats(runtimes: SeatRuntimeLike[], now: number): string[] {
-  const stalled: string[] = []
-  for (const rt of runtimes) {
-    const hb = rt.heartbeat
-    if (!hb.required || hb.lastBeatAt == null || hb.nextDueAt == null) continue
-    if (hb.missedSince != null) continue // already flagged; do not re-report
-    const stallAt = hb.nextDueAt + hb.stallGraceSeconds * 1000
-    if (now >= stallAt) {
-      hb.missedSince = hb.nextDueAt
-      const ago = Math.round((now - hb.lastBeatAt) / 1000)
-      stalled.push(`Seat "${rt.seat.name}": heartbeat overdue (last beat ${ago}s ago)`)
-    }
-  }
-  return stalled
-}
-
-const ROOM_KEEP_PREFIX = 2 // system primer + SENSE/task
-const ROOM_KEEP_RECENT = 8
-
-function buildPrimer(project: Project, room: Room, seat: Seat, roster: Seat[], provider?: Provider): string {
-  const rosterText = roster.map((s) => `- ${s.name}: ${s.role} (model ${s.model})`).join('\n')
-  const roomMemory = formatRoomMemory(room)
-  const sharedMemory = room.sharedMemory ? renderSharedMemory(room.sharedMemory) : ''
-  return [
-    `You are ${seat.name} in a live multi-agent working session with the teammates below.`,
-    '',
-    `ROOM ROLE\nYour visible room role is ${seat.role}. Use it to decide when to volunteer, challenge, defer, or take a ticket, but keep your general reasoning intact.`,
-    `\n${seatCollaborationInstructions(room, seat, provider)}`,
-    roomOutcomeProfile(room.mode) ? `\nROOM OUTCOME\n${roomModePromptBlock(roomOutcomeProfile(room.mode)!)}` : '',
-    project.team ? `\nTEAM CHARTER\n${project.team}` : '',
-    // External seats plan only and never see project memory (planning-guard.ts).
-    project.memory ? (isExternalProvider(provider) ? `\n${PROJECT_CONTEXT_WITHHELD_NOTE}` : `\nPROJECT MEMORY\n${project.memory}`) : '',
-    roomMemory ? `\nROOM MEMORY\n${roomMemory}` : '',
-    sharedMemory ? `\n${sharedMemory}` : '',
-    '',
-    'ROOM CONTRACT',
-    'Messages tagged [room] are what teammates actually said; [moderator] hands you the floor.',
-    'Speak in first person, briefly and concretely. React to what was just said instead of restating it.',
-    "Never write [room] or [moderator] lines yourself, and never invent a teammate's reply.",
-    'Never repeat a question or point you already made.',
-    'End every reply with exactly one line: ACTION: <VERB> <content>.',
-    'Verbs: SPEAK, ASK, OBJECT, ASSIGN, CLAIM, CHECK, VOTE, YIELD, FINAL, TOOL.',
-    'ACTION: ASK <teammate> <question> addresses one teammate by name. ACTION: FINAL <answer> ends the room only when the task is genuinely done.',
-    'When you answer a specific ASK or ASSIGN, cite it by appending RE: #<id> to your ACTION line so the reply links back to the question.',
-    'Only state what you can actually see in the [room] lines above. Do not claim progress that has not happened.',
-    '',
-    'TEAMWORK CONTRACT',
-    'Make handoffs explicit. If a teammate asks or assigns you something, answer that first and say what you are unblocking for them.',
-    'Help the room finish the user goal: create or claim concrete tickets, attach evidence, start workers when ready, and yield when waiting.',
-    'If you disagree, name the risk and offer the next useful move instead of reopening the whole plan.',
-    '',
-    VONTRA_STYLE_PROMPT,
-    '',
-    'SHARED BOARD: coordinate through it so you never duplicate a teammate\'s work:',
-    'ACTION: TOOL list_tickets: see every ticket and who is working on what.',
-    'ACTION: TOOL claim_ticket {"title":"..."}: claim a ticket BEFORE you start it, so teammates know it is taken.',
-    'ACTION: TOOL create_ticket {"title":"...","body":"...","priority":"high","risk":"medium","allowedCapabilities":["read"],"requiredEvidence":["files inspected","verification result"],"acceptanceCriteria":["..."]}: add an execution ticket to the board.',
-    'ACTION: TOOL add_ticket_evidence {"title":"...","kind":"file","summary":"What you found","ref":"src/file.ts"}: attach evidence to a claimed ticket.',
-    'ACTION: TOOL complete_ticket {"title":"...","evidence":[{"kind":"review","summary":"Reviewed X and found Y"}]}: mark your claimed ticket complete after attaching required evidence.',
-    'ACTION: TOOL left_to_work: see the remaining room tickets, active workers, risks, and known file refs.',
-    'ACTION: TOOL memory_write {"name":"decisions","content":"...","mode":"append-bullet"}: update the room\'s live shared memory (decisions, plan, blockers). Teammates see updates on their next turn.',
-    'ACTION: TOOL start_ticket_work {"title":"...","phase":"build","paths":["src/x.ts"]}: ask the Room Supervisor to start a ticket worker thread in the room worktree. Use phase "review" for reviewer passes. If a file overlap is intentional, include "mergeDecision":"why this overlap is safe and how results will be merged".',
-    'ACTION: TOOL delegate {"task":"..."}: hand a focused subtask to a sub-agent and get its result. Add "targetSeat":"SeatName" to run it on that seat\'s provider/model, or "providerId"/"accountId"/"model" for an explicit route; omit them to use your own.',
-    'Always claim before working; never touch a ticket already claimed by someone else.',
-    'Only start ticket workers for claimed or ready tickets. Declare paths when you know them so the supervisor can prevent overlapping edits.',
-    'Do not ACTION: FINAL while room tickets are still open.',
-    '',
-    'WORKSPACE: inspect the shared project safely:',
-    'ACTION: TOOL read_file {"path":"src/x.ts"}: read a file.',
-    'ACTION: TOOL search {"query":"..."}: find relevant code.',
-    'ACTION: TOOL list_dir {"path":"src"}: inspect folders.',
-    'Room agents are read-only by default. Do not attempt edit_file, write_file, or run_command unless the user opens an approved work thread for that ticket.',
-    'When you know the change needed, create/claim a ticket and explain the proposed edit for an approved thread to execute.',
-    '',
-    'TEAM ROSTER',
-    rosterText,
-  ].filter(Boolean).join('\n')
-}
-
-interface Action { verb: string; text: string; raw: string; prose?: string }
-
-// Lenient gate: missing action becomes SPEAK, empty body becomes YIELD.
-function gateAction(output: string): Action {
-  const raw = (output ?? '').trim()
-  if (!raw) return { verb: 'YIELD', text: '', raw }
-  const lines = raw.split('\n')
-  const actionLine = [...lines].reverse().find((l) => l.trim().toUpperCase().startsWith('ACTION:'))
-  const prose = lines.filter((l) => l !== actionLine).join('\n').trim()
-  if (!actionLine) return { verb: 'SPEAK', text: prose || raw, raw }
-  const body = actionLine.trim().slice(actionLine.trim().indexOf(':') + 1).trim()
-  const parts = body.split(/\s+/)
-  const verb = (parts[0] || '').toUpperCase()
-  const text = parts.slice(1).join(' ').trim()
-  if (!VERBS.has(verb)) return { verb: 'SPEAK', text: prose || raw, raw }
-  if (!text && verb !== 'YIELD') return { verb: 'YIELD', text: '', raw }
-  // Keep the prose so peers receive the model's actual reasoning, not just the one-line ACTION tagline.
-  return { verb, text, raw, prose }
-}
-
-function renderForRoom(ev: RoomEventItem, compact = false): string {
-  const label = ev.kind.toUpperCase()
-  // Addressed asks/assigns carry a short ref (#id8) so a teammate can answer with
-  // "RE: #<id>"; replies show the ref they answer (re #id8).
-  const ref = (ev.kind === 'ask' || ev.kind === 'assign') ? ` #${ev.id.slice(0, 8)}` : ''
-  const reply = ev.replyTo ? ` re #${ev.replyTo.slice(0, 8)}` : ''
-  if (compact) return `[room] ${ev.seat} (${label}${reply}): ${ev.text}`
-  const head = ev.target && ev.target !== 'all' && ev.target !== ev.seat
-    ? `[room] ${ev.seat} (${label}, to ${ev.target}${ref}${reply}):`
-    : `[room] ${ev.seat} (${label}${ref}${reply}):`
-  return `${head}\n${ev.text}`
-}
-
-function signature(raw: string): string {
-  return raw.split('\n').filter((l) => !l.trim().toUpperCase().startsWith('ACTION:')).join(' ').trim().toLowerCase().slice(0, 400)
-}
-
-function blockerSignature(blockers: string[]): string {
-  return blockers.map((blocker) => blocker.replace(/\s+/g, ' ').trim().toLowerCase()).filter(Boolean).join('\n')
-}
-
-function oneLine(text: string, max = 180): string {
-  const compact = text.replace(/\s+/g, ' ').trim()
-  return compact.length > max ? `${compact.slice(0, Math.max(0, max - 3))}...` : compact
-}
-
-function roomTeamCue(room: Room, seat: Seat): string {
-  const recent = room.events.filter((event) => !['task', 'notice', 'user'].includes(event.kind)).slice(-10)
-  const directHandoffs = recent.filter((event) => (event.kind === 'ask' || event.kind === 'assign') && event.target === seat.name)
-  const latestDirect = directHandoffs[directHandoffs.length - 1]
-  const latestOtherHandoff = recent.filter((event) =>
-    (event.kind === 'ask' || event.kind === 'assign') &&
-    !!event.target &&
-    event.target !== 'all' &&
-    event.target !== seat.name
-  ).slice(-1)[0]
-  const latestClaim = recent.filter((event) => event.kind === 'claim').slice(-1)[0]
-  const latestUserSteer = room.events
-    .filter((event) => event.kind === 'user' && (event.target === 'all' || event.target === seat.name))
-    .slice(-1)[0]
-  const cue: string[] = []
-
-  if (latestUserSteer) {
-    cue.push(`USER STEERING: "${oneLine(latestUserSteer.text, 220)}". Treat this as the user's latest direction and respond to it before lower-priority room chatter.`)
-  }
-
-  if (latestDirect) {
-    cue.push(`TEAM CUE: ${latestDirect.seat} handed work to you: "${oneLine(latestDirect.text, 220)}". Answer or unblock that first, naming ${latestDirect.seat}.`)
-  } else if (latestOtherHandoff) {
-    cue.push(`TEAM CUE: ${latestOtherHandoff.seat} handed work to ${latestOtherHandoff.target}. Let that teammate respond unless you can unblock with new evidence.`)
-  }
-
-  if (latestClaim) {
-    cue.push(`Latest claim: ${latestClaim.seat} claimed "${oneLine(latestClaim.text, 120)}". Build on it and do not duplicate it.`)
-  }
-
-  cue.push('Work like a teammate: reference who you are helping, answer direct asks before new topics, create or claim the next useful ticket, start workers when ready, and ACTION: YIELD if you are waiting.')
-  return cue.join(' ')
-}
-
-function escapeReg(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 const ALWAYS_FULL = new Set(['final', 'task', 'user', 'file_change'])
@@ -290,50 +37,9 @@ function broadcast(runtimes: SeatRuntime[], item: RoomEventItem, excludeSeatId: 
   }
 }
 
-async function summarizeRoomTranscript(provider: Provider, model: string, transcript: string, signal: AbortSignal): Promise<string> {
-  const sys = ensureTensorFoldStudioStylePrompt([
-    'Compress a multi-agent room seat transcript into a dense private memory.',
-    'Preserve the task, decisions, claims, blockers, files/tools used, open tickets, and anything directly addressed to this seat.',
-    'Use terse bullets. Output only the summary.',
-  ].join('\n'))
-  let out = ''
-  for await (const ch of streamChat({
-    provider,
-    baseUrl: provider.baseUrl,
-    apiKey: provider.apiKey,
-    model,
-    messages: [{ role: 'system', content: sys }, { role: 'user', content: transcript }],
-    temperature: 0.1,
-    approvalMode: 'readonly',
-    cwd: null,
-    signal,
-  })) {
-    if (ch.type === 'content') out += ch.text
-  }
-  return out.trim()
-}
-
-async function compactSeatRuntime(rt: SeatRuntime, provider: Provider, limit: number, signal: AbortSignal): Promise<{ before: number; after: number; folded: number } | null> {
-  if (limit <= 0) return null
-  const before = estimateTokens(rt.messages as ApiMessage[])
-  if (before <= limit) return null
-  const prefix = Math.min(ROOM_KEEP_PREFIX, rt.messages.length)
-  const cut = Math.max(prefix, rt.messages.length - ROOM_KEEP_RECENT)
-  if (cut - prefix < 2) return null
-  const toCompress = rt.messages.slice(prefix, cut)
-  const summary = await summarizeRoomTranscript(provider, rt.seat.model, renderTranscript(toCompress as ApiMessage[]), signal)
-  if (!summary) return null
-  rt.messages = [
-    ...rt.messages.slice(0, prefix),
-    { role: 'user', content: `[Earlier private room context auto-compacted to protect this model's context window. Running memory:]\n\n${summary}` },
-    ...rt.messages.slice(cut),
-  ]
-  return { before, after: estimateTokens(rt.messages as ApiMessage[]), folded: toCompress.length }
-}
-
 // Distributive Omit so each union member keeps its own payload keys
 // (a plain Omit<Union, K> collapses to the members' common keys only).
-type RoomSend = RoomStreamEvent extends infer T ? (T extends any ? Omit<T, 'roomId'> : never) : never
+export type RoomSend = RoomStreamEvent extends infer T ? (T extends any ? Omit<T, 'roomId'> : never) : never
 
 export interface RoomRunDeps {
   room: Room
@@ -342,6 +48,7 @@ export interface RoomRunDeps {
   problem: string
   temperature: number
   reasoningEffort: string
+  reasoningEffortForSeat?: (seat: Seat) => string
   emit: (e: RoomStreamEvent) => void
   signal: AbortSignal
   maxTurns?: number
@@ -356,12 +63,10 @@ export interface RoomRunDeps {
   /** Injectable chat transport (defaults to streamChat) — lets tests drive distinct per-seat models. */
   chat?: typeof streamChat
   /** Injectable CLI seat turn (defaults to the one-shot dispatch in room-cli-seat.ts) — test seam mirroring `chat`. */
-  cliSeatTurn?: (params: CliSeatTurnParams, onDelta: (text: string) => void) => Promise<string>
-  /** Per-seat turn timeout (ms). A seat exceeding it is skipped so one hung model can't freeze the room. */
+  cliSeatTurn?: (params: CliSeatTurnParams, onDelta: (text: string) => void, onActivity?: () => void) => Promise<string>
+  /** Per-seat idle window (ms), refreshed by streamed chunks; a stalled seat is skipped, not a cap on a turn. */
   turnTimeoutMs?: number
 }
-
-const DEFAULT_SEAT_TURN_TIMEOUT_MS = 180_000
 
 export async function runRoom(deps: RoomRunDeps): Promise<void> {
   const { room, project, providers, problem, emit, signal } = deps
@@ -384,53 +89,13 @@ export async function runRoom(deps: RoomRunDeps): Promise<void> {
     return true
   }
   const providerForSeat = (seat: Seat) => deps.providerForSeat?.(seat) ?? providers.find((p) => p.id === seat.providerId)
-  const chat = deps.chat ?? streamChat
-  const cliSeatTurn = deps.cliSeatTurn ?? ((params: CliSeatTurnParams, onDelta: (text: string) => void) => runCliSeatTurn(params, onDelta))
-  const streamSeatReply = async (rt: SeatRuntime, provider: Provider, turnSignal: AbortSignal): Promise<string> => {
-    // CLI-backed seats run as a confined one-shot CLI invocation (room-cli-seat.ts); the
-    // per-turn timeout/abort wrapper in runSeatTurn applies unchanged either way.
-    if (isCliSeatProvider(provider)) {
-      return cliSeatTurn(
-        { provider, model: rt.seat.model, messages: rt.messages as ApiMessage[], cwd: project.cwd, reasoningEffort: deps.reasoningEffort, signal: turnSignal },
-        (text) => send({ type: 'delta', seat: rt.seat.name, chunk: text }),
-      )
-    }
-    let reply = ''
-    for await (const chunk of chat({
-      provider,
-      baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: rt.seat.model,
-      messages: rt.messages, temperature: deps.temperature, reasoningEffort: deps.reasoningEffort, approvalMode: 'readonly', cwd: project.cwd, signal: turnSignal,
-    })) {
-      if (chunk.type === 'content' && chunk.text) { reply += chunk.text; send({ type: 'delta', seat: rt.seat.name, chunk: chunk.text }) }
-    }
-    return reply
-  }
-
-  // Run one seat turn under a per-turn timeout combined with the room signal. If the seat's model
-  // hangs/stalls, the turn is aborted (timedOut=true) and skipped so other models keep going, rather
-  // than the whole room freezing behind one slow seat.
-  const runSeatTurn = async (rt: SeatRuntime, provider: Provider): Promise<{ reply: string; timedOut: boolean }> => {
-    const timeoutMs = deps.turnTimeoutMs ?? DEFAULT_SEAT_TURN_TIMEOUT_MS
-    const ctrl = new AbortController()
-    const onAbort = () => ctrl.abort()
-    signal.addEventListener('abort', onAbort, { once: true })
-    let timedOut = false
-    const timer = timeoutMs > 0 ? setTimeout(() => { timedOut = true; ctrl.abort() }, timeoutMs) : null
-    try {
-      return { reply: await streamSeatReply(rt, provider, ctrl.signal), timedOut: false }
-    } catch (e) {
-      if (timedOut) return { reply: '', timedOut: true }
-      throw e
-    } finally {
-      if (timer) clearTimeout(timer)
-      signal.removeEventListener('abort', onAbort)
-    }
-  }
+  const runSeatTurn = createRoomSeatTurn(deps, send)
 
   const heartbeatInterval = seatHeartbeatIntervalSeconds(room.deliberationEffort)
   const heartbeatStart = Date.now()
   const runtimes: SeatRuntime[] = room.seats.map((seat) => ({
     seat,
+    reasoningEffort: deps.reasoningEffortForSeat?.(seat) ?? captureAgentReasoningEffort(seat, deps.reasoningEffort),
     messages: [{ role: 'system', content: buildPrimer(project, room, seat, room.seats, providerForSeat(seat)) }],
     recent: [],
     heartbeat: initSeatHeartbeat(seat, heartbeatInterval, heartbeatStart),

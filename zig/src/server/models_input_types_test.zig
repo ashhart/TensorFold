@@ -9,9 +9,9 @@ const messages = @import("messages.zig");
 const images = @import("images.zig");
 const t = std.testing;
 
-const Wire = struct {
+pub const Wire = struct {
     out: std.Io.Writer.Allocating,
-    fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
+    pub fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
         const self: *Wire = @ptrCast(@alignCast(ctx));
         self.out.writer.writeAll(bytes) catch return error.Closed;
     }
@@ -41,7 +41,7 @@ fn noTemplate(_: *anyopaque) []const u8 {
 }
 
 /// A server with only discovery's and media's fields set: no engine, model or tokenizer.
-fn server(vision: ?api.Vision, video_decoder: bool) Server {
+pub fn server(vision: ?api.Vision, video_decoder: bool) Server {
     var srv: Server = undefined;
     srv.io = t.io;
     srv.info = .{ .vision = vision };
@@ -57,7 +57,7 @@ fn server(vision: ?api.Vision, video_decoder: bool) Server {
 }
 
 /// GET /v1/models' `data`, as a client reads it.
-fn listed(a: std.mem.Allocator, srv: *Server) ![]json.Value {
+pub fn listed(a: std.mem.Allocator, srv: *Server) ![]json.Value {
     var wire: Wire = .{ .out = .init(a) };
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .version = "HTTP/1.1", .method = "GET", .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
     try @import("status_routes.zig").models(srv, &conn, a);
@@ -132,4 +132,37 @@ test "model discovery input types: a video the decoder library cannot open is a 
     try t.expectEqual(@as(u16, 400), cx.status());
     try t.expect(std.mem.startsWith(u8, cx.message, "video 1: this server takes no video input: "));
     try t.expect(std.mem.indexOf(u8, cx.message, sys.optional_libraries.spec(.video).names[0]) != null);
+}
+
+test "input_types lists audio after text and image when the engine has an audio encoder" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const types = (try @import("input_types.zig").Inputs.value(.{ .image = true, .audio = true }, arena.allocator())).array;
+    try t.expectEqual(@as(usize, 3), types.len);
+    for ([_][]const u8{ "text", "image", "audio" }, types) |want, got| try t.expectEqualStrings(want, got.string);
+}
+
+test "model discovery input types: an audio part is a named 400 on a text-only server and on one that takes images" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { vision: ?api.Vision, message: []const u8 };
+    const cases = [_]Case{
+        .{ .vision = null, .message = "this server accepts text parts only; image, audio and video inputs are unsupported" },
+        .{ .vision = offer(false), .message = "content parts must be text or image_url; audio and video inputs are unsupported" },
+    };
+    const bodies = [_][]const u8{
+        \\[{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "YQ==", "format": "wav"}}, {"type": "text", "text": "x"}]}]
+        ,
+        \\[{"role": "user", "content": [{"type": "text", "text": "x"}, {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,YQ=="}}]}]
+        ,
+    };
+    for (cases) |c| for (bodies) |text| {
+        var srv = server(c.vision, false);
+        var cx: Cx = .{ .a = a };
+        const body = (try json.parse(a, text)).ok;
+        try t.expectError(error.Refused, messages.normalizeWith(&cx, body, "system", false, srv.media()));
+        try t.expectEqual(@as(u16, 400), cx.status());
+        try t.expectEqualStrings(c.message, cx.message);
+    };
 }

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "common/qmm_frag.cuh"
+#include "glm_pdl.cuh"
 
 namespace {
 
@@ -220,7 +221,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
 
 // The K slices' partials added in slice order, then rounded once.
 extern "C" __global__ void glm_mm_reduce(const float* __restrict__ part, void* __restrict__ out, long long total, int SK, int f32) {
-    qmm_frag::grid_launch();
+    glm_pdl::enter();
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     float acc = part[i];
@@ -277,12 +278,22 @@ __device__ __forceinline__ void tile_packed(const uint32_t* __restrict__ src, co
     if (lane < 8) ds[(tg * 8) + lane] = ss[(long long)(tt * 8 + lane) * KG + g];
 }
 
-extern "C" __global__ void glm_mm_tile4(const uint32_t* src, const __half* ss, uint32_t* dst, __half* ds, int N, int K) { tile_packed<4>(src, ss, dst, ds, N, K); }
-extern "C" __global__ void glm_mm_tile6(const uint32_t* src, const __half* ss, uint32_t* dst, __half* ds, int N, int K) { tile_packed<6>(src, ss, dst, ds, N, K); }
-extern "C" __global__ void glm_mm_tile8(const uint32_t* src, const __half* ss, uint32_t* dst, __half* ds, int N, int K) { tile_packed<8>(src, ss, dst, ds, N, K); }
+extern "C" __global__ void glm_mm_tile4(const uint32_t* src, const __half* ss, uint32_t* dst, __half* ds, int N, int K) {
+    glm_pdl::enter_weights();
+    tile_packed<4>(src, ss, dst, ds, N, K);
+}
+extern "C" __global__ void glm_mm_tile6(const uint32_t* src, const __half* ss, uint32_t* dst, __half* ds, int N, int K) {
+    glm_pdl::enter_weights();
+    tile_packed<6>(src, ss, dst, ds, N, K);
+}
+extern "C" __global__ void glm_mm_tile8(const uint32_t* src, const __half* ss, uint32_t* dst, __half* ds, int N, int K) {
+    glm_pdl::enter_weights();
+    tile_packed<8>(src, ss, dst, ds, N, K);
+}
 
 // bf16 rows [N][K] -> the tiled chunks (16 bf16 a chunk, in pair order)
 extern "C" __global__ void glm_mm_tile16(const __nv_bfloat16* __restrict__ src, __nv_bfloat16* __restrict__ dst, int N, int K) {
+    glm_pdl::enter_weights();
     const int KG = K >> 6, N8 = N >> 3;
     const long long c = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= (long long)N8 * KG * 32) return;

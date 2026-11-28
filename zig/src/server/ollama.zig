@@ -47,6 +47,7 @@ pub fn options(a: Allocator, window: u32, raw: Value, out: *json.Object, cx: *Cx
 /// `/api/chat` and `/api/generate` body as a chat request with `return_token_ids` on.
 pub fn chatBody(a: Allocator, model: []const u8, window: u32, raw: Value, cx: *Cx) errors.Refused!Value {
     if (raw != .object) return cx.refuse("request body must be an object");
+    if (json.truthyField(raw, "execution_witness")) return cx.refuse("execution_witness is supported on /v1/chat/completions and /v1/completions only");
     const out = try json.newObject(a);
     try out.put(a, "model", .{ .string = model });
     if (raw.get("messages")) |messages| {
@@ -268,8 +269,8 @@ fn serve(srv: *Server, conn: *Conn, a: Allocator, is_generate: bool) void {
         const err = openai.errorBody(a, &cx, "messages") catch return;
         return routes.sendValue(conn, a, cx.status(), openai.wrapError(a, err) catch return);
     };
-    // A refusal must keep its status: plan before the 200 head goes out.
-    var pre: Cx = .{ .a = a };
+    // A refusal keeps its status: plan decides it before the 200 head; the request line is written once in runNamed.
+    var pre: Cx = .{ .a = a, .skip_request_log = true };
     _ = openai.plan(srv, &pre, true, translated, null, true) catch {
         const err = openai.errorBody(a, &pre, "messages") catch return;
         return routes.sendValue(conn, a, pre.status(), openai.wrapError(a, err) catch return);
@@ -287,7 +288,7 @@ fn serve(srv: *Server, conn: *Conn, a: Allocator, is_generate: bool) void {
     conn.addHeader("Content-Type", "application/x-ndjson") catch return;
     conn.addHeader("Connection", "close") catch return;
     conn.finish("") catch return;
-    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, translated, null, true, true);
+    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, translated, null, true, false);
 }
 
 pub fn embed(srv: *Server, conn: *Conn, a: Allocator) void {

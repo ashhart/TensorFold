@@ -142,8 +142,9 @@ pub const Engine = struct {
             e.w.deinit();
             gpa.destroy(e.w);
         }
+        if (e.w.nvfp4_layers > 0) try e.k.loadNvfp4();
         errdefer e.freeState();
-        try e.allocState();
+        try e.allocState(false);
         errdefer {
             e.stream.synchronize() catch {};
             e.stream2.synchronize() catch {};
@@ -192,11 +193,21 @@ pub const Engine = struct {
     }
 
     pub fn fork(base: *Engine) !*Engine {
+        return base.forkState(false);
+    }
+
+    /// CFG's independent backbone state, without codec tower caches, output frames or tower scratch.
+    pub fn forkBackbone(base: *Engine) !*Engine {
+        return base.forkState(true);
+    }
+
+    fn forkState(base: *Engine, backbone_only: bool) !*Engine {
         const e = try base.gpa.create(Engine);
         errdefer base.gpa.destroy(e);
         e.* = base.*;
         e.owns_model = false;
         e.owner = base.owner orelse base;
+        if (backbone_only) e.o.max_rows = 1;
         e.bufs = .empty;
         e.graph = null;
         e.stream = try cuda.Stream.init(&e.driver, true);
@@ -208,7 +219,7 @@ pub const Engine = struct {
         e.ev_join = try cuda.Event.init(&e.driver, false);
         errdefer e.ev_join.deinit();
         errdefer e.freeState();
-        try e.allocState();
+        try e.allocState(backbone_only);
         return e;
     }
 
@@ -227,7 +238,14 @@ pub const Engine = struct {
         return b.ptr;
     }
 
-    fn allocState(e: *Engine) !void {
+    /// Device bytes this engine's own state holds (weights excluded): what one more lane or guide costs.
+    pub fn stateBytes(e: *const Engine) u64 {
+        var n: u64 = 0;
+        for (e.bufs.items) |b| n += b.len;
+        return n;
+    }
+
+    fn allocState(e: *Engine, backbone_only: bool) !void {
         const R = e.o.max_rows;
         const ctxn = e.o.max_ctx;
         const kvb = ctxn * cfg.kv_heads * cfg.head_dim * 2;
@@ -236,7 +254,7 @@ pub const Engine = struct {
                 e.kv_bb[li] = .{ try e.alloc(kvb), try e.alloc(kvb) };
             } else e.kv_bb[li] = .{ 0, 0 };
         }
-        for (0..cfg.tower_layers) |ti| e.kv_tw[ti] = .{ try e.alloc(kvb), try e.alloc(kvb) };
+        for (0..cfg.tower_layers) |ti| e.kv_tw[ti] = if (backbone_only) .{ 0, 0 } else .{ try e.alloc(kvb), try e.alloc(kvb) };
         var n_gdn: usize = 0;
         for (e.c.full_attention) |f| n_gdn += @intFromBool(!f);
         const conv_b = cfg.conv_channels * 3 * 2;
@@ -257,11 +275,9 @@ pub const Engine = struct {
         e.pos = try e.alloc(8);
         e.pos_bb = try e.alloc(8);
         e.bb_input = try e.alloc(W * 4);
-        e.t_xn = try e.alloc(R * H * 2);
-        e.t_tmp = try e.alloc(R * H * 2);
-        e.t_proj = try e.alloc(R * cfg.gdn_proj * 2);
-        e.t_y = try e.alloc(R * 4096 * 2);
-        e.t_q = try e.alloc(R * 4096 * 2);
+        inline for (.{ "t_xn", "t_tmp" }) |f| @field(e, f) = if (backbone_only) 0 else try e.alloc(R * H * 2);
+        e.t_proj = if (backbone_only) 0 else try e.alloc(R * cfg.gdn_proj * 2);
+        inline for (.{ "t_y", "t_q" }) |f| @field(e, f) = if (backbone_only) 0 else try e.alloc(R * 4096 * 2);
         for (0..2) |li| {
             e.pml[li] = try e.alloc(max_split_rows * 16 * kern.Kernels.attn_splits * 2 * 4);
             e.pacc[li] = try e.alloc(max_split_rows * 16 * kern.Kernels.attn_splits * 256 * 4);
@@ -270,8 +286,8 @@ pub const Engine = struct {
         e.count = try e.alloc(8);
         e.window = try e.alloc(16 * 4);
         e.cur_input = try e.alloc(W * 4);
-        e.frame = try e.alloc(W * 4);
-        e.frames_out = try e.alloc(e.o.max_frames * W * 4);
+        e.frame = if (backbone_only) 0 else try e.alloc(W * 4);
+        e.frames_out = if (backbone_only) 0 else try e.alloc(e.o.max_frames * W * 4);
         e.pframes = try e.alloc((ctxn + 1) * W * 4);
         e.x = try e.alloc(R * H * 2);
         e.xn = try e.alloc(R * H * 2);
@@ -302,13 +318,13 @@ pub const Engine = struct {
         const nblk = (pairs + 1023) / 1024;
         e.plan = .{ .members = try e.alloc(pairs * 4), .items = try e.alloc(items * 3 * 4), .counts = try e.alloc(16), .rank = try e.alloc(pairs * 4), .hist = try e.alloc(nblk * cfg.experts * 4) };
         e.hfin = try e.alloc(R * H * 2);
-        e.th = .{ try e.alloc(R * H * 2), try e.alloc(R * H * 2) };
-        e.mix = try e.alloc(R * 2 * H * 2);
-        e.mixed = try e.alloc(R * H * 2);
-        e.act = try e.alloc(R * cfg.tower_ffn * 2);
+        e.th = if (backbone_only) .{ 0, 0 } else .{ try e.alloc(R * H * 2), try e.alloc(R * H * 2) };
+        e.mix = if (backbone_only) 0 else try e.alloc(R * 2 * H * 2);
+        e.mixed = if (backbone_only) 0 else try e.alloc(R * H * 2);
+        e.act = if (backbone_only) 0 else try e.alloc(R * cfg.tower_ffn * 2);
         e.hlast = try e.alloc(H * 2);
         e.cand_logits = try e.alloc(e.w.n_cand * 4);
-        e.code_logits = try e.alloc(cfg.codebook_size * 4);
+        e.code_logits = if (backbone_only) 0 else try e.alloc(cfg.codebook_size * 4);
     }
 
     pub fn buf(ptr: u64) Buf {
@@ -369,7 +385,8 @@ pub const Engine = struct {
         try e.put(e.pframes, std.mem.sliceAsBytes(rows));
     }
 
-    pub fn promptChunk(e: *Engine, n: usize, c0: usize, t: usize, probe: ?Probe) !void {
+    /// The backbone over prompt rows c0..c0+t of n, keeping the last row's final norm; no codec tower work.
+    pub fn backboneChunk(e: *Engine, n: usize, c0: usize, t: usize, probe: ?Probe) !void {
         if (t == 0 or t > e.o.max_rows or c0 >= n or t > n - c0) return error.BadPromptChunk;
         const k = &e.k;
         const s = e.stream;
@@ -385,6 +402,11 @@ pub const Engine = struct {
         }
         try k.rmsnorm(s, e.x, H, e.w.final_norm, e.hfin, H, t, H, cfg.eps, true);
         if (probe) |p| try p.f(p.ctx, "backbone_final_norm", e.hfin, t, H, false);
+        if (c0 + t == n) try e.copyRow(e.hfin + (t - 1) * H * 2, e.hlast, H * 2);
+    }
+
+    pub fn promptChunk(e: *Engine, n: usize, c0: usize, t: usize, probe: ?Probe) !void {
+        try e.backboneChunk(n, c0, t, probe);
         // the tower over this chunk's rows that have a next prompt row
         const tt = @min(c0 + t, n - 1) - c0;
         if (tt > 0) {
@@ -399,7 +421,6 @@ pub const Engine = struct {
                 hin = hout;
             }
         }
-        if (c0 + t == n) try e.copyRow(e.hfin + (t - 1) * H * 2, e.hlast, H * 2);
     }
 
     pub fn finishPrompt(e: *Engine, rows: []const [W]i32) !void {
@@ -446,8 +467,8 @@ pub const Engine = struct {
 
     /// Device bytes of the state after `rows` prompt rows: both recurrent blocks, then each K and V cache's rows.
     pub fn referenceBytes(e: *const Engine, rows: usize) usize {
-        var caches: [ref_caches]u64 = undefined;
-        return ref_rows.bytes(e.referenceLive(&caches), rows);
+        var caches: [ref_rows.max_caches]u64 = undefined;
+        return ref_rows.bytes(ref_rows.liveOf(e, &caches), rows);
     }
 
     pub fn allocReference(e: *Engine, bytes: usize) !Saved {
@@ -468,36 +489,14 @@ pub const Engine = struct {
         try e.moveReference(saved, rows, true);
     }
 
-    const ref_caches = 2 * (cfg.layers + cfg.tower_layers);
-
-    fn referenceLive(e: *const Engine, caches: *[ref_caches]u64) ref_rows.Live {
-        var n: usize = 0;
-        for (0..cfg.layers) |li| if (e.c.full_attention[li]) for (e.kv_bb[li]) |kv| {
-            caches[n] = kv;
-            n += 1;
-        };
-        for (e.kv_tw) |pair| for (pair) |kv| {
-            caches[n] = kv;
-            n += 1;
-        };
-        return .{ .state = e.state_bufs, .state_bytes = e.state_bytes, .caches = caches[0..n] };
-    }
-
     fn moveReference(e: *Engine, saved: Saved, rows: usize, load: bool) !void {
-        var caches: [ref_caches]u64 = undefined;
-        const live = e.referenceLive(&caches);
+        var caches: [ref_rows.max_caches]u64 = undefined;
+        const live = ref_rows.liveOf(e, &caches);
         if (rows == 0 or rows > e.o.max_ctx or saved.len < ref_rows.bytes(live, rows)) return error.BadReferenceRows;
         errdefer e.stream.synchronize() catch {};
-        _ = try ref_rows.move(DeviceCopy{ .e = e }, live, saved.ptr, rows, load);
+        _ = try ref_rows.move(e, live, saved.ptr, rows, load);
         try e.stream.synchronize();
     }
-
-    const DeviceCopy = struct {
-        e: *Engine,
-        pub fn copy(d: DeviceCopy, src: u64, dst: u64, n: usize) !void {
-            try d.e.copyRow(src, dst, n);
-        }
-    };
 
     /// Teacher forcing for parity: each pick goes to `picks`, then `frame`'s value (device int32 [11]) replaces it.
     pub const Force = struct { frame: u64, picks: u64 };

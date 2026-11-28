@@ -25,9 +25,7 @@ const hcmix_k = @import("contract_hc_mix.zig");
 const utility_k = @import("contract_utility.zig");
 const best_k = @import("contract_row_best.zig");
 const qsa_k = @import("contract_qsa_select.zig");
-const h3_k = @import("contract_h3.zig");
-const h3_prep = @import("contract_h3_prep.zig");
-const h3_topk_k = @import("contract_h3_topk.zig");
+const h3_register = @import("contract_h3_register.zig");
 const drama3_k = @import("contract_drama3.zig");
 const ck_k = @import("contract_ck.zig");
 const q35_bf16_k = @import("contract_qwen_bf16.zig");
@@ -38,7 +36,6 @@ const latent_k = @import("contract_latent.zig");
 const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 const ple_k = @import("contract_ple.zig");
-const f32w_k = @import("contract_glm_f32w.zig");
 const w4a8_k = @import("contract_w4a8.zig");
 const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
@@ -68,18 +65,20 @@ const kk = cuda.kernels;
 
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
-    pub const h3 align(16) = @embedFile("fatbin_h3").*;
 };
 
-/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
-pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
+/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `args`: contract_shard.zig.
+pub fn run(gpu: check.Gpu, args: []const [:0]const u8) !void {
+    const opt = try @import("contract_shard.zig").parse(gpu.gpa, args);
+    defer opt.deinit(gpu.gpa);
     var t0: i96 = undefined;
-    const t = try registered(gpu, only, &t0);
-    try @import("contract_finish.zig").run(gpu, only, t, t0);
+    var listed: usize = undefined;
+    const t = try registered(gpu, opt, &t0, &listed);
+    try @import("contract_finish.zig").run(gpu, opt, t, listed, t0);
 }
 
 // The registered owners and modules end here, before the standalone suites allocate their working sets.
-fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
+fn registered(gpu: check.Gpu, opt: @import("contract_shard.zig").Options, t0: *i96, listed: *usize) !g.Tally {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
     if (!options.controls) {
@@ -234,9 +233,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer for (&mx) |*m| m.deinit();
     for (&mx) |*m| try kernels.append(a, m.kernel());
     var half_lane = lane;
-    var halves: [6]half_k.Half = undefined;
-    for (std.enums.values(half_k.Kind), 0..) |kind, i| for ([_]cuda.qmmf.Out{ .bf16, .f32 }, 0..) |format, j| {
-        halves[i * 2 + j] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind, .format = format };
+    var halves: [12]half_k.Half = undefined; // half tiles, then the same kinds and formats on the fused split-K form
+    for (std.enums.values(half_k.Kind), 0..) |kind, i| for ([_]cuda.qmmf.Out{ .bf16, .f32 }, 0..) |format, j| for (0..2) |f| {
+        halves[f * 6 + i * 2 + j] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind, .format = format, .fused = f == 1 };
     };
     defer for (&halves) |*h| h.deinit();
     for (&halves) |*h| try kernels.append(a, h.kernel());
@@ -293,33 +292,21 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     for (&shifts) |*shift| try kernels.append(a, shift.kernel());
     var mtp = try cuda.Module.load(gpu.d, kk.flashnext_mtp);
     defer mtp.unload();
-    var best = best_k.Best{ .rig = .{ .gpu = gpu, .s = s }, .f = try mtp.function("fn_row_best") };
-    defer best.deinit();
-    try kernels.append(a, best.kernel());
+    const best_split = [2]cuda.Function{ try mtp.function("fn_row_best_max"), try mtp.function("fn_row_best_sum") };
+    var bests: [3]best_k.Best = undefined;
+    for (std.enums.values(best_k.Kind), &bests) |kind, *b| b.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try mtp.function("fn_row_best"), .kind = kind, .split = best_split };
+    defer for (&bests) |*b| b.deinit();
+    for (&bests) |*b| try kernels.append(a, b.kernel());
     var selections: [2]qsa_k.Select = undefined;
     for ([_]bool{ false, true }, &selections) |padded, *selection|
         selection.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_qsa_select"), .padded = padded };
     defer for (&selections) |*selection| selection.deinit();
     for (&selections) |*selection| try kernels.append(a, selection.kernel());
-    var h3_mod = try cuda.Module.load(gpu.d, &images.h3);
-    defer h3_mod.unload();
-    const h3_which = comptime std.enums.values(h3_k.Which);
-    var h3_list: [h3_which.len]h3_k.H3 = undefined;
-    for (h3_which, &h3_list) |w, *m| {
-        const f = try h3_mod.function(h3_k.symbol(w));
-        if (w == .attention) try f.allowDynamicShared(h3_prep.attention_shared);
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = f, .arena = std.heap.ArenaAllocator.init(a) };
-    }
-    defer for (&h3_list) |*m| m.deinit();
-    for (&h3_list) |*m| try kernels.append(a, m.kernel());
-    var h3_topk = h3_topk_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_topk") };
-    defer h3_topk.deinit();
-    try kernels.append(a, h3_topk.kernel());
-    var d3_mod = try cuda.Module.load(gpu.d, kk.drama3);
-    defer d3_mod.unload();
-    var d3_norm = try drama3_k.Norm.init(gpu, s, d3_mod);
-    defer d3_norm.deinit();
-    try kernels.append(a, d3_norm.kernel());
+    var h3: h3_register.Loaded = undefined;
+    try h3_register.append(&h3, a, gpu, s, &kernels);
+    defer h3.deinit();
+    const d3 = try drama3_k.Group.create(a, gpu, s, &kernels);
+    defer d3.destroy();
     var ck: ?cuda.ck.Ck = null;
     var ck_reduce: ?cuda.ck.Ck = null; // no clusters: the FP8 slices meet in tf_ck8_reduce
     if (cap >= 120) {
@@ -426,6 +413,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer q35_mod.unload();
     const norm_shift = try @import("contract_q35_norm_shift.zig").Group.create(a, gpu, s, q35_mod, &kernels);
     defer norm_shift.destroy();
+    const q35_taps = try @import("contract_qwen35_tap.zig").Group.create(a, gpu, s, q35_mod, &kernels);
+    defer q35_taps.destroy();
     var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_kv8.unload();
     var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
@@ -515,29 +504,15 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     for (&wrows) |*x| try kernels.append(a, x.kernel());
     var glm_glue = try cuda.Module.load(gpu.d, kk.glm_glue);
     defer glm_glue.unload();
-    var f32ws: [6]f32w_k.F32w = undefined;
-    for (std.enums.values(f32w_k.Which), &f32ws) |w, *x| x.* = .init(.{ .gpu = gpu, .s = s }, w, try glm_glue.function(switch (w) {
-        .norm_y, .norm_sums => "tf_glm_rmsnorm_4096_f32w",
-        else => "tf_glm_hc_finish_f32w",
-    }));
-    defer for (&f32ws) |*x| x.deinit();
-    for (&f32ws) |*x| try kernels.append(a, x.kernel());
+    var glm_norms: @import("contract_glm_norms.zig").Set = .{};
+    defer glm_norms.deinit();
+    try glm_norms.add(gpu, s, glm_glue, mods[5], &kernels);
     var glm_routers = try glm_router_k.pair(.{ .gpu = gpu, .s = s }, glm_glue, mods[5]);
     defer for (&glm_routers) |*x| x.deinit();
     for (&glm_routers) |*x| try kernels.append(a, x.kernel());
-    var bf16s: [f32w_k.bf16_entries.len]f32w_k.F32w = undefined;
-    for (f32w_k.bf16_entries, &bf16s) |e, *x| {
-        x.* = .init(.{ .gpu = gpu, .s = s }, e.which, try glm_glue.function(e.symbol));
-        x.width = e.width;
-        x.baseline = try mods[5].function(e.old);
-    }
-    defer for (&bf16s) |*x| x.deinit();
-    for (&bf16s) |*x| try kernels.append(a, x.kernel());
-    var f32w_control: f32w_k.F32w = .init(.{ .gpu = gpu, .s = s }, .norm_y, try glm_glue.function("tf_glm_rmsnorm_4096_f32w"));
-    f32w_control.bf16_gamma = true;
-    defer f32w_control.deinit();
-    try kernels.append(a, f32w_control.kernel());
     const glm_fns = try glm.glue.Kernels.load(glm_glue);
+    const glm_wide = try @import("contract_glm_wide_expert.zig").Suite.create(gpu, s, &kernels);
+    defer glm_wide.destroy();
     var glm_lat = glm_pages_k.LatWrite{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.lat_write };
     defer glm_lat.deinit();
     try kernels.append(a, glm_lat.kernel());
@@ -586,15 +561,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer weight_only.destroy(a);
     const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels, &affine4, cap);
     defer families.deinit();
-    var t: g.Tally = .{};
-    try @import("contract_dump.zig").run(a, kernels.items);
-    t0.* = check.now(gpu.io);
-    @import("contract_after.zig").keep(&kernels, only);
-    try g.runAll(a, kernels.items, 0x6b63, &t);
-    return t;
+    // int4's gates are family registrations, so `kernel-contract int4` selects them; the skipped-slot check is not one
+    const int4 = try @import("contract_int4_run.zig").Set.init(gpu, s, a, &kernels);
+    defer int4.deinit();
+    return @import("contract_after.zig").gates(gpu, &kernels, opt, t0, listed);
 }
-
-/// The named embedded image and gate 5: in the contract's own file, so the gates' registrations stay short.
-pub const image = @import("contract_limits.zig").image;
-pub const live = @import("contract_limits.zig").live;
-pub const fatbins = @import("contract_limits.zig").fatbins;

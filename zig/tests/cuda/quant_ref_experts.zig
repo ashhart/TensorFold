@@ -120,6 +120,62 @@ fn batch(r: *Rig, comptime label: []const u8, g: experts.Grouped, router: groupe
     return .{ .act = act, .y = y };
 }
 
+/// One joint route and 128-pair items must be byte-identical to two independent 64-pair calls.
+fn nvfp4PairCase(
+    r: *Rig,
+    ex: *experts.Nvfp4Experts,
+    router: grouped.Router,
+    l: experts.Layer,
+    x: []const u16,
+    rows_a: usize,
+    rows_b: usize,
+    comptime skew: bool,
+    comptime ni: usize,
+    comptime dims: usize,
+) !void {
+    const pa = try picks(r, rows_a);
+    const pb = try picks(r, rows_b);
+    if (skew) for ([_][]i32{ pa, pb }) |one| for (one, 0..) |*e, p| {
+        if (p % slots != slots - 1) e.* = if ((p / slots) % 5 == 0) 1 else 0;
+    };
+    const pk = try r.a.alloc(i32, pa.len + pb.len);
+    @memcpy(pk[0..pa.len], pa);
+    @memcpy(pk[pa.len..], pb);
+    const na = rows_a * slots;
+    const nb = rows_b * slots;
+    const p0 = try plan(r, router, try r.dev(std.mem.sliceAsBytes(pa)), na, 64);
+    const p1 = try plan(r, router, try r.dev(std.mem.sliceAsBytes(pb)), nb, 64);
+    const joint = try plan(r, router, try r.dev(std.mem.sliceAsBytes(pk)), na + nb, 128);
+    const a0 = try r.zeros(na * ni * 2);
+    const a1 = try r.zeros(nb * ni * 2);
+    const aj = try r.zeros((na + nb) * ni * 2);
+    const y0 = try r.zeros(na * dims * 4);
+    const y1 = try r.zeros(nb * dims * 4);
+    const yj = try r.zeros((na + nb) * dims * 4);
+    const xa = try r.dev(std.mem.sliceAsBytes(x[0 .. rows_a * dims]));
+    const xb = try r.dev(std.mem.sliceAsBytes(x[rows_a * dims ..][0 .. rows_b * dims]));
+    const in0: experts.Rows = .{ .x = xa, .stride = dims, .slots = slots };
+    const in1: experts.Rows = .{ .x = xb, .stride = dims, .slots = slots };
+    const g: experts.Grouped = .{ .nvfp4 = ex };
+    try g.prompt(r.s, .up, in0, l, p0.p, a0, p0.items, na, 64, -1);
+    try g.prompt(r.s, .down_bf16, .{ .x = a0, .stride = ni }, l, p0.p, y0, p0.items, na, 64, -1);
+    try g.prompt(r.s, .up, in1, l, p1.p, a1, p1.items, nb, 64, -1);
+    try g.prompt(r.s, .down_bf16, .{ .x = a1, .stride = ni }, l, p1.p, y1, p1.items, nb, 64, -1);
+    try cuda.pair_experts.run(ex, r.s, .up, in0, in1, l, joint.p, aj, aj + na * ni * 2, na, joint.items, -1);
+    const down0: experts.Rows = .{ .x = aj, .stride = ni };
+    const down1: experts.Rows = .{ .x = aj + na * ni * 2, .stride = ni };
+    try cuda.pair_experts.run(ex, r.s, .down_bf16, down0, down1, l, joint.p, yj, yj + na * dims * 4, na, joint.items, -1);
+    const ba = try r.back(a0, na * ni * 2);
+    const bb = try r.back(a1, nb * ni * 2);
+    const bj = try r.back(aj, (na + nb) * ni * 2);
+    var same = std.mem.eql(u8, bj[0..ba.len], ba) and std.mem.eql(u8, bj[ba.len..], bb);
+    const oa = try r.back(y0, na * dims * 4);
+    const ob = try r.back(y1, nb * dims * 4);
+    const oj = try r.back(yj, (na + nb) * dims * 4);
+    same = same and std.mem.eql(u8, oj[0..oa.len], oa) and std.mem.eql(u8, oj[oa.len..], ob);
+    try check.expect(same, "nvfp4 paired prompt {d}+{d} rows at {d}/{d}: joint bytes equal two 64-pair calls", .{ rows_a, rows_b, ni, dims });
+}
+
 /// Prompt items of expert `skip` (the shared one, as a family that computes it itself passes) are left alone.
 fn skipped(
     r: *Rig,
@@ -266,6 +322,32 @@ pub fn run(r: *Rig) !void {
         for ([_]usize{ 1, 3, 40 }) |rows| _ = try batch(r, "nvfp4", g, router, l, x, rows, false, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
         _ = try batch(r, "nvfp4", g, router, l, x, 300, true, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
         try skipped(r, "nvfp4", g, router, l, x, 300);
+        for ([_]struct { usize, usize }{ .{ 1, 3 }, .{ 33, 65 }, .{ 128, 256 } }) |rows| {
+            try nvfp4PairCase(r, &ex, router, l, x, rows[0], rows[1], false, NI, D);
+        }
+        // GLM's production block-16 shapes: M=3 gate/up, M=32 down, NT=2, KC=2.
+        const pn = 192;
+        const pdk = 2048;
+        const pgm = try fp4Mat(r, pn, pdk);
+        const pum = try fp4Mat(r, pn, pdk);
+        const pdm = try fp4Mat(r, pdk, pn);
+        const pblk = pn / W.cols * (pdk / 32) * W.words;
+        const ppu = try r.a.alloc(u32, E * 2 * pblk);
+        const ppd = try r.a.alloc(u32, E * pblk);
+        const pwb = pn * pdk / 2;
+        const psb = pn * pdk / 16;
+        const pus = try r.a.alloc(f32, 2 * E);
+        for (0..E) |e| {
+            const gate: [2][]const u8 = .{ pgm.codes[e * pwb ..][0..pwb], pgm.scales[e * psb ..][0..psb] };
+            const up: [2][]const u8 = .{ pum.codes[e * pwb ..][0..pwb], pum.scales[e * psb ..][0..psb] };
+            W.packGateUp(ppu[e * 2 * pblk ..][0 .. 2 * pblk], gate, up, pn, pdk);
+            W.packOne(ppd[e * pblk ..][0..pblk], pdm.codes[e * pwb ..][0..pwb], pdm.scales[e * psb ..][0..psb], pdk, pn);
+            pus[2 * e] = pgm.global[e];
+            pus[2 * e + 1] = pum.global[e];
+        }
+        const pl: experts.Layer = .{ .format = .nvfp4, .up = try r.dev(std.mem.sliceAsBytes(ppu)), .down = try r.dev(std.mem.sliceAsBytes(ppd)), .up_scale = try r.dev(std.mem.sliceAsBytes(pus)), .down_scale = try r.dev(std.mem.sliceAsBytes(pdm.global)), .width = pn, .dims = pdk, .experts = E };
+        const px = try r.bfs(4096 * pdk, 1.0);
+        try nvfp4PairCase(r, &ex, router, pl, px, 2048, 2048, true, pn, pdk);
     }
     const what = "experts fp8g and nvfp4 (decode, prompt): gate-up and down within float64 tolerance";
     check.pass(what ++ "; a skipped expert's prompt items left alone", .{});

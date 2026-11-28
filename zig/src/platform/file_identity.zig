@@ -4,12 +4,23 @@ const std = @import("std");
 pub fn hash(io: std.Io, path: []const u8, maximum: u64) ![32]u8 {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
+    return hashFile(io, file, maximum);
+}
+
+/// An open file's bytes, checked against its stamps across the read; an open file keeps its inode if its path moves.
+pub fn hashFile(io: std.Io, file: std.Io.File, maximum: u64) ![32]u8 {
+    return hashUntil(io, file, maximum, null);
+}
+
+/// `hashFile`, ending with error.Stopped at the next block once `stop` is set.
+pub fn hashUntil(io: std.Io, file: std.Io.File, maximum: u64, stop: ?*const std.atomic.Value(bool)) ![32]u8 {
     const before = try file.stat(io);
     if (before.size > maximum) return error.IdentityFileTooLarge;
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [32768]u8 = undefined;
     var at: u64 = 0;
     while (at < before.size) {
+        if (stop) |s| if (s.load(.acquire)) return error.Stopped;
         const n = try file.readPositionalAll(io, buf[0..@intCast(@min(buf.len, before.size - at))], at);
         if (n == 0) return error.IdentityFileChanged;
         h.update(buf[0..n]);

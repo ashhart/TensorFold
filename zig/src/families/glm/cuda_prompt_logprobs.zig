@@ -69,6 +69,7 @@ pub const Output = struct {
 
 /// The chunk's rows in e.bp.fnormed that score `next` (row r scores next[r]), a head pass at a time.
 pub fn run(e: *Engine, want: Want, next: []const u32) !void {
+    if (e.local.len > 0) return error.SharesOneRankEach; // full GLM-5.3 at TP=1: one rank's pass (cuda_engine_shares)
     const own = try buffers(e);
     const rows: usize = if (own != null) batch_rows else fw.window_rows;
     const columns = if (own) |b| b.columns.ptr else e.bd.logits;
@@ -125,5 +126,5 @@ test "the head's columns at TP=2 and TP=3 take no K slices: a pass of any rows n
 
 /// The head passes' projection policy (no indexer launches, so no .index); an MXFP8 head runs on the lane.
 pub fn projectionSet(e: anytype) @import("cuda_glue.zig").Set {
-    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs, .prompt = true, .linear = .{ .lane = &e.m.lane } };
+    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs, .prompt = true, .linear = .{ .lane = &e.m.lane }, .tfq3 = if (e.m.tfq3) |*x| x else null };
 }

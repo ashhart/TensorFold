@@ -7,7 +7,7 @@ const stop = @import("benchmark_stop.zig");
 const fake = @import("benchmark_fake.zig");
 const posix = std.posix;
 
-const plan: server.Plan = .{ .exe = "/opt/example/tensorfold-native", .dir = "/models/x", .backend = "", .tokens = 256, .context = 4096, .drafter_dir = null, .serial = true };
+pub const plan: server.Plan = .{ .exe = "/opt/example/tensorfold-native", .dir = "/models/x", .backend = "", .tokens = 256, .context = 4096, .drafter_dir = null, .serial = true };
 
 test "the child's flags parse as serve flags and carry none that native serve refuses; adding --tp fails" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -51,29 +51,29 @@ test "the child's environment drops the key, log, salt and token and turns off t
     defer arena.deinit();
     const a = arena.allocator();
     var parent: std.process.Environ.Map = .init(a);
-    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN", "PATH" }) |k| try parent.put(k, "x");
+    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN", "PATH" }) |k| try parent.put(k, "x");
     const env = try server.environ(a, &parent);
-    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| try std.testing.expect(env.get(k) == null);
+    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| try std.testing.expect(env.get(k) == null);
     for ([_][]const u8{ "TENSORFOLD_NO_LIVE", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HUB_OFFLINE" }) |k| try std.testing.expectEqualStrings("1", env.get(k).?);
     try std.testing.expectEqualStrings("x", env.get("PATH").?);
 }
 
 test "the port comes from serve's serving line, whose format serve.zig still prints" {
-    try std.testing.expectEqual(@as(?u16, 51234), server.servingPort("x\n[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:51234/v1 (sampling: greedy)\n"));
-    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving other at http://127.0.0.1:5/v1 ("));
-    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:"));
+    try std.testing.expectEqual(@as(?u16, 51234), server.servingPort("x\n[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:51234/v1 (sampling: greedy)\n", server.served_name));
+    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving other at http://127.0.0.1:5/v1 (", server.served_name));
+    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:", server.served_name));
     const serve_source = @embedFile("serve.zig");
     try std.testing.expect(std.mem.indexOf(u8, serve_source, "\"serving {s} at http://{s}:{d}/v1 (") != null);
     try std.testing.expect(std.mem.indexOf(u8, serve_source, "\"serving {s} on http://{s}:{d}/v1 (") == null);
 }
 
-const Setup = struct {
+pub const Setup = struct {
     a: std.mem.Allocator,
     env: std.process.Environ.Map,
     dir: []const u8,
     bench: []const u8,
 
-    fn init(a: std.mem.Allocator, tmp: *std.testing.TmpDir) !Setup {
+    pub fn init(a: std.mem.Allocator, tmp: *std.testing.TmpDir) !Setup {
         var env: std.process.Environ.Map = .init(a);
         try env.put("PATH", "/usr/bin:/bin");
         const dir = try fake.tmpPath(a, tmp);
@@ -86,7 +86,7 @@ const Setup = struct {
     }
 };
 
-fn healthy(a: std.mem.Allocator, health: []const u8, model_id: []const u8) ![2]fake.Route {
+pub fn healthy(a: std.mem.Allocator, health: []const u8, model_id: []const u8) ![2]fake.Route {
     const models = try std.fmt.allocPrint(a, "{{\"data\": [{{\"id\": \"{s}\"}}]}}", .{model_id});
     return .{
         .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", health)}) },
@@ -94,7 +94,7 @@ fn healthy(a: std.mem.Allocator, health: []const u8, model_id: []const u8) ![2]f
     };
 }
 
-fn serving(a: std.mem.Allocator, port: u16, tail: []const u8) ![]const u8 {
+pub fn serving(a: std.mem.Allocator, port: u16, tail: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "printf '[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:%s/v1 (x)\\n' {d}; {s}", .{ port, tail });
 }
 
@@ -104,7 +104,7 @@ fn gone(pid: posix.pid_t) bool {
 }
 
 /// Passes when ``start`` gave no child; a child it did give is stopped before the test fails.
-fn none(got: ?server.Managed) !void {
+pub fn none(got: ?server.Managed) !void {
     var m = got orelse return;
     _ = m.stop();
     return error.TestUnexpectedResult;
@@ -183,7 +183,7 @@ test "a child that exits during startup hands back its last log lines, cleaned f
     try std.testing.expect(cut.len == 302 and std.mem.endsWith(u8, cut, "...") and std.unicode.utf8ValidateSlice(cut));
 }
 
-fn lines(want: []const []const u8, got: []const []const u8) !void {
+pub fn lines(want: []const []const u8, got: []const []const u8) !void {
     try std.testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
 }
@@ -203,6 +203,33 @@ test "an engine's load-limit hint before its error is kept with the error, three
     try lines(&.{ glm, "error: three", failed }, try server.lastLines(a, many));
     try lines(&.{ "error: two", "error: three", failed }, try server.lastLines(a, "error: one\nerror: two\nerror: three\n" ++ failed));
     try lines(&.{ "tensorfold: GLM_LOAD_LIMIT_GB is not a load limit", "error: a", "error: b" }, try server.lastLines(a, "set GLM_LOAD_LIMIT_GB=1\ntensorfold: GLM_LOAD_LIMIT_GB is not a load limit\nerror: a\nerror: b\n"));
+}
+
+test "only a child given a key gets TENSORFOLD_API_KEY and probes with it; the benchmark's child gets neither" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try Setup.init(a, &tmp);
+    try s.env.put("TENSORFOLD_API_KEY", "parent-key");
+    const routes = try healthy(a, "{\"status\": \"ok\"}", ".tensorfold-benchmark");
+    const f = try fake.Fake.start(std.testing.allocator, &routes);
+    defer f.stop();
+    const seen = try std.fs.path.join(a, &.{ s.dir, "key" });
+    const script = try std.mem.concat(a, u8, &.{ "printf '[%s]' \"${TENSORFOLD_API_KEY-unset}\" > ", seen, "; ", try serving(a, f.port, "exec sleep 30") });
+    var problem: []const u8 = "";
+    var plain = (try s.start(script, 10, 10_000, &problem)) orelse return error.TestUnexpectedResult;
+    _ = plain.stop();
+    try std.testing.expectEqualStrings("[unset]", try std.Io.Dir.cwd().readFileAlloc(std.testing.io, seen, a, .limited(256)));
+    const probes = f.count();
+    for (0..probes) |i| try std.testing.expect(f.header(i, "authorization") == null);
+    const sh = try a.dupe([]const u8, &.{ "/bin/sh", "-c", script });
+    var keyed = (try server.Managed.spawn(a, std.testing.io, &s.env, sh, .{ .startup_timeout_s = 10, .bench_dir = s.bench, .key = "child-key" }, &problem)) orelse return error.TestUnexpectedResult;
+    _ = keyed.stop();
+    try std.testing.expectEqualStrings("[child-key]", try std.Io.Dir.cwd().readFileAlloc(std.testing.io, seen, a, .limited(256)));
+    try std.testing.expect(f.count() > probes);
+    for (probes..f.count()) |i| try std.testing.expectEqualStrings("Bearer child-key", f.header(i, "authorization").?);
 }
 
 test "the startup timeout grows with the weights past 20 GB, 6 s per GB from 600 s, to 3600 s" {

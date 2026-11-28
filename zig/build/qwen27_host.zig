@@ -10,8 +10,24 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const quant_run = b.addRunArtifact(quant_test);
     test_step.dependOn(&quant_run.step);
     b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
+    const mixed = b.createModule(.{ .root_source_file = b.path("zig/qwen27_mixed_host.zig"), .target = b.graph.host, .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }} });
+    mixed.addImport("core", mixed);
+    b.step("test-qwen27-mixed-host", "The production attention projection stage has no slice dispatch").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mixed, .filters = &.{"qwen27 mixed:"} })).step);
+    const loop_cfg = b.createModule(.{ .root_source_file = b.path("zig/sensenova_loop_config_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
+    loop_cfg.addImport("core", loop_cfg);
+    const loop_cfg_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_cfg, .filters = &.{"SenseNova loop config table:"} }));
+    test_step.dependOn(&loop_cfg_run.step);
+    b.step("test-sensenova-loop-config-host", "SenseNova loop config table through config reader and Metal admission without a GPU").dependOn(&loop_cfg_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
+    const mtp_flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mtp_flags.zig"), .target = b.graph.host }) }));
+    test_step.dependOn(&mtp_flags.step);
+    const mtp_topk = b.createModule(.{ .root_source_file = b.path("zig/src/core/bf16_topk.zig"), .target = b.graph.host });
+    const mtp_pick = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/mtp_pick.zig"), .target = b.graph.host, .imports = &.{.{ .name = "bf16_topk", .module = mtp_topk }} }) }));
+    test_step.dependOn(&mtp_pick.step);
+    const mtp_host = b.step("test-qwen27-mtp-flags-host", "--mtp-drafts refusals, the GPU pick's tie rule and the fused absorb's order without a GPU");
+    mtp_host.dependOn(&mtp_flags.step);
+    mtp_host.dependOn(&mtp_pick.step);
     const window = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_window.zig"), .target = b.graph.host });
     const taps = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tap_gather.zig"), .target = b.graph.host });
     const pricing_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host });
@@ -58,6 +74,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     var names: std.ArrayList([]const u8) = .empty;
     tryNames(b, &names, @embedFile("../src/families/qwen27/gdn_test.zig"));
     tryNames(b, &names, @embedFile("../src/families/qwen27/attention_plan.zig"));
+    tryNames(b, &names, @embedFile("../src/families/qwen27/attention_test.zig"));
     const plans = b.addRunArtifact(b.addTest(.{ .root_module = keep_module, .filters = names.items }));
     plans.has_side_effects = true;
     b.step("test-qwen27-plans-host", "Shared GDN and attention plans with no shaders or GPU").dependOn(&plans.step);
@@ -78,8 +95,49 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     prompt_stats_run.has_side_effects = true;
     test_step.dependOn(&prompt_stats_run.step);
     b.step("test-qwen27-prefill-stats-host", "Completed prompt passes through the lane host and server mailbox without a GPU").dependOn(&prompt_stats_run.step);
+    const idle_extents = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/idle_release_test.zig"), .target = b.graph.host, .link_libc = true });
+    const idle_step = b.step("test-qwen27-idle-release-host", "Exact serialized extents, quiet release, restore failures and pre-admission hooks without a GPU");
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = idle_extents })).step);
+    // the Metal bridge's purgeable states, as numbers the Metal ABI defines: testable without a Mac
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/metal/purgeable.zig"), .target = b.graph.host }) })).step);
+
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_api, .filters = &.{"weight release:"} })).step);
+    test_step.dependOn(idle_step);
     const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
+    if (b.graph.host.result.os.tag != .macos) {
+        const ids_files = b.addWriteFiles();
+        _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
+        const draft_ids = b.createModule(.{
+            .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n"),
+        });
+        const mods = @import("metal_targets.zig").metalEngineModules(b, b.graph.host, .Debug, draft_ids);
+        const api = b.createModule(.{
+            .root_source_file = b.path("zig/src/core/engine_api.zig"),
+            .target = b.graph.host,
+            .link_libc = true,
+            .imports = &.{.{ .name = "lanes", .module = mods.lanes }},
+        });
+        fullCacheHost(b, mods.engine, api, mods.metal, mods.living);
+        b.step("test-sensenova-mtp-scratch-host", "SenseNova MTP scratch allocation sizes on the host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.engine, .filters = &.{"mtp scratch"} })).step);
+        const mac = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
+        const mac_mods = @import("metal_targets.zig").metalEngineModules(b, mac, .Debug, draft_ids);
+        mac_mods.metal.frameworks.clearRetainingCapacity();
+        mac_mods.metal.link_objects.clearRetainingCapacity();
+        const empty = b.addWriteFiles().add("qwen27-mtp-compile-only.metallib", "");
+        mac_mods.sources.addImport("nemotron_packed_metallib", @import("metal_targets.zig").embedded(b, empty, "nemotron_packed.metallib"));
+        const mac_api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = mac, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mac_mods.lanes }} });
+        const mac_host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = mac, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mac_mods.metal }, .{ .name = "tensorfold", .module = mac_mods.engine }, .{ .name = "engine_api", .module = mac_api }, .{ .name = "living", .module = mac_mods.living } } });
+        const mtp_object = b.addObject(.{ .name = "qwen27-sensenova-mtp-compile", .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/qwen27_speed_compile.zig"),
+            .target = mac,
+            .optimize = .debug,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "metal", .module = mac_mods.metal }, .{ .name = "tensorfold", .module = mac_mods.engine }, .{ .name = "engine_api", .module = mac_api }, .{ .name = "qwen27_served", .module = mac_host } },
+        }) });
+        _ = mtp_object.getEmittedBin();
+        b.step("check-qwen27-sensenova-mtp-host", "Compile the real SenseNova MTP transformer as a Darwin object without linking or shaders").dependOn(&mtp_object.step);
+    }
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
@@ -90,10 +148,14 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     tryNames(b, &dense_names, @embedFile("../src/families/qwen3_5/config.zig"));
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    // memory_controller.zig imports living: the engine's own, as residency_host.zig gives its host module
+    const living = engine.import_table.get("living") orelse b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host, .link_libc = true });
+    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "living", .module = living } } });
     b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{ "qwen27 reply cache:", "a reply's end keeps its prompt's born" } })).step);
     const startup_test = b.addTest(.{ .root_module = host, .filters = &.{"qwen27 startup:"} });
     const startup_step = b.step("test-qwen27-startup-host", "Startup draft stream counts and suffixes without a GPU");
+    const costs = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_costs.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });
+    startup_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = costs, .filters = &.{"qwen27 startup:"} })).step);
     for ([_]?[]const u8{ null, "1" }) |value| {
         const run = b.addRunArtifact(startup_test);
         if (value) |v| run.setEnvironmentVariable("TF_Q27_DRAFT_SLOTS", v) else run.removeEnvironmentVariable("TF_Q27_DRAFT_SLOTS");
@@ -130,6 +192,31 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     }) });
     _ = object.getEmittedBin();
     b.step("check-qwen27-speed-host", "Compile the actual Qwen27 startup and encoding without shaders").dependOn(&object.step);
+}
+
+/// The production served cache policy, without the served suite's GPU startup paths.
+fn fullCacheHost(
+    b: *std.Build,
+    engine: *std.Build.Module,
+    api: *std.Build.Module,
+    metal: *std.Build.Module,
+    living: *std.Build.Module,
+) void {
+    const root = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/qwen27_full_cache_host_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "tensorfold", .module = engine },
+            .{ .name = "engine_api", .module = api },
+            .{ .name = "metal", .module = metal },
+            .{ .name = "living", .module = living },
+        },
+    });
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
+    const step = b.step("test-qwen27-reply-cache-host", "Served full-cache warm and history resumes without GPU work");
+    step.dependOn(&run.step);
 }
 
 fn tryNames(b: *std.Build, names: *std.ArrayList([]const u8), text: []const u8) void {

@@ -11,9 +11,10 @@ pub const config = @import("config.zig");
 pub const weights = @import("cuda/weights.zig");
 pub const kernels = @import("cuda/kernels.zig");
 pub const engine = @import("cuda/engine.zig");
+pub const guidance = @import("cuda/guidance.zig");
 pub const prompt = @import("prompt.zig");
 pub const codec = @import("cuda/codec.zig");
-pub const wav = @import("wav.zig");
+pub const wav = @import("core").wav;
 pub const tts = @import("cuda/tts.zig");
 pub const common = @import("common.zig");
 pub const shards = @import("shards.zig");
@@ -34,14 +35,19 @@ test {
     _ = kv_state;
     _ = @import("codec_map.zig");
     _ = @import("codec_schema.zig");
+    _ = @import("codec_net.zig");
+    _ = @import("codec_net_test.zig");
+    _ = @import("weight_names_test.zig");
     _ = @import("cuda/stager.zig");
     _ = @import("cuda/reference_rows.zig");
-    _ = @import("codec_pth.zig");
     _ = prompt;
+    _ = guidance;
+    _ = @import("guidance.zig");
     _ = wav;
 }
 
 test {
     _ = @import("cuda/owner_test.zig");
+    _ = @import("cuda/nvfp4_test.zig");
     _ = @import("cuda/weights.zig");
 }

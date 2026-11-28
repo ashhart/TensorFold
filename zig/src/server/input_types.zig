@@ -3,22 +3,26 @@ const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
 
-/// Images with --vision; videos when the model offers them and this server can decode them (libtfvideo loads).
+/// Images with --vision; videos when the model offers them and this server can decode them; audio with an encoder.
 pub const Inputs = struct {
     image: bool = false,
     video: bool = false,
+    audio: bool = false,
 
-    pub fn of(vision: ?api.Vision, video_decoder: bool) Inputs {
-        const v = vision orelse return .{};
-        return .{ .image = true, .video = v.video != null and video_decoder };
+    pub fn of(vision: ?api.Vision, video_decoder: bool, audio: bool) Inputs {
+        const v = vision orelse return .{ .audio = audio };
+        return .{ .image = true, .video = v.video != null and video_decoder, .audio = audio };
     }
 
-    /// `["text"]`, then "image" and "video" when taken, in that order.
+    /// `["text"]`, then "image", "video" and "audio" when taken, in that order.
     pub fn value(i: Inputs, a: std.mem.Allocator) std.mem.Allocator.Error!json.Value {
-        const out = try a.alloc(json.Value, 1 + @as(usize, @intFromBool(i.image)) + @intFromBool(i.video));
+        const out = try a.alloc(json.Value, 1 + @as(usize, @intFromBool(i.image)) + @intFromBool(i.video) + @intFromBool(i.audio));
         out[0] = .{ .string = "text" };
-        if (i.image) out[1] = .{ .string = "image" };
-        if (i.video) out[out.len - 1] = .{ .string = "video" };
+        var n: usize = 1;
+        inline for (.{ "image", "video", "audio" }) |name| if (@field(i, name)) {
+            out[n] = .{ .string = name };
+            n += 1;
+        };
         return .{ .array = out };
     }
 };
@@ -35,12 +39,19 @@ pub fn decodes(vision: ?api.Vision) bool {
     return false;
 }
 
-/// The media a request may carry: the template's vision and PDF, and the image and video inputs /v1/models publishes.
+/// At startup: the video decoder (none: video parts are a 400, never a 500) and the audio locator's token (audio.zig).
+pub fn start(srv: anytype) !void {
+    srv.video_decoder = decodes(srv.info.vision);
+    try @import("audio.zig").bindLocator(&srv.info, srv.text);
+}
+
+/// The media a request may carry: the template's vision and PDF, and the inputs /v1/models publishes.
 pub fn media(srv: anytype) @import("messages.zig").Media {
     var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
-    const taken = Inputs.of(srv.info.vision, srv.video_decoder);
+    const taken = Inputs.of(srv.info.vision, srv.video_decoder, srv.info.audio != null);
     result.images = taken.image;
     result.videos = taken.video;
+    result.audio = taken.audio;
     result.native_deepseek = srv.text.native_deepseek;
     return result;
 }

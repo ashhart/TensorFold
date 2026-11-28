@@ -1,0 +1,239 @@
+name: Release container images
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - packaging/runtime-trust.json
+      - .github/workflows/container-release.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable engine release (for example v1.3.5)
+        required: true
+        type: string
+      publish:
+        description: Publish to this repository's GHCR namespace
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.event_name != 'release' ||
+      (github.repository == 'ashhart/TensorFold' && !github.event.release.prerelease)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      revision: ${{ steps.release.outputs.revision }}
+      image: ${{ steps.release.outputs.image }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Select a published stable release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          REQUEST_PUBLISH: ${{ github.event_name == 'release' || inputs.publish == true }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            TAG="v$(awk -F= '/^ARG TENSORFOLD_VERSION=/{print $2}' Dockerfile)"
+          fi
+          [[ "$TAG" =~ ^v1\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable v1.x.y release' >&2; exit 1; }
+          gh api "repos/ashhart/TensorFold/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
+          jq -e --arg tag "$TAG" '.tag_name == $tag and (.draft | not) and (.prerelease | not)' \
+            "$RUNNER_TEMP/release.json"
+          revision=$(gh api "repos/ashhart/TensorFold/commits/$TAG" --jq .sha)
+          publish=false
+          if [ "$REQUEST_PUBLISH" = true ]; then
+            publish=true
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "revision=$revision"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.publish == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build the native image for pull-request checks
+        if: needs.prepare.outputs.publish != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          build-args: TENSORFOLD_VERSION=${{ needs.prepare.outputs.version }}
+          tags: tensorfold:smoke
+          load: true
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.revision }}
+      - name: Build once and push by digest, untagged, with provenance and SBOM
+        if: needs.prepare.outputs.publish == 'true'
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          build-args: TENSORFOLD_VERSION=${{ needs.prepare.outputs.version }}
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.revision }}
+      - name: Check the version, runtime libraries, NCCL version and unprivileged cache
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          # a publishing run checks the pushed digest itself, the artifact the publish job promotes
+          if [ -n "$DIGEST" ]; then
+            ref="$IMAGE@$DIGEST"
+            docker pull --platform "linux/$ARCH" "$ref"
+          else
+            ref=tensorfold:smoke
+          fi
+          actual=$(docker run --rm "$ref" --version)
+          [[ "$actual" == "tensorfold-native $VERSION"* ]]
+          docker run --rm "$ref" capabilities --json > "$RUNNER_TEMP/capabilities.json"
+          jq -e '
+            .optional_libraries as $libs |
+            ["libcublas.so.13", "libcublasLt.so.13", "libnccl.so.2", "libtfgrammar.so"] |
+            all(.[]; . as $soname | any($libs[]; .soname == $soname and .found == true))
+          ' "$RUNNER_TEMP/capabilities.json"
+          read -r major minor patch < <(sed -n 's/.*libnccl2=\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)-.*/\1 \2 \3/p' Dockerfile)
+          expected=$((major * 10000 + minor * 100 + patch))
+          [ "$expected" -ge 23007 ] || { echo "Dockerfile pins NCCL $major.$minor.$patch; 2.30.7 or newer is required" >&2; exit 1; }
+          # the libnccl.so.2 the image's loader resolves, asked for its version through ncclGetVersion
+          lib=$(docker run --rm --entrypoint sh "$ref" -ec \
+            'readlink -f "$(ldconfig -p | sed -n "s/^[[:space:]]*libnccl[.]so[.]2 (.*) => //p" | head -n 1)"')
+          [[ "$lib" == /* ]]
+          container=$(docker create "$ref")
+          docker cp "$container:$lib" "$RUNNER_TEMP/libnccl.so.2"
+          docker rm "$container" > /dev/null
+          loaded=$(python3 -c 'import ctypes, sys; v = ctypes.c_int(); assert ctypes.CDLL(sys.argv[1]).ncclGetVersion(ctypes.byref(v)) == 0; print(v.value)' "$RUNNER_TEMP/libnccl.so.2")
+          [ "$loaded" -eq "$expected" ] || { echo "$lib reports NCCL $loaded, expected $expected" >&2; exit 1; }
+          docker run --rm --entrypoint sh "$ref" -ec '
+            test "$(id -u)" -ne 0
+            test ! -e /usr/local/cuda/bin/nvcc
+            touch /huggingface/.write-check
+            rm /huggingface/.write-check
+          '
+          echo "Checked \`$ref\` (linux/$ARCH): $actual, NCCL $loaded" >> "$GITHUB_STEP_SUMMARY"
+      - name: Record the checked image digest
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: needs.prepare.outputs.publish == 'true'
+        with:
+          name: container-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: container-digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish the version once both architectures pass
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$IMAGE:$TAG" > /dev/null 2> inspect-error; then
+            echo "Refusing to replace existing image $IMAGE:$TAG" >&2
+            exit 1
+          elif ! grep -Eqi 'manifest unknown|not found' inspect-error; then
+            cat inspect-error >&2
+            exit 1
+          fi
+          refs=()
+          for digest in digests/*; do
+            digest=${digest##*/}
+            [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+            refs+=("$IMAGE@sha256:$digest")
+          done
+          [ "${#refs[@]}" -eq 2 ]
+          linux() { jq -r '.manifests[] | select(.platform.os == "linux") | .digest' | sort; }
+          checked=$(for ref in "${refs[@]}"; do docker buildx imagetools inspect --raw "$ref"; done | linux)
+          # promotes the checked digests as they are: no rebuild, only a new index naming their manifests
+          index=$(docker buildx imagetools create --dry-run --tag "$IMAGE:$TAG" "${refs[@]}")
+          jq -e '
+            [.manifests[] | select(.platform.os == "linux") | .platform.architecture] |
+            sort == ["amd64", "arm64"]
+          ' <<< "$index"
+          [ "$(linux <<< "$index")" = "$checked" ]
+          docker buildx imagetools create --tag "$IMAGE:$TAG" "${refs[@]}"
+          [ "$(docker buildx imagetools inspect --raw "$IMAGE:$TAG" | linux)" = "$checked" ]
+          echo "Published \`$IMAGE:$TAG\` (linux/amd64 and linux/arm64)" >> "$GITHUB_STEP_SUMMARY"

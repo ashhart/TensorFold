@@ -4,12 +4,15 @@ const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
 const engine = @import("cuda_engine.zig");
 const caches = @import("cuda_cache.zig");
+const platform = @import("sys");
+const kv_host = @import("cuda_kv_host.zig");
+const Storage = @import("cuda_pages_storage.zig").Storage;
 
 const Engine = engine.Engine;
 const Cache = caches.Cache;
 
 /// Rows past a request's prompt and reply its pages hold: one more forward's (a verify window or a prompt chunk).
-pub const window_rows: u32 = engine.max_rows;
+pub const window_rows: u32 = engine.grid_rows;
 
 /// TF_QWEN_KV_PAGES unset: a window each, dense or MoE, as on main, until #2043 closes the page cost.
 pub const unset_pages: usize = 0;
@@ -58,7 +61,13 @@ pub const Pages = struct {
     capacity: usize,
     ring: usize,
     pool: kv.Pool,
+    /// KV pages use a device arena by default, or mapped host memory in capacity mode.
     arena: cuda.DeviceBuffer,
+    host: ?cuda.HostBuffer = null,
+    /// The arena's device address: `arena.ptr`, or the mapped host pointer when host-funded.
+    base: u64 = 0,
+    /// Host capacity mode keeps its state run on the device.
+    run_dev: ?cuda.DeviceBuffer = null,
     lanes: []Lane,
 
     /// `streams` lanes and `pages` pages of layout `l`, made and touched now; each run holds a `ring`-byte ring.
@@ -71,9 +80,13 @@ pub const Pages = struct {
         _ = try std.math.add(u64, l.run_bytes, page_bytes - 1);
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
-        var arena = try cuda.DeviceBuffer.alloc(e.d, try std.math.mul(usize, pages, page_bytes));
-        errdefer arena.free();
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = arena, .lanes = &.{} };
+        const total = try std.math.mul(usize, pages, page_bytes);
+        const host_mode = kv_host.onHost();
+        if (host_mode and streams != 1) return error.QwenKvHostParallel;
+        const run_bytes = if (host_mode) try std.math.mul(usize, streams, try std.math.mul(usize, l.runPages(), page_bytes)) else 0;
+        var storage = try Storage.init(e.d, total, run_bytes, host_mode);
+        errdefer storage.deinit();
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = storage.arena, .host = storage.host, .base = storage.base, .run_dev = storage.run_dev, .lanes = &.{} };
         errdefer p.pool.deinit();
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
@@ -85,14 +98,20 @@ pub const Pages = struct {
         for (p.lanes) |*x| {
             const c = try gpa.create(Cache);
             errdefer gpa.destroy(c);
-            c.* = try Cache.initPaged(gpa, e, mostPages(capacity, tokens), tokens, arena.ptr);
+            c.* = try Cache.initPaged(gpa, e, mostPages(capacity, tokens), tokens, storage.base);
             x.* = .{ .cache = c };
             made += 1;
         }
         errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: a failed pool initialization did not drain");
-        try arena.fill8(0, e.stream.handle);
+        if (p.host) |h| {
+            // The host pages zero through the device's view of them, on the engine's stream like every fill.
+            const view = cuda.DeviceBuffer{ .d = e.d, .ptr = p.base, .len = h.bytes.len, .borrowed = true };
+            try view.fill8(0, e.stream.handle);
+        } else try p.arena.fill8(0, e.stream.handle);
+        if (p.run_dev) |rd| try rd.fill8(0, e.stream.handle);
         for (p.lanes) |x| try x.cache.paged.?.table.fill8(0, e.stream.handle);
         try e.stream.synchronize();
+        if (p.host != null) std.log.info("qwen3_5 host KV: {d} pinned KV bytes, {d} device run bytes", .{ total, run_bytes });
         return p;
     }
 
@@ -100,26 +119,31 @@ pub const Pages = struct {
         cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: the pool did not drain at close");
         for (p.lanes) |*x| {
             if (x.used) {
-                p.pool.releaseRun(x.run, p.layout.runPages());
+                if (p.host == null) p.pool.releaseRun(x.run, p.layout.runPages());
                 p.pool.finish(&x.lease);
             }
             x.cache.deinit(p.gpa);
             p.gpa.destroy(x.cache);
         }
         p.gpa.free(p.lanes);
-        p.arena.free();
+        if (p.host != null) p.host.?.free() else p.arena.free();
+        if (p.run_dev != null) p.run_dev.?.free();
         p.pool.deinit();
         p.gpa.destroy(p);
     }
 
     fn need(p: *const Pages, prompt: usize, max_tokens: usize) usize {
-        return p.layout.need(prompt, max_tokens, window_rows);
+        return p.layout.pages(prompt + max_tokens + window_rows) + p.runPages();
+    }
+
+    fn runPages(p: *const Pages) usize {
+        return if (p.host != null) 0 else p.layout.runPages();
     }
 
     /// Whether a lane is free, the pool can promise a request's pages now and a run of them is free.
     pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
         if (prompt > p.capacity or max_tokens > p.capacity - prompt) return false;
-        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.need(prompt, max_tokens)) and p.pool.findRun(p.layout.runPages()) != null;
+        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.need(prompt, max_tokens)) and (p.runPages() == 0 or p.pool.findRun(p.runPages()) != null);
         return false;
     }
 
@@ -136,7 +160,7 @@ pub const Pages = struct {
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
-        const k = p.layout.runPages();
+        const k = p.runPages();
         const n = p.need(prompt, max_tokens) - k; // keys and values
         if (n > mostPages(p.capacity, p.layout.page_tokens) or adopted.len > n or n * p.layout.page_tokens > std.math.maxInt(c_int)) return error.InvalidQwenPrompt;
         try p.pool.promise(&x.lease, n - adopted.len + k);
@@ -146,13 +170,14 @@ pub const Pages = struct {
             try p.pool.adopt(&x.lease, adopted); // the lease holds them now (its finish releases them)
         }
         // the run first: KV pages fill from the bottom, runs from the top; a fragmented pool waits (LaneMemory)
-        const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
-        errdefer p.pool.releaseRun(run, k);
+        const run = if (k == 0) 0 else p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
+        errdefer if (k > 0) p.pool.releaseRun(run, k);
         errdefer cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a failed lane open did not drain");
         var up: Upload = .{ .p = p, .cache = x.cache };
         if (adopted.len > 0) try Upload.write(&up, x.lease.ids.items, 0);
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
-        try x.cache.mapRun(p.e, p.arena.ptr + run * p.layout.pageBytes(), k * p.layout.pageBytes(), p.ring);
+        const run_base = if (p.run_dev) |rd| rd.ptr else p.base + run * p.layout.pageBytes();
+        try x.cache.mapRun(p.e, run_base, p.layout.runPages() * p.layout.pageBytes(), p.ring);
         try x.cache.reset(p.e);
         x.cache.paged.?.ids = x.lease.ids.items;
         x.cache.cap = n * p.layout.page_tokens;
@@ -168,7 +193,7 @@ pub const Pages = struct {
         } else return false;
         if (!x.used) return true;
         cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a closed stream did not drain");
-        p.pool.releaseRun(x.run, p.layout.runPages());
+        if (p.host == null) p.pool.releaseRun(x.run, p.layout.runPages());
         p.pool.finish(&x.lease);
         cache.unmapRun(p.e);
         cache.paged.?.ids = &.{};
@@ -193,8 +218,7 @@ pub const Pages = struct {
 
     /// TF_QWEN_POOL_LOG=1: the pool's census after a prompt pass (the agent replay's memory readings).
     pub fn log(p: *const Pages, prompt: usize, cached: usize) void {
-        const v = std.c.getenv("TF_QWEN_POOL_LOG") orelse return;
-        if (!std.mem.eql(u8, std.mem.span(v), "1")) return;
+        if (!(platform.environment.read(bool, "TF_QWEN_POOL_LOG", false) catch false)) return;
         const n = p.pool.census();
         std.log.info("qwen3_5 pool after a prompt of {d} (resumed at {d}): {d} pages leased, {d} held by the prompt cache, {d} free of {d}", .{ prompt, cached, n.leased, n.kept, n.free, n.total });
     }
@@ -276,4 +300,10 @@ test "Qwen pages default: TF_QWEN_KV_PAGES_ALL unset keeps the engine's stream a
     try std.testing.expect(!pagedOnlyOf(null));
     try std.testing.expect(pagedOnlyOf("1"));
     for ([_][]const u8{ "0", "", "true", "01", " 1 " }) |v| try std.testing.expect(!pagedOnlyOf(v));
+}
+
+test "TF_QWEN_POOL_LOG: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_QWEN_POOL_LOG", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_QWEN_POOL_LOG", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_QWEN_POOL_LOG", "on"));
 }

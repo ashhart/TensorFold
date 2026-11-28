@@ -35,10 +35,6 @@ const BLOCKED_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
 ]
 
 const APPROVAL_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
-  { re: /(?:^|[\s;&|])(?:curl|wget|http|https)\b/i, reason: 'network fetch commands require explicit approval' },
-  { re: /(?:^|[\s;&|])(?:ssh|scp|sftp|rsync|nc|ncat|netcat|socat)\b/i, reason: 'network shell/file-transfer commands require explicit approval' },
-  { re: /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:install|add|dlx|exec|create)\b/i, reason: 'package install/execution commands require explicit approval' },
-  { re: /(?:^|[\s;&|])(?:pip|pip3|python3?\s+-m\s+pip)\s+install\b/i, reason: 'package install commands require explicit approval' },
   // Mirror approval-policy's isSecretReadCommand: a credential/secret read must require approval, so
   // Full Auto can't silently read & leak in-repo secrets. The binary list mirrors the BLOCKED
   // dump-tool set (xxd/od/strings/base64/dd/...) so a non-`cat` reader can't slip a secret through.
@@ -52,11 +48,6 @@ const APPROVAL_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   // Archive tools bundle credential directories without a reader binary in the command, so the
   // reader-keyed patterns above never see them. Approval only: archiving itself is legitimate.
   { re: /(?:^|[\s;&|])(?:tar|zip|7z|gzip|cpio)\b[\s\S]*(?:(?:~\/|\$HOME\/)?\.(?:ssh|aws|azure|gcloud|kube|gnupg)\b|(?:^|[\s/])\.env(?:[.\s/]|$))/i, reason: 'archiving credential directories requires explicit approval' },
-  // Network egress that would otherwise auto-run when the sandbox network toggle is on:
-  // shell /dev/tcp redirection and inline interpreter one-liners that open a socket — including
-  // when the network module is preloaded via -M/-r/-m (keyword before -e/-c).
-  { re: /\/dev\/(?:tcp|udp)\//i, reason: 'shell network redirection requires explicit approval' },
-  { re: /(?:^|[\s;&|])(?:python3?|node|ruby|perl|deno|bun|php)\b(?=[\s\S]*\s-{1,2}(?:c|e|m|M|r|eval|require|exec))[\s\S]*(?:socket|urllib|requests|http\.client|net\/http|io::socket|net::|\bnet\b|\bdgram\b|\bdns\b|https?:\/\/|fetch\s*\(|http\.server|\bcurl\b|\bwget\b|os\.system|subprocess|popen|\bsystem\s*\(|require\s*\(\s*['"](?:net|http|https|dgram|dns))/i, reason: 'inline interpreter network access requires explicit approval' },
 ]
 
 const GIT_COMMIT_REASON = 'use TensorFold commit so Git hygiene and AI co-author stripping run first'
@@ -70,6 +61,17 @@ const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
   '--exec-path',
   '--config-env',
 ])
+
+function shellPolicySource(input: string): string {
+  let text = String(input || '')
+  // ANSI-C quoting decodes before word splitting; $'\\x72\\x6d' executes rm.
+  text = text.replace(/\$'((?:[^'\\]|\\.)*)'/g, (_match, body: string) => `'${decodeAnsiCEscapes(body)}'`)
+  return text
+    .replace(/\$\{IFS\}/g, ' ')
+    .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:-\}/g, '')
+    .replace(/\$\{:-([^{}]*)\}/g, '$1')
+    .replace(/\$(?=['"])/g, '')
+}
 
 function shellWords(input: string): string[] {
   const words: string[] = []
@@ -113,21 +115,7 @@ function shellWords(input: string): string[] {
  * from every regex-based gate while the shell still executes them normally.
  */
 export function commandPolicyText(input: string): string {
-  let staticText = String(input || '')
-  // ANSI-C quoting ($'...') decodes escapes BEFORE word splitting: $'\x72\x6d' is rm.
-  // This must run before the bare-$ strip below, which would consume the $ in $'.
-  staticText = staticText.replace(/\$'((?:[^'\\]|\\.)*)'/g, (_match, body: string) => `'${decodeAnsiCEscapes(body)}'`)
-  // zsh's empty/default parameter forms are deterministic without consulting the
-  // environment: r$''m, r${:-}m, and ${:-rm} all resolve to the literal token rm.
-  // Normalize only these static forms; do not attempt to evaluate named variables.
-  staticText = staticText
-    // ${IFS} splits words in zsh exactly like a space — decode it before tokenizing.
-    .replace(/\$\{IFS\}/g, ' ')
-    // ${VAR:-} with an empty default collapses to nothing when the variable is unset.
-    .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:-\}/g, '')
-    .replace(/\$\{:-([^{}]*)\}/g, '$1')
-    .replace(/\$(?=['"])/g, '')
-  return shellWords(staticText).join(' ')
+  return shellWords(shellPolicySource(input)).join(' ')
 }
 
 /**
@@ -173,9 +161,190 @@ export function decodeAnsiCEscapes(input: string): string {
   return out
 }
 
+type ShellToken = { kind: 'word' | 'control' | 'redirect' | 'push' | 'pop', text: string }
+type ShellFrame = { quote: "'" | '"' | null, delimiter: '(' | '`' }
+
+/** Lex unquoted shell structure while preserving quoted and escaped argument text. */
+function shellPolicyTokens(input: string): ShellToken[] {
+  const tokens: ShellToken[] = []
+  const frames: ShellFrame[] = []
+  const source = shellPolicySource(input)
+  let word = ''
+  let quote: "'" | '"' | null = null
+  let escaped = false
+  const flush = () => {
+    if (word) tokens.push({ kind: 'word', text: word })
+    word = ''
+  }
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]
+    if (escaped) { if (ch !== '\n') word += ch; escaped = false; continue }
+    if (ch === '\\' && quote !== "'") { escaped = true; continue }
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else word += ch
+      continue
+    }
+    const top = frames[frames.length - 1]
+    if (ch === '`') {
+      flush()
+      if (top?.delimiter === '`') {
+        tokens.push({ kind: 'pop', text: '`' })
+        quote = frames.pop()?.quote ?? null
+      } else {
+        tokens.push({ kind: 'push', text: '`' })
+        frames.push({ quote, delimiter: '`' })
+        quote = null
+      }
+      continue
+    }
+    const substitution = ch === '$' && source[i + 1] === '('
+    if (substitution || (ch === '(' && !quote)) {
+      flush()
+      tokens.push({ kind: 'push', text: substitution ? '$(' : '(' })
+      frames.push({ quote, delimiter: '(' })
+      quote = null
+      if (substitution) i++
+      continue
+    }
+    if (ch === ')' && top?.delimiter === '(' && !quote) {
+      flush()
+      tokens.push({ kind: 'pop', text: ')' })
+      quote = frames.pop()?.quote ?? null
+      continue
+    }
+    if (ch === quote) { quote = null; continue }
+    if (!quote && (ch === "'" || ch === '"')) { quote = ch; continue }
+    if (quote) { word += ch; continue }
+    if (ch === '\n' || ch === ';' || ch === '|' || (ch === '&' && !/[<>]/.test(source[i - 1] ?? ''))) {
+      flush()
+      tokens.push({ kind: 'control', text: ch })
+      continue
+    }
+    if (ch === '>' || ch === '<') {
+      flush()
+      tokens.push({ kind: 'redirect', text: ch })
+      continue
+    }
+    if (/\s/.test(ch)) { flush(); continue }
+    word += ch
+  }
+  flush()
+  return tokens
+}
+
+const COMMAND_WRAPPERS: Record<string, true> = { bash: true, command: true, env: true, nice: true, nohup: true, setsid: true, sh: true, stdbuf: true, time: true, timeout: true, xargs: true, zsh: true }
+const WRAPPER_OPTION_OPERANDS: Record<string, number> = {
+  'env:-C': 1, 'env:-S': 1, 'env:-u': 1, 'env:--chdir': 1, 'env:--split-string': 1, 'env:--unset': 1,
+  'nice:-n': 1, 'nice:--adjustment': 1,
+  'sh:-c': 1, 'bash:-c': 1, 'zsh:-c': 1,
+  'stdbuf:-i': 1, 'stdbuf:-o': 1, 'stdbuf:-e': 1,
+  'time:-f': 1, 'time:-o': 1, 'time:--format': 1, 'time:--output': 1,
+  'xargs:-a': 1, 'xargs:-d': 1, 'xargs:-E': 1, 'xargs:-e': 1, 'xargs:-f': 1, 'xargs:-I': 1,
+  'xargs:-L': 1, 'xargs:-n': 1, 'xargs:-P': 1, 'xargs:-s': 1,
+  'xargs:--arg-file': 1, 'xargs:--delimiter': 1, 'xargs:--eof': 1, 'xargs:--exit': 1, 'xargs:--max-args': 1,
+  'xargs:--max-lines': 1, 'xargs:--max-procs': 1, 'xargs:--replace': 1, 'xargs:--size': 1,
+}
+const RECURSIVE_WRAPPER_OPTIONS = new Set(['env:-S', 'env:--split-string', 'sh:-c', 'bash:-c', 'zsh:-c'])
+const LOCAL_ONLY_EXECUTABLES = new Set([
+  'awk', 'basename', 'cat', 'cd', 'chmod', 'command', 'cp', 'cut', 'date', 'dirname', 'echo', 'env',
+  'false', 'head', 'less', 'ln', 'ls', 'mkdir', 'more', 'mv', 'nice', 'nl', 'nohup', 'pwd', 'printf',
+  'readlink', 'realpath', 'rm', 'rmdir', 'sed', 'setsid', 'sleep', 'sort', 'stdbuf', 'tail', 'tee',
+  'time', 'timeout', 'touch', 'tr', 'true', 'uniq', 'wc', 'which', 'xargs',
+])
+
+type CommandState = { start: boolean, wrapper: string | null, optionOperands: number, wrapperOperands: number, recurse: boolean }
+type CommandInvocation = { name: string, start: number, end: number, text?: string }
+const initialCommandState = (): CommandState => ({ start: true, wrapper: null, optionOperands: 0, wrapperOperands: 0, recurse: false })
+
+function normalizedCommandTokens(input: string, invocations?: CommandInvocation[]): string {
+  let state = initialCommandState()
+  const states: CommandState[] = []
+  const out: string[] = []
+  let active: CommandInvocation[] = []
+  const finishCommand = () => {
+    for (const invocation of active) invocation.end = out.length
+    active = []
+  }
+  for (const token of shellPolicyTokens(input)) {
+    if (token.kind === 'push') {
+      finishCommand()
+      states.push({ ...state })
+      state = initialCommandState()
+      out.push(token.text)
+      continue
+    }
+    if (token.kind === 'pop') {
+      finishCommand()
+      state = states.pop() ?? initialCommandState()
+      out.push(token.text)
+      continue
+    }
+    if (token.kind === 'control') {
+      finishCommand()
+      state = initialCommandState()
+      out.push(token.text)
+      continue
+    }
+    if (token.kind === 'redirect') { out.push(token.text); continue }
+    if (!state.start) { out.push(token.text); continue }
+    if (state.recurse) {
+      out.push(normalizedCommandTokens(token.text, invocations))
+      state = initialCommandState()
+      state.start = false
+      continue
+    }
+    if (state.optionOperands > 0) {
+      state.optionOperands--
+      out.push(token.text)
+      continue
+    }
+    if (state.wrapperOperands > 0) {
+      state.wrapperOperands--
+      out.push(token.text)
+      continue
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.text)) { out.push(token.text); continue }
+    if (state.wrapper && token.text.startsWith('-')) {
+      const lookup = `${state.wrapper}:${token.text}`
+      state.optionOperands = token.text.includes('=') ? 0 : (WRAPPER_OPTION_OPERANDS[lookup] ?? 0)
+      if (RECURSIVE_WRAPPER_OPTIONS.has(lookup)) state.recurse = true
+      out.push(token.text)
+      continue
+    }
+    const name = token.text.slice(token.text.lastIndexOf('/') + 1).toLowerCase()
+    if (invocations) {
+      const invocation = { name, start: out.length, end: out.length }
+      invocations.push(invocation)
+      active.push(invocation)
+    }
+    out.push(name)
+    if (COMMAND_WRAPPERS[name]) {
+      state.wrapper = name
+      state.wrapperOperands = name === 'timeout' ? 1 : 0
+    } else {
+      state = initialCommandState()
+      state.start = false
+    }
+  }
+  finishCommand()
+  if (invocations) {
+    for (const invocation of invocations) {
+      if (invocation.text === undefined) invocation.text = out.slice(invocation.start, invocation.end).join(' ')
+    }
+  }
+  return out.join(' ')
+}
+
+/** Command-position executable paths and wrappers become their shell-equivalent executable names. */
+export function classifyCommandTokens(input: string): string {
+  return normalizedCommandTokens(input)
+}
+
 function commandPolicyCandidates(input: string): string[] {
   const canonical = commandPolicyText(input)
-  return canonical && canonical !== input ? [input, canonical] : [input]
+  const classified = classifyCommandTokens(input)
+  return [...new Set([input, canonical, classified].filter(Boolean))]
 }
 
 function gitSubcommand(words: string[], gitIndex: number): string | null {
@@ -262,8 +431,16 @@ export function blockedCommandReason(command: string): string | null {
 
 export function commandApprovalReason(command: string): string | null {
   const normalized = String(command || '').trim()
-  if (!normalized) return null
-  for (const candidate of commandPolicyCandidates(normalized)) {
+  const classified = classifyCommandTokens(normalized)
+  const networkReason = commandNetworkReason(normalized)
+  if (networkReason) {
+    if (networkReason === 'network fetch command') return 'network fetch commands require explicit approval'
+    if (networkReason === 'network shell or file-transfer command') return 'network shell/file-transfer commands require explicit approval'
+    if (networkReason === 'network package command') return 'package install/execution commands require explicit approval'
+    if (networkReason === 'shell network redirection') return 'shell network redirection requires explicit approval'
+    if (networkReason === 'inline interpreter network access') return 'inline interpreter network access requires explicit approval'
+  }
+  for (const candidate of [classified]) {
     for (const { re, reason } of APPROVAL_COMMAND_PATTERNS) {
       if (re.test(candidate)) return reason
     }
@@ -272,22 +449,34 @@ export function commandApprovalReason(command: string): string | null {
 }
 
 /** Network-bearing shell syntax used by capability-scoped workers (including SSH backends). */
-export function commandNetworkReason(command: string): string | null {
+function unrecognizedUnsandboxedCommand(command: string): boolean {
+  const invocations: CommandInvocation[] = []
+  normalizedCommandTokens(command, invocations)
+  return invocations.length === 0 || invocations.some(({ name }) => !LOCAL_ONLY_EXECUTABLES.has(name))
+}
+
+export function commandNetworkReason(command: string, failClosedUnsandboxed = false): string | null {
   const normalized = String(command || '').trim()
   if (!normalized) return null
-  const patterns: Array<{ re: RegExp; reason: string }> = [
-    { re: /(?:^|[\s;&|])(?:curl|wget|http|https)\b/i, reason: 'network fetch command' },
-    { re: /(?:^|[\s;&|])(?:ssh|scp|sftp|rsync|nc|ncat|netcat|socat)\b/i, reason: 'network shell or file-transfer command' },
-    { re: /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:install|add|dlx|exec|create)\b/i, reason: 'network package command' },
-    { re: /(?:^|[\s;&|])(?:pip|pip3|python3?\s+-m\s+pip)\s+install\b/i, reason: 'network package command' },
-    { re: /\/dev\/(?:tcp|udp)\//i, reason: 'shell network redirection' },
-    { re: /(?:^|[\s;&|])(?:python3?|node|ruby|perl|deno|bun|php)\b(?=[\s\S]*\s-{1,2}(?:c|e|m|M|r|eval|require|exec))[\s\S]*(?:socket|urllib|requests|http\.client|net\/http|io::socket|net::|\bnet\b|\bdgram\b|\bdns\b|https?:\/\/|fetch\s*\(|http\.server|\bcurl\b|\bwget\b|os\.system|subprocess|popen|\bsystem\s*\(|require\s*\(\s*['"](?:net|http|https|dgram|dns))/i, reason: 'inline interpreter network access' },
-  ]
-  for (const candidate of commandPolicyCandidates(normalized)) {
-    const reason = patterns.find(({ re }) => re.test(candidate))?.reason
-    if (reason) return reason
+  const directReasons = new Map([
+    ['curl', 'network fetch command'], ['wget', 'network fetch command'], ['http', 'network fetch command'], ['https', 'network fetch command'],
+    ['ssh', 'network shell or file-transfer command'], ['scp', 'network shell or file-transfer command'],
+    ['sftp', 'network shell or file-transfer command'], ['rsync', 'network shell or file-transfer command'],
+    ['nc', 'network shell or file-transfer command'], ['ncat', 'network shell or file-transfer command'],
+    ['netcat', 'network shell or file-transfer command'], ['socat', 'network shell or file-transfer command'],
+  ])
+  const invocations: CommandInvocation[] = []
+  normalizedCommandTokens(normalized, invocations)
+  for (const invocation of invocations) {
+    const direct = directReasons.get(invocation.name)
+    if (direct) return direct
+    const text = invocation.text ?? invocation.name
+    if (/^(?:npm|pnpm|yarn|bun)\s+(?:install|add|dlx|exec|create)\b/i.test(text)) return 'network package command'
+    if (/^(?:pip|pip3|python3?\s+-m\s+pip)\s+install\b/i.test(text)) return 'network package command'
+    if (/^(?:python3?|node|ruby|perl|deno|bun|php)\b(?=[\s\S]*\s-{1,2}(?:c|e|m|M|r|eval|require|exec))[\s\S]*(?:socket|urllib|requests|http\.client|net\/http|io::socket|net::|\bnet\b|\bdgram\b|\bdns\b|https?:\/\/|fetch\s*\(|http\.server|\bcurl\b|\bwget\b|os\.system|subprocess|popen|\bsystem\s*\(|require\s*\(\s*['"](?:net|http|https|dgram|dns))/i.test(text)) return 'inline interpreter network access'
   }
-  return null
+  if (/\/dev\/(?:tcp|udp)\//i.test(normalized)) return 'shell network redirection'
+  return failClosedUnsandboxed && unrecognizedUnsandboxedCommand(normalized) ? 'unrecognized shell command on an unsandboxed SSH host' : null
 }
 
 // Mirrors the shell credential-read block for the file-read tool, so the agent

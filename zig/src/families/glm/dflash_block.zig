@@ -1,6 +1,7 @@
 //! DFlash2's device passes: the context ingest (taps through fc into the rings) and the block (embed to candidates).
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const mm = @import("cuda_mm.zig");
 const q4 = @import("cuda_q4.zig");
@@ -10,11 +11,11 @@ const D = df.D;
 const BLOCK = df.BLOCK;
 
 fn go(f: cuda.Function, grid: cuda.Dim3, threads: u32, e: anytype, a: *cuda.Args) !void {
-    try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, e.stream, a);
+    try cuda_pdl.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, e.stream, a);
 }
 
 fn set(e: anytype) glue.Set {
-    return .{ .glue = &e.m.glue, .mm = &e.m.mm };
+    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs };
 }
 
 /// out[m, n] = x[m, k] . w^T, bf16 out (`wide`: fp32, glm_mm only): 4 bits 16 rows a launch, or glm_mm.
@@ -157,20 +158,17 @@ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
         } else try linB(dr, e, dr.act, l.down, dr.a, M, false);
         try conv(dr, e, dr.a, 1, l.m_base + 2 * D * 2, dr.x, true, M);
     }
-    // every row through the drafts' 4-bit head (this rank's vocabulary), its 16 best, gathered; rank 0's projections
+    // every row through the drafts' head (4-bit or TFQ3, this rank's vocab), its 16 best gathered; rank 0 projects
     try glue.rmsnorm(set(e), e.stream, dr.x, D, dr.norm, dr.hn, D, dr.xs, df.EPS, M, D);
     const head = e.w.mtp.?.draft;
-    var r0: usize = 0;
-    while (r0 < M) : (r0 += 16) {
-        const rows = @min(16, M - r0);
-        try q4.matmul(&e.m.q4, e.stream, dr.hn + r0 * D * 2, D, dr.xs + r0 * (D / 64) * 4, head, dr.logits + r0 * head.n * 2, rows);
-    }
-    const chunks = (head.n + 4095) / 4096;
+    const head_n = head.outputs();
+    try head.project(set(e), &e.m.q4, if (e.m.tfq3) |*x| x else null, e.stream, dr.hn, dr.xs, dr.logits, M);
+    const chunks = (head_n + 4095) / 4096;
     const nw = M * df.CW;
     {
         var a: cuda.Args = .{};
         a.add(dr.logits);
-        a.add(@as(i32, @intCast(head.n)));
+        a.add(@as(i32, @intCast(head_n)));
         a.add(@as(i32, @intCast(e.share.vocab.lo)));
         a.add(dr.pv);
         a.add(dr.pi);

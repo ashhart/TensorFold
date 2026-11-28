@@ -17,8 +17,8 @@ pub const Pair = struct {
     pos: cuda.DeviceBuffer, // an i32: where the second chunk's view of the sequence starts
     steps: u64 = 0, // paired steps so far (glm-pair-check counts them)
 
-    pub fn init(d: *const cuda.Driver, w: *const weights.Weights, bp: *const fw.Buffers, pieces: *const fw.Pieces, capacity: usize) !Pair {
-        var b = try fw.Buffers.initTwin(d, w, bp, capacity);
+    pub fn init(d: *const cuda.Driver, w: *const weights.Weights, bp: *const fw.Buffers, pieces: *const fw.Pieces, capacity: usize, joint: bool) !Pair {
+        var b = try fw.Buffers.initTwin(d, w, bp, capacity, joint);
         errdefer b.deinit();
         var p = try fw.Pieces.initTwin(d, pieces);
         errdefer p.deinit();
@@ -99,9 +99,9 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     st.pending = ra;
     st.prompt = true;
     const ids: []const i32 = @ptrCast(part);
-    try cuda.copy_source.enqueue(e.d, e.bp.ids, std.mem.sliceAsBytes(ids[0..ra]), e.stream);
-    try cuda.copy_source.enqueue(e.d, pair.bp.ids, std.mem.sliceAsBytes(ids[ra .. ra + rb]), e.stream);
-    try fw.Forward.pairBody(&fa, &fb, ra, rb);
+    try uploadIds(pair, e, ids[0..ra], ids[ra .. ra + rb]);
+    const last = start + ra + rb == len;
+    try fw.Forward.pairBody(&fa, &fb, ra, rb, last);
     pair.steps += 1;
     e.index_splits += @intFromBool(split);
     try mtpRows(e, &fa, ids[1 .. ra + 1], e.bp.fnormed);
@@ -109,7 +109,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     st.pending = rb;
     st.prompt = true;
     var first: ?u32 = null;
-    if (start + ra + rb == len) {
+    if (last) {
         var t: [1]u32 = undefined;
         try e.draw(pair.bp.logits, 1, len, 0, &t);
         first = t[0];
@@ -123,7 +123,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
 /// decode._absorb_rows of a chunk: the MTP head over its next ids `nxt` on its final-norm rows `hidden`.
 fn mtpRows(e: *Engine, f: *fw.Forward, nxt: []const i32, hidden: u64) !void {
     if (!e.mtp or nxt.len == 0) return;
-    try f.mtp(nxt, &.{hidden});
+    try f.mtpMode(nxt, &.{hidden}, false);
     try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
 }
 
@@ -137,6 +137,13 @@ test "a prompt step takes the next chunk when it holds min_rows or more and no k
     try std.testing.expect(takesTwo(2 * C, 5 * C, 3, &.{}));
     try std.testing.expect(!takesTwo(0, 3 * C, 3, &.{C})); // a state kept at the next chunk's start: that chunk starts a step
     try std.testing.expect(takesTwo(0, 3 * C, 3, &.{ 2 * C, 3 * C })); // marks past the pair
+}
+
+fn uploadIds(pair: *const Pair, e: anytype, ids_a: []const i32, ids_b: []const i32) !void {
+    try fw.checkTokenIds(ids_a, e.c.vocab);
+    try fw.checkTokenIds(ids_b, e.c.vocab);
+    try cuda.copy_source.enqueue(e.d, e.bp.ids, std.mem.sliceAsBytes(ids_a), e.stream);
+    try cuda.copy_source.enqueue(e.d, pair.bp.ids, std.mem.sliceAsBytes(ids_b), e.stream);
 }
 
 test "a pair rebases the index rings where a chunk at a time would, so a ring based at chunk 0 pairs from chunk 2" {
@@ -157,4 +164,27 @@ test "only ranks that exchange make the twin: TP=1 has no exchanges to hide" {
 test "a server with solo passes holds no twin: they take the pair's steps" {
     try std.testing.expect(!wanted(true, true, 2));
     try std.testing.expect(!wanted(true, true, 3));
+}
+
+test "GLM embedding: paired prefill checks both ID slices before either upload" {
+    const Fake = struct {
+        var calls: usize = 0;
+        fn hostAlloc(_: *?*anyopaque, _: usize, _: c_uint) callconv(.c) cuda.abi.Result {
+            calls += 1;
+            return cuda.abi.error_not_ready;
+        }
+    };
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemHostAlloc = Fake.hostAlloc;
+    var pair: Pair = undefined;
+    pair.bp.ids = 0;
+    var bp: fw.Buffers = undefined;
+    bp.ids = 0;
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    const e = .{ .d = &d, .bp = &bp, .stream = stream, .c = @import("config.zig").Config{ .vocab = 128 } };
+    for ([_][2][2]i32{ .{ .{ 128, 0 }, .{ 0, 0 } }, .{ .{ 0, 0 }, .{ 128, 0 } }, .{ .{ -1, 0 }, .{ 0, 0 } }, .{ .{ 0, 0 }, .{ 0, -1 } } }) |ids| {
+        try std.testing.expectError(error.BadTokenId, uploadIds(&pair, &e, &ids[0], &ids[1]));
+        try std.testing.expectEqual(0, Fake.calls);
+    }
+    try std.testing.expectError(error.NotReady, uploadIds(&pair, &e, &.{ 127, 0 }, &.{ 127, 0 }));
 }

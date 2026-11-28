@@ -3,6 +3,7 @@ const CudaRecord = @import("registry.zig").CudaRecord;
 const Override = @import("registry.zig").Override;
 
 pub const cuda = [_]CudaRecord{
+    // GB10, not x86-64: ASLR varies this tile on 13.0.88 and shared-header MoE on 13.3.73 (cuda-sass-identity.md).
     .{ .launch = .{ .name = "router tf_nemo_router_tiles", .symbol = "tf_nemo_router_tiles", .image = "nemotron_route", .threads = 256, .dynamic = 40960 }, .usage = .{ .{ .regs = 181, .static = 0, .bound = 256 }, .{ .regs = 184, .static = 0, .bound = 256 }, .{ .regs = 184, .static = 0, .bound = 256 }, .{ .regs = 177, .static = 0, .bound = 256 }, .{ .regs = 177, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "latent tf_super_combine_sums", .symbol = "tf_super_combine_sums", .image = "nemotron_latent", .threads = 128 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "latent tf_super_moe_out_sums", .symbol = "tf_super_moe_out_sums", .image = "nemotron_latent", .threads = 256 }, .usage = .{ .{ .regs = 26, .static = 0, .bound = 256 }, .{ .regs = 22, .static = 0, .bound = 256 }, .{ .regs = 22, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 } } },

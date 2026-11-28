@@ -55,6 +55,7 @@ pub fn failed(h: *const LaneHost, err: anyerror) void {
 
 /// A request the backend failed: the failure hook hears the error and the request ends with the backend's words.
 pub fn dropFailed(h: *LaneHost, job: *Job, err: anyerror) bool {
+    if (err == error.MemoryRestoreFailed and job.memory_snap != null) return unfold(h, job);
     failed(h, err);
     load.failed(h, .backend_prompt);
     return h.drop(job, h.words(err));
@@ -65,6 +66,7 @@ pub fn deliverPending(h: *LaneHost) void {
     var i: usize = 0;
     while (i < h.admitted.items.len) {
         const job = h.admitted.items[i];
+        if (h.srpt.on and job.stream.finished) h.srpt.seen(&job.stream);
         if (h.deliver(job)) continue;
         i += 1;
     }
@@ -147,6 +149,7 @@ pub fn closeAll(h: *LaneHost) void {
     h.admitted = .empty;
     h.filling.clearRetainingCapacity();
     h.unlock();
+    @import("lane_host_status.zig").noteLive(h); // empty before any terminal job or stream is deinitialized
     defer queued.deinit(h.gpa);
     defer admitted.deinit(h.gpa);
     for (admitted.items) |job| {
@@ -156,8 +159,24 @@ pub fn closeAll(h: *LaneHost) void {
     for (queued.items) |job| h.finish(job, .cancelled, "");
 }
 
+/// A memory prefix its backend could not restore: back to the queue's front to run its own prompt, without memory.
+pub fn unfold(h: *LaneHost, job: *Job) bool {
+    @import("lane_host_fill.zig").unfill(h, job);
+    if (job.memory_snap) |snap| if (h.folded_memory) |fm| fm.dropSnap(fm.ctx, snap);
+    job.memory_snap = null;
+    h.gpa.free(job.memory_prompt);
+    job.memory_prompt = &.{};
+    job.memory_refused = true;
+    return again(h, job, true);
+}
+
 /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
 pub fn requeue(h: *LaneHost, job: *Job) bool {
+    return again(h, job, false);
+}
+
+/// `job` back at the queue's front, `always` or while other jobs run (memory comes back only as they end).
+fn again(h: *LaneHost, job: *Job, always: bool) bool {
     if (job.stream.pending != null or job.delivered != 0) return h.drop(job, "memory failure after first-token commit");
     h.lock();
     for (h.admitted.items, 0..) |j, i| if (j == job) {
@@ -166,14 +185,15 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     };
     @import("lane_host_ledger.zig").release(h, job); // it promises again when it is next taken
     const others = h.admitted.items.len;
-    const waits = others > 0 and blk: { // with nothing else running no memory comes back: it would wait forever
+    // with nothing else running no memory comes back: it would wait forever (a memory retry never waits on memory)
+    const waits = (always or others > 0) and blk: {
         h.queued.insert(h.gpa, 0, job) catch break :blk false;
         break :blk true;
     };
     load.ended(job); // before the teardown: this attempt's time leaves with it
     if (waits) {
         h.load.requeued += 1;
-        h.memory_lanes = others; // under the lock: a publish reads it
+        if (!always) h.memory_lanes = others; // under the lock: a publish reads it
     } else if (others == 0) h.load.failures[@backingInt(load.Failure.lane_memory_alone)] += 1;
     h.unlock();
     if (!waits) {
@@ -181,6 +201,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         return true;
     }
     job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
+    @import("lane_host_status.zig").publish(h); // the fill ends here
     job.reported();
     if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
     job.stream.deinit(h.gpa);
@@ -191,6 +212,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     job.reached = 0;
     job.cache_promise = .{};
     job.entry = null; // looked up again at its next admission
+    job.lent = null;
     h.gpa.free(job.marks);
     job.marks = &.{};
     h.gpa.free(job.key);

@@ -23,6 +23,11 @@ pub fn step(w: []const u32) error{ EmptyMessage, ShortMessage, UnknownStep }!Op 
     return op;
 }
 
+/// A begin's cache slot: one this rank's pool holds, or the next (rank 0 leases the lowest slot no stream holds).
+pub fn slotFits(slot: u32, slots: usize) bool {
+    return slot <= slots;
+}
+
 const Lane = struct {
     caches: cache.Caches,
     pending: [cache.max_window]u32 = undefined,
@@ -57,6 +62,7 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
         switch (try step(w)) {
             .stop => return,
             .begin => {
+                if (!slotFits(w[2], e.pool.slots.items.len)) return error.ShortMessage;
                 const lane = try gpa.create(Lane);
                 errdefer gpa.destroy(lane);
                 if (lanes.fetchRemove(w[1])) |kv| {
@@ -104,7 +110,7 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
             .snap => {
                 const lane = lanes.get(w[1]) orelse return error.UnknownStream;
                 // a copy this rank cannot keep is a restore it refuses later, which every rank then hears
-                const x = snapshot.save(gpa, &e.driver, e.stream, &lane.caches, null, w[3], ratio) catch continue;
+                const x = snapshot.save(gpa, .{ .d = &e.driver }, e.stream, &lane.caches, null, w[3], ratio) catch continue;
                 saved.put(gpa, w[2], x) catch snapshot.drop(gpa, x);
             },
             .restore => {
@@ -112,7 +118,7 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
                 // every rank resumes from the state, or every rank starts the prompt over
                 snapshot.restoreAgreed(
                     gpa,
-                    &e.driver,
+                    .{ .d = &e.driver },
                     e.stream,
                     saved.get(w[2]),
                     &lane.caches,
@@ -147,4 +153,11 @@ test "security: a step from the link is refused unless its message holds the wor
         try t.expectError(error.ShortMessage, step(words[0 .. need[1] - 1]));
         try t.expectEqual(need[0], try step(words[0..need[1]]));
     }
+}
+
+test "security: a begin's cache slot is refused past this rank's pool, and the next slot passes" {
+    try std.testing.expect(slotFits(0, 0));
+    try std.testing.expect(slotFits(7, 7));
+    try std.testing.expect(!slotFits(8, 7));
+    try std.testing.expect(!slotFits(0xffff_ffff, 7));
 }

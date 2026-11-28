@@ -9,13 +9,16 @@
 #define __global__
 #define __device__
 #define __forceinline__ inline
+#define __noinline__ __attribute__((noinline))
 #define __restrict__
 #define __launch_bounds__(x)
 #define __shared__ static
 #define __align__(x) __attribute__((aligned(x)))
 struct dim3 { unsigned x, y, z; };
 struct float4 { float x, y, z, w; };
-inline thread_local dim3 threadIdx, blockIdx;
+struct uint4 { unsigned x, y, z, w; };
+inline float4 make_float4(float x, float y, float z, float w) { return {x, y, z, w}; }
+inline thread_local dim3 threadIdx, blockIdx, blockDim;
 namespace emu {
 inline std::barrier<>* block_bar;
 inline std::barrier<>* warp_bar[32];
@@ -76,9 +79,19 @@ inline int atomicMax(int* p, int v) {
   return old;
 }
 inline int __float_as_int(float f) { int i; std::memcpy(&i, &f, 4); return i; }
+inline float __int_as_float(int i) { float f; std::memcpy(&f, &i, 4); return f; }
+inline unsigned __float_as_uint(float f) { unsigned u; std::memcpy(&u, &f, 4); return u; }
+inline float __expf(float f) { return std::exp(f); }
 inline float __fadd_rn(float a, float b) { return a + b; }
 inline float __fmul_rn(float a, float b) { return a * b; }
 inline float __fmaf_rn(float a, float b, float c) { return std::fma(a, b, c); }
+#ifdef __APPLE__
+// glibc's sincosf, which Apple's libm does not declare (model and kernel both turn through it, so they stay equal)
+inline void sincosf(float x, float* s, float* c) {
+  *s = std::sin(x);
+  *c = std::cos(x);
+}
+#endif
 using std::fmaxf;
 using std::max;
 using std::min;

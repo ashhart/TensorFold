@@ -107,7 +107,7 @@ pub const Pools = struct {
         const x = self.shape;
         const t = glm.index.tile(x.n);
         var a: cuda.Args = .{};
-        inline for (.{ self.in, self.out, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), @as(u64, 0) }) |v| a.add(v);
+        inline for (.{ self.in, self.out, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), @as(u64, 0), @as(c_int, sparse.pool) }) |v| a.add(v);
         try cuda.launch.launch(self.fast, .{ .grid = .{ .x = @intCast(x.rows) }, .block = .{ .x = glm.index.pool_threads } }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
@@ -116,7 +116,7 @@ pub const Pools = struct {
     pub fn replaced(self: *Pools) ![]const u8 {
         const x = self.shape;
         var a: cuda.Args = .{};
-        inline for (.{ self.in, self.base, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)) }) |v| a.add(v);
+        inline for (.{ self.in, self.base, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)), @as(c_int, sparse.pool) }) |v| a.add(v);
         try cuda.launch.launch(self.narrow, .{ .grid = .{ .x = @intCast(x.rows) }, .block = .{ .x = 128 } }, self.rig.s, &a);
         return self.rig.bytes(self.base, self.outBytes());
     }
@@ -157,10 +157,12 @@ pub const Pools = struct {
     }
 };
 
-/// The prompt indexer's two kernels, registered together so the runner keeps one entry for them.
+/// glm_index's kernels (the prompt indexer's two, the decode window's scores and its control), registered together.
 pub const Fast = struct {
     mod: cuda.Module,
     scores: @import("contract_glm_index.zig").Scores,
+    dscores: @import("contract_glm_index.zig").Scores, // the same kernel at a decode window's tiles
+    dscores_short: @import("contract_glm_index.zig").Scores, // and its control, told one tile fewer
     pools: Pools,
 
     /// On the heap, so the kernels' contexts keep their address; registered into `kernels`.
@@ -170,14 +172,19 @@ pub const Fast = struct {
         errdefer a.destroy(self);
         var m = try cuda.Module.load(gpu.d, cuda.kernels.glm_index);
         errdefer m.unload();
-        self.* = .{ .mod = m, .scores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = try m.function("tf_glm_index_scores") }, .pools = .{ .rig = .{ .gpu = gpu, .s = s }, .fast = try m.function("tf_glm_index_pools"), .narrow = fns.select_rows } };
+        const fast = try m.function("tf_glm_index_scores");
+        self.* = .{ .mod = m, .scores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = fast }, .dscores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = fast, .decode = true }, .dscores_short = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = fast, .decode = true, .short = true }, .pools = .{ .rig = .{ .gpu = gpu, .s = s }, .fast = try m.function("tf_glm_index_pools"), .narrow = fns.select_rows } };
         try kernels.append(a, self.scores.kernel());
+        try kernels.append(a, self.dscores.kernel());
+        try kernels.append(a, self.dscores_short.kernel());
         try kernels.append(a, self.pools.kernel());
         return self;
     }
 
     pub fn destroy(self: *Fast, a: std.mem.Allocator) void {
         self.pools.deinit();
+        self.dscores_short.deinit();
+        self.dscores.deinit();
         self.scores.deinit();
         self.mod.unload();
         a.destroy(self);

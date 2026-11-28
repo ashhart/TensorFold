@@ -103,14 +103,18 @@ fn refused(slide: bool, kv_pages: ?[:0]const u8, share: ?[:0]const u8) !void {
     if (kv_pages) |v| _ = env.setenv("TF_QWEN_KV_PAGES", v, 1);
     if (share) |v| _ = env.setenv("TF_QWEN_KV_SHARE", v, 1);
     const o: native.Options = .{ .context = capacity, .drafts = false, .slide = slide };
-    _ = try native.open(t.allocator, t.io, undefined, "/nonexistent", null, o);
+    var d = @import("cuda_sm110_open_test.zig").driver(121);
+    const ctx: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
+    _ = try native.open(t.allocator, t.io, &ctx, "/nonexistent", null, o);
 }
 
-/// A set switch's refusal needs no model: it stops before the weights load, as the other switch checks do.
+/// Early switch refusals need no model; a non-divisible page size proceeds to the ordinary model load.
 pub fn refusals() !void {
     try t.expectError(error.QwenPagesNoLearner, refused(true, "256", null));
     try t.expectError(error.QwenShareNeedsPages, refused(false, null, "16"));
-    try t.expectError(error.QwenShareNeedsPages, refused(false, "100", "16"));
+    if (refused(false, "100", "16")) |_| return error.UnexpectedNonexistentModel else |err| {
+        try t.expect(err != error.QwenShareNeedsPages);
+    }
 }
 
 test "Qwen share faults: --parallel N admits N streams at once with every stream on pages" {
@@ -119,4 +123,16 @@ test "Qwen share faults: --parallel N admits N streams at once with every stream
 
 test "Qwen pages default: --parallel a cap with TF_QWEN_KV_PAGES set, a request waits for pages; unset, a window each" {
     try caps(native.Lanes);
+}
+
+test "Qwen lane startup: prefill trace allocation failure releases the lane" {
+    _ = env.setenv("TF_CUDA_PREFILL_TRACE", "1", 1);
+    defer _ = env.unsetenv("TF_CUDA_PREFILL_TRACE");
+    var d = @import("cuda_sm110_open_test.zig").driver(120);
+    const ctx: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
+    var e = engine(&d);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const l = try failing.allocator().create(native.Lanes);
+    l.* = .{ .gpa = failing.allocator(), .io = std.testing.io, .e = &e, .capacity = 1, .target = undefined };
+    try std.testing.expectError(error.OutOfMemory, @import("cuda_lane_startup.zig").open(l, &ctx));
 }

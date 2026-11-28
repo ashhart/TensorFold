@@ -5,9 +5,11 @@ const pull = @import("pull.zig");
 const ranged = @import("pull_parts.zig");
 const single = @import("pull_file.zig");
 const exlr8_pull = @import("pull_exlr8.zig");
+const TestClient = @import("pull_test_client.zig").Client;
 
 /// A fake hub on 127.0.0.1: revision and tree APIs, ranged resolve endpoints, a body cut once, a repo ignoring ranges.
-const FakeHub = struct {
+pub const FakeHub = struct {
+    allocator: Allocator = std.heap.page_allocator, // the fake server owns its worker allocations
     server: std.Io.net.Server,
     io: std.Io,
     threaded: *std.Io.Threaded,
@@ -26,8 +28,9 @@ const FakeHub = struct {
     config_git_hex: [40]u8,
     flaky_git_hex: [40]u8,
     port: u16,
-
-    const weights_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/weights.safetensors";
+    /// Routes a test puts before the fake's own: the answer's keep-alive, or null when the request is not theirs.
+    route: ?*const fn (fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) ?bool = null,
+    pub const weights_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/weights.safetensors";
     const config_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/config.json";
     const nested_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/tensors/model-00001-of-00001.safetensors";
     const flaky_body = "{\"chat_template\": \"{{ messages }}\"}";
@@ -36,10 +39,12 @@ const FakeHub = struct {
     var nested_body_storage: [1234]u8 = @splat(0x5A);
     const nested_body: []const u8 = &nested_body_storage;
 
-    fn open() !FakeHub {
-        const threaded = try std.testing.allocator.create(std.Io.Threaded);
-        threaded.* = std.Io.Threaded.init(std.testing.allocator, .{});
-        errdefer std.testing.allocator.destroy(threaded);
+    pub fn open() !FakeHub {
+        const a = std.heap.page_allocator;
+        const threaded = try a.create(std.Io.Threaded);
+        errdefer a.destroy(threaded);
+        threaded.* = std.Io.Threaded.init(a, .{});
+        errdefer threaded.deinit();
         const io = threaded.io();
         const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
         var server = try loopback.listen(io, .{});
@@ -52,15 +57,20 @@ const FakeHub = struct {
         nested_hash.update(nested_body);
         var nested_digest: [32]u8 = undefined;
         nested_hash.final(&nested_digest);
+        const weights_sha_hex = try std.fmt.allocPrint(a, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
+        errdefer a.free(weights_sha_hex);
+        const nested_sha_hex = try std.fmt.allocPrint(a, "{s}", .{std.fmt.bytesToHex(nested_digest, .lower)});
+        errdefer a.free(nested_sha_hex);
         return .{
+            .allocator = a,
             .server = server,
             .io = io,
             .threaded = threaded,
             .weights = weights_body,
             .config = config_body,
             .nested = nested_body,
-            .weights_sha_hex = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{std.fmt.bytesToHex(digest, .lower)}),
-            .nested_sha_hex = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{std.fmt.bytesToHex(nested_digest, .lower)}),
+            .weights_sha_hex = weights_sha_hex,
+            .nested_sha_hex = nested_sha_hex,
             .config_git_hex = gitHex(config_body),
             .flaky_git_hex = gitHex(flaky_body),
             .port = server.socket.address.getPort(),
@@ -75,9 +85,9 @@ const FakeHub = struct {
         return std.fmt.bytesToHex(git.finalResult(), .lower);
     }
 
-    const config_body = "{\"model_type\": \"qwen4_exp\", \"quantization\": {\"bits\": 6, \"group_size\": 32}, \"max_position_embeddings\": 262144}";
+    pub const config_body = "{\"model_type\": \"qwen4_exp\", \"quantization\": {\"bits\": 6, \"group_size\": 32}, \"max_position_embeddings\": 262144}";
     var weights_body_storage: [5000]u8 = @splat(0xA5);
-    const weights_body: []const u8 = &weights_body_storage;
+    pub const weights_body: []const u8 = &weights_body_storage;
 
     fn serve(fake: *FakeHub) void {
         var conns: [64]std.Thread = undefined;
@@ -94,7 +104,7 @@ const FakeHub = struct {
                 continue;
             }
             fake.live_lock.lockUncancelable(fake.io);
-            fake.live.append(std.testing.allocator, conn) catch {};
+            fake.live.append(fake.allocator, conn) catch {};
             fake.live_lock.unlock(fake.io);
             conns[n] = std.Thread.spawn(.{}, handle, .{ fake, conn }) catch {
                 fake.forget(conn);
@@ -132,6 +142,7 @@ const FakeHub = struct {
 
     /// Answers one request; false closes the connection.
     fn respondOne(fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) bool {
+        if (fake.route) |r| if (r(fake, conn, head)) |keep| return keep;
         var tree_buf: [256]u8 = undefined;
         const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return false;
         var parts = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
@@ -184,8 +195,8 @@ const FakeHub = struct {
             fake.respond(conn, config_body);
         } else if (std.mem.eql(u8, path, "/api/models/Org/Flash/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1") or std.mem.eql(u8, path, "/api/models/Org/Whole/tree/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2")) {
             // The hub's tree sends LFS oids as bare hex.
-            const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"3333333333333333333333333333333333333333\", \"path\": \"tensors/model-00001-of-00001.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len, fake.nested.len, fake.nested_sha_hex, fake.nested.len }) catch return false;
-            defer std.testing.allocator.free(tree);
+            const tree = std.fmt.allocPrint(fake.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"3333333333333333333333333333333333333333\", \"path\": \"tensors/model-00001-of-00001.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len, fake.nested.len, fake.nested_sha_hex, fake.nested.len }) catch return false;
+            defer fake.allocator.free(tree);
             fake.respond(conn, tree);
         } else if (std.mem.eql(u8, path, config_path) or std.mem.eql(u8, path, "/Org/Whole/resolve/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2/config.json")) {
             fake.respond(conn, fake.config);
@@ -235,25 +246,25 @@ const FakeHub = struct {
         fake.sendAll(conn, body);
     }
 
-    fn respond(fake: *FakeHub, conn: std.Io.net.Stream, body: []const u8) void {
+    pub fn respond(fake: *FakeHub, conn: std.Io.net.Stream, body: []const u8) void {
         var head_buf: [128]u8 = undefined;
         const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{body.len}) catch return;
         fake.sendAll(conn, head_text);
         fake.sendAll(conn, body);
     }
 
-    fn sendAll(fake: *FakeHub, conn: std.Io.net.Stream, bytes: []const u8) void {
+    pub fn sendAll(fake: *FakeHub, conn: std.Io.net.Stream, bytes: []const u8) void {
         var buf: [4096]u8 = undefined;
         var w = conn.writer(fake.io, &buf);
         w.interface.writeAll(bytes) catch return;
         w.interface.flush() catch return;
     }
 
-    fn start(fake: *FakeHub) void {
+    pub fn start(fake: *FakeHub) void {
         fake.thread = std.Thread.spawn(.{}, serve, .{fake}) catch null;
     }
 
-    fn endpoint(fake: *FakeHub, a: Allocator) ![]const u8 {
+    pub fn endpoint(fake: *FakeHub, a: Allocator) ![]const u8 {
         return std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{fake.port});
     }
 
@@ -268,7 +279,7 @@ const FakeHub = struct {
         }
     }
 
-    fn stopServer(fake: *FakeHub) void {
+    pub fn stopServer(fake: *FakeHub) void {
         fake.stop.store(true, .release);
         fake.live_lock.lockUncancelable(fake.io);
         for (fake.live.items) |conn| conn.shutdown(fake.io, .both) catch {};
@@ -277,11 +288,11 @@ const FakeHub = struct {
         if (fake.server.socket.address.connect(fake.io, .{ .mode = .stream }) catch null) |wake| wake.close(fake.io);
         if (fake.thread) |t| t.join();
         fake.server.deinit(fake.io);
-        fake.live.deinit(std.testing.allocator);
+        fake.live.deinit(fake.allocator);
         fake.threaded.deinit();
-        std.testing.allocator.destroy(fake.threaded);
-        std.testing.allocator.free(fake.weights_sha_hex);
-        std.testing.allocator.free(fake.nested_sha_hex);
+        fake.allocator.destroy(fake.threaded);
+        fake.allocator.free(fake.weights_sha_hex);
+        fake.allocator.free(fake.nested_sha_hex);
     }
 };
 
@@ -292,10 +303,13 @@ fn testEnv(a: Allocator, endpoint_url: []const u8) !std.process.Environ.Map {
 }
 
 test "pull downloads, verifies, retries a cut body, resumes and refuses a family Zig cannot serve" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch {
         return error.SkipZigTest;
     };
@@ -303,8 +317,8 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     defer fake_hub.stopServer();
     const root = try std.fmt.allocPrint(a, ".tf-pull-test-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const env = try testEnv(a, try fake_hub.endpoint(a));
-
+    var env = try testEnv(a, try fake_hub.endpoint(a));
+    try env.put("HF_TOKEN", "fixture-resume-token");
     var out: std.Io.Writer.Allocating = .init(a);
     var err_out: std.Io.Writer.Allocating = .init(a);
     try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
@@ -371,10 +385,13 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
 }
 
 test "large files come down as shared pieces, and whole files when the hub ignores ranges" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -403,10 +420,13 @@ test "large files come down as shared pieces, and whole files when the hub ignor
 }
 
 test "shared pieces fill every byte across files, restart only unmarked pieces and refuse a server without ranges" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -420,7 +440,7 @@ test "shared pieces fill every byte across files, restart only unmarked pieces a
         .{ .url = url, .path = try std.fs.path.join(a, &.{ root, "second.ranges" }), .size = size },
     };
 
-    try ranged.fetch(a, io, &files, 1250, null);
+    try ranged.fetch(a, io, &files, 1250, .{}, null);
     try std.testing.expectEqual(@as(u32, 8), fake_hub.weight_requests.load(.monotonic));
     for (files) |f| try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try std.Io.Dir.cwd().readFileAlloc(io, f.path, a, .limited(1 << 20)));
 
@@ -429,13 +449,13 @@ test "shared pieces fill every byte across files, restart only unmarked pieces a
     try std.Io.Dir.cwd().deleteFile(io, first.path);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = first.path, .data = FakeHub.weights_body });
     for ([_]u32{ 0, 2 }) |i| try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}.part{d}", .{ first.path, i }), .data = "" });
-    try ranged.fetch(a, io, &.{first}, 1250, null);
+    try ranged.fetch(a, io, &.{first}, 1250, .{}, null);
     try std.testing.expectEqual(@as(u32, 10), fake_hub.weight_requests.load(.monotonic));
     try std.testing.expectEqualSlices(u8, &(try ranged.digest(a, io, first.path, size)), &(try hexBytes(fake_hub.weights_sha_hex)));
 
     // A server that answers a range with the whole file (the config endpoint here) is refused for pieces.
     const config_url = try std.fmt.allocPrint(a, "{s}{s}", .{ try fake_hub.endpoint(a), FakeHub.config_path });
-    try std.testing.expectError(error.RangeUnsupported, ranged.fetch(a, io, &.{.{ .url = config_url, .path = try std.fs.path.join(a, &.{ root, "config.ranges" }), .size = FakeHub.config_body.len }}, 50, null));
+    try std.testing.expectError(error.RangeUnsupported, ranged.fetch(a, io, &.{.{ .url = config_url, .path = try std.fs.path.join(a, &.{ root, "config.ranges" }), .size = FakeHub.config_body.len }}, 50, .{}, null));
 }
 
 fn hexBytes(text: []const u8) ![32]u8 {
@@ -445,10 +465,13 @@ fn hexBytes(text: []const u8) ![32]u8 {
 }
 
 test "an EXLR8 node's whole files land in a relative directory, small files and LFS pieces alike" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -466,17 +489,20 @@ test "an EXLR8 node's whole files land in a relative directory, small files and 
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
     var err_out: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u32, 2), try exlr8_pull.fetchWhole(a, io, &client, &out.writer, &err_out.writer, try fake_hub.endpoint(a), "Org/Flash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", dir, &whole));
+    try std.testing.expectEqual(@as(u32, 2), try exlr8_pull.fetchWhole(a, io, &client, &out.writer, &err_out.writer, .{ .endpoint = try fake_hub.endpoint(a) }, "Org/Flash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", dir, &whole));
     const cwd = std.Io.Dir.cwd();
     try std.testing.expectEqualStrings(FakeHub.config_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 20)));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "weights.safetensors" }), a, .limited(1 << 20)));
 }
 
 test "security: a hub response cannot write beyond the manifest file size" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena.deinit();
     const a = arena.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake = try FakeHub.open();
     fake.start();
     defer fake.stopServer();
@@ -487,7 +513,7 @@ test "security: a hub response cannot write beyond the manifest file size" {
     var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectError(error.SizeMismatch, single.downloadRetrying(a, io, &client, &out.writer, url, dir, .{
+    try std.testing.expectError(error.SizeMismatch, single.downloadRetrying(a, io, &client, .{}, &out.writer, url, dir, .{
         .path = "overflow.bin",
         .size = 8,
     }));
@@ -500,10 +526,13 @@ test "security: a hub response cannot write beyond the manifest file size" {
 }
 
 test "security: a shard in a folder inside the model folder lands inside the snapshot" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -522,10 +551,13 @@ test "security: a shard in a folder inside the model folder lands inside the sna
 }
 
 test "security: a hub tree path TensorFold reserves is refused, naming the path and why" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -546,10 +578,13 @@ test "security: a hub tree path TensorFold reserves is refused, naming the path 
 }
 
 test "pull refuses cache mutation while rm holds the cache directory" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena.deinit();
     const a = arena.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);

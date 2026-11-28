@@ -4,6 +4,28 @@ pub fn once(a: std.mem.Allocator, source: []const u8, before: []const u8, after:
     if (std.mem.count(u8, source, before) != 1) return error.HybridGeometrySourceChanged;
     return std.mem.replaceOwned(u8, a, source, before, after);
 }
+
+/// Preserve a declaration's intended reservation; refuse a conflicting one rather than compiling duplicates.
+pub fn reserve(a: std.mem.Allocator, source: []const u8, marker: []const u8, threads: usize) ![]const u8 {
+    if (std.mem.count(u8, source, marker) != 1) return error.HybridGeometrySourceChanged;
+    const at = std.mem.indexOf(u8, source, marker).?;
+    const boundary = std.mem.lastIndexOfAny(u8, source[0..at], "{};");
+    const start = if (boundary) |i| i + 1 else 0;
+    const prefix = source[start..at];
+    const existing = std.mem.count(u8, prefix, "max_total_threads_per_threadgroup");
+    var storage: [80]u8 = undefined;
+    const attribute = std.fmt.bufPrint(&storage, "[[max_total_threads_per_threadgroup({d})]]", .{threads}) catch unreachable;
+    if (existing != 0) {
+        if (existing == 1 and std.mem.count(u8, prefix, attribute) == 1) return source;
+        return error.HybridGeometrySourceChanged;
+    }
+    const out = try a.alloc(u8, source.len + attribute.len + 1);
+    @memcpy(out[0..at], source[0..at]);
+    @memcpy(out[at..][0..attribute.len], attribute);
+    out[at + attribute.len] = ' ';
+    @memcpy(out[at + attribute.len + 1 ..], source[at..]);
+    return out;
+}
 pub fn function(source: []const u8, name: []const u8) ![]const u8 {
     const at = std.mem.indexOf(u8, source, name) orelse return error.HybridGeometrySourceChanged;
     if (std.mem.indexOfPos(u8, source, at + name.len, name) != null) return error.HybridGeometrySourceChanged;
@@ -17,4 +39,19 @@ pub fn function(source: []const u8, name: []const u8) ![]const u8 {
     }
     if (depth != 0) return error.HybridGeometrySourceChanged;
     return source[start..end];
+}
+
+fn declaration(source: []const u8, name: []const u8, marker: []const u8) ![]const u8 {
+    const body = try function(source, name);
+    const at = std.mem.indexOf(u8, body, marker) orelse return error.HybridGeometrySourceChanged;
+    const base = @intFromPtr(body.ptr) - @intFromPtr(source.ptr);
+    const boundary = std.mem.lastIndexOfAny(u8, source[0 .. base + at], "{};");
+    const start = if (boundary) |i| i + 1 else 0;
+    return source[start .. base + body.len];
+}
+
+/// Validate the whole original declaration, then emit today's canonical single-line reservation.
+pub fn reservedFunction(a: std.mem.Allocator, source: []const u8, name: []const u8, marker: []const u8, threads: usize) ![]const u8 {
+    const checked = try reserve(a, try declaration(source, name, marker), marker, threads);
+    return reserve(a, try function(checked, name), marker, threads);
 }

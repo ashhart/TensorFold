@@ -65,7 +65,7 @@ const Fake = struct {
     }
 };
 
-const Bufs = struct { y: u64 = 0x1000_0000, wts: u64 = 0x2000_0000, moe_f32: u64 = 0x3000_0000 };
+const Bufs = struct { y: u64 = 0x1000_0000, wts: u64 = 0x2000_0000, moe_f32: u64 = 0x3000_0000, slots: usize = slots };
 
 const Pass = struct {
     s: *const Bufs,
@@ -79,6 +79,7 @@ fn collective(pair: *[2]c_int, rank: usize, timeout_ms: u64) !Collective {
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, pair) != 0) return error.SocketPair;
     var c: Collective = undefined;
     c.failed = false;
+    c.round_graph = null;
     c.comm = @ptrFromInt(0x1000);
     c.link = .{ .fd = pair[0] };
     c.timeout_ms = timeout_ms;

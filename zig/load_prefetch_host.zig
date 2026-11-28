@@ -3,7 +3,7 @@ const std = @import("std");
 const core = @import("core");
 const ahead = core.checkpoint_read_ahead;
 const t = std.testing;
-const Family = enum { nemotron, bolt, glm, minimax, kolibri, spark, deepseek };
+const Family = enum { nemotron, bolt, glm, glm_dsa, minimax, kolibri, spark, deepseek };
 const families = std.enums.values(Family);
 const ds = @import("src/families/deepseek_v41/cuda_load_prefetch.zig");
 const Pack = @import("src/families/deepseek_v41/pack.zig").Pack;
@@ -28,6 +28,7 @@ fn fixture(family: Family) !Fixture {
         .nemotron => "backbone.layers.",
         .bolt => "language_model.backbone.layers.",
         .glm => "model.language_model.layers.",
+        .glm_dsa => "model.layers.",
         .minimax => "language_model.model.layers.",
         .kolibri, .spark => "model.layers.",
         .deepseek => "layers.",
@@ -57,7 +58,8 @@ fn fixture(family: Family) !Fixture {
 fn begin(family: Family, f: *Fixture, layer: usize, count: usize) !ahead.Scope {
     return switch (family) {
         .nemotron, .bolt => @import("src/families/nemotron/cuda_load_prefetch.zig").begin(&f.ck, if (family == .bolt) "language_model." else "", layer, count),
-        .glm => @import("src/families/glm/cuda_load_prefetch.zig").begin(&f.ck, layer, count),
+        .glm => @import("src/families/glm/cuda_load_prefetch.zig").begin(&f.ck, "model.language_model.", layer, count),
+        .glm_dsa => @import("src/families/glm/cuda_load_prefetch.zig").begin(&f.ck, "model.", layer, count),
         .minimax => @import("src/families/minimax_m3/cuda_load_prefetch.zig").begin(&f.ck, layer, count),
         .kolibri => @import("src/families/kolibri1/cuda_load_prefetch.zig").begin(&f.ck, layer, count),
         .spark => @import("src/families/spark25/cuda_load_prefetch.zig").begin(&f.ck, layer, count),
@@ -91,6 +93,27 @@ test "load prefetch: actual family adapters isolate layer prefixes and join befo
         const after = try f.tmp.dir.readFileAlloc(t.io, "model.safetensors", t.allocator, .limited(1 << 20));
         defer t.allocator.free(after);
         try t.expectEqualSlices(u8, before, after);
+    }
+}
+
+test "load prefetch: GLM Flash spans are unchanged and full GLM uses the model prefix" {
+    for ([_]Family{ .glm, .glm_dsa }) |family| {
+        var f = try fixture(family);
+        defer f.deinit();
+        var reading = try begin(family, &f, 1, 3);
+        defer reading.deinit();
+        try t.expectEqual(@as(u64, 8), try reading.check());
+        const spans = reading.reader.work.?.spans;
+        try t.expectEqual(@as(usize, 2), spans.len);
+        const stem = if (family == .glm) "model.language_model.layers.1." else "model.layers.1.";
+        const file = &f.ck.files.items[0];
+        var name_buf: [64]u8 = undefined;
+        for ([_][]const u8{ "a", "b" }, 0..) |suffix, i| {
+            const name = try std.fmt.bufPrint(&name_buf, "{s}{s}", .{ stem, suffix });
+            const info = file.names.get(name).?;
+            try t.expectEqual(file.data + info.begin, spans[i].lo);
+            try t.expectEqual(file.data + info.end, spans[i].hi);
+        }
     }
 }
 
@@ -131,6 +154,26 @@ test "load prefetch: every family balances allocation failures while readers may
         defer f.deinit();
         try t.checkAllAllocationFailures(t.allocator, Control.run, .{ family, &f });
     }
+}
+
+test "load prefetch: deepseek's pack reader allocates the same count every run" {
+    const Control = struct {
+        fn run(a: std.mem.Allocator, family: Family, input: *Fixture) !void {
+            var f = input.*;
+            f.ck.gpa = a;
+            var reading = try begin(family, &f, 1, 3);
+            defer reading.deinit();
+            _ = try reading.check();
+        }
+    };
+    var f = try fixture(.deepseek);
+    defer f.deinit();
+    var first = std.testing.FailingAllocator.init(t.allocator, .{});
+    try Control.run(first.allocator(), .deepseek, &f);
+    var second = std.testing.FailingAllocator.init(t.allocator, .{});
+    try Control.run(second.allocator(), .deepseek, &f);
+    try t.expectEqual(first.alloc_index, second.alloc_index);
+    try t.expectEqual(first.allocated_bytes, second.allocated_bytes);
 }
 
 test "load prefetch: new CUDA ports are opt-in while donor and GLM defaults stay unchanged" {
@@ -181,7 +224,7 @@ test "load prefetch: actual GLM loop follows a rank's layer order and stops on f
         defer f.deinit();
         var loader: Fake = .{ .ck = &f.ck };
         var out: [3]u32 = @splat(99);
-        try production.layersWithCount(&loader, &.{ 2, 0, 1 }, &out, count);
+        try production.layersWithCount(&loader, "model.language_model.", &.{ 2, 0, 1 }, &out, count);
         try t.expectEqualSlices(u32, &.{ 2, 0, 1 }, &loader.calls);
         try t.expectEqualSlices(u32, &loader.calls, &out);
         try t.expectEqual(@as(usize, 3), loader.n);
@@ -190,7 +233,7 @@ test "load prefetch: actual GLM loop follows a rank's layer order and stops on f
             f.ck.files.items[0].path = "missing-load-prefetch-fixture.safetensors";
             defer f.ck.files.items[0].path = old;
             loader.n = 0;
-            try t.expectError(error.LoadPrefetchRead, production.layersWithCount(&loader, &.{ 2, 0, 1 }, &out, count));
+            try t.expectError(error.LoadPrefetchRead, production.layersWithCount(&loader, "model.language_model.", &.{ 2, 0, 1 }, &out, count));
             try t.expectEqual(@as(usize, 1), loader.n);
         }
     }

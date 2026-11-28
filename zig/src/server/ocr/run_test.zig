@@ -7,6 +7,7 @@ const run = @import("run.zig");
 const types = @import("types.zig");
 const budget = @import("budget.zig");
 const harness = @import("harness_test.zig");
+const log = @import("../log.zig");
 const picture = @import("core").picture;
 const t = std.testing;
 const Allocator = std.mem.Allocator;
@@ -46,7 +47,7 @@ const Seen = struct {
     fn sink(s: *Seen) run.PageSink {
         return .{ .ctx = s, .page = page };
     }
-    fn page(ctx: *anyopaque, a: Allocator, p: *const types.OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, _: *types.Fault) run.Step!void {
+    fn page(ctx: *anyopaque, a: Allocator, _: u32, p: *const types.OcrPage, rgb: picture.Rgb, enc: *budget.Encodes, _: *types.Fault) run.Step!void {
         const s: *Seen = @ptrCast(@alignCast(ctx));
         try s.pages.append(a, p.*);
         try s.sizes.append(a, .{ rgb.width, rgb.height });
@@ -55,14 +56,14 @@ const Seen = struct {
 };
 
 fn imageSource(a: Allocator, w: u32, h: u32) !types.Source {
-    return .{ .bytes = try harness.png(a, w, h) };
+    return .{ .name = "page", .bytes = try harness.png(a, w, h), .kind = .image, .sel = .{ .all_within = 1 } };
 }
 
 test "ocr run: blocks scale from the frame, quads are validated, and the sink sees the live pixels" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{ .{ .text = "title 10 5 90 10\n# T\n;;\ntext -5 40 120 60\nbody" }, .{ .text = "text 0 0 100 50\nall" } } };
+    var h: Harness = .{ .replies = &.{ .{ .text = "title 10 5 90 10\n# T\n;;\ntext -5 40 120 60\nbody" }, .{ .text = "page\nall" } } };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     var seen: Seen = .{};
@@ -73,11 +74,11 @@ test "ocr run: blocks scale from the frame, quads are validated, and the sink se
     try t.expectEqual(@as(u32, 200), p.width);
     try t.expectEqual(@as(u32, 72), p.dpi);
     try t.expectEqual([2]usize{ 200, 100 }, seen.sizes.items[0]);
-    try t.expectEqual(api.ocr.Quad{ .{ 20, 10 }, .{ 180, 10 }, .{ 180, 20 }, .{ 20, 20 } }, p.blocks[0].quad);
+    try t.expectEqual(api.ocr.Quad{ .{ 20, 10 }, .{ 180, 10 }, .{ 180, 20 }, .{ 20, 20 } }, p.blocks[0].quad.?);
     // a box past the page is clamped into it
-    try t.expectEqual(api.ocr.Quad{ .{ 0, 80 }, .{ 200, 80 }, .{ 200, 100 }, .{ 0, 100 } }, p.blocks[1].quad);
+    try t.expectEqual(api.ocr.Quad{ .{ 0, 80 }, .{ 200, 80 }, .{ 200, 100 }, .{ 0, 100 } }, p.blocks[1].quad.?);
     try t.expectEqualStrings("body", p.blocks[1].content);
-    try t.expectEqual(api.ocr.Quad{ .{ 0, 0 }, .{ 30, 0 }, .{ 30, 20 }, .{ 0, 20 } }, seen.pages.items[1].blocks[0].quad);
+    try t.expectEqual(@as(?api.ocr.Quad, null), seen.pages.items[1].blocks[0].quad);
     // the encode limit grew by four times each page's pixels
     try t.expectEqual(@as(u64, 4 * (200 * 100 + 30 * 20)), seen.limit);
     try t.expectEqual(@as(i64, 0), h.srv.preparing.load(.acquire));
@@ -101,7 +102,7 @@ test "ocr run: a missing frame releases the prepared request and fails as intern
     try t.expectError(error.Cancelled, run.run(h.srv, a, &.{try imageSource(a, 8, 8)}, seen.sink(), &fault, Gone{ .left = true }));
 }
 
-test "ocr run: undecodable bytes refuse before any generation" {
+test "ocr run: the page budget, undecodable bytes and the gate refuse before any generation" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -110,26 +111,31 @@ test "ocr run: undecodable bytes refuse before any generation" {
     defer h.stop();
     var seen: Seen = .{};
     var fault: types.Fault = undefined;
-    const junk: types.Source = .{ .bytes = "\x89PNG\r\n\x1a\nnope" };
+    const one = try imageSource(a, 8, 8);
+    const many = try a.alloc(types.Source, budget.Pages.init().left + 1);
+    @memset(many, one);
+    try t.expectError(error.Faulted, run.run(h.srv, a, many, seen.sink(), &fault, Gone{}));
+    try t.expectEqual(types.Class.bad_input, fault.class);
+    try t.expect(std.mem.indexOf(u8, fault.message, "TENSORFOLD_MAX_PDF_PAGES") != null);
+    const junk: types.Source = .{ .name = "x", .bytes = "\x89PNG\r\n\x1a\nnope", .kind = .image, .sel = .{ .all_within = 1 } };
     try t.expectError(error.Faulted, run.run(h.srv, a, &.{junk}, seen.sink(), &fault, Gone{}));
     try t.expectEqual(types.Class.bad_input, fault.class);
+    const doc: types.Source = .{ .name = "d", .bytes = "%PDF-1.4\n", .kind = .pdf, .sel = .{ .all_within = 16 } };
+    try t.expectError(error.Faulted, run.run(h.srv, a, &.{doc}, seen.sink(), &fault, Gone{}));
+    try t.expect(std.mem.indexOf(u8, fault.message, "--vision-pdf") != null);
     try t.expectEqual(@as(usize, 0), h.next);
 }
 
-/// Reserves five whole-page encodes on the first page of a request, as five full-page pictures would.
+/// Reserves five whole-page encodes on the first page, as five full-page pictures would.
 const Greedy = struct {
     limit: u64 = 0,
-    first: bool = true,
     fn sink(g: *Greedy) run.PageSink {
-        g.first = true;
         return .{ .ctx = g, .page = page };
     }
-    fn page(ctx: *anyopaque, _: Allocator, p: *const types.OcrPage, _: picture.Rgb, enc: *budget.Encodes, fault: *types.Fault) run.Step!void {
+    fn page(ctx: *anyopaque, _: Allocator, source: u32, p: *const types.OcrPage, _: picture.Rgb, enc: *budget.Encodes, fault: *types.Fault) run.Step!void {
         const g: *Greedy = @ptrCast(@alignCast(ctx));
-        if (!g.first) return;
-        g.first = false;
-        g.limit = enc.limit_pixels;
-        for (0..5) |_| try enc.before(fault, p.width, p.height);
+        if (source == 0) g.limit = enc.limit_pixels;
+        if (source == 0) for (0..5) |_| try enc.before(fault, p.width, p.height);
     }
 };
 
@@ -137,7 +143,7 @@ test "ocr run: the encode budget is the whole request's, so a first page may use
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{ .{ .text = "text 0 0 1 1\na" }, .{ .text = "text 0 0 1 1\nb" }, .{ .text = "text 0 0 1 1\nc" } } };
+    var h: Harness = .{ .replies = &.{ .{ .text = "page\na" }, .{ .text = "page\nb" }, .{ .text = "page\nc" } } };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     var g: Greedy = .{};
@@ -184,18 +190,47 @@ test "ocr run: an image whose first header and its pixels disagree is refused be
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{.{ .text = "text 0 0 1 1\na" }} };
+    var h: Harness = .{ .replies = &.{.{ .text = "page\na" }} };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     const orders = [_][2][2]u32{ .{ .{ 80, 60 }, .{ 40, 30 } }, .{ .{ 40, 30 }, .{ 80, 60 } } };
     for (orders) |o| {
         var seen: Seen = .{};
         var fault: types.Fault = undefined;
-        const src: types.Source = .{ .bytes = try twoHeaders(a, o[0], o[1]) };
+        const src: types.Source = .{ .name = "p", .bytes = try twoHeaders(a, o[0], o[1]), .kind = .image, .sel = .{ .all_within = 1 } };
         try t.expectError(error.Faulted, run.run(h.srv, a, &.{src}, seen.sink(), &fault, Gone{}));
         try t.expectEqual(types.Class.bad_input, fault.class);
         try t.expectEqualStrings("page 0: the image's header and its pixels disagree", fault.message);
         try t.expectEqual(@as(usize, 0), seen.pages.items.len);
+    }
+    try t.expectEqual(@as(usize, 0), h.next);
+}
+
+/// A client that leaves after ``after`` checks.
+const LeavesAfter = struct {
+    checks: *u32,
+    after: u32,
+    pub fn check(g: @This()) bool {
+        g.checks.* += 1;
+        return g.checks.* > g.after;
+    }
+};
+
+test "ocr run: a client that left renders no PDF and generates no page" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: Harness = .{};
+    try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .vision_pdf = true });
+    defer h.stop();
+    var seen: Seen = .{};
+    var fault: types.Fault = undefined;
+    // not a renderable document: a render would refuse it, so Cancelled shows no render was tried
+    const doc: types.Source = .{ .name = "d", .bytes = "%PDF-1.4\nnot a document", .kind = .pdf, .sel = .{ .all_within = 16 } };
+    for ([_]u32{ 0, 1 }) |after| {
+        var checks: u32 = 0;
+        try t.expectError(error.Cancelled, run.run(h.srv, a, &.{ try imageSource(a, 8, 8), doc }, seen.sink(), &fault, LeavesAfter{ .checks = &checks, .after = after }));
+        try t.expectEqual(after + 1, checks);
     }
     try t.expectEqual(@as(usize, 0), h.next);
 }
@@ -393,13 +428,63 @@ test "ocr mistral: a page past the decoded-pixel limit answers 400 with the deco
     var h: Harness = undefined;
     try serve(&h, &.{.{ .text = "text 0 0 1 1\na" }});
     defer h.stop();
-    // 4097 x 4096 is 16 Mi pixels and 4096 more, under 8192 a side: only the pixel limit refuses it
-    const w = 4097;
-    const ht = 4096;
+    // 8192 x 4097 is 32 Mi pixels and 8192 more, under 8192 a side: only the pixel limit refuses it
+    const w = 8192;
+    const ht = 4097;
     try t.expect(@as(u64, w) * ht > run.max_page_pixels and @max(w, ht) <= picture.max_side);
     var status: u16 = 0;
     const r = try postPng(a, &h, try bigHeader(a, .{ w, ht }), "", &status);
     try t.expectEqual(@as(u16, 400), status);
     try t.expectEqualStrings(picture.problem(error.Oversized), r.get("detail").?.array[0].strField("msg").?);
     try t.expectEqual(@as(usize, 0), h.next);
+}
+
+const private_marker = "CONFIDENTIAL-OCR-DOCUMENT-MARKER";
+const LogCapture = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    fn line(ctx: *anyopaque, message: []const u8) void {
+        const c: *LogCapture = @ptrCast(@alignCast(ctx));
+        c.bytes.appendSlice(t.allocator, message) catch {};
+    }
+    fn start(c: *LogCapture) void {
+        log.Test.sink = .{ .ctx = c, .call = line };
+    }
+    fn deinit(c: *LogCapture) void {
+        log.Test.sink = null;
+        c.bytes.deinit(t.allocator);
+    }
+};
+
+fn expectGeneratedLog(script: harness.Script, message: []const u8, suffix: []const u8, confidential: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: Harness = .{ .replies = &.{script} };
+    try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .confidential = confidential });
+    defer h.stop();
+    var capture: LogCapture = .{};
+    defer capture.deinit();
+    capture.start();
+    var seen: Seen = .{};
+    var fault: types.Fault = undefined;
+    try t.expectError(error.Faulted, run.run(h.srv, a, &.{try imageSource(a, 8, 8)}, seen.sink(), &fault, Gone{}));
+    try t.expectEqual(types.Class.unreadable, fault.class);
+    try t.expectEqualStrings(message, fault.message);
+    const logged = capture.bytes.items;
+    if (confidential) {
+        try t.expect(std.mem.indexOf(u8, logged, private_marker) == null);
+        try t.expect(std.mem.endsWith(u8, logged, suffix));
+    } else try t.expect(std.mem.indexOf(u8, logged, private_marker) != null);
+}
+
+test "ocr confidential logging: generated document text never appears, ordinary diagnostics stay detailed" {
+    const cases = [_]struct { script: harness.Script, message: []const u8, suffix: []const u8 }{
+        .{ .script = .{ .text = "!" ++ private_marker }, .message = "page 0: the model's output does not follow its format", .suffix = ": page 0: the model's output does not follow its format\n" },
+        .{ .script = .{ .text = "text nan 0 0 1 1\n" ++ private_marker }, .message = "page 0: the model's output has a box that is not finite", .suffix = ": page 0: a box is not finite\n" },
+        .{ .script = .{ .text = private_marker, .reason = .length }, .message = "page 0: the model's output was cut at the context limit", .suffix = ": page 0: the model's output was cut at the context limit\n" },
+    };
+    for (cases) |c| {
+        try expectGeneratedLog(c.script, c.message, c.suffix, true);
+        try expectGeneratedLog(c.script, c.message, c.suffix, false);
+    }
 }

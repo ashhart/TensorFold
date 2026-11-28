@@ -158,7 +158,7 @@ test "the Mamba window's two launches write the bytes of the mixer a row at a ti
         .{ .heads = 4, .dh = 64, .groups = 2 },
     };
     var cases: usize = 0;
-    for (shapes) |sh| for ([_]usize{ 1, 2, 3, 4, 7, 17 }) |rows| for ([_]bool{ true, false }) |snaps| {
+    for (shapes) |sh| for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 16, 17 }) |rows| for ([_]bool{ true, false }) |snaps| {
         try rig.expect(
             try window(t, &rng, sh, rows, snaps),
             "mamba window {d} heads, {d} groups, {d} rows, snapshots {}: the bytes differ",

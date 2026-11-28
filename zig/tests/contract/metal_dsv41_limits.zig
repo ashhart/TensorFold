@@ -6,6 +6,11 @@ const sources = @import("kernel_sources");
 const limits = @import("contract").limits;
 const Launch = @import("metal_limits.zig").Launch;
 
+/// The tensor-unit prompt expert kernels: built only with tensor units, and the loader has no M1/M2 library.
+pub fn tensorOnly(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "dsv41 xmma units ");
+}
+
 /// The dsv41 launch's sources, or null when the name belongs to another family.
 pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8, comptime assemble: bool) !?Launch {
     _ = device;
@@ -21,6 +26,10 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 mma ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_mma, .pre_m5 = sources.dsv41.fp8_mma };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 fp8 tile ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_tile, .pre_m5 = sources.dsv41.fp8_tile };
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 attn ")) {
         if (!assemble) return @as(Launch, undefined);
@@ -38,6 +47,10 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         if (!assemble) return @as(Launch, undefined);
         const body = try tf.dsv41_metal.experts.source(a, "", &.{});
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 x3 ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = tf.dsv41_metal.experts_exl3.text, .pre_m5 = tf.dsv41_metal.experts_exl3.text };
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 route ")) {
         if (!assemble) return @as(Launch, undefined);
@@ -70,6 +83,10 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.compress, .pre_m5 = sources.dsv41.compress };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 mv mma ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.mv_mma, .pre_m5 = sources.dsv41.mv_mma };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 mv ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.mv, .pre_m5 = sources.dsv41.mv };
@@ -89,6 +106,14 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 rows ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_rows, .pre_m5 = sources.dsv41.fp8_rows };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 exl3 rows ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.core_exl3_rows, .pre_m5 = sources.core_exl3_rows };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 exl3 ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.core_exl3_projection, .pre_m5 = sources.core_exl3_projection };
     }
     return null;
 }

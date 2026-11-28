@@ -98,13 +98,13 @@ pub fn chunk(b: anytype, stream: *lanes.Stream, i: usize, at: u32, n: u32) !void
     }
 }
 
-pub fn mark(b: anytype, stream: *lanes.Stream, at: u32) !void {
+pub fn mark(b: anytype, stream: *lanes.Stream, at: u32, interrupted: bool) !void {
     const i = b.by.get(stream) orelse return error.UnknownStream;
     const s = &b.sessions[i];
     const old = try b.bind(s);
     defer old.restore(b.e);
     b.outputs(s, 0);
-    if (stream.reuse.hook) |hook| hook.at(hook.ptr, stream, at);
+    if (interrupted) stream.keepInterruptedPrefill(at) else if (stream.reuse.hook) |hook| hook.at(hook.ptr, stream, at);
 }
 
 fn dropImages(b: anytype, resource: ?*anyopaque) void {

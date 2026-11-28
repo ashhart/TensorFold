@@ -4,7 +4,7 @@ TensorFold hosts the optional ATC review exchange at `https://tensorfold.dev`.
 Its policy is `.github/atc-exchange.json` on the default branch.
 Requests and responses name an exact PR commit; older results become stale when that commit changes.
 
-Install the current ATC checkout with `npm install -g github:ashhart/ATC`, then use your own `gh auth login`.
+Install ATC from a tag you have looked at, for example `npm install -g github:ashhart/ATC#v0.9.6`, then use your own `gh auth login`.
 From a TensorFold clone, connect and inspect the inbox:
 
 ```sh

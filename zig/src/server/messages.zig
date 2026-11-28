@@ -5,6 +5,7 @@ const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const pdf = @import("pdf.zig");
 const api = @import("engine_api");
+const audio = @import("audio.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -28,12 +29,13 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
     return normalizeWith(cx, messages, late_system, needs_user_after_tool, .{});
 }
 
-/// The media parts an engine reads: image_url (``Info.vision``), video_url (``video``), and PDFs (``--vision-pdf``).
+/// Media parts an engine reads: images and videos (``Info.vision``), PDFs (``--vision-pdf``), audio (``Info.audio``).
 pub const Media = struct {
     native_deepseek: bool = false,
     images: bool = false,
     videos: bool = false,
     pdfs: bool = false,
+    audio: bool = false,
     image_type: []const u8 = "image_url", // the part type the template reads (Vision.part_type)
     max_images: u32 = 50,
 
@@ -103,8 +105,10 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
         var item: *json.Object = message.object;
         if (content != null and content.? == .array) {
             var text: std.ArrayList(u8) = .empty;
-            var parts: std.ArrayList(Value) = .empty; // with images: text and image parts in order
+            var parts: std.ArrayList(Value) = .empty; // with images or in a tool result: text and other parts in order
+            var has_reference = false;
             var has_image = false;
+            const tool = std.mem.eql(u8, role.?.string, "tool");
             for (content.?.array, 0..) |part, part_index| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
                 // an image part, or one this normalization already wrote with the template's type (it runs twice)
@@ -129,25 +133,41 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                     has_image = true;
                     continue;
                 }
+                if (media.audio and (std.mem.eql(u8, kind, "input_audio") or std.mem.eql(u8, kind, "audio_url"))) {
+                    if (!std.mem.eql(u8, role.?.string, "user")) return cx.refuse("audio parts are accepted in user messages only");
+                    try parts.append(cx.a, try audio.part(cx, part, kind));
+                    has_image = true;
+                    continue;
+                }
                 if (media.videos and std.mem.eql(u8, kind, "video_url")) {
                     if (!std.mem.eql(u8, role.?.string, "user")) return cx.refuse("video_url parts are supported only in user messages");
                     try parts.append(cx.a, try videoPart(cx, part));
                     has_image = true;
                     continue;
                 }
-                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
+                if (tool and std.mem.eql(u8, kind, "tool_reference")) {
+                    const name = part.get("name") orelse Value.null;
+                    if (name != .string or name.string.len == 0) return cx.refuse("a tool_reference part must name a tool");
+                    const ref = try json.newObject(cx.a);
+                    try ref.put(cx.a, "type", .{ .string = "tool_reference" });
+                    try ref.put(cx.a, "name", name);
+                    try parts.append(cx.a, .{ .object = ref });
+                    has_reference = true;
+                    continue;
+                }
+                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.audio) "content parts must be text, input_audio or audio_url; image and video inputs are unsupported" else if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
                 if (media.native_deepseek and part_index > 0) try text.appendSlice(cx.a, "\n\n");
                 try text.appendSlice(cx.a, t.string);
-                if (images) {
+                if (images or tool or media.audio) {
                     const tp = try json.newObject(cx.a);
                     try tp.put(cx.a, "type", .{ .string = "text" });
                     try tp.put(cx.a, "text", t);
                     try parts.append(cx.a, .{ .object = tp });
                 }
             }
-            item = try withField(cx, message.object, "content", if (has_image) Value{ .array = parts.items } else Value{ .string = text.items });
+            item = try withField(cx, message.object, "content", if (has_image or has_reference) Value{ .array = parts.items } else Value{ .string = text.items });
         } else if (content == null or content.? == .null) {
             item = try withField(cx, message.object, "content", .{ .string = "" });
         } else if (content.? != .string) {
@@ -198,6 +218,40 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
         }
     }
     return .{ .array = out.items };
+}
+
+/// Only reorder a complete bijection between one assistant's calls and its immediately following results.
+pub fn orderParallelResults(a: std.mem.Allocator, messages: []Value) !void {
+    for (messages, 0..) |message, i| {
+        if (!std.mem.eql(u8, message.strField("role") orelse "", "assistant")) continue;
+        const calls = message.get("tool_calls") orelse continue;
+        if (calls != .array or calls.array.len < 2) continue;
+        const start = i + 1;
+        var end = start;
+        while (end < messages.len and std.mem.eql(u8, messages[end].strField("role") orelse "", "tool")) end += 1;
+        if (end - start != calls.array.len) continue;
+        try orderResultRun(a, calls.array, messages[start..end]);
+    }
+}
+
+fn orderResultRun(a: std.mem.Allocator, calls: []const Value, results: []Value) !void {
+    var positions: std.StringHashMapUnmanaged(usize) = .empty;
+    defer positions.deinit(a);
+    for (calls, 0..) |call, index| {
+        const id = call.strField("id") orelse return;
+        if (id.len == 0) return;
+        const entry = try positions.getOrPut(a, id);
+        if (entry.found_existing) return;
+        entry.value_ptr.* = index;
+    }
+    const ordered = try a.alloc(Value, results.len);
+    defer a.free(ordered);
+    for (results) |result| {
+        const id = result.strField("tool_call_id") orelse return;
+        const entry = positions.fetchRemove(id) orelse return;
+        ordered[entry.value] = result;
+    }
+    @memcpy(results, ordered);
 }
 
 /// ``_normalize_tool_call_arguments``: call arguments as objects for templates; bad ones under ``_invalid_arguments``.

@@ -13,8 +13,7 @@ pub fn freeProfs(e: *Engine) void {
 }
 
 pub fn heatRoot() []const u8 {
-    const p = std.c.getenv("TF_HEAT_ROOT") orelse return @import("heat").default_root;
-    const s = std.mem.span(p);
+    const s = (@import("sys").environment.Process{}).get("TF_HEAT_ROOT") orelse return @import("heat").default_root;
     return if (s.len == 0) @import("heat").default_root else s;
 }
 

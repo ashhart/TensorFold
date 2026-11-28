@@ -1,26 +1,69 @@
-//! kernel-contract's words (`only`): the kernels so named, and the suites that run after the gates on a full run.
+//! kernel-contract's gates over its words and shard, and the suites that run after them on a full run.
 const std = @import("std");
 const g = @import("core").contract.gates;
 const check = @import("check.zig");
+const shard = @import("contract_shard.zig");
+const back = @import("contract_back_suites.zig");
 
-/// Keeps the kernels whose name holds one of `only`'s words; empty keeps every one.
+/// Whether `only` names kernels to keep: without plain words (none, or only `-word`s) the run is a full one.
+pub fn filtered(only: []const []const u8) bool {
+    return shard.hasPositive(only);
+}
+
+/// Whether `name` holds no `-word` and, when plain words are given, one of them.
+pub fn wanted(name: []const u8, only: []const []const u8) bool {
+    return shard.wanted(name, only);
+}
+
+/// Keeps the kernels `wanted` keeps; empty keeps every one.
 pub fn keep(kernels: *std.ArrayList(g.Kernel), only: []const []const u8) void {
-    if (only.len == 0) return;
     var kept: usize = 0;
-    for (kernels.items) |k| for (only) |w| if (std.mem.indexOf(u8, k.spec.name, w) != null) {
+    for (kernels.items) |k| if (wanted(k.spec.name, only)) {
         kernels.items[kept] = k;
         kept += 1;
-        break;
     };
     kernels.shrinkRetainingCapacity(kept);
 }
 
-/// The served, paged, pending, learning and lane suites of a full run.
-pub fn suites(gpu: check.Gpu) !void {
-    try @import("contract_qwen_served.zig").run(gpu);
-    try @import("contract_qwen_pages.zig").run(gpu);
-    try @import("contract_qwen_shared_prefix.zig").run(gpu, &.{});
-    try @import("contract_qwen_pending.zig").run(gpu);
-    try @import("contract_qwen_learning.zig").numerical(gpu);
-    try @import("contract_fn_lanes.zig").run(gpu);
+/// Dumps if asked, then gates 1-4 on `opt`'s share of the kernels; `t0` is the clock at the first gate.
+pub fn gates(gpu: check.Gpu, kernels: *std.ArrayList(g.Kernel), opt: shard.Options, t0: *i96, listed: *usize) !g.Tally {
+    var t: g.Tally = .{};
+    try @import("contract_dump.zig").run(gpu.gpa, kernels.items);
+    t0.* = check.now(gpu.io);
+    keep(kernels, opt.words);
+    listed.* = shard.keep(g.Kernel, kernels, &.{}, opt.effectiveShard());
+    try g.runAll(gpu.gpa, kernels.items, 0x6b63, &t);
+    return t;
+}
+
+fn sharedPrefix(gpu: check.Gpu) !void {
+    return @import("contract_qwen_shared_prefix.zig").run(gpu, &.{});
+}
+
+/// The served, paged, pending, learning, lane, TFQ3, SwiGLU and int4 skipped suites of a full run.
+const served = [_]back.Suite{
+    back.entry("tfq3", @import("tfq3_tests.zig").run),
+    back.entry("qwen-served", @import("contract_qwen_served.zig").run),
+    back.entry("qwen-pages", @import("contract_qwen_pages.zig").run),
+    back.entry("qwen-shared-prefix", sharedPrefix),
+    back.entry("qwen-pending", @import("contract_qwen_pending.zig").run),
+    back.entry("qwen-learning", @import("contract_qwen_learning.zig").numerical),
+    back.entry("fn-lanes", @import("contract_fn_lanes.zig").run),
+    back.entry("prompt-swiglu", @import("contract_prompt_swiglu.zig").run),
+    back.entry("int4-skipped", @import("contract_int4_run.zig").skippedAlone),
+};
+
+pub const Part = enum { back, after };
+
+/// The suites of a full run in order, the gradient ones first; `sh` runs those whose index it owns.
+pub fn suites(gpu: check.Gpu, part: Part, sh: shard.Shard, coverage: *shard.Coverage) !void {
+    const all = back.list ++ served;
+    const from: usize = if (part == .back) 0 else back.list.len;
+    const to: usize = if (part == .back) back.list.len else all.len;
+    coverage.of += to - from;
+    for (all[from..to], from..) |s, i| {
+        if (!sh.owns(i)) continue;
+        try s.run(gpu);
+        coverage.ran += 1;
+    }
 }

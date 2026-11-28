@@ -20,6 +20,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
         .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
     }) }));
     step.dependOn(&writeback_contract.step);
+    const set_pair = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_set_pair.zig"), .target = host, .optimize = .debug }) }));
+    b.step("test-contract-set-pair-host", "Contract sets set up in pairs: a failing second set releases the first").dependOn(&set_pair.step);
+    step.dependOn(&set_pair.step);
     @import("cuda_row_contracts.zig").host(b, host, cuda, mods.core, step);
     @import("cuda_window_host.zig").steps(b, host, step);
     const utility_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
@@ -52,6 +55,15 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     step.dependOn(&qsa_contract.step);
     flash_contract.dependOn(&qsa_contract.step);
     @import("cuda_window_host.zig").contracts(b, host, cuda, mods.core, step);
+    const moss_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/contract_moss_image_ref.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
+    }) }));
+    b.step("test-moss-contract-host", "MOSS-Image contract references' float64 silu against fp32 expf, no GPU").dependOn(&moss_contract.step);
+    step.dependOn(&moss_contract.step);
     const reference_step = b.step("test-cuda-reference", "CUDA's FP64 comparison with CPU-only readback (no GPU)");
     const projection_step = b.step("test-cuda-projection-fixture", "Projection fixture dispatch controls with CPU-only CUDA calls");
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {

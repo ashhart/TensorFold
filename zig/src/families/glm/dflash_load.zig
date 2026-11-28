@@ -125,6 +125,7 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
 /// The drafter from `dir` (config.json and model.safetensors, bf16) for rank `rank` of `world`, on engine `e`.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
     if (bits != 0 and bits != 4) return error.BadDrafterBits;
+    if (e.w.config.vocab < df.VOCAB) return error.TargetVocab;
     try checkConfig(gpa, io, dir);
     const checkpoint_digest = try core.checkpoint_identity.fullIdentity(gpa, io, dir);
     const d = e.d;
@@ -145,7 +146,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var ents = std.StringHashMap(Ent).init(gpa);
     defer ents.deinit();
     try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
-    const mlp = df.mlpSplit(world, e.settings.roce_wide); // the MLP split across the ranks, or whole
+    const mlp = df.mlpSplit(world, e.settings.draftWide()); // the MLP split across the ranks, or whole
     const split = mlp.split;
     const ff = mlp.ff;
     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2 + 16 * 256;
@@ -156,7 +157,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     errdefer wbuf.free();
     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
     defer tmp.free();
-    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world, e.settings.roce_wide));
+    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world, e.settings.draftWide()));
     defer raw.free();
     var module = try cuda.Module.load(d, cuda.kernels.glm_dflash);
     errdefer module.unload();
@@ -201,7 +202,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     dr.hnorm = try l.raw("hidden_norm.weight", D * 2);
     dr.norm = try l.raw("norm.weight", D * 2);
     if (l.at > total) return error.DrafterLayout;
-    var tail: Tail = .{ .loader = &l, .head_n = head.n };
+    var tail: Tail = .{ .loader = &l, .head_n = head.outputs() };
     const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
     try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
     dr.log = try @import("sys").environment.read(u64, "TF_GLM_DFLASH2_LOG", dr.log);
@@ -312,4 +313,12 @@ test "a malformed drafter header is refused with an error, and a range past the 
     try addEntries(arena.allocator(), json, 4, &ents);
     try std.testing.expectEqual(Ent{ .off = 8 + json.len, .n = 4 }, ents.get("a").?);
     try std.testing.expectError(error.DrafterNotBf16, addEntries(arena.allocator(), "{\"f\":{\"dtype\":\"F16\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4, &ents));
+}
+
+test "GLM embedding: DFlash refuses a small target before checkpoint I/O" {
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.w.config.vocab = 128;
+    try std.testing.expectError(error.TargetVocab, load(std.testing.allocator, std.testing.io, &e, "missing-dflash-small-target", 0, 1, 0));
+    e.w.config.vocab = 154880;
+    try std.testing.expectError(error.FileNotFound, load(std.testing.allocator, std.testing.io, &e, "missing-dflash-valid-target", 0, 1, 0));
 }

@@ -188,11 +188,11 @@ pub fn metaOf(t: *const core.checkpoint.Tensor) Meta {
 pub const Part = struct { rel: []const u8, rows: ?[2]usize = null, cols: ?[2]usize = null };
 
 /// Layer `i`'s projection `name` of `parts` stacked, as `cut` reads them.
-pub fn cutProj(L: anytype, comptime prefix: []const u8, i: u32, parts: []const Part, wants: []const Format, comptime name: []const u8) !projection.Proj {
+pub fn cutProj(L: anytype, prefix: []const u8, i: u32, parts: []const Part, wants: []const Format, comptime name: []const u8) !projection.Proj {
     var bufs: [3][192]u8 = undefined;
     var mods: [3][]const u8 = undefined;
     if (parts.len == 0 or parts.len > bufs.len) return error.UnreadableFormat; // a tensor, [q_a | kv_a], [q | k | v]
-    for (parts, 0..) |q, j| mods[j] = try std.fmt.bufPrint(&bufs[j], prefix ++ "layers.{d}.{s}", .{ i, q.rel });
+    for (parts, 0..) |q, j| mods[j] = try std.fmt.bufPrint(&bufs[j], "{s}layers.{d}.{s}", .{ prefix, i, q.rel });
     return cut(L, L.ck, mods[0..parts.len], parts, wants, name, .{i});
 }
 

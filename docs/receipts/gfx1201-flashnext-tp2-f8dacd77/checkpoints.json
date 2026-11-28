@@ -1,0 +1,213 @@
+{
+ "repo": "TensorFold/Qwen3.8-Flash-Next-MLX-oQ2-MTP",
+ "revision": "0a1bf6faa0a2f16a314da889e8e6c80226455dbf",
+ "files": [
+  {
+   "file": ".gitattributes",
+   "size": 1570,
+   "hf_size": 1570,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "LICENSE",
+   "size": 3235,
+   "hf_size": 3235,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "README.md",
+   "size": 8881,
+   "hf_size": 8881,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "chat_template.jinja",
+   "size": 8952,
+   "hf_size": 8952,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "config.json",
+   "size": 215805,
+   "hf_size": 215805,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "generation_config.json",
+   "size": 202,
+   "hf_size": 202,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "merges.txt",
+   "size": 3353259,
+   "hf_size": 3353259,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "model-00001-of-00015.safetensors",
+   "size": 5079979369,
+   "hf_size": 5079979369,
+   "sha256_local": "f2c60452c3beb6ae3b75cda0e0257c68fa9879008e521dc1a0cdd082fc9ba00a",
+   "sha256_hf": "f2c60452c3beb6ae3b75cda0e0257c68fa9879008e521dc1a0cdd082fc9ba00a",
+   "match": true
+  },
+  {
+   "file": "model-00002-of-00015.safetensors",
+   "size": 5100040586,
+   "hf_size": 5100040586,
+   "sha256_local": "f9e9df67acb88a74d0f5914211187aa82260279a12306626a1832072b8803b42",
+   "sha256_hf": "f9e9df67acb88a74d0f5914211187aa82260279a12306626a1832072b8803b42",
+   "match": true
+  },
+  {
+   "file": "model-00003-of-00015.safetensors",
+   "size": 5100040588,
+   "hf_size": 5100040588,
+   "sha256_local": "bf30d51097ad350b82d26ad39751e43e72c4672e4119d28022ad5e82360a7e12",
+   "sha256_hf": "bf30d51097ad350b82d26ad39751e43e72c4672e4119d28022ad5e82360a7e12",
+   "match": true
+  },
+  {
+   "file": "model-00004-of-00015.safetensors",
+   "size": 5001353310,
+   "hf_size": 5001353310,
+   "sha256_local": "6ebd6d7693c8f695d1670795661ea5f8b2514199a0fb41084734ca3cd60ce815",
+   "sha256_hf": "6ebd6d7693c8f695d1670795661ea5f8b2514199a0fb41084734ca3cd60ce815",
+   "match": true
+  },
+  {
+   "file": "model-00005-of-00015.safetensors",
+   "size": 5136486181,
+   "hf_size": 5136486181,
+   "sha256_local": "c9691da87e23f3d80aad7fba5009681545d8bdbd0b329d3546a9146ffbc939f1",
+   "sha256_hf": "c9691da87e23f3d80aad7fba5009681545d8bdbd0b329d3546a9146ffbc939f1",
+   "match": true
+  },
+  {
+   "file": "model-00006-of-00015.safetensors",
+   "size": 5033171560,
+   "hf_size": 5033171560,
+   "sha256_local": "89faee73e3cebb6762cfc19038b287bbef617f0de3c695c59815226a840e944b",
+   "sha256_hf": "89faee73e3cebb6762cfc19038b287bbef617f0de3c695c59815226a840e944b",
+   "match": true
+  },
+  {
+   "file": "model-00007-of-00015.safetensors",
+   "size": 5033171579,
+   "hf_size": 5033171579,
+   "sha256_local": "3771420ffc8b8acfb45e4ae2814bff4c2fa0697a46adc23bf33925c8402ab9c2",
+   "sha256_hf": "3771420ffc8b8acfb45e4ae2814bff4c2fa0697a46adc23bf33925c8402ab9c2",
+   "match": true
+  },
+  {
+   "file": "model-00008-of-00015.safetensors",
+   "size": 5033171600,
+   "hf_size": 5033171600,
+   "sha256_local": "e5869d94b7571cc317fe7a0c06bc0168940ea91d16e3f8834337d0f854490cc2",
+   "sha256_hf": "e5869d94b7571cc317fe7a0c06bc0168940ea91d16e3f8834337d0f854490cc2",
+   "match": true
+  },
+  {
+   "file": "model-00009-of-00015.safetensors",
+   "size": 5033171606,
+   "hf_size": 5033171606,
+   "sha256_local": "589b69b8c6d923546f80df5936943d2358f686386152b933ebc1e77d94a0c5df",
+   "sha256_hf": "589b69b8c6d923546f80df5936943d2358f686386152b933ebc1e77d94a0c5df",
+   "match": true
+  },
+  {
+   "file": "model-00010-of-00015.safetensors",
+   "size": 5033171614,
+   "hf_size": 5033171614,
+   "sha256_local": "2bf67caa8aab78a721f3353f935995bfb962816f34e5f8b75eeaa000d9af4980",
+   "sha256_hf": "2bf67caa8aab78a721f3353f935995bfb962816f34e5f8b75eeaa000d9af4980",
+   "match": true
+  },
+  {
+   "file": "model-00011-of-00015.safetensors",
+   "size": 5033171606,
+   "hf_size": 5033171606,
+   "sha256_local": "8e0b9422ff2261cac832a006a2455ee5cca610e4814e30e2a98cb7b0d3a54ef4",
+   "sha256_hf": "8e0b9422ff2261cac832a006a2455ee5cca610e4814e30e2a98cb7b0d3a54ef4",
+   "match": true
+  },
+  {
+   "file": "model-00012-of-00015.safetensors",
+   "size": 5033171602,
+   "hf_size": 5033171602,
+   "sha256_local": "d5be8534bbf8bd8922ba8be30463e3374ae5582c84d40519e359a95d231504c4",
+   "sha256_hf": "d5be8534bbf8bd8922ba8be30463e3374ae5582c84d40519e359a95d231504c4",
+   "match": true
+  },
+  {
+   "file": "model-00013-of-00015.safetensors",
+   "size": 5033171610,
+   "hf_size": 5033171610,
+   "sha256_local": "047c1b62f7712141aa912c8e7b2696aefe2a0cff2c94a044fca193ed8d67a038",
+   "sha256_hf": "047c1b62f7712141aa912c8e7b2696aefe2a0cff2c94a044fca193ed8d67a038",
+   "match": true
+  },
+  {
+   "file": "model-00014-of-00015.safetensors",
+   "size": 5041019662,
+   "hf_size": 5041019662,
+   "sha256_local": "96ff560e837b40eb3ad1d389408e4d8e0afc3290c1d784df0cd3fe92152ef426",
+   "sha256_hf": "96ff560e837b40eb3ad1d389408e4d8e0afc3290c1d784df0cd3fe92152ef426",
+   "match": true
+  },
+  {
+   "file": "model-00015-of-00015.safetensors",
+   "size": 57843679,
+   "hf_size": 57843679,
+   "sha256_local": "20b70f625681244e50ef07bfd30ce8b917fc4b4ecf492aa74e4f6d40b657691f",
+   "sha256_hf": "20b70f625681244e50ef07bfd30ce8b917fc4b4ecf492aa74e4f6d40b657691f",
+   "match": true
+  },
+  {
+   "file": "model.safetensors.index.json",
+   "size": 405812,
+   "hf_size": 405812,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "preprocessor_config.json",
+   "size": 390,
+   "hf_size": 390,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "qwen-logo.png",
+   "size": 11203,
+   "hf_size": 11203,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "tokenizer.json",
+   "size": 12809320,
+   "hf_size": 12809320,
+   "sha256_local": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+   "sha256_hf": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+   "match": true
+  },
+  {
+   "file": "tokenizer_config.json",
+   "size": 17928,
+   "hf_size": 17928,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "video_preprocessor_config.json",
+   "size": 385,
+   "hf_size": 385,
+   "match": "non-lfs (size only)"
+  },
+  {
+   "file": "vocab.json",
+   "size": 6722759,
+   "hf_size": 6722759,
+   "match": "non-lfs (size only)"
+  }
+ ],
+ "mismatches": 0
+}

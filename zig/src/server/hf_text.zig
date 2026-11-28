@@ -9,6 +9,11 @@ const dsv41_chat = @import("dsv41_chat");
 const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
+const files = @import("hf_text_files.zig");
+const readJson = files.readJson;
+const readEosJson = files.readEosJson;
+const openTokenizer = files.openTokenizer;
+const specialsOf = files.specialsOf;
 
 const clear_thinking_env = "TF_GLM_CLEAR_THINKING";
 
@@ -31,6 +36,7 @@ pub const HfText = struct {
     native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    native_inkling2: bool = false,
     schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
     overridden: bool = false, // the chat template is --chat-template's file
     unread_template: bool = false, // a native DeepSeek checkpoint's own Jinja, which its encoder replaces
@@ -65,13 +71,14 @@ pub const HfText = struct {
             };
             return t;
         };
-        t.tok = tokenizer.loadTokenizer(io, gpa, dir) catch |e| {
-            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
+        var read: []const u8 = dir;
+        t.tok = openTokenizer(io, a, gpa, try @import("zonos_request").release.tokenizerAt(a, io, dir), &read) catch |e| {
+            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ read, @errorName(e) });
             return error.Load;
         };
         errdefer t.tok.deinit();
         // each request renders its chat up to three times, and a chat's earlier messages come back every turn
-        t.tok.memo = try tokenizer.Memo.create(gpa, 64 << 20);
+        t.tok.memo = try tokenizer.Memo.create(std.heap.smp_allocator, 64 << 20);
         const config = readJson(io, a, dir, "tokenizer_config.json");
         // a Clef checkpoint's tokenizer splits words with the regex this field publishes, not tokenizer.json's
         const clef = if (std.fs.path.join(a, &.{ dir, "joint_head_config.json" })) |head| if (std.Io.Dir.cwd().access(io, head, .{})) |_| true else |_| false else |_| false;
@@ -94,14 +101,31 @@ pub const HfText = struct {
             return error.Load;
         };
         if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
+            // the Inkling 2 family's two model types (families/inkling2/config.zig): Small's and Mini's looped one
+            t.native_inkling2 = template_override == null and kind == .string and
+                (std.mem.eql(u8, kind.string, "inkling2") or std.mem.eql(u8, kind.string, "inkling2_loop"));
             t.native_deepseek = template_override == null and kind == .string and
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
-            if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) {
-                const value = if (std.c.getenv(clear_thinking_env)) |v| std.mem.span(v) else null;
-                t.clear_thinking = glmClearThinking(value) orelse {
-                    problem.* = try std.fmt.allocPrint(pa, "{s}={s}: expected 0 or 1", .{ clear_thinking_env, value.? });
-                    return error.Load;
+            const glm = kind == .string and (std.mem.eql(u8, kind.string, "glm5_next") or std.mem.eql(u8, kind.string, "glm_moe_dsa"));
+            if (glm) {
+                // Flash keeps its vocabulary in text_config; full GLM's engine reads only the root
+                const nested = if (std.mem.eql(u8, kind.string, "glm5_next")) model_config.object.get("text_config") else null;
+                const target = nested orelse model_config;
+                if (target == .object) if (target.object.get("vocab_size")) |size| if (size == .integer and size.integer > 0) {
+                    const vocab: usize = @intCast(size.integer);
+                    // padded embeddings are normal (Flash: 154856 tokens, 154880 rows); refuse only ids past them
+                    if (t.tok.id_to_token.tokens.items.len > vocab) {
+                        problem.* = try std.fmt.allocPrint(pa, "GLM tokenizer has more tokens than the model vocabulary: tokenizer {d}, model {d}", .{ t.tok.id_to_token.tokens.items.len, vocab });
+                        return error.Load;
+                    }
                 };
+                if (std.mem.eql(u8, kind.string, "glm5_next")) {
+                    const value = if (std.c.getenv(clear_thinking_env)) |v| std.mem.span(v) else null;
+                    t.clear_thinking = glmClearThinking(value) orelse {
+                        problem.* = try std.fmt.allocPrint(pa, "{s}={s}: expected 0 or 1", .{ clear_thinking_env, value.? });
+                        return error.Load;
+                    };
+                }
             }
         };
         if (template_override) |path| {
@@ -117,7 +141,7 @@ pub const HfText = struct {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
             t.source = "";
             t.tool_source = "";
-            t.schema_prompt = try schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
+            t.schema_prompt = try schemaPrompt(@import("sys").environment.rawText("TF_DSV41_SCHEMA_PROMPT"));
         }
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {
@@ -144,24 +168,6 @@ pub const HfText = struct {
         if (t.native_kimi) |kimi| kimi.deinit() else t.tok.deinit();
         t.arena.deinit();
         t.gpa.destroy(t);
-    }
-
-    fn readJson(io: std.Io, a: Allocator, dir: []const u8, name: []const u8) std.json.Value {
-        const path = std.fs.path.join(a, &.{ dir, name }) catch return .null;
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch return .null;
-        return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch .null;
-    }
-
-    /// Optional EOS documents are absent only on FileNotFound; malformed present data refuses the text load.
-    fn readEosJson(io: std.Io, a: Allocator, dir: []const u8, name: []const u8, limit: usize) !std.json.Value {
-        const path = try std.fs.path.join(a, &.{ dir, name });
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(limit)) catch |e| switch (e) {
-            error.FileNotFound => return .null,
-            else => return e,
-        };
-        const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
-        if (doc != .object) return error.BadEos;
-        return doc;
     }
 
     /// chat_template.jinja, else chat_template.json, else tokenizer_config.json's (named: "default", and "tool_use").
@@ -198,23 +204,6 @@ pub const HfText = struct {
             },
             else => {},
         }
-    }
-
-    /// Every ``*_token`` string (or ``{"content": ...}``) in tokenizer_config.json, as apply_chat_template passes them.
-    fn specialsOf(a: Allocator, config: std.json.Value) !std.json.Value {
-        var out: std.json.ObjectMap = .empty;
-        if (config == .object) {
-            var it = config.object.iterator();
-            while (it.next()) |e| {
-                if (!std.mem.endsWith(u8, e.key_ptr.*, "_token")) continue;
-                switch (e.value_ptr.*) {
-                    .string => try out.put(a, e.key_ptr.*, e.value_ptr.*),
-                    .object => |o| if (o.get("content")) |c| if (c == .string) try out.put(a, e.key_ptr.*, c),
-                    else => {},
-                }
-            }
-        }
-        return .{ .object = out };
     }
 
     /// Shared model/generation EOS, plus the tokenizer's chat end when declared.
@@ -287,7 +276,7 @@ pub const HfText = struct {
 
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .ctx = t, .vtable = &.{
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .native_inkling2 = t.native_inkling2, .deferred_native = @import("deferred_tools.zig").native(if (t.tool_source.len > 0) t.tool_source else t.source), .ctx = t, .vtable = &.{
             .encode = encodeFn,
             .decode = decodeFn,
             .token_id = tokenIdFn,
@@ -324,7 +313,7 @@ pub const HfText = struct {
 
     fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, add_special: bool) model_text.Error![]u32 {
         const t = self(ctx);
-        const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
+        const ids = t.tok.encode(a, if (@import("hf_hy4.zig").active(&t.tok)) @import("hf_hy4.zig").spelling(s) orelse s else s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
     }
@@ -347,11 +336,11 @@ pub const HfText = struct {
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
-        return self(ctx).tok.decode(a, ids, false) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}");
+        return @import("hf_hy4.zig").mapped(&self(ctx).tok, a, self(ctx).tok.decode(a, ids, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}"));
     }
 
     fn tokenIdFn(ctx: *anyopaque, piece: []const u8) ?u32 {
-        return self(ctx).tok.specialTokenId(piece);
+        return self(ctx).tok.specialTokenId(if (@import("hf_hy4.zig").active(&self(ctx).tok)) @import("hf_hy4.zig").spelling(piece) orelse piece else piece);
     }
 
     fn tokenStringFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
@@ -593,6 +582,7 @@ test "chat_template_kwargs.clear_thinking: a bool, null as unset, anything else 
 }
 
 test {
+    _ = @import("hf_glm_vocab_test.zig");
     _ = @import("hf_eos_test.zig");
     _ = @import("hf_text_regex_test.zig");
     _ = @import("dory_chat_test.zig");

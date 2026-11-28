@@ -17,6 +17,13 @@ pub const Settings = struct {
         return parse(env("TF_DSV41_SPEC_DRAFT"), env("TF_DSV41_SPEC_NUCLEUS"));
     }
 
+    /// `fromEnv`, the pass `on` while TF_DSV41_SPEC_DRAFT is unset.
+    pub fn fromEnvOr(on: bool) !Settings {
+        var s = try fromEnv();
+        if (env("TF_DSV41_SPEC_DRAFT") == null) s.on = on;
+        return s;
+    }
+
     /// The knob values: 0 | 1 | on | off | true | false (case-insensitive), empty is 0.
     pub fn parse(spec: ?[]const u8, nucleus: ?[]const u8) !Settings {
         return .{ .on = try flag(spec), .nucleus = try flag(nucleus) };
@@ -251,6 +258,13 @@ pub const Spec = struct {
         w.matched = ok;
         if (ok) s.stats.ingests_skipped += 1 else s.stats.commit_differs += 1;
         return ok;
+    }
+
+    /// After `ingested` said no: the speculation ingested another path of this window (the commit's must land anyway).
+    pub fn differs(s: *const Spec, slot: u32, start: u64) bool {
+        if (!s.live or slot >= s.wins.len) return false;
+        const w = s.wins[slot] orelse return false;
+        return w.start == start and w.gen == s.gen[slot] and w.matched == false;
     }
 
     /// At the draft: the speculated proposals into `out` (caller's ask order) and true, or false; the speculation ends.

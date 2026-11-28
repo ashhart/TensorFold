@@ -71,33 +71,6 @@ The native engine carries that adaptation. `zig/kernels/metal/qwen3_5/gdn_pre.me
 `zig/kernels/metal/core/deltanet.metal` and Flash Next's `zig/kernels/metal/flashnext/q4_gdn_*.metal` run the same
 model math.
 
-## Vulkan shaders from omarchy-mlx
-
-These files in `zig/kernels/vulkan/` come from [omarchy-mlx](https://github.com/joshuaswarren/omarchy-mlx),
-MIT License, Copyright © 2026 Joshua Warren and mlx-omarchy contributors. The first lines of each file name its
-source path and commit. The native Vulkan path does not link MLX.
-
-- `argreduce_chunk.comp`
-- `argreduce_combine.comp`
-- `binary_vec.comp`
-- `cast.comp`
-- `conv_dw1d.comp`
-- `copy_general.comp`
-- `dequant.comp`
-- `fast_norm.comp`
-- `fast_norm_gated.comp`
-- `fast_rope.comp`
-- `gated_delta_decode.comp`
-- `gated_delta_prefill_oracle.comp`
-- `gather_take.comp`
-- `gdn_conv_decode.comp`
-- `omarchy_trig.h`
-- `qmm.comp`
-- `sdpa_decode_native.comp`
-- `swiglu.comp`
-
-See [the license text](LICENSES/mlx-omarchy-MIT.txt).
-
 ## Qwen Flash Next
 
 The n-gram ID helpers translate Hugging Face transformers' `models/qwen4_exp/modeling_qwen4_exp.py` with renamed
@@ -351,9 +324,12 @@ These follow a model's release code or a library's model code for their math, ro
 
 - `tools/lfm3/ref64.py` and `zig/kernels/xpu/lfm3.cl`: `modeling_lfm3.py` in [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Copyright Liquid AI, LFM Open License v1.0; see [the license text](LICENSES/LFM-Open-1.0.txt).
 - `zig/kernels/metal/minimax_m3/glue.metal`: the rounding points of `modeling_minimax_m3_vl.py` in [transformers](https://github.com/huggingface/transformers).
+- `zig/src/families/ricursive/` (its layer order and rounding points), `zig/kernels/metal/ricursive/glue.metal`, `zig/kernels/cuda/ricursive.cu`, `ricursive.cuh`, `ricursive_prep.cu`, `ricursive_prep.cuh` and `tools/zig/ricursive_reference.py`: `modeling_ricursive.py` in [ricursiveAI/Ripple-65B-Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) at revision `240d5966cbe00f0627c699e59ef58560b60303cf`: the scaled embedding, the value residual, the per-head q/k norms, RoPE on sliding layers only, the fp32 sigmoid gate, the clamped SwiGLU and the four norms a layer. The release's SGLang model `inference/server/model.py` computes the same layers; what is in it alone is its serving (the W4A4 kernels, the capture of hidden states for a drafter), which this family does not take. Copyright ricursiveAI, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt). The reference's `--release` and `--release-f64` modes import the release's own `modeling_ricursive.py` from the checkpoint at run time; TensorFold does not include it.
+- `zig/src/families/ricursive/dflash2.zig` and `zig/kernels/metal/ricursive/dflash2.metal` (the DFlash2 drafter for ricursiveAI/Ripple-65B-Preview-DFlash2): `DFlash2DraftModel`, `GroupedDynamicCausalConv` and `CandidateSelector` in `dflash/model.py` of [z-lab/dflash](https://github.com/z-lab/dflash) at revision `07ebd93db9f472af339b644bb70221ad8428328a`, MIT License, Copyright © 2026 Z Lab, with its `apply_rotary_pos_emb`'s rounding points; the RMSNorm, rotary cos and sin, and SiLU MLP of the release's `modeling_ricursive.py` above (`RicursiveRMSNorm`, `RicursiveRotaryEmbedding`, `RicursiveMLP`), at the drafter's config. The target's taps are the hidden states `extract_context_feature` in that `model.py` takes (`hidden_states[layer_id + 1]`), here of `modeling_ricursive.py`'s `output_hidden_states`: a tapped layer's output, before the final norm. The NoPE layer is `no_rope_layers` in the drafter's `config.json` ([ricursiveAI/Ripple-65B-Preview-DFlash2](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-DFlash2) at revision `35609b3be3dd08a822b3ba1257c1ea5dd6f87632`, Apache License 2.0); `zig/src/families/ricursive/fixtures/dflash2_config.json` is that `config.json`, unchanged. The 16,384-token draft window is from `inference/server/README.md` in the release above.
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
+- `zig/kernels/metal/idol.metal`, `zig/kernels/cuda/idol.cu` and `zig/kernels/cuda/idol_attention.cuh`: the rounding points of Idol's denoiser in [speridlabs/idol-sdk](https://github.com/speridlabs/idol-sdk) at `4702a7f0`. Copyright speridlabs, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
@@ -464,6 +440,14 @@ common EXL3 operators and their per-slot epilogues; tile decoding is shared.
 The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as described above.
 No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
 
+## DeepSeek-V4.1 Metal image preparation
+
+The image preparation (`zig/src/families/deepseek_v41/metal/vision_prep.zig`,
+`zig/src/families/deepseek_v41/metal/vision_prepare.zig`) follows the image budgets and geometry of
+`image_processor.py` in DeepSeek AI's MIT licensed
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+(revision 08c8657f02291e11b6f6b63e0e16014f8e748518), Copyright (c) 2023 DeepSeek.
+
 ## Shared EXL3 resolver setup
 
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
@@ -476,6 +460,19 @@ with the common EXL3 and DeepSeek contributor credits preserved.
 recipe commit e1f564eb915bb5272474b6c1c527aec3b9ed3de6. It credits TensorFold Contributors for the expert
 arithmetic and staging design. Copyright (c) 2026 MiaAI-Lab and Copyright (c) 2026 TensorFold contributors.
 The complete original MIT notices and permission text are retained in [Mia-FlashNext-MIT.txt](LICENSES/Mia-FlashNext-MIT.txt).
+
+## MiaAI-Lab Flash Next int4 kernel
+
+`zig/kernels/cuda/fn_int4.cu` is the `fn_int4.cu` that patch 0002 of
+[MiaAI-Lab's dual-Spark recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold) creates, at
+recipe commit `04f2b53826dca9a52893f2bce9d49bb3d1828e88`, under the Apache License 2.0, Copyright 2026 MiaAI-Lab.
+That recipe's NOTICE reads "Qwen3.8-Flash-Next on 2x DGX Spark with TensorFold / Copyright 2026 MiaAI-Lab" and asks a
+redistributor to keep it and to state what changed, which this section and the file's own header do. The license text
+is [Apache-2.0.txt](LICENSES/Apache-2.0.txt). TensorFold's three changes: the head's dense items hold 16 MT rows rather
+than 16, one more `int4_prompt_kernel` instantiation builds for the routed gate/up (both marked `TF:` in the file), and
+the local copies of the mma, the non-allocating load and the `cp.async` copies are replaced by the shared ones in
+`zig/kernels/cuda/common/`, whose instruction text is the same. The groups-of-64 instantiations a two-rank serve would
+need are not built. The host packer and the launchers in `zig/src/cuda/int4.zig` are TensorFold's.
 
 ## Ling-3.0-tiny and Ling-3.1-flash
 
@@ -551,3 +548,113 @@ own code as the reference.
 [IN22-Gen](https://huggingface.co/datasets/ai4bharat/IN22-Gen) (AI4Bharat) in its 22 languages, unchanged, under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It is tokenizer test input only. The composition exclusions
 and ZWJ/ZWNJ conjuncts after it are TensorFold's own.
+
+## Inkling 2 Small test fixtures
+
+`zig/src/families/inkling2/fixtures/` holds files and values taken from Thinking Machines' Inkling 2 Small release at
+revision `2ad1157016e1aac77b6ff1b770e7c05229403134`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, `chat_template.jinja`, `mini_tokenizer.json` (its
+`tokenizer.json` cut to the added tokens, the byte alphabet and the first 1,500 merges) and the prompts and ids in
+`prompt_cases.json` and `mini_cases.json`, which the Hugging Face transformers and tokenizers libraries produced from
+those files. `tiny_config.json` and the tensor tables
+`tiny_model_header.txt` and `tiny_mtp_header.txt` describe `tiny-random/inkling-2` at revision
+`0a57c72e4e5b68aafe1d983dbb62980344a5fcd7`, a randomly initialised model whose model card names that release as its base
+model and states no licence; no weights are included. `tools/zig/inkling2_fixtures.py` rebuilds all of these files.
+
+## Inkling 2 Mini fixtures and loop references
+
+`mini_config.json`, `mini_model_header.txt` and `mini_mtp_header.txt` in
+`zig/src/families/inkling2/fixtures/` come from the 2026-11-20 published snapshot of
+[thinkingmachines/Inkling-2-Mini at `ed40e7da625f594fc9c4990f5f66be24873c22d7`](https://huggingface.co/thinkingmachines/Inkling-2-Mini), under the Apache License 2.0
+stated on its model card (see [the license text](LICENSES/Apache-2.0.txt)). The public model API supplied that full revision and last-modified time 2026-11-20T22:55:20Z. The fixture config differs from the supplied published `config.json` only by its explicit `_fixture_provenance` annotation; after excluding that annotation, every checkpoint config field matches. The folded tables contain only metadata from the model and MTP safetensors
+headers, no tensor data or weights. `tools/zig/inkling2_fixtures.py` rebuilds all three from the Mini release, or from its
+extracted headers, with the same revision annotation. No revision was derived from fixture digests.
+
+`release_chat_template.jinja` and `release_tokenizer_config.json` in the same folder are byte-identical copies of that
+revision's `chat_template.jinja` and `tokenizer_config.json`, under the same license.
+
+`tiny_mini_config.json` and the tensor table `tiny_mini_model_header.txt` in the same folder describe
+`hf-internal-testing/tiny-inkling2-mini` at revision `ee242a48af34ff0729518f4ac28cfcb847e470ab`, the tiny checkpoint
+that `docs/design/inkling-2-mini.md` names for same-engine exactness; its model card states no licence. The config is a
+byte-identical copy and the table holds only metadata from the `model.safetensors` header, no tensor data or weights.
+`tools/zig/inkling2_fixtures.py` rebuilds both, from that file or its extracted `model.header.json`.
+
+The Mini loop host/reference implementations in `zig/src/families/inkling2/loop.zig`, `loop_model.zig`, `loop_engine.zig`,
+`loop_math_cuda.zig`, the CUDA and Metal loop kernels and the stored-expert implementations in `modelopt.zig` and
+`zig/kernels/cuda/inkling2/modelopt.cu` are independent TensorFold implementations of the supplied math-only Mini
+specification. Its primary reference is huggingface/transformers PR #51050 at head `6173a2f6`: the Mini configuration and
+forward pass in `models/inkling2_loop/modular_inkling2_loop.py` and `modeling_inkling2_loop.py`, with the temporary
+NVFP4/MXFP8 expert dequantization in `core_model_loading.py` and the checkpoint mappings in `conversion_mapping.py`.
+ModelOpt here names the checkpoint format and that Transformers arithmetic; no NVIDIA Model Optimizer source was used or
+vendored. The specification also records Neywa-Labs/mlx-vlm at `fd6404fb` as its second reading of the loop and DSpark
+implementation (`mlx_vlm/models/inkling2/` and `mlx_vlm/speculative/drafters/inkling2_dspark/`). Transformers is Apache-2.0;
+mlx-vlm is MIT (see [`LICENSES/MIT.txt`](LICENSES/MIT.txt)). No reference source code is vendored. The supplied materials
+give only these two abbreviated reference heads, not their full commit SHAs.
+
+## Inkling 2 attention kernels
+
+`zig/kernels/cuda/inkling2/attention.cu`, `zig/kernels/cuda/inkling2/prompt_attention.cu` and
+`zig/src/families/inkling2/kernels.zig` compute the attention of Hugging Face transformers'
+`src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0). The query and key L2 clips come
+from `Inkling2L2Clip` and `Inkling2ScaledL2Clip`, the relative-position logits from `Inkling2RelativeLogits`, and the
+sinks and sigmoid output gate from `Inkling2SlidingAttention` and `Inkling2FullAttention`. The kernels, their chunked
+layout and their rounding points are TensorFold's own.
+
+## Inkling 2 glue kernels
+
+`zig/kernels/cuda/inkling2/ops.cu`, `zig/kernels/cuda/inkling2/rows.cu` and `zig/src/families/inkling2/ops.zig` compute
+these layers of Hugging Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit
+`109a7d19bf66` ([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0):
+`Inkling2NormedEmbedding`, `Inkling2BlockAttentionResidual`, `Inkling2ShortConvolution`,
+`Inkling2DynamicShortConvolution`, `Inkling2TopKRouter`, `Inkling2SoftcappedSwiGLU` and `Inkling2Softcap`. The kernels
+are TensorFold's own.
+
+## Inkling 2 expert and vision kernels
+
+`zig/kernels/cuda/inkling2/experts.cu` and `zig/src/families/inkling2/experts.zig` run `Inkling2Experts` from Hugging
+Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0) on main's EXL3 grouped-expert
+arithmetic. `zig/kernels/cuda/inkling2/vision.cu` and `zig/src/families/inkling2/vision.zig` compute the same file's
+vision tower: `Inkling2VisionEmbeddings`, `Inkling2VisionRotaryEmbedding`, `Inkling2VisionAttention`,
+`Inkling2VisionMLP` and `Inkling2VisionMerger`. `zig/src/families/inkling2/image.zig` follows `Inkling2ImageProcessor`
+in `image_processing_inkling2.py` at the same commit for its 40-pixel patches and the tower's input tables.
+
+## Hy4-flash NVFP4 tensor table and build scripts
+
+`zig/src/families/hy4_flash/nvfp4_header.txt` lists names, types and shapes from the safetensors headers of the NVFP4
+build [atakans/Hy4-flash-NVFP4](https://huggingface.co/atakans/Hy4-flash-NVFP4) at revision
+`30f201acf0b4f9ba178817bcbc04ccfa3ec473f9`, made from Tencent's Hy4-flash release
+([tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) at revision `d88c9dfd96ba4f2e6b92adba0b8e8f1c8696f959`)
+under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0.txt)); no weights are included.
+`tools/hy4_flash/nvfp4.py` and `tools/hy4_flash/engram_fp8.py` rebuild that checkpoint (`docs/receipts/hy4-flash-nvfp4/`).
+
+## ERNIE 5.5 pre-tokenizer fixture
+
+`zig/src/core/tokenizer/fixtures/onig_anchors.json` holds the pre-tokenizer steps of the `tokenizer.json` in Baidu's
+[baidu/ERNIE-5.5-Flash-Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview) at revision
+`ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe` (all but its last, ByteLevel), under the Apache License 2.0 stated on its
+model card (see [the license text](LICENSES/Apache-2.0.txt)), and the pieces the Hugging Face tokenizers library splits
+with them and with a few other patterns. `tools/zig/onig_anchor_fixtures.py` rebuilds the file.
+
+## ERNIE 5.5 test fixtures and chat encoding
+
+`zig/src/families/ernie5_5/fixtures/` holds files and values taken from Baidu's
+[baidu/ERNIE-5.5-Flash-Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview) at revision
+`ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, a byte-identical copy; `mini_tokenizer.json`, its
+`tokenizer.json` cut to added tokens 0 to 20, the byte alphabet and the first 1,500 merges; `release_header.txt`, the
+names, dtypes and shapes in its 128 model shards' safetensors headers, with no weights; and the prompts, spans and ids
+in `prompt_cases.json` and `mini_cases.json`, which the release's `encoding_ernie.py` and `tokenization_ernie.py`
+produced through the Hugging Face transformers and tokenizers libraries. `zig/src/families/ernie5_5/prompt.zig` writes
+the text part of that chat encoding in TensorFold's own code, written after reading `encoding_ernie.py` and checked
+against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` rebuilds all of these files.
+## Inkling 2 DSpark drafter kernels
+
+`zig/kernels/cuda/inkling2/dspark.cu`, `zig/kernels/cuda/inkling2/dspark_many.cuh` and
+`zig/src/families/inkling2/dspark_ops.zig` compute the drafter in
+`vllm/models/inkling2/nvidia/dspark.py` at commit `abb8194dc35e` of
+[vllm-project/vllm](https://github.com/vllm-project/vllm) (Apache-2.0): the tap mix and its RMS norm in
+`Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
+The drafter's weights ship in Thinking Machines' Inkling 2 Small release under Apache-2.0. The kernels are TensorFold's
+own.

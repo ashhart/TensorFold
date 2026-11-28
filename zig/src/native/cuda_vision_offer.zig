@@ -19,11 +19,11 @@ pub fn offer(v: anytype, open: ?api.VisionOpen) ?api.Vision {
     if (comptime T == qwen35.native.vision.Vision) {
         // the template writes Qwen's vision_start and vision_end around the image token itself
         const image = x.shared.image_token;
-        return .{ .ctx = x, .prepare = prepare, .image_token = image, .markers = &x.markers, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+        return .{ .ctx = x, .prepare = prepare, .image_token = image, .markers = &x.markers, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .image_share = if (open) |o| o.image_share else .request, .explain = T.explain };
     }
     // a template that writes each image's begin and end itself: the server expands the image token alone
     const wrap: ?[2]u32 = if (@hasDecl(T, "template_wraps")) null else .{ x.marks.open, x.marks.close };
-    var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+    var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .image_share = if (open) |o| o.image_share else .request, .explain = T.explain };
     if (comptime @hasDecl(T, "part_type")) out.part_type = T.part_type; // the template's name for an image part
     if (comptime T == nemotron.native.vision.Vision) {
         // video: the checkpoint's temporal projection, and a reserved token for the template's `<video>`
@@ -115,7 +115,7 @@ fn omniVideo(ctx: *anyopaque, a: Allocator, src: api.VideoSource, max_tokens: u3
 
 /// The device bytes a family's tower takes beside its text weights on this rank, 0 without --vision.
 pub fn weightBytes(comptime F: type, a: Allocator, io: std.Io, o: api.Open) !u64 {
-    if (comptime @hasDecl(F, "visionBytes")) if (o.vision != null and o.rank == 0) return F.visionBytes(a, io, o.dir);
+    if (comptime @hasDecl(F, "visionBytes")) if (o.vision != null) return F.visionBytes(a, io, o.dir, o.rank, o.tp); // its holder's rank
     return 0;
 }
 
@@ -246,4 +246,22 @@ test "actual Qwen offer keeps its image_url type and template-owned markers" {
     try std.testing.expectEqual(@as(u32, 57), held.image_token);
     try std.testing.expectEqualSlices(u32, &q.markers, held.markers);
     try std.testing.expect(held.wrap == null and held.video == null);
+}
+
+/// Info.audio for a family's audio encoder (Nemotron 3.5 Transcribe's): its WAV prepare, locator and limits.
+pub fn audio(x: ?*nemotron.audio.Audio) ?api.AudioOffer {
+    const a = x orelse return null;
+    if (a.encoder == null) return null;
+    const prepare = struct {
+        fn f(ctx: *anyopaque, al: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedAudio {
+            _ = ctx;
+            var p = try nemotron.audio.prepare(al, bytes);
+            if (p.rows > max_tokens) {
+                p.deinit(al);
+                return error.AudioTooLong;
+            }
+            return .{ .samples = p.samples, .tokens = p.rows, .hash = p.hash };
+        }
+    }.f;
+    return .{ .ctx = a, .prepare = prepare, .locator = "<|audio|>", .audio_tokens = a.rows.limit, .max_audios = nemotron.audio.max_clips };
 }

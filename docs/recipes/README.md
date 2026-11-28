@@ -8,22 +8,24 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Family | Recipe |
 | --- | --- |
 | dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
-| dots.mocr | [Native CUDA text decoder, BF16, one GPU](dots-mocr-cuda.md) |
+| dots.mocr | [Native CUDA, images and text, BF16, one GPU](dots-mocr-cuda.md) |
 | Kimi K3 / K3.1 | [Native Metal bring-up, synthetic only, resident budget refusal](kimi-k3-metal.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Parse | [Native HIP OCR, validation and qualification limits](nemotron-parse.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
+| Nemotron 3.5 Transcribe | [Native CUDA on one GB10, the bf16 release, audio input](nemotron-3.5-transcribe.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3-Embedding | [Native Metal](qwen3-embedding-metal.md), [HIP](qwen3-embedding-hip.md) |
-| Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
-| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
+| Qwen3.5-2B | [Native Metal preview and CUDA, tied affine 4-bit](qwen3.5-2b-native.md) |
+| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [native HIP](flash-next-hip.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
 | Qwen4 dense | [Native preparation, device qualification pending](qwen4-dense.md) |
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md), [native CUDA](glm-5.3-flash-cuda.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
-| Gemma 4 31B | [Native Metal, affine 4-bit](gemma-4-native.md) |
+| Gemma 4 31B | [Native Metal and CUDA, affine 4-bit](gemma-4-native.md) |
 | Gemma 4 12B | [Native Metal, affine 4-bit, MTP assistant](gemma-4-12b-native.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
+| DeepSeek-V4-Pro-Qwen3.5-9B on a DGX Spark | [MLX 4-bit on one GB10, thinking and drafts off](deepseek-v4-pro-qwen35-9b-cuda.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
 | Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
 | MiniMax-M3.1-Flash | [Native Metal on one 256 GB Mac: affine 3/4-bit experts, exact bf16 cache, DFlash2 drafts, images](minimax-m3.1-flash.md) |
@@ -33,6 +35,10 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nanbeige4.3-33B | [Native Metal, the bf16 and INT4 releases, the Llama family](nanbeige-4.3-33b-metal.md) |
 | Recursive Flint | [Native Metal, the publisher's affine 4-bit export, reasoning and tool calls](flint.md) |
 | Unlimited-OCR-2 | [Native Metal, the bf16 release: page images to structured text, 131k context](unlimited-ocr-metal.md) |
+| Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, plain decode](muse-spark.md) |
+| Ripple-65B-Preview | [Native CUDA, the publisher's NVFP4 release](ripple-65b-cuda.md), [native Metal, the publisher's NVFP4 and bf16 releases](ripple-65b-metal.md) |
+| Ling-3.0-tiny | [Native CPU on aarch64 Linux, the Q4_K_M GGUF, exact greedy decode from token IDs](ling-3.0-tiny-cpu.md) |
+| SenseNova-Loop-9B | [Native Metal, BF16 and AWQ g128, 512k context, MTP drafts, images](sensenova-loop-9b.md) |
 
 [Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 
@@ -72,6 +78,12 @@ The sampler keys each draw by seed, absolute position and token ID. A draft is a
 matches that draw from the target. Each verify row must use the serial row's arithmetic, including
 attention boundaries, routing ties and recurrence updates. Rollback must restore all state after the
 accepted path, including draft-head state.
+
+Family device tests can reuse `core/lanes/invariance.zig`: construct its `Runner` callback with fixed caller-owned
+token and RNG-position buffers and call `check`. The dynamic fake-target example is in `invariance_fake.zig`.
+The gate compares cohorts 2, 4 and 8 with solo output through timed joins and leaves, drafts off and on,
+greedy and keyed sampling, fresh and restored prefixes. It requires observed draft acceptance, restoration,
+overlap and lifecycle events, and prints the smallest failing replay rather than accepting a serialized pass.
 
 Prompt reuse is equally strict. The MLX planner computes chunks from rendered tokens and caches only
 compatible boundaries. Its resume points are assistant-message starts and the second message start

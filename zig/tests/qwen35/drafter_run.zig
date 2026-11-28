@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const qwen35 = @import("qwen3_5");
 
 const Engine = qwen35.engine.Engine;
+const Hip = qwen35.hip_lanes.Hip;
 const Draft = qwen35.draft.Draft;
 const Features = lanes.backend.Features;
 const Hold = lanes.drafter.Hold;
@@ -164,6 +165,52 @@ fn twice(gpa: std.mem.Allocator, d: *Draft, t: Track) !Rounds {
     return a[0].r;
 }
 
+/// Drafts kept at `depth` a hold, frames truncated to depth + 1 rows and full blocks, each hold at the same context.
+const Truncated = struct { rounds: usize = 0, same: usize = 0, short: usize = 0, full: usize = 0 };
+
+/// A greedy walk held twice a round, at `depth` (a frame of depth + 1 rows) and at the block (its first drafts).
+fn truncated(d: *Draft, s: *lanes.Stream, f0: Features, len: usize, g: []const u32, depth: usize) !Truncated {
+    const x = d.drafter();
+    const block = d.c.block - 1;
+    var r: Truncated = .{};
+    try x.open(s);
+    defer x.release(s);
+    var f = f0;
+    f.offset = 0;
+    f.rows = @intCast(len);
+    try x.absorb(&.{.{ .stream = s, .features = f, .start = 0, .follow = g[0..1] }});
+    var p = len;
+    while (p - len + block + 1 <= g.len) {
+        const at = p - len;
+        var short: [16]u32 = undefined;
+        var full: [16]u32 = undefined;
+        try x.hold(&.{.{ .stream = s, .pending = g[at], .position = p + 1, .depth = @intCast(depth) }});
+        try x.held(&.{s}, &.{short[0..depth]});
+        try x.hold(&.{.{ .stream = s, .pending = g[at], .position = p + 1, .depth = @intCast(block) }});
+        try x.held(&.{s}, &.{full[0..block]});
+        const ks = matching(short[0..depth], g[at + 1 ..]);
+        const kf = matching(full[0..depth], g[at + 1 ..]);
+        r.rounds += 1;
+        r.short += ks;
+        r.full += kf;
+        if (std.mem.eql(u32, short[0..depth], full[0..depth])) r.same += 1;
+        // the walk keeps the full block's drafts, so both holds see the same contexts
+        f.offset = p;
+        f.rows = @intCast(kf + 1);
+        const follow = g[at + 1 ..][0 .. kf + 1];
+        try x.absorb(&.{.{ .stream = s, .features = f, .start = p, .follow = follow, .prompt = false }});
+        p += kf + 1;
+    }
+    return r;
+}
+
+/// Drafts matching the greedy continuation `g` from the first.
+fn matching(drafts: []const u32, g: []const u32) usize {
+    var k: usize = 0;
+    while (k < drafts.len and drafts[k] == g[k]) k += 1;
+    return k;
+}
+
 /// Positions and shapes through the contract: a hold behind its context and too few held drafts are refused.
 fn refusals(d: *Draft, s: *lanes.Stream, f0: Features) !void {
     const x = d.drafter();
@@ -180,6 +227,92 @@ fn refusals(d: *Draft, s: *lanes.Stream, f0: Features) !void {
     if (x.held(&.{s}, &.{out[0..4]}) != error.TooFewDrafts) return error.HeldNotRefused;
     try x.held(&.{s}, &.{out[0..3]});
     for (out[0..3]) |t| if (t >= d.c.vocab) return error.DraftOutOfVocabulary;
+    // features of other rows than the absorb names, and a kept row past them
+    f.offset = 0;
+    const elsewhere = x.absorb(&.{.{ .stream = s, .features = f, .start = 4, .follow = &.{}, .prompt = false }});
+    if (elsewhere != error.FeaturesNotAtStart) return error.StartNotHonoured;
+    f.offset = 4;
+    const past = x.absorb(&.{.{ .stream = s, .features = f, .start = 4, .follow = &.{}, .rows = &.{ 0, 4 } }});
+    if (past != error.BadDraftRows) return error.KeptRowNotRefused;
+}
+
+/// Rows a verified window of `wide` rows keeps (a tree's path, out of the first rows), and their count.
+const picks = [_]u32{ 0, 5, 10, 15 };
+const wide = 16;
+
+/// One stream's chain after the prompt and an absorb at `p` (`ring`: the tap ring the features name).
+fn keptChain(d: *Draft, s: *lanes.Stream, f0: Features, ring: u64, p: usize, rows: ?[]const u32, pending: u32) ![7]u32 {
+    const x = d.drafter();
+    try x.open(s);
+    defer x.release(s);
+    var f = f0;
+    f.buffer = ring;
+    f.offset = 0;
+    f.rows = @intCast(p);
+    try x.absorb(&.{.{ .stream = s, .features = f, .start = 0, .follow = &.{} }});
+    // kept rows pick from the window's rows; whole rows are as many of its first
+    f.offset = p;
+    f.rows = if (rows != null) wide else picks.len;
+    try x.absorb(&.{.{ .stream = s, .features = f, .start = p, .follow = &.{}, .rows = rows, .prompt = false }});
+    var held: [7]u32 = undefined;
+    try x.hold(&.{.{ .stream = s, .pending = pending, .position = p + picks.len + 1, .depth = 7 }});
+    try x.held(&.{s}, &.{&held});
+    return held;
+}
+
+/// Kept rows `picks` of a window draft as the first rows of a ring holding those rows in order, not as its first rows.
+fn keptRows(e: *Engine, d: *Draft, s: *lanes.Stream, f: Features, p: usize, pending: u32) !void {
+    const t = e.model().taps;
+    const row: usize = f.row_bytes;
+    var alt = try hip.DeviceBuffer.alloc(&e.driver, t.rows * row);
+    defer alt.free();
+    try e.stream.synchronize();
+    try alt.copyFrom(0, f.buffer, t.rows * row);
+    for (picks, 0..) |from, to| try alt.copyFrom(((p + to) % t.rows) * row, f.buffer + ((p + from) % t.rows) * row, row);
+    const kept = try keptChain(d, s, f, f.buffer, p, &picks, pending);
+    const moved = try keptChain(d, s, f, alt.base(), p, null, pending);
+    if (!std.mem.eql(u32, &kept, &moved)) return error.KeptRowsDiffer;
+    const first = [_]u32{ 0, 1, 2, 3 };
+    const prefix = try keptChain(d, s, f, f.buffer, p, &first, pending);
+    const whole = try keptChain(d, s, f, f.buffer, p, null, pending);
+    if (!std.mem.eql(u32, &prefix, &whole)) return error.KeptPrefixDiffers;
+    // rows the absorb ignored would draft as the first rows: the picks must move the chain to tell
+    if (std.mem.eql(u32, &kept, &whole)) return error.KeptRowsVacuous;
+}
+
+/// A prompt past the tap ring through the lanes backend and Drafted, as the server runs it; then `features`' bounds.
+fn served(gpa: std.mem.Allocator, e: *Engine, d: *Draft, prompt: []const u32) !void {
+    const h = try Hip.init(gpa, e);
+    defer h.deinit();
+    const b = h.backend();
+    var x = try lanes.drafted.Drafted.init(gpa, b, d.drafter());
+    defer x.deinit();
+    var s = try lanes.Stream.init(gpa, .{ .id = "long", .prompt = prompt, .max_new = 4 });
+    defer s.deinit(gpa);
+    // the whole prompt's rows: the drafter reads its window's newest, still in the ring
+    try x.backend().prefill(&s);
+    defer x.backend().release(&s);
+    const taps = d.c.tapLayers();
+    const len: u64 = prompt.len;
+    const ring: u64 = e.model().taps.rows;
+    const window: u64 = qwen35.engine.tap_window;
+    const whole = try b.features(&s, taps, 0, @intCast(len - 1));
+    if (whole.offset != 0 or whole.rows != len - 1) return error.FeaturesMoved;
+    _ = try b.features(&s, taps, len - window, @intCast(window));
+    const refused = [_][2]u64{
+        .{ len - ring - 8, 16 }, // its first rows are out of the ring
+        .{ 0, 16 }, // all of them are
+        .{ len - 4, 5 }, // its last row is not written
+        .{ len - 4, 0 }, // no row
+    };
+    for (refused) |r| {
+        const got = b.features(&s, taps, r[0], @intCast(r[1]));
+        if (got != error.RowsNotHeld) {
+            std.debug.print("FAIL drafter features [{d}, +{d}) of {d} rows in a {d}-row ring: served\n", .{ r[0], r[1], len, ring });
+            return error.FeaturesNotBounded;
+        }
+    }
+    if (b.features(&s, taps[1..], 0, 4) != error.TapsMismatch) return error.TapsNotChecked;
 }
 
 /// The seeded sampled run: the target draws each continuation by `rule`, and the drafter's chains draw by it too.
@@ -214,6 +347,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         return error.Usage;
     }
     const steps = if (args.len == 4) try std.fmt.parseInt(usize, args[3], 10) else 160;
+    if (steps < min_steps) {
+        std.debug.print("--steps {d}: at least {d}, so the rounds measure acceptance\n", .{ steps, min_steps });
+        return error.Usage;
+    }
     var tok = try qwen35.tokenizer.loadTokenizer(io, gpa, args[1]);
     defer tok.deinit();
     var prompts: [texts.len][]u32 = undefined;
@@ -225,13 +362,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         longest = @max(longest, p.len);
     }
     defer for (prompts) |p| gpa.free(p);
+    // a prompt past the tap ring of 1024-row prompt chunks: the served path's eviction
+    const long = try gpa.alloc(u32, qwen35.engine.tap_window + qwen35.prefix.chunk + 256);
+    defer gpa.free(long);
+    for (long, 0..) |*t, i| t.* = prompts[i % prompts.len][(i / prompts.len) % prompts[i % prompts.len].len];
     var target = try qwen35.Config.read(gpa, io, args[1]);
     defer target.deinit();
     const c = try qwen35.draft_config.Config.read(gpa, io, args[0], qwen35.draft_config.Target.of(target.spec));
     const policy = (try @import("group.zig").resolve("", 0)).policy;
     const e = try Engine.open(gpa, io, args[1], .{
-        .capacity = longest + steps + 64,
-        .prompt_rows = longest + 16,
+        .capacity = @max(longest + steps, long.len + Hip.max_window) + 64,
+        .prompt_rows = qwen35.prefix.chunk,
         .streams = 1,
         .batch_rows = 16,
         .policy = policy,
@@ -244,9 +385,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     // frames of two streams at most: a lone stream's holds run frames of one, the pair's frames of two
     const d = try Draft.init(gpa, io, e, args[0], 2);
     defer d.deinit();
-    const depth: f64 = @floatFromInt(c.block - 1);
-    const loaded = "PASS drafter load: {d:.1} s, a draft step {d:.2} ms (a hold of {d} drafts {d:.2} ms)\n";
-    std.debug.print(loaded, .{ ms(io, t_load) / 1e3, d.step_ms, c.block - 1, d.step_ms * depth });
+    const loaded = "PASS drafter load: {d:.1} s, a draft step {d:.2} ms (past a one-draft hold)\n";
+    std.debug.print(loaded, .{ ms(io, t_load) / 1e3, d.step_ms });
     var streams: [2]lanes.Stream = undefined;
     for (&streams) |*s| s.sampling = null;
     // every prompt's greedy continuation, its caches kept for the pair that drafts two prompts together
@@ -258,6 +398,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         gpa.free(g);
     };
     var plain_ms: f64 = 0;
+    var cut: [cut_depths.len]Truncated = .{ .{}, .{} };
     for (prompts, 0..) |prompt, n| {
         greedy[n] = try gpa.alloc(u32, steps);
         caches[n] = e.newCaches(prompt.len + steps + 8) catch |err| {
@@ -268,7 +409,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         plain_ms += try decode(io, e, &caches[n], prompt, greedy[n], null);
     }
     try refusals(d, &streams[0], features(e, c, &caches[0]));
-    std.debug.print("PASS drafter refusals: a hold behind its context, more drafts read than held\n", .{});
+    std.debug.print("PASS drafter refusals: a hold behind its context, more drafts read than held, " ++
+        "features of other rows, a kept row past them\n", .{});
+    try keptRows(e, d, &streams[0], features(e, c, &caches[0]), prompts[0].len, greedy[0][4]);
+    std.debug.print("PASS drafter kept rows: rows {any} of {d} draft as those rows in order, not as the " ++
+        "first rows; a prefix as whole rows\n", .{ picks, wide });
     var alone: [texts.len]Rounds = undefined;
     var ran: usize = 0;
     defer for (alone[0..ran]) |*r| r.chains.deinit(gpa);
@@ -287,6 +432,15 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         const per = a.kept();
         std.debug.print(fmt, .{ n, prompt.len, steps, a.rounds, a.first, a.rounds, per, per + 1, hold_ms, absorb_ms });
         all.add(a);
+        for (&cut, cut_depths) |*sum, depth| {
+            const one = try truncated(d, &streams[0], f, prompt.len, greedy[n], depth);
+            inline for (.{ "rounds", "same", "short", "full" }) |name| @field(sum, name) += @field(one, name);
+        }
+    }
+    try truncatedHolds(cut);
+    if (all.rounds < min_rounds) {
+        std.debug.print("FAIL drafter: {d} rounds, too few to judge acceptance (at least {d})\n", .{ all.rounds, min_rounds });
+        return error.TooFewRounds;
     }
     const plain = plain_ms / @as(f64, @floatFromInt(prompts.len));
     const summary = "drafter acceptance over {d} rounds: first draft right {d:.3}, " ++
@@ -318,7 +472,34 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         std.debug.print(fmt, .{ n, together, r.rounds, r.kept() + 1, alone[n].rounds, alone[n].kept() + 1, equal });
     }
     try sampled(gpa, io, e, d, &prompts, steps);
+    try served(gpa, e, d, long);
+    std.debug.print("PASS drafter served: a {d}-token prompt through the lanes backend and Drafted; features " ++
+        "serve its drafter window and refuse rows out of the ring, unwritten or none\n", .{long.len});
 }
+
+/// The depths whose truncated frames are checked against the full block.
+const cut_depths = [_]usize{ 1, 3 };
+
+/// The acceptance length a truncated frame may lose to the full block.
+const max_truncated_loss = 0.05;
+
+/// Truncated frames keep the full block's acceptance, not its chains: the block's rows attend to each other unmasked.
+fn truncatedHolds(cut: [cut_depths.len]Truncated) !void {
+    for (cut, cut_depths) |r, depth| {
+        const n: f64 = @floatFromInt(r.rounds);
+        const short = @as(f64, @floatFromInt(r.short)) / n + 1;
+        const full = @as(f64, @floatFromInt(r.full)) / n + 1;
+        const fmt = "{s} drafter depth {d} truncated frames: {d} rounds, {d} chains as the full block's, " ++
+            "acceptance length {d:.3} against {d:.3}\n";
+        const lost = short + max_truncated_loss < full;
+        std.debug.print(fmt, .{ if (lost) "FAIL" else "PASS", depth, r.rounds, r.same, short, full });
+        if (lost) return error.TruncatedFramesLoseAcceptance;
+    }
+}
+
+/// Greedy steps a prompt at least, and rounds over all prompts at least, for the acceptance to mean anything.
+const min_steps = 64;
+const min_rounds = 24;
 
 /// The mean acceptance length under which the check fails: below a clean run's, above a ring read a slot behind.
 const min_length = 4.5;

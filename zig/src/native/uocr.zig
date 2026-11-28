@@ -61,7 +61,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer h.core.deinit();
     // a page at most the widest gundam grid; without --vision-image-tokens, every allowed page may take it
     const image_tokens = if (vis_open.image_tokens_set) vis_open.image_tokens else vis_open.max_images * fl.serve.maxPageTokens();
-    const vis: api.Vision = .{ .ctx = h, .prepare = prepareImage, .image_token = fl.config.image_token, .markers = &h.markers, .image_tokens = image_tokens, .max_images = vis_open.max_images };
+    const vis: api.Vision = .{ .ctx = h, .prepare = prepareImage, .image_token = fl.config.image_token, .markers = &h.markers, .image_tokens = image_tokens, .max_images = vis_open.max_images, .image_share = vis_open.image_share };
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = 1, .context_window = @intCast(context), .vision = vis, .greedy_only = true, .reasoning = false });
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };

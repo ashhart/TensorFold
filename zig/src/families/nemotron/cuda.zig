@@ -6,6 +6,7 @@ pub const Precision = @import("config.zig").Precision;
 pub const weights = @import("cuda_weights.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const state = @import("cuda_state.zig");
+pub const wide = @import("cuda_wide.zig");
 pub const Forward = @import("cuda_forward.zig").Forward;
 pub const Seg = @import("cuda_forward.zig").Seg;
 pub const Walk = @import("cuda_forward.zig").Walk;
@@ -23,6 +24,7 @@ pub const native = @import("cuda_native.zig");
 pub const train = @import("cuda_train.zig");
 /// Bolt's image tower (C-RADIO) and projector: one image's patches to the rows its `<image>` placeholders take.
 pub const vision = @import("cuda_vision.zig");
+pub const audio = @import("cuda_audio.zig");
 pub const sites = @import("cuda_sites.zig");
 pub const train_ops = @import("cuda_train_ops.zig");
 pub const glue = @import("cuda_glue.zig");
@@ -36,10 +38,14 @@ pub const pages = @import("cuda_pages.zig");
 pub const slide = @import("cuda_slide.zig");
 pub const worker = @import("cuda_worker.zig");
 pub const omni = @import("cuda_native_omni.zig");
+pub const transcribe = @import("cuda_native_transcribe.zig");
 pub const identity = @import("core").checkpoint_identity;
 
 test {
     _ = omni;
+    _ = @import("cuda_wide.zig");
+    _ = @import("cuda_wide_walk_test.zig");
+    _ = @import("cuda_attn_segs_test.zig");
     _ = @import("cuda_bolt_lanes_test.zig");
     _ = @import("cuda_shared_draw.zig");
     _ = @import("cuda_lanes.zig");
@@ -69,6 +75,7 @@ test {
 test {
     _ = @import("cuda_vision_test.zig");
     _ = @import("cuda_vision_lanes_test.zig");
+    _ = @import("cuda_lanes_fill_test.zig");
     _ = @import("cuda_source_ring_test.zig");
 }
 

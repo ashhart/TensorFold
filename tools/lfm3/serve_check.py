@@ -37,10 +37,11 @@ def image_url(data):
 
 
 class Server:
-    def __init__(self, binary, directory, cache, log_directory):
+    def __init__(self, binary, directory, cache, log_directory, vision=False):
         self.binary, self.directory, self.cache = binary, directory, cache
         self.log_directory = log_directory
         self.process = None
+        self.vision = vision
 
     def __enter__(self):
         with socket.socket() as sock:
@@ -52,6 +53,8 @@ class Server:
         command = [str(self.binary), 'serve', str(self.directory), '--host', '127.0.0.1', '--port', str(port),
                    '--name', 'lfm3-check', '--context', '2048', '--parallel', '4', '--temperature', '0',
                    '--prompt-cache-gib', str(self.cache), '--no-thinking', '--no-update-check']
+        if self.vision:
+            command.append('--vision')  # the image tower opens only when the flag names it
         self.command = command
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT)
         try:
@@ -98,7 +101,7 @@ class Server:
                                          headers={'Content-Type': 'application/json'})
         if gate:
             gate.wait(timeout=30)
-        evidence, usage, runtime, text = Evidence(), {}, {}, []
+        evidence, usage, runtime, speculative, text = Evidence(), {}, {}, {}, []
         complete = False
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
@@ -114,11 +117,14 @@ class Server:
                         raise RuntimeError(str(event['error']))
                     usage = event.get('usage') or usage
                     runtime = event.get('tensorfold') or runtime
+                    speculative = event.get('speculative') or speculative
                     for choice in event.get('choices', []):
                         evidence.add(choice)
                         text.append(choice.get('text') or (choice.get('delta') or {}).get('content') or '')
             result = evidence.finish(usage, runtime, complete)
             result['text'] = ''.join(text)
+            result['sampling'] = runtime.get('sampling')
+            result['accepted'], result['drafted'] = speculative.get('accepted'), speculative.get('drafted')
             if not complete:
                 result['error'] = 'incomplete_stream'
             return result
@@ -208,6 +214,7 @@ def main():
     args.binary, args.model_dir = args.binary.resolve(), args.model_dir.resolve()
     config = json.loads((args.model_dir / 'config.json').read_text())
     vision = config.get('model_type') == 'lfm3_vl'
+    images = vision and not args.skip_images
     receipt = {'model': args.model_dir.name, 'binary_sha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),
                'tests': [], 'logs': [], 'commands': [], 'speed_qualified': False}
 
@@ -225,7 +232,7 @@ def main():
     if args.sampled:
         items['sampled_code'] = dict(code, temperature=0.7)
         items['sampled_chat'] = dict(prose, temperature=0.7)
-    if vision and not args.skip_images:
+    if images:
         red, blue = solid_png(255, 0, 0), solid_png(0, 0, 255)
         question = 'What single solid color fills this image? Reply with only the color name.'
         items.update(red=chat(question, [red]), blue=chat(question, [blue]))
@@ -238,23 +245,30 @@ def main():
     baselines = {}
     log_directory = tempfile.mkdtemp(prefix='lfm3-serve-check-')
     try:
-        with Server(args.binary, args.model_dir, 0, log_directory) as server:
+        with Server(args.binary, args.model_dir, 0, log_directory, images) as server:
             receipt['logs'].append(server.log.name)
             receipt['commands'].append(server.command)
             for name, item in items.items():
                 result = server.request(item)
                 baselines[name] = result
                 check(name + '/fresh_plain', result.get('complete') and bool(result.get('token_sha256')), result)
+                if item.get('temperature'):  # the reply names its sampler: "exact" when sampled, "greedy" otherwise
+                    check(name + '/sampler_ran', result.get('sampling') == 'exact', result)
             if 'long_prefix' in baselines:
                 check('long_prefix/length_over_256', (baselines['long_prefix'].get('prompt_tokens') or 0) > 256,
                       baselines['long_prefix'].get('prompt_tokens'))
-        with Server(args.binary, args.model_dir, 0.1, log_directory) as server:
+        with Server(args.binary, args.model_dir, 0.1, log_directory, images) as server:
             receipt['logs'].append(server.log.name)
             receipt['commands'].append(server.command)
             if not args.cancel_only:
+                drafts = {'accepted': 0, 'plain_drafted': 0}
                 for name, item in items.items():
                     for draft in (False, True):
                         result = server.request(item, draft=draft)
+                        if draft:
+                            drafts['accepted'] += result.get('accepted') or 0
+                        else:
+                            drafts['plain_drafted'] += result.get('drafted') or 0
                         if name == 'edited_prefix' and not draft:
                             check('edited_prefix/no_stale_prefix_reuse', result.get('cached_tokens') == 0, result)
                         check(name + ('/drafted_equals_fresh' if draft else '/plain_equals_fresh'),
@@ -266,13 +280,15 @@ def main():
                     if name == 'edited_prefix':
                         result = server.request(item)
                         check('edited_prefix/matches_cache_off', token_equal(result, baselines[name]), result)
+                # drafted == fresh tests drafting only if a draft landed, and plain == fresh only if plain drafted none
+                check('drafts/exercised', drafts['accepted'] > 0 and drafts['plain_drafted'] == 0, drafts)
                 for level in (1, 2, 4):
                     names = ['code', 'chat'] if not args.sampled else ['code', 'chat', 'sampled_code', 'sampled_chat']
                     for name in names:
                         results = concurrent_requests(server, [items[name]] * level)
                         check(f'{name}/concurrent_{level}_equals_solo',
                               all(token_equal(result, baselines[name]) is True for result in results), results)
-                if vision and not args.skip_images:
+                if images:
                     for name, expected in [('red', ['red']), ('blue', ['blue']),
                                            ('red_blue', ['red', 'blue']), ('blue_red', ['blue', 'red'])]:
                         found = re.findall(r'\b(?:red|blue)\b', baselines[name].get('text', '').lower())

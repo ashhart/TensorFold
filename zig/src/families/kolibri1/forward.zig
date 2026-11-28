@@ -51,6 +51,9 @@ pub const Model = struct {
     ids: []u32 = &.{}, // paged: the tables on the host
     caps: []usize = &.{}, // paged: positions slot s's pages cover
     norms: []u64, // per layer: q_norm then k_norm, fp32 [2, D]
+    rows_k: []u64 = &.{}, // per layer: its rows' normed K and V [n, HK, D] (a layer on another's cache: that one's)
+    rows_v: []u64 = &.{},
+    dense: [2]u64 = .{ 0, 0 }, // a dense layer's one slot a row: expert 0 (int32 zeros) at weight 1 (fp32 ones)
     cos: u64,
     sin: u64,
     origin: u64, // the bf16 base tree attention's cache offsets count from
@@ -84,7 +87,9 @@ pub const Model = struct {
     /// Bytes one stream's caches take: full layers hold `context` positions, sliding layers the ring.
     pub fn streamBytes(c: Config, context: usize) usize {
         var total: usize = 0;
-        for (c.full[0..c.layers]) |full| total += 2 * (if (full) context else ringSize(prompt_rows, c.window)) * c.kv_heads * c.head_dim * 2;
+        for (c.full[0..c.layers], c.kv_from[0..c.layers]) |full, from| if (from == null) {
+            total += 2 * (if (full) context else ringSize(prompt_rows, c.window)) * c.kv_heads * c.head_dim * 2;
+        };
         return total;
     }
 
@@ -139,12 +144,13 @@ pub const Model = struct {
         const arena = try m.zeros(s, m.fullLayers() * 2 * region);
         var block: usize = 0;
         for (c.full[0..c.layers], 0..) |full, i| {
-            if (full) {
+            if (full and c.kv_from[i] == null) {
                 m.k[i] = arena + block * region;
                 m.v[i] = m.k[i] + region;
                 block += 2;
-            } else try m.cacheOf(s, i);
+            } else if (!full) try m.cacheOf(s, i);
         }
+        m.alias();
         try m.makeTables(s);
         try s.synchronize();
     }
@@ -205,21 +211,32 @@ pub const Model = struct {
         @memset(m.k, 0);
         @memset(m.v, 0);
         for (0..c.layers) |i| {
-            if (!m.paged or !c.full[i]) try m.cacheOf(s, i); // paged full layers: attach's arena
+            if ((!m.paged or !c.full[i]) and c.kv_from[i] == null) try m.cacheOf(s, i); // paged full: attach's arena
             m.norms[i] = try m.alloc(2 * dh * 4);
             if (m.planned != null) continue;
             const L = w.layers[i];
             try d.check(d.api.cuMemcpyDtoDAsync_v2(m.norms[i], L.q_norm, dh * 4, s.handle), "cuMemcpyDtoDAsync");
-            try d.check(d.api.cuMemcpyDtoDAsync_v2(m.norms[i] + dh * 4, L.k_norm, dh * 4, s.handle), "cuMemcpyDtoDAsync");
+            if (L.k_norm != 0) try d.check(d.api.cuMemcpyDtoDAsync_v2(m.norms[i] + dh * 4, L.k_norm, dh * 4, s.handle), "cuMemcpyDtoDAsync");
         }
+        m.alias();
         if (m.paged) try m.makeTables(s);
         try m.rope(s);
         m.origin = try m.zeros(s, 256);
-        try m.scratch(k);
+        try m.scratch(s, k);
         if (m.planned == null) try s.synchronize();
     }
 
+    /// A layer reading another's cache (kv_source_layers) takes that layer's K and V, cache and rows alike.
+    fn alias(m: *Model) void {
+        for (m.c.kv_from[0..m.c.layers], 0..) |from, i| if (from) |src| {
+            m.k[i] = m.k[src];
+            m.v[i] = m.v[src];
+        };
+    }
+
     pub fn deinit(m: *Model) void {
+        m.gpa.free(m.rows_k);
+        m.gpa.free(m.rows_v);
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
         m.gpa.free(m.k);
@@ -266,12 +283,16 @@ pub const Model = struct {
         var most: usize = 0;
         for (m.w.layers) |L| for ([_]cuda.qlinear.Weight{ L.qkv, L.o }) |q| {
             var rows: usize = 1;
-            while (rows <= m.max_rows) : (rows += 1) most = @max(most, k.lane.partBytes(rows, q.fp8g));
+            const lw = switch (q) {
+                .fp8g, .bf16 => |x| x,
+                else => unreachable, // pack.zig makes these two
+            };
+            while (rows <= m.max_rows) : (rows += 1) most = @max(most, k.lane.partBytes(rows, lw));
         };
         return most;
     }
 
-    fn scratch(m: *Model, k: *const kern.Kernels) !void {
+    fn scratch(m: *Model, s: cuda.Stream, k: *const kern.Kernels) !void {
         const c = m.c;
         const r = m.max_rows;
         const dh = c.head_dim;
@@ -303,7 +324,7 @@ pub const Model = struct {
                 .rank = try m.alloc((if (wide) pairs else 1) * 4),
                 .hist = try m.alloc((if (wide) (pairs + 1023) / 1024 * count else 1) * 4),
             },
-            .act = try m.alloc(pairs * c.moe_width * 2),
+            .act = try m.alloc(r * c.actWidth() * 2),
             .y = try m.alloc(pairs * c.hidden * 4),
             .mo = try m.alloc(r * c.hidden * 2),
             .flat = try m.alloc((2 * cap + 4 * m.slotCap()) * 4),
@@ -315,6 +336,22 @@ pub const Model = struct {
             .win = try m.alloc(cuda.window_attention.WindowAttention.scratchBytes(m.window(), cap)),
             .ctab = if (m.paged) try m.alloc(m.slotCap() * m.perSlot() * 4) else 0,
         };
+        m.rows_k = try m.gpa.alloc(u64, c.layers);
+        m.rows_v = try m.gpa.alloc(u64, c.layers);
+        for (0..c.layers) |i| {
+            var read = false; // a later layer reads this one's rows: they keep their own buffers
+            for (c.kv_from[i + 1 .. c.layers]) |f| read = read or (f != null and f.? == i);
+            m.rows_k[i] = if (c.kv_from[i]) |src| m.rows_k[src] else if (read) try m.alloc(r * c.kv_heads * dh * 2) else m.s.kn;
+            m.rows_v[i] = if (c.kv_from[i]) |src| m.rows_v[src] else if (read) try m.alloc(r * c.kv_heads * dh * 2) else m.s.vn;
+        }
+        try m.denseSlots(s, r);
+    }
+
+    /// The dense layers' one slot a row (expert 0 at weight 1), made once for all (a plan's addresses are all 0).
+    pub fn denseSlots(m: *Model, s: cuda.Stream, r: usize) !void {
+        if (std.mem.indexOfScalar(bool, m.c.dense[0..m.c.layers], true) == null) return;
+        m.dense = .{ try m.zeros(s, r * 4), try m.alloc(r * 4) };
+        if (m.planned == null) try m.d.check(m.d.api.cuMemsetD32Async(m.dense[1], 0x3f800000, r, s.handle), "cuMemsetD32Async");
     }
 
     /// A sliding layer's keys: (pos - window, pos], key p at ring row p % ring.
@@ -329,6 +366,26 @@ pub const Model = struct {
 
     /// fp32 logits [rows.len, V] at `out` of the chains' rows `rows` (default: each chain's last).
     pub fn forward(m: *Model, o: kern.Ops, chains: []const Chain, prompt: bool, rows: ?[]const usize, out: u64) !void {
+        const st = try m.stage(o, chains, prompt);
+        var ends: std.ArrayList(usize) = .empty;
+        defer ends.deinit(m.gpa);
+        const pick = rows orelse blk: {
+            var e: usize = 0;
+            for (chains) |ch| {
+                e += ch.tokens.len;
+                try ends.append(m.gpa, e - 1);
+            }
+            break :blk ends.items;
+        };
+        for (pick) |r| if (r >= st.n) return error.NoSuchRow;
+        try m.launch(o, st.n, if (prompt) chains[0] else null, st.t, chains.len, st.ng, @min(m.max_rows, round_rows), pick, out);
+    }
+
+    /// What `stage` leaves `launch` to take: the rows, and a decode round's tree rows and key groups.
+    pub const Staged = struct { n: usize, t: ?cuda.tree_attention.Rows = null, ng: usize = 0 };
+
+    /// The chains' ids, positions and slots on `o.s`; a decode round's plan, paths, offsets and page table too.
+    pub fn stage(m: *Model, o: kern.Ops, chains: []const Chain, prompt: bool) !Staged {
         const gpa = m.gpa;
         const s = o.s;
         if (prompt and chains.len != 1) return error.PromptTakesOneStream;
@@ -355,38 +412,22 @@ pub const Model = struct {
         try m.upload(s, m.s.ids, std.mem.sliceAsBytes(host[0..n]));
         try m.upload(s, m.s.pos, std.mem.sliceAsBytes(host[n .. 2 * n]));
         try m.upload(s, m.s.slot, std.mem.sliceAsBytes(host[2 * n ..]));
-        var t: ?cuda.tree_attention.Rows = null;
-        var ng: usize = 0;
-        var plan: ?tree.Plan = null;
-        defer if (plan) |p| gpa.free(p.flat);
-        if (!prompt) {
-            const windows = try gpa.alloc(tree.Window, chains.len);
-            defer gpa.free(windows);
-            var most: usize = 0;
-            for (chains, windows) |ch, *win| {
-                win.* = .{ .rows = ch.tokens.len, .committed = ch.p0 };
-                most = @max(most, ch.p0 + ch.tokens.len);
-            }
-            plan = try tree.build(gpa, windows);
-            try m.upload(s, m.s.flat, std.mem.sliceAsBytes(plan.?.flat));
-            t = m.treeRows(m.s.flat, plan.?, m.s.paths, m.s.depths, m.s.offs, m.treePages(m.s.ctab));
-            if (m.paged) try m.callTable(s, chains);
-            try o.k.tree.paths(s, m.s.flat + plan.?.parentsAt(), m.s.paths, m.s.depths, n);
-            try m.offsets(s, chains, m.s.offs);
-            ng = TreeAttention.groups(most);
+        if (prompt) return .{ .n = n };
+        const windows = try gpa.alloc(tree.Window, chains.len);
+        defer gpa.free(windows);
+        var most: usize = 0;
+        for (chains, windows) |ch, *win| {
+            win.* = .{ .rows = ch.tokens.len, .committed = ch.p0 };
+            most = @max(most, ch.p0 + ch.tokens.len);
         }
-        var ends: std.ArrayList(usize) = .empty;
-        defer ends.deinit(gpa);
-        const pick = rows orelse blk: {
-            var e: usize = 0;
-            for (chains) |ch| {
-                e += ch.tokens.len;
-                try ends.append(gpa, e - 1);
-            }
-            break :blk ends.items;
-        };
-        for (pick) |r| if (r >= n) return error.NoSuchRow;
-        try m.launch(o, n, if (prompt) chains[0] else null, t, chains.len, ng, @min(m.max_rows, round_rows), pick, out);
+        const plan = try tree.build(gpa, windows);
+        defer gpa.free(plan.flat);
+        try m.upload(s, m.s.flat, std.mem.sliceAsBytes(plan.flat));
+        const t = m.treeRows(m.s.flat, plan, m.s.paths, m.s.depths, m.s.offs, m.treePages(m.s.ctab));
+        if (m.paged) try m.callTable(s, chains);
+        try o.k.tree.paths(s, m.s.flat + plan.parentsAt(), m.s.paths, m.s.depths, n);
+        try m.offsets(s, chains, m.s.offs);
+        return .{ .n = n, .t = t, .ng = TreeAttention.groups(most) };
     }
 
     fn treeRows(m: *const Model, base: u64, p: tree.Plan, paths: u64, depths: u64, offs: u64, pages: ?cuda.tree_attention.Pages) cuda.tree_attention.Rows {
@@ -417,7 +458,7 @@ pub const Model = struct {
     }
 
     /// The layers over staged inputs, no host copies (a graph can hold them); `prompt_chain` set: a prompt chunk.
-    fn launch(m: *Model, o: kern.Ops, n: usize, prompt_chain: ?Chain, t: ?cuda.tree_attention.Rows, streams: usize, ng: usize, cap: usize, pick: []const usize, out: u64) !void {
+    pub fn launch(m: *Model, o: kern.Ops, n: usize, prompt_chain: ?Chain, t: ?cuda.tree_attention.Rows, streams: usize, ng: usize, cap: usize, pick: []const usize, out: u64) !void {
         const c = m.c;
         const s = o.s;
         const prompt = prompt_chain != null;
@@ -437,12 +478,18 @@ pub const Model = struct {
             try (if (prompt) lin.prompt(s, L.qkv, .{ .x = m.s.x, .part = m.s.part }, m.s.qkv, n) else lin.decode(s, L.qkv, .{ .x = m.s.x, .part = m.s.part }, m.s.qkv, n));
             const len = if (c.full[i]) m.context else m.ring;
             const paged = c.full[i] and m.paged; // the rows kernel writes no cache: `put` copies its k and v rows' bits
-            try o.qkv(.{ .rows = m.s.qkv, .norms = m.norms[i], .cos = m.cos, .sin = m.sin, .pos = m.s.pos, .slots = m.s.slot, .q = m.s.q, .k = m.s.kn, .v = m.s.vn, .kc = if (paged) 0 else m.k[i], .vc = if (paged) 0 else m.v[i], .len = len }, n, h, hk, dh, c.eps, !c.full[i]);
-            if (paged) {
-                var pw = m.window();
-                pw.win = 0;
-                pw.pg = m.pagesFor(null);
-                try o.put(m.s.kn, m.s.vn, m.k[i], m.v[i], m.s.pos, m.s.slot, pw, n);
+            const kn = m.rows_k[i];
+            const vn = m.rows_v[i];
+            if (c.kv_from[i] != null) { // the source layer's cache and rows are this one's: q alone, no cache write
+                try o.qOnly(m.s.qkv, m.norms[i], m.s.pos, m.s.q, n, h, dh, c.eps);
+            } else {
+                try o.qkv(.{ .rows = m.s.qkv, .norms = m.norms[i], .cos = m.cos, .sin = m.sin, .pos = m.s.pos, .slots = m.s.slot, .q = m.s.q, .k = kn, .v = vn, .kc = if (paged) 0 else m.k[i], .vc = if (paged) 0 else m.v[i], .len = len }, n, h, hk, dh, c.eps, !c.full[i]);
+                if (paged) {
+                    var pw = m.window();
+                    pw.win = 0;
+                    pw.pg = m.pagesFor(null);
+                    try o.put(kn, vn, m.k[i], m.v[i], m.s.pos, m.s.slot, pw, n);
+                }
             }
             if (prompt_chain) |ch| {
                 const per = if (paged) 0 else len * hk * dh * 2; // a stream's rows (paged: pages)
@@ -458,24 +505,32 @@ pub const Model = struct {
             } else {
                 var rows = t.?;
                 rows.offs += i * streams * 16;
-                try o.full(m.s.q, m.s.kn, m.s.vn, rows, m.s.tree, cap, ng, m.s.att, n, h, hk, dh, scale(c));
+                try o.full(m.s.q, kn, vn, rows, m.s.tree, cap, ng, m.s.att, n, h, hk, dh, scale(c));
             }
             try (if (prompt) lin.prompt(s, L.o, .{ .x = m.s.att, .part = m.s.part }, m.s.o, n) else lin.decode(s, L.o, .{ .x = m.s.att, .part = m.s.part }, m.s.o, n));
             try o.addRms(m.s.o, m.s.res, L.post_attn_norm, L.pre_moe_norm, m.s.x, n, c.hidden, c.eps);
-            // routed experts by sigmoid + bias, the shared expert as one more slot of weight 1, then the weighted sum
-            try o.dense(m.s.x, c.hidden, L.router, m.s.logits_e, n, c.hidden, c.experts);
-            try o.topk(m.s.logits_e, L.bias, m.s.pick, m.s.wts, n, c.experts, c.top_k);
-            try o.k.router.route(s, m.s.pick, pairs, c.experts + 1, tile, m.s.plan);
-            const up_in: experts.Rows = .{ .x = m.s.x, .stride = c.hidden, .slots = slots_e };
-            const down_in: experts.Rows = .{ .x = m.s.act, .stride = c.moe_width };
-            if (prompt) {
-                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
-                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
-            } else {
-                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
-                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
+            // routed experts by sigmoid + bias, the shared one at weight 1; a dense layer: its MLP alone at weight 1
+            const dense = c.dense[i];
+            const sl = if (dense) 1 else slots_e;
+            const np = n * sl;
+            const pk = if (dense) m.dense[0] else m.s.pick;
+            const wt = if (dense) m.dense[1] else m.s.wts;
+            const its = if (dense) grouped.maxItems(np, 1, tile) else items;
+            if (!dense) {
+                try o.dense(m.s.x, c.hidden, L.router, m.s.logits_e, n, c.hidden, c.experts);
+                try o.topk(m.s.logits_e, L.bias, m.s.pick, m.s.wts, n, c.experts, c.top_k);
             }
-            try o.combine(m.s.y, prompt, m.s.wts, m.s.mo, n, slots_e, c.hidden);
+            try o.k.router.route(s, pk, np, L.experts.experts, tile, m.s.plan);
+            const up_in: experts.Rows = .{ .x = m.s.x, .stride = c.hidden, .slots = sl };
+            const down_in: experts.Rows = .{ .x = m.s.act, .stride = L.experts.width };
+            if (prompt) {
+                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, its, np, tile, -1);
+                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, its, np, tile, -1);
+            } else {
+                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, its, np, tile, -1);
+                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, its, np, tile, -1);
+            }
+            try o.combine(m.s.y, prompt, wt, m.s.mo, n, sl, c.hidden);
             const after = if (i + 1 < w.layers.len) w.layers[i + 1].input_norm else w.norm;
             try o.addRms(m.s.mo, m.s.res, L.post_moe_norm, after, m.s.x, n, c.hidden, c.eps);
         }
@@ -529,72 +584,8 @@ pub const Model = struct {
     }
 };
 
-test "the ring holds a prompt chunk and a window, in whole key tiles" {
-    try std.testing.expectEqual(@as(usize, 8768), ringSize(prompt_rows, 513));
-    try std.testing.expect(ringSize(prompt_rows, 513) - 513 >= prompt_rows);
-}
-
-test "the f64 angle table against core's words: 19 of 64 differ, first at 7" {
-    const rope_freq = @import("core").rope_freq;
-    // The site's f64 frequency rounded to fp32 (the word a move would store); it keeps the f64 value for the angle.
-    const theta: f64 = 1e4; // config.zig's default rope_theta
-    const dh = 128;
-    const site_words = [64]u32{
-        0x3f800000, 0x3f5dafd7, 0x3f3ff911, 0x3f263de0, 0x3f0ff59a, 0x3ef953cf, 0x3ed7e89b, 0x3ebaf81a,
-        0x3ea1e89b, 0x3e8c3504, 0x3e72d424, 0x3e5247ed, 0x3e361887, 0x3e1db040, 0x3e088d77, 0x3dec7fd5,
-        0x3dcccccd, 0x3db15978, 0x3d99940e, 0x3d84fe4d, 0x3d6655c3, 0x3d47763f, 0x3d2cba15, 0x3d159348,
-        0x3d0186e2, 0x3ce054d2, 0x3cc24350, 0x3ca8398b, 0x3c91ad39, 0x3c7c4d33, 0x3c5a7bf1, 0x3c3d3311,
-        0x3c23d70a, 0x3c0de12d, 0x3bf5b9b0, 0x3bd4ca14, 0x3bb8449c, 0x3b9f91cc, 0x3b8a2e77, 0x3b6f520d,
-        0x3b4f3e37, 0x3b33770f, 0x3b1b690d, 0x3b06946f, 0x3ae91528, 0x3ac9d75c, 0x3aaec98e, 0x3a975c0e,
-        0x3a83126f, 0x3a6301e2, 0x3a44948c, 0x3a2a3b43, 0x3a136a16, 0x39ff4fad, 0x39dd1726, 0x39bf74d7,
-        0x39a5cb5f, 0x398f9272, 0x3978a814, 0x395753e5, 0x393a7753, 0x39217917, 0x390bd472, 0x38f22ce3,
-    };
-    const core_words = [64]u32{
-        0x3f800000, 0x3f5dafd7, 0x3f3ff911, 0x3f263de0, 0x3f0ff59a, 0x3ef953cf, 0x3ed7e89b, 0x3ebaf81b,
-        0x3ea1e89b, 0x3e8c3504, 0x3e72d423, 0x3e5247ed, 0x3e361887, 0x3e1db040, 0x3e088d77, 0x3dec7fd6,
-        0x3dcccccd, 0x3db15978, 0x3d99940d, 0x3d84fe4d, 0x3d6655c2, 0x3d47763f, 0x3d2cba15, 0x3d159348,
-        0x3d0186e3, 0x3ce054d2, 0x3cc2434f, 0x3ca8398b, 0x3c91ad39, 0x3c7c4d33, 0x3c5a7bf2, 0x3c3d3311,
-        0x3c23d70a, 0x3c0de12d, 0x3bf5b9b0, 0x3bd4ca15, 0x3bb8449c, 0x3b9f91cc, 0x3b8a2e77, 0x3b6f520e,
-        0x3b4f3e38, 0x3b33770f, 0x3b1b690d, 0x3b06946f, 0x3ae91528, 0x3ac9d75c, 0x3aaec98e, 0x3a975c0e,
-        0x3a83126f, 0x3a6301e2, 0x3a44948c, 0x3a2a3b44, 0x3a136a16, 0x39ff4fac, 0x39dd1725, 0x39bf74d7,
-        0x39a5cb60, 0x398f9272, 0x3978a815, 0x395753e4, 0x393a7753, 0x39217916, 0x390bd472, 0x38f22ce2,
-    };
-    var site: [64]f32 = undefined;
-    var core: [64]f32 = undefined;
-    for (&site, 0..) |*f, j| {
-        const frac = @as(f64, @floatFromInt(2 * j)) / @as(f64, @floatFromInt(dh));
-        f.* = @floatCast(1.0 / std.math.pow(f64, theta, frac));
-    }
-    rope_freq.inverseFrequencies(theta, dh, &core);
-    var differ: usize = 0;
-    var first: ?usize = null;
-    var max_ulp: u32 = 0;
-    for (site, core, 0..) |s, c, j| {
-        try std.testing.expectEqual(site_words[j], @as(u32, @bitCast(s)));
-        try std.testing.expectEqual(core_words[j], @as(u32, @bitCast(c)));
-        const a: u32 = @bitCast(s);
-        const b: u32 = @bitCast(c);
-        if (a != b) {
-            differ += 1;
-            if (first == null) first = j;
-            max_ulp = @max(max_ulp, if (a > b) a - b else b - a);
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 19), differ);
-    try std.testing.expectEqual(@as(?usize, 7), first);
-    try std.testing.expectEqual(@as(u32, 1), max_ulp);
-}
-
-test "a page's bytes: the pool's layout and the kernels' stride agree" {
-    const config = @import("config.zig");
-    var why: config.Why = .{};
-    var m: Model = undefined;
-    m.c = try config.parse(std.testing.allocator, config.pinned, &why);
-    m.context = 32768;
-    m.ring = ringSize(prompt_rows, m.c.window);
-    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
-    try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
-}
 test {
     _ = @import("forward_offsets_test.zig");
+    _ = @import("forward_rope_test.zig");
+    _ = @import("forward_test.zig");
 }

@@ -9,8 +9,8 @@ const Rig = rig_.Rig;
 const Heads = lay.Heads;
 const Part = lay.Part;
 
-/// Token rows: one, a few, a stage of 16, the TPR seam's either side, and the default chunk.
-const counts = [_]usize{ 1, 4, 16, 63, 64, 1536 };
+/// Token rows: every KR15 short-row cell, the TPR seam's either side, and the default chunk.
+const counts = [_]usize{ 1, 4, 8, 16, 32, 63, 64, 1536 };
 
 /// A pass's inputs, host bytes in one layout: projection rows, conv window and taps, gates, norm weight, state.
 const In = struct { p: []const u8, cs: []const u8, cw: []const u8, a_log: []const u8, dt: []const u8, nw: []const u8, st: []const u8 };

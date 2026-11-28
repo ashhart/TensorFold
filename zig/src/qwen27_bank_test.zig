@@ -20,7 +20,7 @@ fn shape() !abi.Shape {
 test "qwen27 bank: construction does not allocate rollback storage for idle or lone use" {
     var allocations: metal.Allocations = .{};
     const device = metal.Device{ .allocations = &allocations };
-    var pool = try gpu.Pool.init(device, try shape(), 2, 8, 16);
+    var pool = try gpu.Pool.init(a, device, try shape(), 2, 8, 16);
     defer pool.deinit();
     try std.testing.expect(allocations.bytes <= pool.budget.totalBytes() - pool.budget.state);
 }
@@ -40,14 +40,14 @@ test "qwen27 bank: constructor allocation failures unwind every earlier buffer" 
     var count: usize = 0;
     {
         var allocations: metal.Allocations = .{};
-        var pool = try gpu.Pool.init(.{ .allocations = &allocations }, try shape(), 2, 8, 16);
+        var pool = try gpu.Pool.init(a, .{ .allocations = &allocations }, try shape(), 2, 8, 16);
         count = allocations.calls;
         pool.deinit();
         try std.testing.expectEqual(@as(usize, 0), allocations.live);
     }
     for (0..count) |fail| {
         var allocations: metal.Allocations = .{ .fail = fail };
-        try std.testing.expectError(error.NoBuffer, gpu.Pool.init(.{ .allocations = &allocations }, try shape(), 2, 8, 16));
+        try std.testing.expectError(error.NoBuffer, gpu.Pool.init(a, .{ .allocations = &allocations }, try shape(), 2, 8, 16));
         try std.testing.expectEqual(@as(usize, 0), allocations.live);
         try std.testing.expectEqual(@as(usize, 0), allocations.bytes);
     }
@@ -56,7 +56,7 @@ test "qwen27 bank: constructor allocation failures unwind every earlier buffer" 
 test "qwen27 bank: actual plans allocate only the one-row rollback extent" {
     var allocations: metal.Allocations = .{};
     const device = metal.Device{ .allocations = &allocations };
-    var pool = try gpu.Pool.init(device, try shape(), 2, 8, 16);
+    var pool = try gpu.Pool.init(a, device, try shape(), 2, 8, 16);
     defer pool.deinit();
     var one = try Window.init(a, 3, &.{-1}, 2, 64);
     defer one.deinit();
@@ -99,7 +99,7 @@ test "qwen27 bank: actual plans allocate only the one-row rollback extent" {
 test "qwen27 bank: growth shrink reuse and failed allocation leave committed words intact" {
     var allocations: metal.Allocations = .{};
     const device = metal.Device{ .allocations = &allocations };
-    var pool = try gpu.Pool.init(device, try shape(), 2, 8, 16);
+    var pool = try gpu.Pool.init(a, device, try shape(), 2, 8, 16);
     defer pool.deinit();
     const base_bytes = allocations.bytes;
     var one = try Window.init(a, 3, &.{-1}, 2, 64);
@@ -141,6 +141,35 @@ test "qwen27 bank: growth shrink reuse and failed allocation leave committed wor
     for (state) |word| try std.testing.expectEqual(@as(u8, 0x59), word);
 }
 
+test "qwen27 bank: the rollback bank is the recurrent workspace's one lease; nothing else stays resident" {
+    var allocations: metal.Allocations = .{};
+    const device = metal.Device{ .allocations = &allocations };
+    var pool = try gpu.Pool.init(a, device, try shape(), 2, 8, 16);
+    defer pool.deinit();
+    const live = allocations.live;
+    var one = try Window.init(a, 3, &.{-1}, 2, 64);
+    defer one.deinit();
+    var small = try makePlan(&pool, &.{
+        .{ .window = one, .state_slot = 0, .next_slot = 0, .path = &.{0} },
+        .{ .window = one, .state_slot = 1, .next_slot = 1, .path = &.{0} },
+    });
+    defer small.deinit();
+    var high = try makePlan(&pool, &.{
+        .{ .window = one, .state_slot = 0, .next_slot = 0, .path = &.{0} },
+        .{ .window = one, .state_slot = 7, .next_slot = 7, .path = &.{0} },
+    });
+    defer high.deinit();
+    try pool.prepare(device, small, false);
+    try std.testing.expectEqual(pool.before.?.length(), pool.scratch.residentBytes());
+    try std.testing.expectEqual(live + 1, allocations.live);
+    try pool.prepare(device, high, false);
+    try std.testing.expectEqual(pool.budget.state, pool.scratch.residentBytes()); // the smaller bank went first
+    try std.testing.expectEqual(live + 1, allocations.live);
+    try pool.prepare(device, high, true);
+    try std.testing.expectEqual(@as(usize, 0), pool.scratch.residentBytes());
+    try std.testing.expectEqual(live, allocations.live);
+}
+
 const Fixture = struct {
     pool: gpu.Pool,
     metadata: gpu.Metadata,
@@ -148,7 +177,7 @@ const Fixture = struct {
     output: metal.Buffer,
     fn init(device: metal.Device) !Fixture {
         var f: Fixture = undefined;
-        f.pool = try gpu.Pool.init(device, try shape(), 2, 8, 16);
+        f.pool = try gpu.Pool.init(a, device, try shape(), 2, 8, 16);
         errdefer f.pool.deinit();
         inline for (@typeInfo(gpu.Metadata).@"struct".field_names) |name|
             @field(f.metadata, name) = .{ .buffer = try device.buffer(4096, 0) };
@@ -158,7 +187,10 @@ const Fixture = struct {
     }
     fn deinit(f: *Fixture) void {
         f.pool.deinit();
-        inline for (@typeInfo(gpu.Metadata).@"struct".field_names) |name| @field(f.metadata, name).buffer.deinit();
+        inline for (@typeInfo(gpu.Metadata).@"struct".field_names) |name| {
+            const ref = if (comptime std.mem.eql(u8, name, "flows")) @field(f.metadata, name).? else @field(f.metadata, name);
+            ref.buffer.deinit();
+        }
         f.scratch.deinit();
         f.output.deinit();
     }

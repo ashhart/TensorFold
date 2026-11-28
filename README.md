@@ -36,7 +36,7 @@ Needs glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0). The [run 
 lists the archive's requirements; Windows has [its own guide](docs/WINDOWS.md).
 
 ```sh
-V=1.2.9
+V=1.3.7
 case "$(uname -m)" in
   aarch64|arm64) PLATFORM=linux-aarch64 ;;
   x86_64) PLATFORM=linux-x86_64 ;;
@@ -52,6 +52,11 @@ tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f1
 tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 8192 --no-thinking
 ```
 
+On Windows, `tensorfold start` is not available yet. Use the [Windows guide](docs/WINDOWS.md).
+
+Or let TensorFold choose on macOS and Linux with `tensorfold start --check`. It prints the selected model and download
+size and asks before downloading. The check prints one reply and stops the server.
+
 ### Send a request
 
 Leave the server running. In another terminal, on either platform:
@@ -64,6 +69,17 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 
 The API also serves completions, Responses and Anthropic Messages. `/v1/models` lists the served name.
 
+To talk to a model in the terminal in one command, `tensorfold chat MODEL` starts the server itself, streams each
+reply and stops the server when the chat ends; `/help` lists the chat's commands, and `/bye` or Ctrl-D ends it:
+
+```sh
+tensorfold chat mlx-community/Qwen3.5-2B-MLX-4bit
+```
+
+With the server above still running, `tensorfold chat --url http://127.0.0.1:8080` chats with it instead, and
+`echo "Say hello." | tensorfold chat --url http://127.0.0.1:8080` prints one reply for a script.
+See [the chat command](docs/chat.md) for its flags and the serve flags it passes on.
+
 ## Docs
 
 - [Run guide](docs/run-guide.md): platform setup, requests, parallel requests, exact decoding, context compaction,
@@ -73,6 +89,7 @@ The API also serves completions, Responses and Anthropic Messages. `/v1/models` 
 - [Installation runbook](RUNBOOK.md): macOS and CUDA installation, paired Metal serving and troubleshooting.
 - [Windows](docs/WINDOWS.md), [TensorFold Web](docs/web.md) and [the Mac app](app/README.md).
 - [API](docs/api.md), [Cortheon mode](docs/cortheon.md) and [known issues](docs/known-issues.md).
+- [Claude Code](docs/claude-code.md): point it at a local server, name its model, and keep its prompt prefix cacheable.
 - [Evaluating TensorFold](docs/evaluating.md) and [community benchmarks](docs/community-benchmarks.md).
 - [Usable memory profiles](docs/memory-profiling.md): how to record applied budgets, context, cache state and process peaks.
 - [Contributing](CONTRIBUTING.md): ATC and agents, builds, tests and the exactness and performance gates.

@@ -198,17 +198,17 @@ fn block(root: std.json.Value) ?std.json.ObjectMap {
     return null;
 }
 
-fn object(v: ?std.json.Value) ?std.json.ObjectMap {
+pub fn object(v: ?std.json.Value) ?std.json.ObjectMap {
     const x = v orelse return null;
     return if (x == .object) x.object else null;
 }
 
-fn text(v: ?std.json.Value) ?[]const u8 {
+pub fn text(v: ?std.json.Value) ?[]const u8 {
     const x = v orelse return null;
     return if (x == .string) x.string else null;
 }
 
-fn int(v: ?std.json.Value) ?i64 {
+pub fn int(v: ?std.json.Value) ?i64 {
     const x = v orelse return null;
     return if (x == .integer) x.integer else null;
 }

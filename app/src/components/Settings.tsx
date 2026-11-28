@@ -183,6 +183,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
             return (
               <div key={group.id}>
                 <button
+                  aria-expanded={isOpen}
                   onClick={() => toggleGroup(group.id)}
                   className={clsx('mt-2 flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1 text-left text-[13px] font-normal transition-colors hover:text-ink', hasActive ? 'text-ink-2' : 'text-ink-3')}
                 >
@@ -194,6 +195,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
                     {group.sections.map((section) => (
                       <button
                         key={section.id}
+                        aria-current={activeSection === section.id ? 'page' : undefined}
                         onClick={() => setActiveSection(section.id)}
                         className={clsx('flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors', activeSection === section.id ? 'bg-surface-hover text-ink' : 'text-ink/80 hover:bg-surface-hover hover:text-ink')}
                       >
@@ -210,7 +212,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
         <div className="px-4 py-3 text-[12px] leading-relaxed text-ink-4">
           {tx("Settings and conversations are stored locally on your machine.")}</div>
       </aside>
-      <section className="content-card relative flex min-w-0 flex-1 flex-col">
+      <main className="content-card relative flex min-w-0 flex-1 flex-col">
         <div className="drag flex min-h-11 shrink-0 items-center justify-between gap-3 px-3 py-1">
           <label className="no-drag flex min-w-0 flex-1 items-center sm:hidden">
             <span className="sr-only">{tx("Settings section")}</span>
@@ -277,7 +279,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
             )}
           </div>
         </div>
-      </section>
+      </main>
     </div>
   )
 }

@@ -26,10 +26,21 @@ fn same(x: [2]usize, y: [2]usize) bool {
 
 /// A layer's experts: gate and up share one width (one kernel reads both), routed and shared each their own.
 pub fn experts(w: *const widths.Widths, stem: []const u8) !?variants.Experts {
+    return expertsTfq3(w, stem, false);
+}
+
+pub fn expertsTfq3(w: *const widths.Widths, stem: []const u8, tfq3_routed: bool) !?variants.Experts {
     var buf: [192]u8 = undefined;
     var v: [6][2]usize = undefined;
     const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-    for (projs, &v) |p, *out| out.* = try width(w, try std.fmt.bufPrint(&buf, "{s}.mlp.{s}", .{ stem, p }));
+    for (projs, &v, 0..) |p, *out, j| {
+        const is_routed = j == 0 or j == 1 or j == 4;
+        if (tfq3_routed and is_routed) {
+            out.* = .{ 6, 32 };
+        } else {
+            out.* = try width(w, try std.fmt.bufPrint(&buf, "{s}.mlp.{s}", .{ stem, p }));
+        }
+    }
     if (!same(v[0], v[1]) or !same(v[2], v[3])) {
         std.log.warn("{s}: gate and up of one expert differ in width; one kernel reads both", .{stem});
         return error.ExpertGateUpWidths;
@@ -60,10 +71,19 @@ pub fn uniformDir(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
 
 /// Every directly read tensor's width from the checkpoint's config; `spelling` names the n-gram shards.
 pub fn read(c: *const config.Config, w: *const widths.Widths, spelling: []const u8) !Set {
+    return readWithTfq3(c, w, spelling, null, false);
+}
+
+pub fn readWithTfq3(c: *const config.Config, w: *const widths.Widths, spelling: []const u8, tfq3_layers: ?[]const bool, tfq3_mtp: bool) !Set {
     var s: Set = .{};
     var buf: [192]u8 = undefined;
-    for (0..c.layers) |i| s.layers[i] = try experts(w, try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}", .{i}));
-    if (c.mtp.layers > 0) s.mtp = try experts(w, "language_model.mtp.layers.0");
+    var any_tfq3 = tfq3_mtp;
+    for (0..c.layers) |i| {
+        const is_t = if (tfq3_layers) |tl| (i < tl.len and tl[i]) else false;
+        any_tfq3 = any_tfq3 or is_t;
+        s.layers[i] = try expertsTfq3(w, try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}", .{i}), is_t);
+    }
+    if (c.mtp.layers > 0) s.mtp = try expertsTfq3(w, "language_model.mtp.layers.0", tfq3_mtp);
     s.embed = orNull(try width(w, "language_model.model.embed_tokens"));
     for (0..c.layers) |i| if (c.ple[i]) {
         const first = try width(w, try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.ple.ple_embedding.ngram_embedding.{s}0", .{ i, spelling }));
@@ -73,7 +93,7 @@ pub fn read(c: *const config.Config, w: *const widths.Widths, spelling: []const 
         }
         s.ple = orNull(first);
     };
-    s.uniform = sixUniform(w);
+    s.uniform = sixUniform(w) and !any_tfq3;
     return s;
 }
 
@@ -85,7 +105,9 @@ test {
 pub fn apply(a: std.mem.Allocator, c: *const config.Config, map: std.json.ObjectMap, p: *replay.Prompt, m: *replay.Model) !bool {
     var w = try widths.Widths.init(a, c);
     defer w.deinit();
-    const ws = try read(c, &w, @import("index.zig").ngramSpelling(map));
+    var tfq3_l: [config.max_layers]bool = @splat(false);
+    for (&m.layers, 0..) |*L, i| tfq3_l[i] = L.tfq3 != null;
+    const ws = try readWithTfq3(c, &w, @import("index.zig").ngramSpelling(map), tfq3_l[0..c.layers], m.mtp.tfq3 != null);
     for (&m.layers, 0..) |*L, i| L.xw = ws.layers[i];
     m.mtp.xw = ws.mtp;
     m.embed_w = ws.embed;

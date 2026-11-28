@@ -152,6 +152,9 @@ pub const Layout = struct {
         errdefer gpa.free(d);
         @memcpy(std.mem.sliceAsBytes(d), bytes[@sizeOf(Head) + segs.len * @sizeOf(Seg) ..][0 .. d.len * 32]);
         var nd: u64 = 0;
+        for (segs, 0..) |s, i| if (s.kind == .blob) for (segs[0..i]) |old| {
+            if (old.kind == .blob and std.mem.eql(u8, old.nameOf(), s.nameOf())) return error.BadHeader;
+        };
         for (segs) |s| {
             if (s.chunk == 0 or s.stride != up(s.chunk) or s.first_digest != nd or s.offset % 4096 != 0) return error.BadHeader;
             if (s.stride > max_stride) return error.BadHeader;
@@ -238,4 +241,23 @@ test "a segment of 2^64 - 1 bytes claiming no chunks is refused, not counted by 
 // In a child: if decode's end-of-segment sum is unchecked, a safe build panics and only this test fails
 test "a segment whose last chunk ends past 2^64 is refused, not wrapped under the file's total" {
     try std.testing.expectEqual(isolate.Outcome.passed, try isolate.run(decodeWrapped, .{ null, std.math.maxInt(u64) - 4095 }));
+}
+
+test "security: duplicate blob names, including NUL-truncated collisions, are refused" {
+    const gpa = std.testing.allocator;
+    const head: Head = .{ .key = @splat(1), .compat = @splat(2), .tag = 3, .kind = 0, .page = 256, .world = 1, .rank = 0, .first_page = 0, .npages = 1, .nseg = 0, .ndigest = 0, .pos = 0 };
+    const names = [_][2][]const u8{
+        .{ "taps", "taps" },
+        .{ "123456789012345678901234567890123456789-a", "123456789012345678901234567890123456789-b" },
+    };
+    for (names) |pair| {
+        var l = try Layout.build(gpa, head, &.{
+            .{ .name = segName(pair[0]), .kind = .blob, .family = 0, .nbytes = 4096, .chunk = 4096 },
+            .{ .name = segName(pair[1]), .kind = .blob, .family = 0, .nbytes = 8192, .chunk = 4096 },
+        });
+        defer l.deinit(gpa);
+        var buf: [8192]u8 = undefined;
+        l.encode(&buf);
+        try std.testing.expectError(error.BadHeader, Layout.decode(gpa, &buf, 1 << 20));
+    }
 }

@@ -10,6 +10,38 @@ const Hazards = @import("hazard.zig").Hazards;
 const Error = runtime.Error;
 const check = runtime.check;
 
+const max_streams = 64;
+
+const StreamSlot = struct {
+    id: std.atomic.Value(u64) = .init(0),
+    completed: std.atomic.Value(u64) = .init(0),
+};
+
+var stream_gen: std.atomic.Value(u64) = .init(1);
+var stream_slots: [max_streams]StreamSlot = @splat(.{});
+
+fn claimStreamSlot() Error!u64 {
+    for (&stream_slots, 0..) |*slot, idx| {
+        const gen = stream_gen.fetchAdd(1, .monotonic);
+        const id = (gen << 8) | @as(u64, @intCast(idx));
+        if (slot.id.cmpxchgStrong(0, id, .acq_rel, .monotonic) == null) {
+            slot.completed.store(0, .release);
+            return id;
+        }
+    }
+    return error.OutOfMemory;
+}
+
+/// True when `stream_id` has completed `epoch` (fence signalled or discarded) or was cleanly deinitialized.
+pub fn isLeaseFree(stream_id: u64, epoch: u64) bool {
+    if (stream_id == 0) return true;
+    const idx: usize = @intCast(stream_id & 0xff);
+    if (idx >= max_streams) return true;
+    const cur = stream_slots[idx].id.load(.acquire);
+    if (cur != stream_id) return true;
+    return stream_slots[idx].completed.load(.acquire) >= epoch;
+}
+
 pub const Commands = struct {
     dev: *const Device,
     pool: c.VkCommandPool,
@@ -25,6 +57,23 @@ pub const Commands = struct {
     submitted_before: bool = false,
     /// Set by a state-corrupting failure (signaled fence, invalid buffer, failed submit or wait): begin, submit refuse.
     poison: ?Error = null,
+    /// Lazily claimed registry ID and monotonic recording epoch for fence-tied descriptor set leases.
+    stream_id: u64 = 0,
+    epoch: u64 = 1,
+
+    /// Stable non-zero stream ID for descriptor-set leasing; claimed lazily so test structs need no init call.
+    pub fn streamId(self: *Commands) Error!u64 {
+        if (self.stream_id == 0) self.stream_id = try claimStreamSlot();
+        return self.stream_id;
+    }
+
+    fn finishEpoch(self: *Commands) void {
+        if (self.stream_id != 0) {
+            const idx: usize = @intCast(self.stream_id & 0xff);
+            stream_slots[idx].completed.store(self.epoch, .release);
+        }
+        self.epoch += 1;
+    }
 
     pub fn init(dev: *const Device) Error!Commands {
         const api = &dev.api;
@@ -52,6 +101,10 @@ pub const Commands = struct {
 
     /// Frees the pool, its command buffer and the fence after the last submit; dispatches never submitted are dropped.
     pub fn deinit(self: *Commands) void {
+        if (self.stream_id != 0 and self.poison == null) {
+            const idx: usize = @intCast(self.stream_id & 0xff);
+            stream_slots[idx].id.store(0, .release);
+        }
         self.dev.api.vkDestroyFence(self.dev.handle, self.fence, null);
         self.dev.api.vkDestroyCommandPool(self.dev.handle, self.pool, null);
         self.* = undefined;
@@ -64,6 +117,7 @@ pub const Commands = struct {
         self.recording = false;
         self.pending = 0;
         self.hazards.clear();
+        if (self.poison == null) self.finishEpoch();
     }
 
     /// The open command buffer; begun (and reset) only when nothing recorded earlier still waits for a submission.
@@ -134,6 +188,7 @@ pub const Commands = struct {
             if (!builtin.is_test) std.log.err("vulkan: vkResetFences returned {d} after a signaled wait; the command stream is poisoned", .{reset_done});
             return error.FencePoisoned;
         }
+        self.finishEpoch();
     }
 };
 
@@ -194,6 +249,53 @@ pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offse
     if (dst.dev != dev or dst.kind != .device) return error.Invalid;
     try fillRange(dst.len, offset, len);
     dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
+}
+
+/// Fills `len` bytes of `dst` at `offset` with `value` inside the open command buffer, with transfer barriers.
+pub fn fillInBatch(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32) Error!void {
+    if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
+    try fillRange(dst.len, offset, len);
+    const cmd = try cmds.begin();
+    const range = [_]@import("hazard.zig").Range{.{ .buffer = @intFromPtr(dst.handle), .start = offset, .end = offset + len }};
+    if (cmds.hazards.conflicts(&.{}, &range)) {
+        barrier(cmds.dev, cmd, gpu_stages, gpu_writes, gpu_stages, gpu_access);
+        cmds.hazards.clear();
+    }
+    cmds.dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+}
+
+/// Vulkan guarantees vkCmdUpdateBuffer inline copies up to 64 KiB, 4-byte aligned.
+pub const max_inline_update: u64 = 65536;
+
+/// Copies `bytes` inline into `dst` at `offset` inside the open command buffer without staging or submitting.
+pub fn updateInBatch(cmds: *Commands, dst: Buffer, offset: u64, bytes: []const u8) Error!void {
+    if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
+    if (bytes.len > max_inline_update) return error.Invalid;
+    try fillRange(dst.len, offset, bytes.len);
+    const cmd = try cmds.begin();
+    const range = [_]@import("hazard.zig").Range{.{ .buffer = @intFromPtr(dst.handle), .start = offset, .end = offset + bytes.len }};
+    if (cmds.hazards.conflicts(&.{}, &range)) {
+        barrier(cmds.dev, cmd, gpu_stages, gpu_writes, gpu_stages, gpu_access);
+        cmds.hazards.clear();
+    }
+    cmds.dev.api.vkCmdUpdateBuffer(cmd, dst.handle, offset, bytes.len, bytes.ptr);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+}
+
+/// Zeroes every device buffer in `buffers` on-GPU in a single submission.
+pub fn zeroBuffers(cmds: *Commands, buffers: []const *Buffer, timeout_ns: u64) Error!void {
+    for (buffers) |ptr| {
+        if (ptr.dev != cmds.dev or ptr.kind != .device) return error.Invalid;
+        try fillRange(ptr.len, 0, ptr.len);
+    }
+    if (buffers.len == 0) return;
+    const cmd = try cmds.begin();
+    barrier(cmds.dev, cmd, gpu_stages, gpu_writes, gpu_stages, gpu_access);
+    cmds.hazards.clear();
+    for (buffers) |ptr| cmds.dev.api.vkCmdFillBuffer(cmd, ptr.handle, 0, ptr.len, 0);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+    try cmds.submit(timeout_ns);
 }
 
 /// Fills `len` bytes of buffer `dst` at `offset` with `value`, after earlier dispatches and copies; submits the batch.

@@ -7,7 +7,7 @@ const st = @import("metal_state.zig");
 const fwd = @import("metal_forward.zig");
 const Model = @import("metal_model.zig").Model;
 const snapshot = @import("metal_snapshot.zig");
-const row = @import("../step5/backend.zig").row;
+const row = lanes.logprob.bf16Row;
 const be = lanes.backend;
 
 /// The longest context a stream may take, the streams at once, and the bytes every stream's caches may hold.
@@ -199,7 +199,10 @@ pub const Metal = struct {
             return error.SparkCachesFull;
         }
         self.held += need;
-        errdefer self.held -= need;
+        errdefer { // as releaseFn: the bytes back and the prompt cache's room fitted to them (it was fitted short below)
+            self.held -= need;
+            if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, null, &.{});
+        }
         if (stream.reuse.saved) |saved| { // a state the stream cannot hold beside its caches: freed now, no restore
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (self.held + snap.bytes > self.options.budget) snap.free();

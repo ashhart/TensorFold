@@ -10,7 +10,7 @@ Old files remain in their original namespace and follow the existing cache budge
 | Nemotron, Metal | Binary, kernel texts, precision mode, prompt step, loaded coop K-slice split and its scratch rows, probe, OS build and GPU | Config, index, shard stamps and MTP header | Canonical snapshot, head flag and probe | Shared host clears RAM and detaches disk stores when weights move |
 | Dense Qwen hybrid, Metal | Binary, shared/family shader texts, tensor mode, loaded ANE columns and prompt policy, probe, OS build and GPU | Config, index and shard stamps for target and external drafter | Canonical recurrence/KV/tap image and draft end | Unsupported learners refuse; the store remains scoped to its loaded model |
 | GLM, Metal | Binary, compiled source hash, resolved rank/route/prompt policy, probe, OS build and GPU | Config/index identity plus current shard stamps | Canonical KDA/MLA image and checked snapshot header | Unsupported learner on this adapter |
-| Flash Next, Metal | Binary, actual loaded shader texts/bindings, rotary/precision and resolved execution policy, probe, OS build and GPU | Pack metadata identity, current source and loaded-pack stamps, loaded reference bytes | Checked snapshot layout; canonical session image | Unsupported learner on this adapter |
+| Flash Next, Metal | Binary, actual loaded shader texts/bindings, rotary/precision and resolved execution policy, probe, OS build and GPU | Stable pack metadata, verified source and opened-pack content digests, loaded reference bytes | Checked snapshot layout; canonical session image | Unsupported learner on this adapter |
 | Nemotron, CUDA | Binary, embedded images, captured manifest and cubin bytes, resolved checkpoint math, expert ranks, NVFP4 decode form, lane half-tile threshold, expert grids and captured attention variant, probe, GPU and driver | Config, index and shard stamps | Head flag and canonical state image | Shared host clears RAM and detaches disk stores when weights move |
 | Qwen dense/MoE hybrids, CUDA | Same shared CUDA identity | Same shared checkpoint identity | Explicit BF16/FP8 format, tap flag, prompt-int8 mode and actual rotary table; image states stay off disk | Same shared learning barrier |
 | Flash Next, CUDA | Same shared CUDA identity, plus resolved prompt chunk heights, prompt kernel forms and tile thresholds, expert grids and captured-set use | Same shared checkpoint identity | Head flag and canonical recurrence/KV/PLE image; tensor-rank disk persistence is refused | Same shared learning barrier |
@@ -29,12 +29,35 @@ rendered answer text. No separate hot-swappable LoRA state is admitted by these 
 changes and supported external drafters use the identities above.
 
 Checkpoint keys include every validated indexed shard path, including subfolders and any suffix accepted by the loader, plus
-auxiliary top-level safetensors files. Their names, sizes, inodes and modification/change stamps are bound. A weight
+auxiliary top-level safetensors files. Except for Flash Next Metal, their names, sizes, inodes and modification/change stamps are bound. A weight
 write with unchanged config, index, tensor header and size moves their namespace even when a fixed probe does not
 visit the changed tensor. Flash Next also hashes the loaded variant text and input/output/meta bindings in sorted
 function-name order. Captured CUDA sets hash each cubin named by the parsed manifest, through the same loader
 paths and size limit. A missing or changed file fails identity construction instead of opening an old namespace;
 a shard the index names but the folder lacks is refused as `IndexedShardMissing`, as the loaders refuse it.
+
+Top-level TFQ3 record files also contribute their stamps. When records are present, keys bind the 10,816 active
+PWV3 table bytes already checked by the loaders; an orphan table contributes nothing. Existing verified whole-file
+SHA256 digests are used when available, without scanning payloads on a miss. Pack builders record generated file
+digests while writing already resident bytes, in a separate digest namespace so publication cannot evict their own
+input digests. Flash Next pack identity version 5 has stable index/config/shard-header metadata and deterministic
+source-content attestations. Builders hash each source shard before retaining conversion indices, independent of
+local digest-cache warmth. Namespaces and pack-cache directories use stable metadata; admissions separately compare
+any locally verified content. Descriptor stamps live only in the local digest cache. An unknown copied source admits
+under the metadata-only policy; a locally verified inode whose stamps changed needs verification, not a silent fallback.
+Old identity formats rebuild through the existing path; an explicit refused pack names its rebuild command.
+
+Flash Next Metal persisted state requires verified content for every checkpoint shard and actual opened weight file.
+Only the content digests enter its keys, along with the existing binary, arithmetic, metadata and prompt policies.
+Identical copies under identical runtime policies share a key after verification. Missing local digests leave both
+learned-state and conversation-state tiers unattached, while ordinary model serving and in-memory cache remain available.
+This prevents an unverified copy from reusing a state based only on metadata. No load-time payload scan is added;
+rebuilding through `tf-flashnext-pack` performs the source verification and records generated-pack digests while writing.
+
+This is not an authenticated checkpoint format. A source or TFQ3 coefficient edit preserving all descriptor stamps
+can remain undetected: refreshing a cached digest or checking unseen bytes would require a payload read. A supplied
+pack's source metadata alone is not proof of an arbitrary pack payload's authenticity. These limits are retained to
+avoid adding payload scans at load. Snapshot payloads and serving arithmetic are unchanged.
 
 Resolved policies are bound even when a fixed startup probe does not exercise their difference. The Metal Qwen
 key includes loaded ANE columns and the prompt chunk height, not the frame's buffer rows. GLM includes effective
@@ -42,7 +65,7 @@ rank slices, routing, its prompt chunk height and sparse kernel, and whether the
 the tile kernel as the load built it (`GLM_EHPROJ_NAX=0` or a failed tile build: scalar). A different chunk height
 starts these two stores cold: GLM's prompt windows and chunks sum in different orders (#743), and Qwen's may too.
 Flash Next includes its resolved execution branches, including the DeltaNet window kernels, but not the serial
-encoder choice, which orders the same launches. It also binds stamps of the files actually indexed (including an
+encoder choice, which orders the same launches. It binds verified content of the files actually indexed (including an
 external weight pack) and the bytes of loaded metadata such as a supplied reference. Descriptor and mapping order
 do not change that key. CUDA Qwen keys include the rotary table the target consumes, for dense and routed
 checkpoints. These additions change the optional disk namespace; snapshot payloads and layouts are unchanged.
@@ -55,7 +78,7 @@ grids, and whether a captured set runs with which entries on our glue. `TF_FLASH
 keyed through the profile rows. Its draft, window, round, graph, lane-parts (`TF_FLASHNEXT_LANE_PARTS`), load-thread, I/O and dense-split settings and
 `TF_FLASHNEXT_KV_PAGE_TEST` are not keyed: kept states come only from prompt passes, which those settings either never
 reach, reach with the same launches or the same kernels addressing pages, or refuse for disk at `--tp 2`.
-Nemotron on CUDA keys `--precision checkpoint`'s math, the expert ranks of `TF_NEMOTRON_WORLD`, a ModelOpt
+Nemotron on CUDA keys `--precision checkpoint`'s math, the expert ranks of `--tp` (or `TF_NEMOTRON_WORLD`), a ModelOpt
 checkpoint's NVFP4 decode warps and lane half-tile threshold, the experts' resident grids and, with a captured set, the
 attention variant `--context` picks by its chunk count. Its pages, poison fill, carveout, segments, graph log and trace,
 and the context on our own glue, are not keyed: they place memory, fill pages before use, log, run only passes that

@@ -6,7 +6,6 @@ const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const abi = @import("abi.zig");
-
 const Driver = driver.Driver;
 const Module = module.Module;
 const Function = module.Function;
@@ -56,6 +55,9 @@ pub fn bucket(m: usize) u32 {
 /// A packed projection on the device: codes or words, scale tiles, the tensor scale, its shape, its input scale (act).
 pub const Weight = struct { mode: Mode, codes: u64, scales: u64, scale: f32 = 1.0, n: u32, k: u32, npad: u32, act: f32 = 0, sk: u32 = 0 };
 
+pub const Many = @import("qmmf_many.zig").Many;
+/// Whether matmulMany takes `parts` in one grouped launch rather than one matmulOut each.
+pub const manyEligible = @import("qmmf_many.zig").eligible;
 /// `w` with its K slices pinned to `sk`: 1, 2, 4 or 8, dividing its groups and leaving at least 8 a slice.
 pub fn pinned(w: Weight, sk: u32) error{BadSplit}!Weight {
     const groups = w.k / group;
@@ -103,15 +105,15 @@ fn symbol(
 }
 
 /// The 16-row tile at 32 columns a block (MXFP8 and BF16): plain, then with a cluster.
-fn halfSymbol(comptime mode: Mode, comptime cluster: bool, comptime wide: bool) [:0]const u8 {
+pub fn halfSymbol(comptime mode: Mode, comptime cluster: bool, comptime wide: bool) [:0]const u8 {
     const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi16ELi32ELi1ELi4ELi4ELb{d}ELb{d}ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
     return std.fmt.comptimePrint(name, .{ @backingInt(mode), @intFromBool(wide), @intFromBool(cluster) });
 }
 
 /// Dynamic shared bytes of the half tile: a stage holds half the weights (and scales) of the 64-column tile's.
 pub fn halfShared(mode: Mode) u32 {
-    const w: u32 = if (mode == .bf16) 32 * group * 2 else 32 * group;
-    const s: u32 = if (mode == .mxfp8) 32 * 2 else 0;
+    const w: u32 = if (mode == .bf16) 32 * group * 2 else if (mode == .fp4) 32 * group / 2 else 32 * group;
+    const s: u32 = if (mode == .mxfp8) 32 * 2 else if (mode == .fp4 or mode == .fp8g) 32 * 4 else 0;
     const stage = (16 * group * 2 + w + s + 127) / 128 * 128;
     const partials = 1 * 1 * 4 * threads * 4;
     return @max(4 * stage, partials);
@@ -183,12 +185,18 @@ pub const Lane = struct {
     f32_fns: [modes.len][7]Function,
     reduce: [2]Function, // by Out
     half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
+    half_n: ?@import("qmmf_half.zig").Set = null, // TF_QMMF_HALF_BN: FP4, FP8 and FP8G half tiles too
     half_below: usize = half_below_default,
     shared_down: [4]Function = undefined,
+    /// Output columns from which this lane fuses a split-K cluster call; 0 keeps its original schedule.
+    fuse_split_n: usize = 0,
+    fuse_s: [2][2][2]Function = undefined, // by halfModeIndex, Out, row tile 16 then 32: the fused form at decode rows
+    many: [6]Function = undefined,
     prompt: ?[2][2]Function = null, // Out, then plain / fused; loadPrompt() fills it on sm_12x
     prompt_k32: ?[2]Function = null, // Out; unsplit BF16 prompt calls, loadPrompt() fills it on sm_12x
     prompt_sms: usize = 0, // the device's SMs: the tile runs when its blocks fill more than half of them
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
+    pdl: bool = false, // decode launches dependent (qmmf_kernel waits after its weight loads); weights fixed after load
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -216,7 +224,17 @@ pub const Lane = struct {
             f.* = try mod.function(name);
             try f.allowDynamicShared(sharedBytes(.bf16, 64));
         }
+        inline for (.{ Mode.mxfp8, Mode.bf16 }, 0..) |mode, mi| inline for (.{ false, true }, 0..) |wide, oi| inline for (.{ 16, 32 }, 0..) |bm, bi| {
+            const f = try mod.function(symbol(mode, bm, false, true, wide));
+            try f.allowDynamicShared(sharedBytes(mode, bm));
+            l.fuse_s[mi][oi][bi] = f;
+        };
+        inline for (@import("qmmf_many.zig").symbols, 0..) |name, i| {
+            l.many[i] = try mod.function(name);
+            try l.many[i].allowDynamicShared(sharedBytes(.fp4, row_tiles[i / 2]));
+        }
         l.half_below = try halfBelow();
+        try @import("qmmf_half.zig").apply(&l, d);
         return l;
     }
 
@@ -264,6 +282,7 @@ pub const Lane = struct {
         return l.matmulOut(s, x, ldx, m, w, y, .f32, part);
     }
 
+    pub const matmulMany = @import("qmmf_many.zig").matmulMany;
     pub const matmulF32Strided = @import("qmmf_shared.zig").matmulF32Strided;
 
     /// The actual prompt selection: loaded tiles, the pinned slice plan, and blocks over half the SMs.
@@ -284,8 +303,11 @@ pub const Lane = struct {
         const bm: usize = if (prompt) 128 else p.bm;
         const rows_t = (m + bm - 1) / bm;
         const hm = halfModeIndex(w.mode);
-        const half = hm != null and p.bm == 16 and !p.fused and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
-        const f = if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) l.half[hm.?][@backingInt(out)][@intFromBool(p.cluster)] else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
+        // fuse_split_n: a cluster call this wide on the fused form (row tile 64: the fused instance), one block a tile
+        const fs = l.fuse_split_n != 0 and p.cluster and w.n >= l.fuse_split_n and hm != null;
+        const hn = if (l.half_n != null) @import("qmmf_half.zig").index(w.mode) else null;
+        const half = (hm != null or hn != null) and p.bm == 16 and !p.fused and !fs and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
+        const f = if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) (if (hm) |i| l.half[i] else l.half_n.?[hn.?])[@backingInt(out)][@intFromBool(p.cluster)] else if (fs) (if (p.bm == 64) set[6] else l.fuse_s[hm.?][@backingInt(out)][@intFromBool(p.bm == 32)]) else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const cols: usize = if (prompt) 128 else if (half) 32 else bn;
         const band = @max(1, @min(rows_t, (12 << 20) / (bm * w.k * 2)));
         var args: launch_.Args = .{};
@@ -303,10 +325,11 @@ pub const Lane = struct {
         args.add(@as(i32, @intCast(if (m == 1) w.k else ldx)));
         args.add(@as(i32, @intCast(band)));
         try launch_.launch(f, .{
-            .grid = .{ .x = @intCast(rows_t * ((w.n + cols - 1) / cols)), .y = 1, .z = if (p.fused) 1 else p.sk },
+            .grid = .{ .x = @intCast(rows_t * ((w.n + cols - 1) / cols)), .y = 1, .z = if (p.fused or fs) 1 else p.sk },
             .block = .{ .x = if (prompt) 256 else threads, .y = 1, .z = 1 },
             .shared = if (k32) prompt_k32_shared else if (prompt) prompt_shared else if (half) halfShared(w.mode) else sharedBytes(w.mode, p.bm),
-            .cluster = if (p.cluster) .{ .x = 1, .y = 1, .z = p.sk } else null,
+            .cluster = if (p.cluster and !fs) .{ .x = 1, .y = 1, .z = p.sk } else null,
+            .pdl = l.pdl and !prompt, // the prompt entries do not wait
         }, s, &args);
         if (p.reduce) {
             const total: usize = m * w.n;
@@ -319,6 +342,7 @@ pub const Lane = struct {
             try launch_.launch(l.reduce[@backingInt(out)], .{
                 .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 },
                 .block = .{ .x = 256, .y = 1, .z = 1 },
+                .pdl = l.pdl,
             }, s, &r);
         }
     }
@@ -517,6 +541,42 @@ test "prompt dispatch changes CTA geometry and output instance without changing 
     try std.testing.expectEqual(@as(i32, 4), Trace.sk);
 }
 
+test "a dependent lane launches its decode tile and reduce dependent, its prompt tile plain" {
+    const Seen = struct {
+        var plain: usize = 0;
+        var dependent: usize = 0;
+        fn run(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+            plain += 1;
+            return abi.success;
+        }
+        fn ex(c: *const abi.LaunchConfig, _: abi.Function, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+            if (c.attrs) |attrs| for (attrs[0..c.num_attrs]) |at| if (at.id == .programmatic_stream_serialization and at.value.int == 1) {
+                dependent += 1;
+                return abi.success;
+            };
+            plain += 1;
+            return abi.success;
+        }
+    };
+    var d: Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuLaunchKernel = Seen.run;
+    d.api.cuLaunchKernelEx = Seen.ex;
+    const f: Function = .{ .d = &d, .handle = @ptrFromInt(10) };
+    var lane: Lane = .{ .mod = undefined, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .reduce = @splat(f), .half = @splat(@splat(@splat(f))), .half_below = 0, .prompt = .{ .{ f, f }, .{ f, f } }, .prompt_k32 = .{ f, f }, .clusters = false, .pdl = true };
+    const s: Stream = .{ .d = &d, .handle = null };
+    const w = try pinned(Weight{ .mode = .bf16, .codes = 0, .scales = 0, .n = 2560, .k = 6144, .npad = 2560 }, 4);
+    try lane.matmulOut(s, 0, w.k, 1, w, 0, .bf16, 0x1000); // a decode row: the 16-row tile's 4 slices, then their reduce
+    try std.testing.expectEqual(@as(usize, 2), Seen.dependent);
+    try std.testing.expectEqual(@as(usize, 0), Seen.plain);
+    try lane.matmulOut(s, 0, w.k, 4218, w, 0, .bf16, 0x1000); // the prompt tile does not wait: plain
+    try std.testing.expectEqual(@as(usize, 2), Seen.dependent);
+    try std.testing.expectEqual(@as(usize, 1), Seen.plain);
+    lane.pdl = false;
+    try lane.matmulOut(s, 0, w.k, 1, w, 0, .bf16, 0x1000);
+    try std.testing.expectEqual(@as(usize, 2), Seen.dependent);
+    try std.testing.expectEqual(@as(usize, 3), Seen.plain);
+}
+
 test "a cut weight pinned to the whole weight's K slices plans as the whole one at every row count" {
     const whole: Weight = .{ .mode = .bf16, .codes = 0, .scales = 0, .n = 16480, .k = 2560, .npad = 16512 };
     var cut = whole;
@@ -534,4 +594,7 @@ test "a cut weight pinned to the whole weight's K slices plans as the whole one 
     try std.testing.expectEqual(splitK(cut.n, cut.k), slices(cut));
     try std.testing.expectEqual(@as(u32, 4), (try pinned(cut, 4)).sk); // 40 groups: 10 a slice
     for ([_]u32{ 0, 3, 8, 16 }) |bad| try std.testing.expectError(error.BadSplit, pinned(cut, bad)); // 8: 5 a slice
+}
+test {
+    _ = @import("qmmf_many.zig");
 }

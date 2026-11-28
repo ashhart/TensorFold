@@ -92,7 +92,7 @@ const Got = struct {
 };
 
 /// What a client is left with: reasoning_content and content, joined across a stream's deltas.
-const Seen = struct { reasoning: []const u8, content: []const u8, prompt_end: []const u8 };
+const Seen = struct { reasoning: []const u8, content: []const u8, prompt_end: []const u8, calls: bool = false };
 
 fn ask(a: std.mem.Allocator, reply: []const u32, server_thinking: bool, extra: []const u8, stream: bool, stride: usize) !Seen {
     var fx = try Fixture.init(a);
@@ -112,12 +112,14 @@ fn ask(a: std.mem.Allocator, reply: []const u32, server_thinking: bool, extra: [
     const prompt_end = if (script.prompt.items.len > 0) try hf.text().tokenString(a, script.prompt.items[script.prompt.items.len - 1]) else "";
     var reasoning: std.ArrayList(u8) = .empty;
     var content: std.ArrayList(u8) = .empty;
+    var calls = false;
     if (!stream) {
         try t.expectEqual(@as(u16, 200), got.status);
         const v = (try json.parseText(a, got.body)).ok;
         const m = v.get("choices").?.array[0].get("message").?;
         if (m.get("reasoning_content")) |r| if (r == .string) try reasoning.appendSlice(a, r.string);
         if (m.get("content")) |c| if (c == .string) try content.appendSlice(a, c.string);
+        if (m.get("tool_calls")) |tc| calls = tc == .array and tc.array.len > 0;
     } else for (got.events.items) |e| {
         const v = (try json.parseText(a, e)).ok;
         const choices = v.get("choices") orelse continue;
@@ -125,8 +127,9 @@ fn ask(a: std.mem.Allocator, reply: []const u32, server_thinking: bool, extra: [
         const d = choices.array[0].get("delta") orelse continue;
         if (d.get("reasoning_content")) |r| if (r == .string) try reasoning.appendSlice(a, r.string);
         if (d.get("content")) |c| if (c == .string) try content.appendSlice(a, c.string);
+        if (d.get("tool_calls")) |tc| calls = calls or (tc == .array and tc.array.len > 0);
     }
-    return .{ .reasoning = reasoning.items, .content = content.items, .prompt_end = prompt_end };
+    return .{ .reasoning = reasoning.items, .content = content.items, .prompt_end = prompt_end, .calls = calls };
 }
 
 fn ids(a: std.mem.Allocator, parts: []const Part) ![]const u32 {
@@ -171,10 +174,14 @@ test "DeepSeek chat: reply splits, whole and streamed, thinking on and off" {
     // cut by the length while still reasoning: no content
     s = try probe(a, "on/cut", &.{ .{ .text = "Plan" }, .{ .text = "Hi" } }, true, "");
     try t.expectEqualStrings("", s.content);
-    // ended (EOS) before any close: the reasoning is also the answer (#3687)
+    // ended (EOS) before any close: its reasoning text is the answer too
     s = try probe(a, "on/no-close", &.{ .{ .text = "Plan" }, .{ .id = eos } }, true, "");
     try t.expectEqualStrings("Plan", s.reasoning);
     try t.expectEqualStrings("Plan", s.content);
+    // tools attached: a call envelope inside an unclosed block never becomes a call; the reply keeps empty content
+    s = try probe(a, "on/no-close-markup", &.{ .{ .text = "Plan<tool_call>[nope" ++ "<" ++ "|tool_call_" ++ "start" ++ "|>[lookup()]" ++ "<" ++ "|tool_call_" ++ "end" ++ "|>" }, .{ .id = eos } }, true, ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}],\"max_tokens\":256");
+    try t.expectEqualStrings("", s.content);
+    try t.expect(!s.calls);
     // a reply that writes its own opener after the prompt's
     s = try probe(a, "on/own-opener", &.{ .{ .id = think_open }, .{ .text = "Plan" }, .{ .id = think_close }, .{ .text = "Hi" }, .{ .id = eos } }, true, "");
     try t.expectEqualStrings("Hi", s.content);

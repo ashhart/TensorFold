@@ -5,6 +5,7 @@ const module = @import("module.zig");
 const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
+const grouped = @import("grouped.zig");
 const exl3 = @import("exl3.zig");
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -34,11 +35,25 @@ pub const Layer = struct {
     width: usize, // I (expert width)
     codebook: Codebook,
     uniform_k2: u32 = 0, // nonzero only when the loader verified this half-bit width for every projection
+    uniform_k2_gu: u32 = 0, // nonzero when the loader verified this half-bit width for every gate and up matrix
+    uniform_k2_d: u32 = 0, // nonzero when the loader verified this half-bit width for every down matrix
+    mixed_gu: u32 = 0, // bit k2 for each width of an expert's gate and up (the loader verified the two alike), else 0
+    mixed_d: u32 = 0, // bit k2 for each down width, else 0
     shared_input: bool = false, // the loader verified identical gate/up input scales across every expert
     gu_stride: usize = 0, // gate/up trellis row stride in tiles (0: contiguous per projection)
     limit: f32 = 0, // the SwiGLU clamp (0: none)
-    act_mode: i32 = 0, // 0: GLM's bf16 roundings (the route RED-SNOW runs), 1: fp32, 2: SwiGLU-OAI (Grouped only)
+    // 0: GLM's bf16 roundings (RED-SNOW), 1: fp32, 2: SwiGLU-OAI (Grouped only)
+    act_mode: i32 = 0, // 3: softcaps
     alpha: f32 = 0, // SwiGLU-OAI's sigmoid scale (act_mode 2)
+    caps: [2]f32 = .{ 0, 0 }, // the gate and up softcaps (act_mode 3, Inkling 2)
+};
+
+/// The item plan a call takes: the family's Router, the plan buffer the caller holds, and members an item.
+pub const Items = struct {
+    router: *const grouped.Router,
+    plan: grouped.Plan,
+    tile: usize = 16, // 16, or 32 for the 64-column wide kernel (mul1 only)
+    reject_invalid: bool = false, // true: omit picks outside [0, l.experts), as Inkling's old group did
 };
 
 /// What one projection launches (experts.py default_config): the 8-tile 4-warp K splits, shape-fixed; n % 128 required.
@@ -66,12 +81,21 @@ pub const Scratch = struct {
 
 /// The byte size of the scratch buffers for a layer and row capacity, or error.TileNotBuilt when plan() fails.
 pub fn scratchBytes(l: Layer, rows: usize, slots: usize) !usize {
+    return layoutBytes(l, rows, slots, l.dims * 4);
+}
+
+/// The decode item plan's scratch: scratchBytes() without y, which the down epilogue writes into `ey` instead.
+pub fn fusedBytes(l: Layer, rows: usize, slots: usize) !usize {
+    return layoutBytes(l, rows, slots, 0);
+}
+
+fn layoutBytes(l: Layer, rows: usize, slots: usize, y_pair: usize) !usize {
     const g_sk = try plan(l.dims, l.width, true);
     const d_sk = try plan(l.width, l.dims, false);
     const p = rows * slots;
     const maxu = @min(p, l.experts);
     return align256(p * l.dims * 2) + align256(p * l.dims * 2) + align256(p * l.width * 2) +
-        align256(@max(2 * g_sk * l.width, d_sk * l.dims) * p * 4) + align256(p * l.dims * 4) +
+        align256(@max(2 * g_sk * l.width, d_sk * l.dims) * p * 4) + align256(p * y_pair) +
         align256(maxu * 4) + 256 + align256(maxu * rows * 4);
 }
 
@@ -81,6 +105,17 @@ fn align256(n: usize) usize {
 
 /// The pointers into one allocation of scratchBytes(), or error.TileNotBuilt when plan() fails.
 pub fn scratch(base: u64, l: Layer, rows: usize, slots: usize) !Scratch {
+    return carve(base, l, rows, slots, l.dims * 4);
+}
+
+/// The pointers into one allocation of fusedBytes(); y is 0 (the down epilogue writes the caller's `ey` rows).
+pub fn fusedScratch(base: u64, l: Layer, rows: usize, slots: usize) !Scratch {
+    var sc = try carve(base, l, rows, slots, 0);
+    sc.y = 0;
+    return sc;
+}
+
+fn carve(base: u64, l: Layer, rows: usize, slots: usize, y_pair: usize) !Scratch {
     const p = rows * slots;
     const g_sk = try plan(l.dims, l.width, true);
     const d_sk = try plan(l.width, l.dims, false);
@@ -97,7 +132,7 @@ pub fn scratch(base: u64, l: Layer, rows: usize, slots: usize) !Scratch {
     const xu = take(&at, p * l.dims * 2);
     const xd = take(&at, p * l.width * 2);
     const z = take(&at, @max(2 * g_sk * l.width, d_sk * l.dims) * p * 4);
-    const y = take(&at, p * l.dims * 4);
+    const y = take(&at, p * y_pair);
     const ids = take(&at, maxu * 4);
     const count = take(&at, 4);
     const members = take(&at, maxu * rows * 4);
@@ -112,6 +147,8 @@ pub const Experts = struct {
     grouped: [3]Function, // one per codebook
     gateup: Function,
     down_combine: Function,
+    wide: Function = undefined, // tf_exl3_grouped_wide_2: 32-member items by 64 columns, mul1
+    capped: Function = undefined, // the gate/up epilogue for act_mode 3
     prompt: prompt.Kernels = undefined,
     plan_rotate: Function = undefined,
     plan_finish: Function = undefined,
@@ -141,6 +178,8 @@ pub const Experts = struct {
             try e.mod.function("tf_exl3_grouped_2"),
         };
         e.gateup = try e.mod.function("tf_exl3_gateup_epilogue");
+        e.wide = try e.mod.function("tf_exl3_grouped_wide_2");
+        e.capped = try e.mod.function("tf_exl3_gateup_capped");
         e.down_combine = try e.mod.function("tf_exl3_down_combine");
         return e;
     }
@@ -156,13 +195,19 @@ pub const Experts = struct {
 
     /// The routed experts of `rows` rows: group, rotate in, grouped gate/up, SwiGLU, grouped down, wts-weighted sum.
     pub fn run(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch) !void {
+        try e.runWith(s, l, x, x_stride, x_dtype, pick, wts, rows, out, sc, 0, null);
+    }
+
+    /// run() on an item plan (`it`): the grouped kernels in standard mode, the slot rows in `ey` (0: scratch y).
+    pub fn runWith(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch, ey: u64, it: ?Items) !void {
         const d = l.dims;
         const w = l.width;
         const slots = sc.slots;
         std.debug.assert(rows >= 1 and rows <= sc.rows);
         std.debug.assert(slots >= 1 and slots <= 32);
         std.debug.assert(l.experts >= 1 and l.experts <= 4096);
-        if (l.act_mode != 0 and l.act_mode != 1) return error.BadExperts; // SwiGLU-OAI runs through Grouped only
+        // SwiGLU-OAI: Grouped only
+        if (l.act_mode != 0 and l.act_mode != 1 and l.act_mode != 3) return error.BadExperts;
         const g_sk = try plan(d, w, true);
         const d_sk = try plan(w, d, false);
         const p = rows * slots;
@@ -173,17 +218,38 @@ pub const Experts = struct {
                 return @intCast(v);
             }
         }.f;
+        // An item plan: the picks grouped into 16- or 32-pair items, the grouped kernels in standard mode.
+        const items = it != null;
+        const tile: usize = if (items) it.?.tile else 16;
+        const wide = tile == 32; // 32-pair items take the wide kernel, built for mul1
+        if (items and (it.?.plan.members == 0 or it.?.plan.items == 0 or it.?.plan.counts == 0)) return error.TileNotBuilt;
+        if ((tile != 16 and !wide) or (wide and l.codebook != .mul1)) return error.TileNotBuilt;
+        const nx: usize = if (items) grouped.maxItems(p, l.experts + 1, tile) else maxu; // grid x and nexp_max
+        const mtu: usize = if (items) 1 else mt; // member tiles a program (one item, or ceil(rows/16))
+        const uids = if (items) it.?.plan.items else sc.ids;
+        const ucount = if (items) it.?.plan.counts else sc.count;
+        const members = if (items) it.?.plan.members else sc.members;
+        const maxm_a: i32 = if (items) i32d(tile) else i32d(rows);
+        const proj = if (wide) e.wide else e.grouped[@backingInt(l.codebook)];
+        const cols: usize = if (wide) 64 else 128;
+        const std_a: i32 = if (items) 1 else 0;
+        const skip_a: i32 = if (items) i32d(l.experts) else -1;
 
-        var a: launch_.Args = .{};
-        a.add(pick);
-        a.add(sc.ids);
-        a.add(sc.count);
-        a.add(sc.members);
-        a.add(i32d(rows));
-        a.add(i32d(slots));
-        a.add(i32d(l.experts));
-        a.add(i32d(rows));
-        try launch_.launch(e.group, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = @intCast(rows * slots * 4) }, s, &a);
+        if (items) {
+            const route_experts = if (it.?.reject_invalid) l.experts else l.experts + 1;
+            try it.?.router.route(s, pick, p, route_experts, tile, it.?.plan);
+        } else {
+            var a: launch_.Args = .{};
+            a.add(pick);
+            a.add(sc.ids);
+            a.add(sc.count);
+            a.add(sc.members);
+            a.add(i32d(rows));
+            a.add(i32d(slots));
+            a.add(i32d(l.experts));
+            a.add(i32d(rows));
+            try launch_.launch(e.group, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = @intCast(rows * slots * 4) }, s, &a);
+        }
 
         var r: launch_.Args = .{};
         r.add(x);
@@ -206,22 +272,22 @@ pub const Experts = struct {
         g.add(l.up);
         g.add(l.gate_k2);
         g.add(l.up_k2);
-        g.add(sc.ids);
-        g.add(sc.count);
-        g.add(sc.members);
+        g.add(uids);
+        g.add(ucount);
+        g.add(members);
         g.add(sc.z);
         g.add(i32d(d));
         g.add(i32d(w));
         g.add(i32d(p));
         g.add(i32d(g_sk));
-        g.add(i32d(rows));
+        g.add(maxm_a);
         g.add(i32d(slots));
-        g.add(i32d(maxu));
+        g.add(i32d(nx));
         g.add(@as(i32, 2));
         g.add(i32d(l.gu_stride));
-        g.add(@as(i32, 0));
-        g.add(@as(i32, -1));
-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
+        g.add(std_a);
+        g.add(skip_a);
+        try launch_.launch(proj, .{ .grid = .{ .x = @intCast(nx), .y = @intCast(w / cols), .z = @intCast(2 * g_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
 
         var ep: launch_.Args = .{};
         ep.add(sc.z);
@@ -236,7 +302,8 @@ pub const Experts = struct {
         ep.add(i32d(l.experts));
         ep.add(l.limit);
         ep.add(l.act_mode);
-        try launch_.launch(e.gateup, .{ .grid = .{ .x = @intCast(p), .y = @intCast(w / 128), .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s, &ep);
+        if (l.act_mode == 3) for (l.caps) |c| ep.add(c); // tf_exl3_gateup_capped's CappedArgs
+        try launch_.launch(if (l.act_mode == 3) e.capped else e.gateup, .{ .grid = .{ .x = @intCast(p), .y = @intCast(w / 128), .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s, &ep);
 
         var dn: launch_.Args = .{};
         dn.add(sc.xd);
@@ -245,28 +312,28 @@ pub const Experts = struct {
         dn.add(l.down);
         dn.add(l.down_k2);
         dn.add(l.down_k2);
-        dn.add(sc.ids);
-        dn.add(sc.count);
-        dn.add(sc.members);
+        dn.add(uids);
+        dn.add(ucount);
+        dn.add(members);
         dn.add(sc.z);
         dn.add(i32d(w));
         dn.add(i32d(d));
         dn.add(i32d(p));
         dn.add(i32d(d_sk));
-        dn.add(i32d(rows));
+        dn.add(maxm_a);
         dn.add(i32d(slots));
-        dn.add(i32d(maxu));
+        dn.add(i32d(nx));
         dn.add(@as(i32, 1));
         dn.add(@as(i32, 0));
-        dn.add(@as(i32, 0));
-        dn.add(@as(i32, -1));
-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
+        dn.add(std_a);
+        dn.add(skip_a);
+        try launch_.launch(proj, .{ .grid = .{ .x = @intCast(nx), .y = @intCast(d / cols), .z = @intCast(d_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
 
         var cb: launch_.Args = .{};
         cb.add(sc.z);
         cb.add(pick);
         cb.add(l.svh_d);
-        cb.add(sc.y);
+        cb.add(if (ey != 0) ey else sc.y); // ey: write the caller's routed slot rows in place (no copy back)
         cb.add(wts);
         cb.add(out);
         cb.add(i32d(p));

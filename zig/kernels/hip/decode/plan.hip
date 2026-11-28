@@ -11,22 +11,6 @@ __device__ __forceinline__ float wave_sum(float x) {
     return __shfl(x, 0, 32);
 }
 
-// x from lane ^ M of its 16-lane row (M < 16): a DPP row_xmask move, all lanes active.
-template <int M>
-__device__ __forceinline__ float row_xor(float x) {
-    return __builtin_bit_cast(float, __builtin_amdgcn_mov_dpp(__builtin_bit_cast(int, x), 0x160 + M, 0xf, 0xf, false));
-}
-
-// wave_sum's folds, own value then partner's at xor 16, 8, 4, 2, 1, without LDS: every lane ends with the sum.
-__device__ __forceinline__ float wave_sum_dpp(float x) {
-    const int w = __builtin_bit_cast(int, x);
-    x += __builtin_bit_cast(float, __builtin_amdgcn_permlanex16(w, w, 0x76543210u, 0xfedcba98u, false, false));
-    x += row_xor<8>(x);
-    x += row_xor<4>(x);
-    x += row_xor<2>(x);
-    return x + row_xor<1>(x);
-}
-
 // Row r's keys (already rotated, fp32) and values (the activation kind) into its slot's pages at its position.
 __device__ void plan_kv_write_body(const float* keys, const void* values, int kind, int rows, int kv_heads, int d,
                                      PlanArgs plan, int layer) {
@@ -56,11 +40,7 @@ __device__ void plan_kv_write_act_body(const void* keys, const void* values, int
     cache[to] = static_cast<const uint16_t*>(values)[i];
 }
 
-// Query heads a block takes together: they share a KV head, so its keys and values are read once for all of them.
-constexpr int kMaxGroup = 16;
-
-// Keys a wave scores on long spans and on short ones: their loads go out together, each head's query read once.
-constexpr int kScoreKeys = 4;
+// Keys a wave scores on short spans (kScoreKeys on long ones, plan.hpp).
 constexpr int kScoreKeysShort = 2;
 
 // score_keys over a plan's rows: a warp scores KEYS keys for each of the block's heads; q fp32 or of kind QKIND.
@@ -122,71 +102,6 @@ __device__ void plan_score_body(const void* __restrict__ q, float* __restrict__ 
                 }
             }
         }
-    }
-}
-
-// apply_values over a plan's rows: a 128-key tile of the block's heads, weights worked once a block, in its order.
-template <int KIND>
-__device__ void plan_apply_body(const float* __restrict__ scores, const float* __restrict__ stats,
-                                  float* __restrict__ partials, int span, int heads, int kv_heads, int d,
-                                  PlanArgs plan, int layer) {
-    __shared__ float weights[kMaxGroup * 128];
-    const int batch = blockIdx.z;
-    const int visible = min(plan.pos[batch] + 1, span);
-    const int tile = blockIdx.x;
-    const int group = heads / gridDim.y;
-    const int head0 = blockIdx.y * group;
-    const long long first = static_cast<long long>(batch) * heads + head0;
-    const int lane = threadIdx.x;
-    const int key0 = tile * 128;
-    if (key0 >= visible) {  // a tile past the keys in use adds zero
-        if (lane < d) {
-            for (int g = 0; g < group; ++g) partials[((first + g) * gridDim.x + tile) * d + lane] = 0.f;
-        }
-        return;
-    }
-    const int stop = min(key0 + 128, visible);
-    for (int i = threadIdx.x; i < group * 128; i += blockDim.x) {
-        const long long h = first + i / 128;
-        const int key = key0 + i % 128;
-        if (key < stop) weights[i] = expf(scores[h * span + key] - stats[h * 2]) / stats[h * 2 + 1];
-    }
-    __syncthreads();
-    if (lane >= d) return;
-    const unsigned long long* desc = plan_desc(plan, plan.slot[batch]);
-    const void* values = reinterpret_cast<const void*>(desc[plan_second(layer)]);
-    const unsigned* table = plan_pages(plan, desc);
-    const int kv = head0 / (heads / kv_heads);
-    float acc[kMaxGroup] = {};
-    // a page at a time: its table entry is read once, and the keys are summed in order
-    for (int key = key0; key < stop;) {
-        const int edge = min((key / kPageTokens + 1) * kPageTokens, stop);
-        const long long slot0 = page_row(table[key / kPageTokens], plan.pool, kv, 0, d) + lane;
-        // eight values loaded ahead, then summed in key order: the loads overlap, the sums are the same
-        for (; key + 8 <= edge; key += 8) {
-            float ahead[8];
-#pragma unroll
-            for (int u = 0; u < 8; ++u)
-                ahead[u] = load(values, KIND, slot0 + static_cast<long long>((key + u) % kPageTokens) * d);
-#pragma unroll
-            for (int u = 0; u < 8; ++u) {
-#pragma unroll
-                for (int g = 0; g < kMaxGroup; ++g) {
-                    if (g < group) acc[g] += weights[g * 128 + key + u - key0] * ahead[u];
-                }
-            }
-        }
-        for (; key < edge; ++key) {
-            const float value = load(values, KIND, slot0 + static_cast<long long>(key % kPageTokens) * d);
-#pragma unroll
-            for (int g = 0; g < kMaxGroup; ++g) {
-                if (g < group) acc[g] += weights[g * 128 + key - key0] * value;
-            }
-        }
-    }
-#pragma unroll
-    for (int g = 0; g < kMaxGroup; ++g) {
-        if (g < group) partials[((first + g) * gridDim.x + tile) * d + lane] = acc[g];
     }
 }
 
@@ -371,6 +286,14 @@ tf_plan_score2_act_bf16(const void* q, float* scores, int span, int heads, int k
                            int layer) {
     plan_score_body<kScoreKeysShort, 2, 2>(q, scores, span, heads, kv_heads, d, scale, plan, layer);
 }
+// tf_plan_score256_*: tf_plan_score_*'s arguments, q fp32 or (act) in the cache's kind; kScoreSteps steps a block.
+#define TF_PLAN_SCORE256(Name, Q, KIND, QKIND) __global__ void __launch_bounds__(128) Name(const Q* q, float* scores, \
+    int span, int heads, int kv_heads, int d, float scale, PlanArgs plan, int layer) {                              \
+    plan_score256_body<KIND, QKIND>(q, scores, span, heads, kv_heads, d, scale, plan, layer); }
+TF_PLAN_SCORE256(tf_plan_score256_f16, float, 1, 0)
+TF_PLAN_SCORE256(tf_plan_score256_bf16, float, 2, 0)
+TF_PLAN_SCORE256(tf_plan_score256_act_f16, void, 1, 1)
+TF_PLAN_SCORE256(tf_plan_score256_act_bf16, void, 2, 2)
 // tf_sum_partials into the activation kind, rounded as tf_cast rounds: the same bytes as the sum and the cast.
 __global__ void tf_sum_partials_act(const float* __restrict__ partials, void* __restrict__ out, int tiles, int d,
                                     int kind) {

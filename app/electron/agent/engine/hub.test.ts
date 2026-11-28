@@ -83,6 +83,43 @@ async function main() {
   assert.equal(good.family, 'Qwen3.5-2B or Qwen3.8-27B')
   assert.equal(good.fileCount, 2)
 
+  const sparkRepo = 'Example/Spark-BF16'
+  const sparkRoutes = repoRoutes(sparkRepo, { modelType: 'spark2_5', quant: null })
+  sparkRoutes[`/${sparkRepo}/resolve/${SHA}/config.json`] = { body: { model_type: 'spark2_5', dtype: 'bfloat16' } }
+  const spark = mockHub(sparkRoutes)
+  const metal = await preflightRepo(sparkRepo, null, context(spark.fetchImpl, { families: { spark2_5: ['bf16', 'mlx-q4g64'] } }))
+  assert.equal(metal.format, 'bf16')
+  assert.equal(metal.verdict, 'ok')
+  const cuda = await preflightRepo(sparkRepo, null, context(spark.fetchImpl, { families: { spark2_5: ['mlx-q4g64'] } }))
+  assert.equal(cuda.format, 'bf16')
+  assert.equal(cuda.verdict, 'format')
+
+  // TFQ3: GLM-5.3-Flash's checkpoint names its format from its .tffpw records, its config.json header is plain MLX 8-bit.
+  const glmRepo = (repo: string, quant: unknown, extra: string[]) => {
+    const routes = repoRoutes(repo, { modelType: 'glm5_next', quant })
+    const tree = routes[`/api/models/${repo}/tree/${SHA}`]
+    tree.body = [...(tree.body as unknown[]), ...extra.map((name) => ({ type: 'file', path: name, size: 4096 }))]
+    return mockHub(routes)
+  }
+  const records = ['nonmoe.tffpw', 'layer_00.tffpw', 'layer_01.tffpw', 'pw_v3_tables.bin']
+  const tfq3Hub = glmRepo('TensorFold/GLM-5.3-Flash-TFQ3', { bits: 8, group_size: 64 }, records)
+  const tfq3 = await preflightRepo('TensorFold/GLM-5.3-Flash-TFQ3', null, context(tfq3Hub.fetchImpl, { families: { glm5_next: ['mlx-q4g64', 'tfq3'] } }))
+  assert.equal(tfq3.format, 'tfq3')
+  assert.equal(tfq3.verdict, 'ok', tfq3.reasons.join('; '))
+  const older = await preflightRepo('TensorFold/GLM-5.3-Flash-TFQ3', null, context(tfq3Hub.fetchImpl, { families: { glm5_next: ['mlx-q4g64'] } }))
+  assert.equal(older.format, 'tfq3')
+  assert.equal(older.verdict, 'format')
+  assert.match(older.reasons.join(' '), /TFQ3.*newer engine/, 'an engine without tfq3 is named as the reason, with the fix')
+  for (const families of [{ glm5_next: ['mlx-q4g64', 'tfq3'] }, { glm5_next: ['mlx-q4g64'] }]) {
+    const plain = await preflightRepo('Example/GLM-MLX-4bit', null, context(glmRepo('Example/GLM-MLX-4bit', { bits: 4, group_size: 64 }, []).fetchImpl, { families }))
+    assert.equal(plain.format, 'mlx-q4g64', 'a GLM checkpoint without records is named as before')
+    assert.equal(plain.verdict, 'ok', plain.reasons.join('; '))
+    const stray = await preflightRepo('Example/GLM-Tables', null, context(glmRepo('Example/GLM-Tables', { bits: 8, group_size: 64 }, ['pw_v3_tables.bin']).fetchImpl, { families }))
+    assert.equal(stray.format, 'mlx-q8g64', 'pw_v3_tables.bin without .tffpw records is not TFQ3')
+    assert.equal(stray.verdict, 'format')
+    assert.doesNotMatch(stray.reasons.join(' '), /This checkpoint is TFQ3|newer engine/, 'its reason is the plain format mismatch')
+  }
+
   const declared = parseCapabilities(JSON.stringify({ schema: 1, engine: 'zig', version: '1.1.0', backends: ['metal'], families: { lfm2_moe: ['mlx-q6g64'], gemma4: ['mlx-q3g64'], gemma4_unified: ['mlx-q8g64'], step5_vl: ['mlx-q2g128'], fish_omni: ['fp8-block128'], glm_moe_dsa: ['exlr8'] }, serve: { flags: {} }, env: [] }))
   for (const [modelType, bits, group] of [['lfm2_moe', 6, 64], ['gemma4', 3, 64], ['gemma4_unified', 8, 64], ['step5_vl', 2, 128]] as const) {
     const repo = `Example/Declared-${modelType}`, hub = mockHub(repoRoutes(repo, { modelType, quant: { bits, group_size: group } }))
@@ -115,9 +152,13 @@ async function main() {
     assert.ok(blocked.calls.filter((url) => url.endsWith('/config.json')).length <= 6, 'same-origin redirect loops are bounded')
   }
 
-  // Installed already.
+  // Installed already, with or without an app-managed selection.
   const installed = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']) }))
   assert.equal(installed.verdict, 'installed')
+  const selected = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']), installedRevision: async () => SHA }))
+  assert.equal(selected.verdict, 'installed')
+  const external = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']), installedRevision: async () => null }))
+  assert.equal(external.verdict, 'installed')
 
   // Unsupported family, and a drafter on its own.
   const gemma = mockHub(repoRoutes('google/gemma-9', { modelType: 'gemma4' }))

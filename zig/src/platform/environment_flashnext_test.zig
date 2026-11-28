@@ -16,7 +16,7 @@ const Group = enum { switches, integers, reals, structured };
 fn group(r: e.Rule) Group {
     if (r.kind == .flag or r.kind == .toggle) return .switches;
     if (e.isReal(r.kind)) return .reals;
-    return if (r.kind == .word or r.kind == .range or r.only.len > 0) .structured else .integers;
+    return if (r.kind == .word or r.kind == .path or r.kind == .range or r.only.len > 0) .structured else .integers;
 }
 
 fn check(name: []const u8, raw: []const u8, valid: bool) !void {
@@ -33,22 +33,40 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 31 settings: 20 switches, 9 integers, 1 real, 1 structured" {
+test "Flash Next strict env: the table holds all 46 settings: 30 switches, 10 integers, 1 real, 5 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
-        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
+        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 20, 9, 1, 1 }, counts);
+    try t.expectEqual([4]usize{ 30, 10, 1, 5 }, counts);
 }
 
-test "Flash Next strict env: unset and blank settings both read as the caller's default" {
+test "Flash Next strict env: unset reads the caller default and every row keeps its blank contract" {
     for (e.rules) |r| if (r.scope == .flashnext) for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {
-        if (raw) |v| try check(r.name, v, true);
+        const blank_ok = raw == null or r.blank_default;
+        if (raw) |v| {
+            if (blank_ok) {
+                try check(r.name, v, true);
+            } else {
+                const fx: Fixture = .{ .name = r.name, .raw = v };
+                try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
+            }
+        }
+        if (!blank_ok) {
+            try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
+            continue;
+        }
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
-            .structured => try t.expect(try e.value(?u64, r.name, raw, null) == null),
+            .structured => {
+                if (r.kind == .path) {
+                    try t.expect(try e.parse(r.name, raw) == null);
+                } else {
+                    try t.expect(try e.value(?u64, r.name, raw, null) == null);
+                }
+            },
             .integers => try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
         }
     };
@@ -60,6 +78,25 @@ test "Flash Next strict env: every switch keeps exactly 0 and 1 and refuses the 
         try t.expect(try e.value(bool, r.name, "1", false));
         for ([_][]const u8{ "2", "yes", "on", "true", "x", "00", "-1", "1 " }) |raw| try check(r.name, raw, false);
     };
+}
+
+test "Flash Next strict env: the dense split, head shard and fused read-out switches keep their own defaults, blank as unset" {
+    const Switch = struct { name: [:0]const u8, default: bool };
+    for ([_]Switch{
+        .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .default = true },
+        .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .default = false },
+        .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .default = true },
+    }) |s| {
+        // unset, empty and whitespace-only all read as unset, so each keeps the default its reader passes
+        for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {
+            if (raw) |v| try check(s.name, v, true);
+            try t.expectEqual(s.default, try e.value(bool, s.name, raw, s.default));
+        }
+        try t.expect(!try e.value(bool, s.name, "0", true));
+        try t.expect(try e.value(bool, s.name, "1", false));
+        for ([_][]const u8{ "2", "00", "1 ", "-1", "1.0", "yes", "on", "true", "x" }) |raw| try check(s.name, raw, false);
+    }
+    try t.expectEqualStrings("0 or 1 (default 1)", e.rule("TF_FLASHNEXT_READOUT_FUSED").forms);
 }
 
 test "Flash Next strict env: every count keeps its whole numbers and refuses junk, negatives, overflow" {
@@ -113,6 +150,16 @@ test "Flash Next strict env: the prompt word keeps rows as a present index and r
     try t.expect((try e.value(?u64, name, null, null)) == null);
 }
 
+test "Flash Next strict env: the draft head keeps bf16 and affine4 in the reader's order and refuses other text" {
+    const name = "TF_FLASHNEXT_DRAFT_HEAD";
+    try check(name, "bf16", true);
+    try check(name, "affine4", true);
+    // the words' order is the reader's: bf16 is 0 and affine4 is 1, its default
+    try t.expectEqual(@as(u1, 0), try e.value(u1, name, "bf16", 1));
+    try t.expectEqual(@as(u1, 1), try e.value(u1, name, "affine4", 0));
+    for ([_][]const u8{ "BF16", "affine", "fp8", "1", "affine4 " }) |raw| try check(name, raw, false);
+}
+
 test "Flash Next strict env: the late keep reads unset and blank as null, and 0 and 1 as false and true" {
     const name = "TF_FLASHNEXT_KEEP_LATE";
     for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw|
@@ -135,9 +182,11 @@ test "Flash Next strict env: a refusal names the setting, quotes its text, and e
 }
 
 test "Flash Next strict env: the scope refuses only its own settings" {
-    const fx: Fixture = .{ .name = "TF_FLASHNEXT_GPU_TOPK", .raw = "yes" };
-    const why = try e.refusal(t.allocator, fx, .{ .flashnext = false });
-    defer if (why) |w| t.allocator.free(w);
-    try t.expect(why == null);
-    try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
+    for ([_][:0]const u8{ "TF_FLASHNEXT_GPU_TOPK", "TF_FLASHNEXT_SPLIT_DENSE", "TF_FLASHNEXT_SHARD_HEAD" }) |name| {
+        const fx: Fixture = .{ .name = name, .raw = "yes" };
+        const why = try e.refusal(t.allocator, fx, .{ .flashnext = false });
+        defer if (why) |w| t.allocator.free(w);
+        try t.expect(why == null);
+        try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
+    }
 }

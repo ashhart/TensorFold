@@ -4,6 +4,7 @@ const json = @import("json");
 const tool_specs = @import("tool_specs.zig");
 const tool_params = @import("tool_params.zig");
 const tool_kinds = @import("tool_kinds.zig");
+const tool_schema = @import("tool_schema.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -28,7 +29,9 @@ pub fn isStyle(rendered: []const u8, comptime probe: []const u8, comptime key: [
 }
 
 /// The structural tag (xgrammar's JSON) whose one format is `ebnf`'s grammar.
-pub fn build(a: Allocator, tools: []const Value, parallel: bool) Allocator.Error![]const u8 {
+pub const Error = error{ InvalidSchema, OutOfMemory };
+
+pub fn build(a: Allocator, tools: []const Value, parallel: bool) Error![]const u8 {
     const format = try json.newObject(a);
     try format.put(a, "type", .{ .string = "grammar" });
     try format.put(a, "grammar", .{ .string = try ebnf(a, tools, parallel) });
@@ -39,15 +42,16 @@ pub fn build(a: Allocator, tools: []const Value, parallel: bool) Allocator.Error
 }
 
 /// The grammar for one block of calls to `tools`: one call, or (`parallel`) one or more in the same list.
-pub fn ebnf(a: Allocator, tools: []const Value, parallel: bool) Allocator.Error![]const u8 {
-    const schemas = try tool_params.schemas(a, tools);
+pub fn ebnf(a: Allocator, tools: []const Value, parallel: bool) Error![]const u8 {
     var rules: std.ArrayList(u8) = .empty;
+    const schemas = try tool_params.schemas(a, tools);
     var names: std.ArrayList(u8) = .empty;
     for (tools, 0..) |t, i| {
         const name = try tool_specs.toolName(a, t);
         try names.print(a, "{s}call_{d}", .{ if (i > 0) " | " else "", i });
         try rules.print(a, "call_{d} ::= {s} a_{d}_0_0 \")\"\n", .{ i, try literal(a, try std.fmt.allocPrint(a, "{s}(", .{name})), i });
         const tool = schemas.get(try std.ascii.allocLowerString(a, name)).?;
+        if (!tool_schema.supported(tool.root)) return error.InvalidSchema;
         try properties(a, &rules, i, tool);
     }
     const more = if (parallel) " (\", \" call)*" else "";
@@ -55,9 +59,11 @@ pub fn ebnf(a: Allocator, tools: []const Value, parallel: bool) Allocator.Error!
 }
 
 /// Rules a_I_J_S: tool I's arguments from property J on, S = 1 when one is written already; optional ones may go.
-fn properties(a: Allocator, rules: *std.ArrayList(u8), tool: usize, schema: tool_params.Tool) Allocator.Error!void {
+fn properties(a: Allocator, rules: *std.ArrayList(u8), tool: usize, schema: tool_params.Tool) Error!void {
     var required: std.StringHashMapUnmanaged(void) = .empty;
     if (schema.root == .object) if (schema.root.get("required")) |r| if (r == .array) for (r.array) |k| if (k == .string) try required.put(a, k.string, {});
+    var required_keys = required.keyIterator();
+    while (required_keys.next()) |key| if (!keyword(key.*)) return error.InvalidSchema;
     var usable: std.ArrayList(usize) = .empty;
     for (schema.properties.keys(), 0..) |k, j| if (keyword(k)) try usable.append(a, j);
     for (usable.items, 0..) |j, n| {
@@ -76,6 +82,9 @@ fn properties(a: Allocator, rules: *std.ArrayList(u8), tool: usize, schema: tool
 fn keyword(k: []const u8) bool {
     if (k.len == 0 or std.ascii.isDigit(k[0])) return false;
     for (k) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    for ([_][]const u8{ "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield" }) |word| {
+        if (std.mem.eql(u8, k, word)) return false;
+    }
     return true;
 }
 

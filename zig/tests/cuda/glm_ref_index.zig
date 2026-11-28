@@ -23,8 +23,8 @@ pub fn selection(r: *Rig, set: glm.glue.Set, ops: cuda.Module) !void {
     const pos = 6000;
     const rows = 96;
     const cap = 4096;
-    const np = sp.poolBucket(pos, rows, cap);
-    const cols = @min(np, (sp.scoreColumns(pos, rows, np) + 63) / 64 * 64);
+    const np = sp.poolBucket(pos, rows, cap, .{});
+    const cols = @min(np, (sp.scoreColumns(pos, rows, np, .{}) + 63) / 64 * 64);
     const qi = try r.bfs(rows * heads * d, 1.0);
     const wts = try r.bfs(rows * heads, 1.0);
     const pk = try r.bfs(np * d, 1.0);
@@ -32,7 +32,7 @@ pub fn selection(r: *Rig, set: glm.glue.Set, ops: cuda.Module) !void {
     const s: sp.Scratch = .{ .scores = try r.zeros(rows * np * 4), .ls = try r.zeros(rows * sp.select_list * 4), .li = try r.zeros(rows * sp.select_list * 4), .pools = try r.zeros(rows * sp.topk_pools * 8), .at = try r.zeros(4) };
     const tokens = try r.zeros(rows * sp.width * 4);
     const counts = try r.zeros(rows * 4);
-    try sp.selectTokens(set, ops, r.s, try r.dev(std.mem.sliceAsBytes(qi)), try r.dev(std.mem.sliceAsBytes(wts)), heads, try r.dev(std.mem.sliceAsBytes(pk)), .{}, try r.dev(std.mem.asBytes(&p0)), pos, rows, heads, d, cap, s, tokens, counts);
+    try sp.selectTokens(set, ops, r.s, try r.dev(std.mem.sliceAsBytes(qi)), try r.dev(std.mem.sliceAsBytes(wts)), heads, try r.dev(std.mem.sliceAsBytes(pk)), .{}, try r.dev(std.mem.asBytes(&p0)), pos, rows, heads, d, .{}, cap, s, tokens, counts);
     const raw = try r.back(s.scores, rows * np * 4);
     const got = std.mem.bytesAsSlice(f32, raw);
 
@@ -110,7 +110,7 @@ pub fn selectionWide(r: *Rig, set: glm.glue.Set) !void {
     for (cases) |c| {
         const pos = c[0];
         const rows = c[1];
-        const np = sp.poolBucket(pos, rows, 1 << 20);
+        const np = sp.poolBucket(pos, rows, 1 << 20, .{});
         const host = try r.a.alloc(f32, rows * np);
         for (0..rows) |row| {
             const vis = (pos + row + 1) / 4;
@@ -126,7 +126,7 @@ pub fn selectionWide(r: *Rig, set: glm.glue.Set) !void {
         var ms: [2]f64 = undefined;
         for ([2]cuda.Function{ set.glue.select_rows, set.glue.select_rows_wide }, [2]u32{ 128, 1024 }, outs, 0..) |f, threads, out, i| {
             var a: cuda.Args = .{};
-            inline for (.{ scores, out, @as(i64, @intCast(np)), at, @as(c_int, sp.topk_pools) }) |v| a.add(v);
+            inline for (.{ scores, out, @as(i64, @intCast(np)), at, @as(c_int, sp.topk_pools), @as(c_int, sp.pool) }) |v| a.add(v);
             const cfg: cuda.launch.Config = .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = threads } };
             try cuda.launch.launch(f, cfg, r.s, &a);
             try t0.record(r.s);

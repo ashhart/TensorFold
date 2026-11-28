@@ -1,10 +1,12 @@
-# Qwen3.5-2B, native Metal preview
+# Qwen3.5-2B, native Metal and CUDA
 
 This recipe covers text generation with
 [`mlx-community/Qwen3.5-2B-MLX-4bit`](https://huggingface.co/mlx-community/Qwen3.5-2B-MLX-4bit/tree/93760be4f1f69842a46bc13dbdc0f19e291392a3),
 revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
 Build from `main` with Zig **0.17.0** and Xcode's Metal toolchain, as described in
 [the native preview](../zig-preview.md#build). Keep weights outside the source checkout.
+On Linux with an NVIDIA GPU, the release archive serves it without a build: follow the
+[quick start](../../README.md#linux-with-an-nvidia-gpu).
 
 ```bash
 hf download mlx-community/Qwen3.5-2B-MLX-4bit \
@@ -44,7 +46,8 @@ one-row rounds still go through the shared lane engine. GPU execution failures s
 The qualified path has up to 16 rows per stream and 32 rows per shared forward. Prompt chunks have up to
 128 rows and follow the server's planned boundaries. `--no-drafts` supplies the plain reference.
 
-Cross-request prompt reuse is opt-in with `--prompt-cache-gib N`; omitting it or passing zero keeps fresh execution.
+Cross-request prompt reuse is on by default, sized as the [serve flags](../run-guide.md#serve-flags) describe;
+`--prompt-cache-gib N` sets its budget and `--prompt-cache-gib 0` keeps fresh execution.
 The core prompt-cache store keeps committed recurrence, convolution tails, attention K/V and logits in host memory.
 It reuses only compatible prompt cuts on the 128-token grid or the request's explicit chunk boundaries, within the
 memory budget. The optional paged K/V path restores the same image into newly allocated pages. This is RAM retention;
@@ -59,7 +62,9 @@ that length. `--context` controls request admission; KV buffers are sized for ea
 | Pinned affine 4-bit/group-64 checkpoint, M5 Max, macOS 27 | Native operation, forward, cache and server checks exercised; see the contribution's receipt for results and outstanding checks. |
 | M1, M2, M3, M4 | Untested for this model. Uses simdgroup matrix kernels without M5 tensor units; the local load check does not replace full hardware qualification. |
 | M5 on other macOS / runtime versions | Untested. Rerun the operation, fidelity and exactness checks. |
-| CUDA, non-Apple platforms | No native Qwen3.5-2B backend in this contribution. |
+| CUDA, GB10 (sm_121), release archive | Serves the pinned checkpoint: chat, streaming, tool calls and copy drafts. |
+| CUDA, official 1.3.5 `linux-x86_64` release archive; one NVIDIA RTX A4500 (sm_86) | [#5271](https://github.com/ashhart/TensorFold/issues/5271) by @jerrod-storm checked the pinned revision above. Measured scope: the README's single chat request; complete community-v2 (code and chat prompts, temperatures 1.0 and 0, 256 requested tokens, five repeats); and two drafted-versus-plain greedy comparisons whose final token SHA-256 agreed in 2/2 cases. Only one card was measured. Concurrency, prompt-cache resumes, long prompts, sampled exactness and other sm_86 cards remain unqualified. |
+| Other CUDA GPUs not listed above, and non-Apple platforms | Not covered here; see the [CUDA release checks](../../CHANGELOG.md#110). |
 | Other checkpoints, model sizes, quantizations, vision / video | Outside the qualified scope. |
 
 The preview's unresolved M1–M4 exactness qualification for existing families remains in force.

@@ -26,7 +26,7 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/profile.zig` and [profiles](profiles.md): the `--profile` switch registry.
 - `zig/src/core/contract/` and the [kernel contract](kernel-contract.md): the gates a new or ported kernel passes.
 - `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
-- `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
+- `zig/src/core/state_walk.zig`: one walk for kept prompt states ([#2215]).
 
 Flash Next CUDA sampled reductions: one check in top-k and batched verify/draft completions prepared (#2920);
 CUDA candidate bytes, parity and served/speed qualification are pending.
@@ -49,49 +49,59 @@ last two hold the families with only a Metal, HIP or scoring backend.
 
 | Optimization | q3.5 | fnext | glm | gem4 | nemo |
 | --- | --- | --- | --- | --- | --- |
-| 1. Prompt tail | done [#2229] | yes | yes | open [#2432] | open [#2432] |
+| 1. Prompt tail | done [#2229] | yes | yes | done [#2432] | done [#2432] |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
 | 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
-| 5. State walk | open C[#2392] | open C[#2392] | open [#2215] | open C[#2392] | open C[#2392] |
+| 5. State walk | open C[#2392] | open C[#2392] | done [#2215] | open C[#2392] | open C[#2392] |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
 | 7. Host KV tier | yes | open [#1501] | done [#1795] | yes | yes |
-| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | yes | done C[#1413] M¹ |
+| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | done C[#3135] | done C[#1413] M¹ |
 | 9. FP8 KV | done [#886] | yes | done¹ | yes | yes |
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
-| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864] | no (dense) | done [#558] |
+| 13. MoE grouped | done [#605] | done [#1351] M[#2784] | done [#864]; paired C experiment (REV25 E1) | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
-| 15. MTP | done [#1562] | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
-| 16. DFlash(2) | done [#1465] | yes | done [#979] | done C¹ M[#879] | yes |
+| 15. MTP | done [#1562]; dense C done [#3582] | done [#1925] | done [#1585]; wide C done [#2257] | done [#1385] | done [#997] |
+| 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
-| 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C open [#2257] | done [#2022] | done [#1974] |
-| 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C open [#2257] | done [#1779] | done [#768] |
+| 18. Copy drafts | done [#1477] | done [#468]; wide C open | done [#2146]; wide C done [#2257] | done [#2022] | done [#1974] |
+| 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C done [#2257] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | done C[#2391] | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | done [#2033] |
 | 22. Direct load | done [#2282] | done [#1901] | yes | done [#2282] | done [#458] |
 | 23. Page drop | done [#1884] | done [#1880] | done [#600] | done [#1884] | done [#1884] |
 | 24. L2 prefetch | failed [#2014] | no (null) | done [#2162] | no (null) | failed [#2014] |
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
-| 26. Pipeline | open [#2115] | yes | yes | yes | yes |
+| 26. Pipeline | done [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
-| 28. Scale index | ? | done M[#2760], open M[#2805] | ? | ? | ? |
+| 28. Scale index | ? | done M[#2760] M[#2805] | ? | ? | ? |
 | 29. DSpine | done C[#2633] | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | failed H[#1603] | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | failed H[#1603] | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
+| 33. Dependent launches | ? | ? | done¹ [#3652] | ? | ? |
+| 34. Rows together | ? | ? (oQ4e dense is 5–8 bits) | no (no HIP) | no (no HIP) | failed H[#3305] |
+| 35. FP8 KV prefill waits | failed C[#3741] | ? | ? | ? | ? |
+| 36. Qwen normalization and head | failed C[#3741] | ? | ? | ? | ? |
+| 37. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | open H[#4673] | ? | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
 | 1. Prompt tail | yes | yes | yes | yes | yes |
 | 2. Paged KV | done [#1620] | done [#1653] | done [#1284] | yes | yes (own pool) |
-| 3. Prompt store | done [#1755] | done [#1756] | open [#2430] | yes | yes |
+| 3. Prompt store | done [#1755] | done [#1756] | done [#2430] | yes | yes |
 | 4. iGPU states | done¹ | done¹ | done¹ | done¹ | yes |
 | 5. State walk | yes | yes | yes | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | yes | yes |
 | 7. Host KV tier | yes | yes | yes | yes | yes |
-| 8. Disk cache | yes | yes | yes | yes | done¹ |
+| 8. Disk cache | yes | done [#3135] | done [#3135] | yes | done¹ |
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
-| 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
+| 11. Fused proj. | done¹ | done [#1783] | done [#3131] | done¹ | done¹ |
 | 12. Add + norm | done¹ | done¹ | done [#1256] | done¹ | done M[#1714] ? C |
 | 13. MoE grouped | done¹ | no (dense) | no (dense) | done [#1388] | done M[#1707] |
 | 14. CUDA graphs | done¹ | done¹ | done¹ | yes | done¹ |
@@ -99,23 +109,33 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 16. DFlash(2) | yes | yes | yes | done¹ | yes |
 | 17. DSpark | yes | yes | yes | done¹ | done [#1751] |
 | 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | done¹ |
-| 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in) |
-| 20. Solo chunks | yes | yes | yes | yes | yes |
+| 19. Shared drafts | no (copies) | no (copies) | no (copies) | done [#1426] | done¹ (opt-in) |
+| 20. Solo chunks | yes | yes | yes | yes | done M[#2950] |
 | 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
-| 22. Direct load | yes | open [#2449] | open [#2449] | yes | open [#1924] |
+| 22. Direct load | yes | done [#2449] | done [#2449] | yes | open [#1924] |
 | 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | done [#1884] |
 | 24. L2 prefetch | yes | yes | yes | yes | done¹ |
 | 25. TP ranks | yes | no (4B) | yes | done [#1388] | done¹ |
 | 26. Pipeline | yes | no (4B) | yes | yes | yes |
-| 27. Profiles | done [#1944] | done [#1944] | open [#2306] | yes | yes |
+| 27. Profiles | done [#1944] | done [#1944] | done [#2306] | yes | yes |
 | 28. Scale index | ? | ? | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? | ? |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
-| 1. Prompt tail | no (no CUDA) | no (no CUDA) | no (n/a) | no (no engine) |
-| 2. Paged KV | open [#1503] | yes | yes | yes |
-| 3. Prompt store | open [#1503] | yes | yes | yes |
+| 1. Prompt tail | yes | no (no CUDA) | no (n/a) | no (no engine) |
+| 2. Paged KV | done C[#1503] | yes | yes | yes |
+| 3. Prompt store | done C[#1503] | yes | yes | yes |
 | 4. iGPU states | yes | yes | yes | yes |
 | 5. State walk | yes | yes | yes | yes |
 | 6. KV ledger | yes | yes | yes | yes |
@@ -133,7 +153,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 18. Copy drafts | done M¹ | done X[#1696] | done¹ | yes |
 | 19. Shared drafts | done [#1779] | no (no head) | no (no head) | yes |
 | 20. Solo chunks | yes | yes | yes | yes |
-| 21. Read-ahead | no (no CUDA) | yes | yes | yes |
+| 21. Read-ahead | yes | yes | yes | yes |
 | 22. Direct load | yes | yes | yes | yes |
 | 23. Page drop | done M[#1885] | yes | done [#1887] | yes |
 | 24. L2 prefetch | yes | yes | yes | yes |
@@ -142,11 +162,22 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 40. CPU KDA heads | n/a | n/a | n/a | done CPU, exact independent heads (Refs #1247) |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
 dory `dory` (C), mm3 `minimax_m3` (C, M), dsv41 `deepseek_v41` (its own CUDA binary, not the release's CUDA server;
-M), lfm2m `lfm2_moe` (M; C on [#1492]), lfm3 `lfm3` (X; C on [#1508]), qwen4 `qwen4` (C, M),
+M), lfm2m `lfm2_moe` (C, M), lfm3 `lfm3` (X; C on [#1508]), qwen4 `qwen4` (C, M),
 ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 
 | Optimization | q27 | lfm2 | llama | step5 |
@@ -161,16 +192,16 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 8. Disk cache | done¹ | no (scores) | yes | yes |
 | 9. FP8 KV | yes | no (scores) | yes | yes |
 | 10. FP4/FP8 decode | no (Metal) | no (bf16) | no (Metal) | no (Metal) |
-| 11. Fused proj. | done¹ | yes | yes | done¹ |
+| 11. Fused proj. | done¹; mixed KV and Q/K norm-RoPE prepared #2940 | yes | yes | done¹ |
 | 12. Add + norm | done M¹ | done¹ | done¹ | yes |
 | 13. MoE grouped | done [#1125] | no (dense) | no (dense) | done¹ |
 | 14. CUDA graphs | no (Metal) | no (scores) | no (Metal) | no (Metal) |
-| 15. MTP | open M[#2464] | no (scores) | no (no head) | done¹ |
+| 15. MTP | done M[#2464] | no (scores) | no (no head) | done¹ |
 | 16. DFlash(2) | done [#578] | no (scores) | yes | yes |
 | 17. DSpark | yes | no (scores) | yes | yes |
 | 18. Copy drafts | done¹ | no (scores) | done M¹ | done M¹ |
 | 19. Shared drafts | done [#578] | no (scores) | no (no head) | yes |
-| 20. Solo chunks | yes | no (scores) | yes | yes |
+| 20. Solo chunks | M5 yes; pre-M5 implemented M[#2916], device gate pending | no (scores) | yes | yes |
 | 21. Read-ahead | no (Metal) | yes | no (Metal) | no (Metal) |
 | 22. Direct load | yes | yes | yes | yes |
 | 23. Page drop | done M[#1885] | done [#1884] | done M[#1885] | done M[#1885] |
@@ -180,42 +211,62 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
 | 29. DSpine | open M[#2634] | no (scores) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? |
 
-| Optimization | gdsa | kimi | qwen3 |
-| --- | --- | --- | --- |
-| 1. Prompt tail | no (Metal) | no (Metal) | no (HIP only) |
-| 2. Paged KV | yes | yes | no (prompt) |
-| 3. Prompt store | yes | yes | no (prompt) |
-| 4. iGPU states | no (unified) | no (unified) | no (prompt) |
-| 5. State walk | yes | yes | no (prompt) |
-| 6. KV ledger | yes | yes | no (prompt) |
-| 7. Host KV tier | yes | yes | no (prompt) |
-| 8. Disk cache | yes | yes | no (prompt) |
-| 9. FP8 KV | yes | yes | no (prompt) |
-| 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) |
-| 11. Fused proj. | yes | yes | yes |
-| 12. Add + norm | done¹ | done M¹ | yes |
-| 13. MoE grouped | done¹ | done¹ | no (dense) |
-| 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) |
-| 15. MTP | done¹ | no (DSpark) | no (prompt) |
-| 16. DFlash(2) | yes | yes | no (prompt) |
-| 17. DSpark | yes | yes | no (prompt) |
-| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) |
-| 19. Shared drafts | yes | yes | no (prompt) |
-| 20. Solo chunks | yes | yes | no (prompt) |
-| 21. Read-ahead | no (Metal) | no (Metal) | yes |
-| 22. Direct load | yes | yes | yes |
-| 23. Page drop | done M[#1888] | yes | yes |
-| 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) |
-| 25. TP ranks | yes | yes | no (small) |
-| 26. Pipeline | yes | yes | no (small) |
-| 27. Profiles | yes | yes | yes |
-| 28. Scale index | ? | ? | ? |
-| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) |
+| Optimization | gdsa | kimi | qwen3 | snloop |
+| --- | --- | --- | --- | --- |
+| 1. Prompt tail | no (Metal) | no (Metal) | no (HIP only) | done M¹ |
+| 2. Paged KV | yes | yes | no (prompt) | done M[#2283] |
+| 3. Prompt store | yes | yes | no (prompt) | yes |
+| 4. iGPU states | no (unified) | no (unified) | no (prompt) | no (unified) |
+| 5. State walk | yes | yes | no (prompt) | yes |
+| 6. KV ledger | yes | yes | no (prompt) | yes |
+| 7. Host KV tier | yes | yes | no (prompt) | yes |
+| 8. Disk cache | yes | yes | no (prompt) | done¹ |
+| 9. FP8 KV | yes | yes | no (prompt) | yes |
+| 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) | no (Metal) |
+| 11. Fused proj. | yes | yes | yes | open M[#3859] |
+| 12. Add + norm | done¹ | done M¹ | yes | open M[#3859] |
+| 13. MoE grouped | done¹ | done¹ | no (dense) | no (dense) |
+| 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
+| 15. MTP | done¹ | no (DSpark) | no (prompt) | open M |
+| 16. DFlash(2) | yes | yes | no (prompt) | yes |
+| 17. DSpark | yes | yes | no (prompt) | yes |
+| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) | done¹ |
+| 19. Shared drafts | yes | yes | no (prompt) | open M |
+| 20. Solo chunks | yes | yes | no (prompt) | yes |
+| 21. Read-ahead | no (Metal) | no (Metal) | yes | no (Metal) |
+| 22. Direct load | yes | yes | yes | yes |
+| 23. Page drop | done M[#1888] | yes | yes | done M[#1885] |
+| 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
+| 25. TP ranks | yes | yes | no (small) | no (9B) |
+| 26. Pipeline | yes | yes | no (small) | no (9B) |
+| 27. Profiles | yes | yes | yes | yes |
+| 28. Scale index | ? | ? | ? | ? |
+| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
+| 34. Rows together | no (Metal) | no (Metal) | no (prompt) | ? |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
-qwen3 `qwen3` (H: embeddings and rerankers, prompt only).
+qwen3 `qwen3` (H: embeddings and rerankers, prompt only), snloop `sensenova_loop` (M: SenseNova-Loop-9B via `qwen27`).
 
 Not in the table: `h3` (MiniMax H3 denoising blocks), `drama3` (speech), `moss_image`, `qwen_image`, `radio`, and
 the HIP OCR families `dots_mocr` and `glm_ocr`. They are not autoregressive text servers on the lane host, so few rows
@@ -258,6 +309,16 @@ below; these are estimates for planning a port, not results.
 | 27. Profiles | none | none | none | names the opt-in switches |
 | 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode before tensor units |
 | 29. DSpine | none | medium | low | Qwen3.8-27B; agent 2–20 % faster, chat and code 10–19 % slower |
+| 30. Small-kernel fusion | none | low | none | HIP Flash Next: 1.2–2.0 % of a round for the hyper-connection block, 2.4–4.0 % for all four groups |
+| 31. Stream-tile prefetch | none | none | none | HIP Flash Next: the hyper-connection projections, no gain |
+| 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
+| 33. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
+| 34. Rows together | none | low | none | Lightning on HIP: dense launches faster, two greedy streams slower |
+| 35. FP8 KV prefill waits | none | none | none | CUDA qwen3_5: +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) |
+| 36. Qwen normalization and head | none | none | none | CUDA qwen3_5: −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) |
+| 37. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
+| 38. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
+| 39. Drafted rows share the walk | none | medium | none | HIP qwen3_5: decode at one stream with drafts at 131K-258K, score half +1.0–5.1 %, values' half +0.4–6.9 % more |
 
 ## The optimizations
 
@@ -269,8 +330,8 @@ below; these are estimates for planning a port, not results.
 
    | Family | Last layer, layers | Main blocker | Gain | Effort |
    | --- | --- | --- | --- | --- |
-   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer | −1.2..−1.6 % TTFT | done [#2229] |
-   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer | −1.3..−2.9 % TTFT (no drafter) | done [#2229] |
+   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer when drafting | −1.2..−1.6 % TTFT; unread chunks [#2941] | done [#2229] |
+   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer when drafting | −1.3..−2.9 % TTFT (no drafter); unread chunks −0.5..−0.6 % (−28..−35 ms) cold 32K, −3 ms 8K [#2941] | done [#2229] |
    | gemma4 | global attention, 42–60 | drafter taps copy every row | ~1.5 % | easy |
    | dory | an MLP sublayer, 72 sublayers | none | ~1.3 % | easy |
    | spark25 | full attention, 36 | fused QKVG GEMM | ~2 % | medium |
@@ -282,7 +343,7 @@ below; these are estimates for planning a port, not results.
    | glm | KDA linear layer, 45 | must write the recurrent state for every row | small | hard |
    | qwen4, lfm2 | | | n/a | |
 
-   The qwen3_5 numbers are measured. The others are estimates (`~`): about 1/layers, minus the k/v share.
+   The qwen3_5 numbers are measured. The 35B-A3B unread-chunk path is a quiet-GB10 A/B: 32K −28.4 ms median per-round and −34.5 ms median adjacent (-0.5..-0.6 %), 8K −3..−4 ms, 2K level, tokens equal ([#2941], @jschmied). The others are estimates (`~`): about 1/layers, minus the k/v share.
 
 2. **KV pages from the core pool.** Streams lease KV pages from one `kv_pool` as their rows grow, instead of each
    reserving a whole `--context` window, so more streams fit and a short request holds little ([#1156], [#781]'s
@@ -303,6 +364,15 @@ below; these are estimates for planning a port, not results.
    its DFlash2 drafter, turns 2 to 6 of a six-turn chat reused 1,450 to 1,635 prompt tokens and took 0.72 to 1.33 s
    against 1.78 to 2.10 s unset. Prompt passes are cut at replies, so one of the six replies differed from the unset
    path; resumed and fresh replies matched with it set. This mode remains incompatible with `TF_QWEN_KV_SHARE`.
+
+   Qwen3.8-27B on Metal can opt into states at message starts with `TF_QWEN27_MESSAGE_STARTS=1` ([#4932], [#3617]). On an M5
+   Ultra with Qwen3.8-27B MLX 4-bit, a 32,768-token history of four tool results whose last result was then edited
+   reused 21,041 tokens and answered in 9.5 s against 24.5 s unset; replies matched a fresh cache-off pass, greedy and
+   seeded, with and without DFlash2. The starts take only room the cache can already promise, except the rewind state
+   at the last user message's start of a prompt among the last 16 with a rewind state: a full store evicts for it
+   beside the endpoint, never another conversation's rewind state, so a repeating client's next question resumes
+   there. Five assistant clients asking in turn in a 6 GiB cache reused 38.9% of prompt tokens, against 29.5% on
+   main.
 
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
    state can stay where it is instead of being copied through pinned host memory on every save ([#2043]). On Qwen
@@ -362,6 +432,12 @@ below; these are estimates for planning a port, not results.
     Flash Next on Metal before tensor units groups a decode window's 4-bit experts from five rows up, each
     (row, expert) pair keeping the per-row kernels' sums ([#2784], plan in [#2764]); its shared rounds do not yet.
 
+    REV25 E1 adds an opt-in GLM CUDA experiment: two paired prompt chunks share one grouped route and 128-pair
+    block-16 NVFP4 items, with separate per-chunk activations and slot rows (`TF_GLM_PAIR_EXPERTS=1`). Each pair
+    keeps its own K loop and epilogue; shared prefixes and slot combines retain the original piece and slot order.
+    Default-off allocations and the existing 64-pair kernels are unchanged. Device timing and token hashes are not
+    yet run, so no speedup is claimed; EXL3 and block-32/CSF0 keep the original two-pass path.
+
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
     host's launch cost from every step. `TENSORFOLD_GEMMA4_GRAPHS=0` (and the same switch for Kolibri, Spark
     and Dory) keeps those eager. GLM's capture is [#2279] (open), for [#1490].
@@ -369,7 +445,7 @@ below; these are estimates for planning a port, not results.
 15. **MTP drafts.** The checkpoint's own MTP head drafts tokens that the target verifies in one pass, with the same
     replies as serial decode. `--mtp-drafts` and `--mtp-confidence` size the drafts on Nemotron and GLM.
 
-    GLM CUDA's proposed 32-row prices, three-draft shared MTP cap and wider copy windows are tracked in [#2257].
+    GLM CUDA's 32-row prices, three-draft shared MTP cap and wider copy windows landed in [#2257].
     The TP=2 receipt on two GB10s compares main 52427c023e with an earlier revision of the proposed branch: one-stream code 55.4 to 73.7 tok/s
     (+33.1%), two-stream chat +3.2%, one-stream chat +1.0%, two-stream code +1.3%, prefill within 0.3% and
     replies 52/0/0 equal/unequal/unverified. The receipt does not identify the drafter mode, so it qualifies
@@ -379,14 +455,44 @@ below; these are estimates for planning a port, not results.
     that same total between fixed and head components. Its row learning, granted-depth and shared-depth limits are
     off. The preserved shared step values are still checked on the host; the other proposed behavior retains its gates.
 
+    Dense Qwen CUDA MTP is tracked in [#2485]. The local candidate `ab19ad377` against main `a0e2665a4` was
+    measured with the Qwen3.8-27B NVFP4 checkpoint on an RTX 5090 Laptop (SM120). At one stream, 128-token decode
+    was 68.5–78.4 tok/s with MTP3 versus 34.2 tok/s without drafts; at two streams, aggregate decode was
+    122.6–151.9 versus 58.9–60.3 tok/s. Across greedy and seeded temperature-1 sampling, 120/120 cross-run token
+    hashes matched; resumed and fresh replies also matched in all four MTP-on/off and greedy/sampled cells, with
+    4,096 cached tokens observed on each resumed request. Cold first-token latency with cache off was slower with
+    MTP3: at 2,048 prompt tokens, 1.279 s versus a 1.213 s main A/B/A mean (+5.5%); at 8,000 tokens, 5.036 s
+    versus 4.864 s (+3.5%). The branch's target-only path matched main within noise. This misses the current
+    no-slower prompt gate for `--drafter`, so the change is not release-qualified until that regression is
+    addressed or the gate is explicitly revised. At parallel 2 and context 1,024, process GPU peak was 21,498
+    MiB with MTP versus 21,088 MiB target-only (+410 MiB); at context 8,192 it was 21,396 versus 21,168 MiB
+    (+228 MiB). Only this checkpoint and SM120 were measured; other dense families and devices remain unqualified.
+
+    Follow-up on 12 Nov 2026 after adding KV-only prompt absorption (same Qwen3.8-27B NVFP4 checkpoint and RTX 5090 Laptop, SM120): baseline worktree `3885dceb2bb60fe02e609066b75ec752baf51e38`, candidate `4f2436fc016adbc4ca79adab5fbcd0886a6149be`. Five fresh-server, cache-off greedy samples gave main/candidate-MTP median first-output latency of 1.2214/1.2498 s at 2,048 tokens (+2.33%) and 4.9839/5.0677 s at 8,192 (+1.68%); all token hashes matched. Candidate without drafts was +0.62% at 2K and −0.12% at 8K. MTP remains outside the strict no-slower prompt gate at both required lengths. The isolated K/V ring check was byte-identical for 1 and 128 rows; KV-only CUDA time was 0.081/0.770 ms versus 0.336/3.003 ms for full proposal. These checks do not qualify away the cold-prefill regression.
+
+    Those 12 Nov measurements predate the 13 Nov rebase onto main (`223da7659b2f1ec7a6fe666cb064d839382d6fce`); rerun the cold-prompt gate on the rebased candidate before treating them as current qualification evidence.
+
+    Flash Next CUDA has an opt-in `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` prompt-head path. It retains the KV and indexer
+    caches, skips proposal attention, experts, last-row outputs, scores and graph capture, and bounds pieces by 3,072
+    rows and one quarter of the admitted scratch capacity. #5332 uses that bound to keep the native `fc_h` lane's two
+    four-stream `part` slices in the existing allocation while retaining pieces wider than 256 when capacity permits.
+    The default is off and its `cap / 2`, 256-row plan is unchanged. Host checks cover cache bytes, poisoned outputs and
+    scratch plans at one- and five-stream capacities; device byte-equality, memory and timing qualification remain required.
+
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
     Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
     16-row default; sampled and shared requests keep the lane core ([#3013](https://github.com/ashhart/TensorFold/issues/3013)).
+    Qwen3.5 CUDA mixed-width batches project narrow and wide contexts through their own DFlash2/DSpine head paths
+    ([#3460](https://github.com/ashhart/TensorFold/issues/3460)); hardware timing and token-identity receipts are pending.
 
 17. **DSpark drafters.** A drafter that ships with the release (DeepSeek-V4.1's `mtp.i` blocks, MiniMax-M3.1's, Kimi
     K3's) drafts from the target's taps with a confidence schedule. Applies wherever a DSpark drafter exists for the
     target.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | deepseek_v41 (M), timed cost table | opt-in; M5 Ultra code +1..+6 %, 3 chat cells −2..−4 %; M3 Ultra 5 cells +1..+4 %, 3 −1..−2 % | [#2952] |
 
 18. **Copy drafts.** Where a reply repeats earlier text, the lane host drafts the continuation from the context
     (`copy_index.zig`) and the target verifies it. It needs no drafter weights; [#2022] brought verified root and
@@ -416,6 +522,7 @@ below; these are estimates for planning a port, not results.
     | flashnext (C), one GPU | prompts 15–23 % faster at `--parallel 1`, up to 8,192 rows a pass | [#2246] |
     | glm (C), TP=2 | prompts about 2 % sooner at 8K–128K, two chunks a step, replies unchanged | [#1423] |
     | gemma4 (C) | first token 31B −4..−5 %, E4B −9..−10 %, opt-in with `TF_GEMMA4_CHUNK_SOLO` | [#2391] |
+    | deepseek_v41 (M) | a reply's longest pause beside a 131K prompt 203 → 7 s, prompt's first token level (M3 Ultra, opt-in) | [#2950] |
 
     `TF_GLM_CHUNK_SOLO=4096` is slower with GLM's NVFP4 checkpoint on two GB10s ([#2288]).
 
@@ -452,12 +559,20 @@ below; these are estimates for planning a port, not results.
     | glm | decode +3.0..+4.1 % at TP=3, +0.8..+1.9 % at TP=2 | [#2162] |
     | flashnext, gemma4 | null: +0.45 % and +0.15 % at one stream, inside the runs' spread, same replies; not proposed | measured on a GB10, no PR |
 
+    Qwen3.8-27B's decode attention on XPU takes its L2 reuse from launch order instead, with no prefetch: [#2595] is a
+    grid-only change. `attn_decode` runs on a (rows, heads, slices) grid, so a key slice's tree rows run back to back;
+    each work group's arithmetic and the bits are unchanged ([#2543] keeps wider slices for later, as an opt-in). On
+    an Arc Pro B70 at one stream, drafted, with a bf16 cache: +6 % at 8K prompt tokens, +23 % at 32K, +33 % at 131K;
+    `"draft": false` is unchanged. With `XPU_KV_INT8=1` it is 2–4 % slower below about 12K tokens and faster past it.
+    Not run: sampled decoding, resumed prompts, `QPARTS != 1` builds and any GPU but BMG-G31.
+
 25. **Tensor parallel ranks.** A model splits over two or more GPUs or hosts, so a model that doesn't fit one box
     runs, and decode reads each rank's share of the weights. Mixed Metal and CUDA ranks are tracked in [#1236].
 
     | Family | Gain (measured) | Where |
     | --- | --- | --- |
     | flashnext (C), TP=2 | prompt passes reduce-scatter the experts' slots by rows: rank 0 sends 5.81 → 3.43 MiB a prompt token, cold prefill +26.5..+26.8 % on two GB10s, +30.9..+33.9 % on two RTX PRO 6000s, same replies | [#2977] |
+    | flashnext (C), TP=2 | control-link waits poll 50 µs for 50 ms before they block: drafted decode +1.4..+1.5 % at one stream, +3.7..+4.7 % at four on two GB10s, same replies | [#2971] |
 
 26. **Pipeline stages.** Layer ranges on different nodes, one hidden row a token over Ethernet, so a GB10 and a Mac
     can serve one model ([#2005]). The stage link and its protocol are [#2012] and [#2060]; the 27B as a stage is
@@ -479,6 +594,90 @@ below; these are estimates for planning a port, not results.
     `core/dspine.zig` and the tree walker in `core/lanes/draft_tree.zig` are on main through the CUDA binding
     ([#2633]); the Metal binding ([#2634]) is still open. On a GB10, against DFlash2: agent prompts decode 2–20 %
     faster, chat and code 10–19 % slower. It needs the checkpoint's own DSpine drafter, so other families have none.
+
+30. **Small-kernel fusion.** Launches under 20 µs, fused into one launch where they sit next to each other, to save the
+    gap between dispatches (2.0 µs median) and the per-launch floor (the cheapest kernels run 1.3 µs). Bounded under the
+    bar on Flash Next HIP, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | hyper-connection block 1.2–2.0 % of a round, all four groups together 2.4–4.0 %; estimates from measured gaps and launch counts, not built | [#1603], main `6c5cef894`, gfx1151 |
+
+31. **Prefetched and double-buffered stream tiles.** A separate stream-tile family for the hyper-connection
+    projections that prefetches or double-buffers the weight loads, bit-equal to the plain kernel at 1–8 rows. On
+    Flash Next HIP it gained nothing, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | code 46.01–46.30 tok/s and chat 39.87–40.10 tok/s against main, every token hash equal | [#1603], one Strix Halo iGPU (gfx1151) |
+
+32. **Routed-expert prompt grid sized by filled items.** The prompt launch's grid follows the items actually filled
+    and not the decode tile's capacity, where about 91 % of the blocks exit empty at 4,096 rows. On Flash Next HIP the
+    empty blocks cost almost nothing, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | first-token ratios 0.99–1.01, prompt tok/s at most 1.2 % better, decode and concurrency level | [#1603], one Strix Halo iGPU (gfx1151) |
+
+33. **Dependent launches.** On sm_90 and newer a kernel can launch while the one before it ends, then wait
+    (`griddepcontrol.wait`) only where it reads that kernel's output; a linear can stream its fixed weights in before
+    the wait. GLM ([#3652]) opens every kernel with the wait and its qmmf decode tiles load weights first: decode
+    +6.8 % plain and +4.0 % drafted at TP=2 on GB10, the same tokens. An input a predecessor writes must not be
+    `const __restrict__`, or ptxas may place its non-coherent load above the wait; `zig build check-pdl-loads`
+    checks the SASS.
+34. **Rows together on HIP's stream tile.** In a dense 4-bit product of 3 or 4 rows, every row's dot chains advance
+    one code pair at a time on gfx1151, so the rows' chains hide each other's latency; each output keeps its order of
+    operations, so the bits are unchanged. The launches are faster, but cheaper 3- and 4-row windows make the draft
+    policy draft shallower, and two greedy streams lose more than one stream gains.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | nemotron (H), Lightning 4-bit | dense launches 3..16 % faster; one stream's decode +3.4..+5.9 %, two greedy streams −3.2 % and −2.3 % (2.98 against 3.08 tokens a chunk), same tokens; not proposed | measured on a Strix Halo, [#3305] |
+    | flashnext (H), Flash Next oQ4e | picks nothing: its dense weights are 5, 6 and 8 bits | measured on a Strix Halo, no PR |
+
+35. **FP8 KV prefill waits.** Experiment: FP8 KV prefill waits; Nsight showed the FP8 path executed. On one GB10
+    (SM121) it fell under the 3 % bar, so the row is `failed` ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+36. **Qwen normalization and head.** Experiment: Qwen normalization and head; Nsight showed standalone group-sum
+    launches removed in the normalization trace. On one GB10 (SM121) it fell under the 3 % bar, so the row is `failed`
+    ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+37. **Text metadata uploads.** Experiment: Qwen text metadata and snapshots; Nsight showed a typical Qwen
+    text-metadata upload shrink from 183,328 to 70,192 bytes. On one GB10 (SM121) it fell under the 3 % bar, so the
+    row is `failed` ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+38. **Greedy readback.** Experiment: dots.mocr greedy readback; Nsight showed 48 four-byte device-to-host copies
+    eliminated in the dots trace. On one GB10 (SM121) the one-stream gain did not carry to four streams, so the change
+    is `failed` ([#3741]). `dots_mocr` is an OCR family named under "Not in the table" above and has no column of its
+    own, so this entry is the only place it is recorded.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | dots_mocr | +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) at one greedy stream, but −0.68 % paired at four greedy streams (absolute 52.61 → 52.26 tok/s a stream); tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+39. **Drafted rows share the walk.** A decode round's drafted rows of one stream sit at consecutive positions and
+    read the same keys and values. On HIP at d = 256 over spans of 16,384 keys or more, a multi-row round scores a
+    slot's rows in chunks of two from one read of the keys ([#4673]) and weighs them in chunks of four from one read of
+    the values ([#3811]'s second half), each row keeping its sums and their order, so the bits are unchanged. One-row
+    rounds keep their kernels, and a second launch keeps one-row slots at the one-row kernels' occupancy. The depth rule
+    weighs timed rounds, so faster multi-row rounds can change how deep a stream drafts.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (35B-A3B) | score half +0.96 % to +3.27 % decode at one stream with drafts at 131,072 and 258,048 kept tokens; the values' half +3.86 % to +6.94 % on top of it; `"draft": false` and four streams without drafts level; tokens equal | [#4673] and [#3811], gfx1151 |
+    | qwen3_5 (27B) | score half +2.59 % to +5.11 %; the values' half +0.43 % to +4.91 % on top of it; the same checks | [#4673] and [#3811], gfx1151 |
 
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
@@ -524,6 +723,7 @@ below; these are estimates for planning a port, not results.
 [#1394]: https://github.com/ashhart/TensorFold/pull/1394
 [#1411]: https://github.com/ashhart/TensorFold/pull/1411
 [#1413]: https://github.com/ashhart/TensorFold/pull/1413
+[#3135]: https://github.com/ashhart/TensorFold/pull/3135
 [#1423]: https://github.com/ashhart/TensorFold/pull/1423
 [#1426]: https://github.com/ashhart/TensorFold/pull/1426
 [#1434]: https://github.com/ashhart/TensorFold/pull/1434
@@ -532,7 +732,6 @@ below; these are estimates for planning a port, not results.
 [#1465]: https://github.com/ashhart/TensorFold/pull/1465
 [#1477]: https://github.com/ashhart/TensorFold/pull/1477
 [#1490]: https://github.com/ashhart/TensorFold/issues/1490
-[#1492]: https://github.com/ashhart/TensorFold/pull/1492
 [#1501]: https://github.com/ashhart/TensorFold/pull/1501
 [#1503]: https://github.com/ashhart/TensorFold/pull/1503
 [#1508]: https://github.com/ashhart/TensorFold/pull/1508
@@ -599,6 +798,8 @@ below; these are estimates for planning a port, not results.
 [#2127]: https://github.com/ashhart/TensorFold/pull/2127
 [#2146]: https://github.com/ashhart/TensorFold/pull/2146
 [#2162]: https://github.com/ashhart/TensorFold/pull/2162
+[#2543]: https://github.com/ashhart/TensorFold/issues/2543
+[#2595]: https://github.com/ashhart/TensorFold/pull/2595
 [#2165]: https://github.com/ashhart/TensorFold/issues/2165
 [#2432]: https://github.com/ashhart/TensorFold/pull/2432
 [#2499]: https://github.com/ashhart/TensorFold/issues/2499
@@ -624,10 +825,24 @@ below; these are estimates for planning a port, not results.
 [#2392]: https://github.com/ashhart/TensorFold/pull/2392
 [#2436]: https://github.com/ashhart/TensorFold/pull/2436
 [#2464]: https://github.com/ashhart/TensorFold/pull/2464
+[#2485]: https://github.com/ashhart/TensorFold/issues/2485
 [#2375]: https://github.com/ashhart/TensorFold/pull/2375
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
+[#3582]: https://github.com/ashhart/TensorFold/pull/3582
+[#3617]: https://github.com/ashhart/TensorFold/issues/3617
+[#3652]: https://github.com/ashhart/TensorFold/issues/3652
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
+[#2950]: https://github.com/ashhart/TensorFold/pull/2950
+[#2952]: https://github.com/ashhart/TensorFold/pull/2952
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
+[#1603]: https://github.com/ashhart/TensorFold/issues/1603
 [#2977]: https://github.com/ashhart/TensorFold/pull/2977
 [#2805]: https://github.com/ashhart/TensorFold/pull/2805
+[#3305]: https://github.com/ashhart/TensorFold/issues/3305
+[#2941]: https://github.com/ashhart/TensorFold/issues/2941
+[#2971]: https://github.com/ashhart/TensorFold/pull/2971
+[#3741]: https://github.com/ashhart/TensorFold/issues/3741
+[#3811]: https://github.com/ashhart/TensorFold/issues/3811
+[#4673]: https://github.com/ashhart/TensorFold/pull/4673
+[#4932]: https://github.com/ashhart/TensorFold/pull/4932

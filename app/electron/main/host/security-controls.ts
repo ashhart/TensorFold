@@ -1,3 +1,4 @@
+import { canUseLinuxSandbox } from '../../agent/linux-sandbox'
 import { canUseMacSandbox } from '../../agent/sandbox'
 import type { SecurityControlSnapshot } from '../../agent/types'
 import { store } from '../state'
@@ -33,7 +34,7 @@ export function securityControlSnapshot(): SecurityControlSnapshot {
   return {
     actor: auditActor(),
     role: currentSecurityRole(),
-    commandSandboxAvailable: canUseMacSandbox(),
+    commandSandboxAvailable: canUseMacSandbox() || canUseLinuxSandbox(),
     mcpSandboxAvailable: canUseMacSandbox(),
     signedUpdatesRequired: signedUpdatesRequired(),
     updatePublicKeyConfigured: !!updateSignaturePublicKey(),
@@ -48,8 +49,7 @@ export function securityControlSnapshot(): SecurityControlSnapshot {
     quarantinedProtectedFiles: localSecrets.quarantinedProtectedFiles,
     quarantinedProtectedPaths: localSecrets.quarantinedProtectedPaths,
     quarantineBackupPaths: localSecrets.quarantineBackupPaths,
-    // There is no plaintext-store bypass. Keep the compatibility field honest
-    // even if a stale deployment still exports the former unused variable.
+    // Legacy environment values must not advertise a plaintext-store bypass.
     unencryptedLocalStoreAllowed: false,
     strictAuditEnabled: envEnabled('VONTRA_STRICT_AUDIT'),
     auditHealthy: !getLastAuditError(),

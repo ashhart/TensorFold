@@ -1,7 +1,11 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
 pub const dflash = @import("dflash/root.zig");
+pub const yarn = @import("yarn.zig");
+pub const loop = @import("loop.zig");
+pub const loop_affine = @import("loop_affine.zig");
 pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
+pub const tied_head = @import("tied_head.zig");
 pub const affine = @import("affine.zig");
 pub const widths = @import("widths.zig");
 pub const checkpoint = @import("checkpoint.zig");
@@ -13,6 +17,10 @@ pub const attention_join = @import("attention_join.zig");
 pub const simd_attention = @import("simd_attention.zig");
 pub const decode_round = @import("decode_round.zig");
 pub const forward = @import("forward.zig");
+/// The MTP draft head's forward (mtp-4bit.safetensors beside the checkpoint).
+pub const mtp = @import("mtp.zig");
+/// TF_Q27_MTP_GPU_PICK: the draft pick from a GPU top-1 row.
+pub const mtp_pick = @import("mtp_pick.zig");
 pub const gdn = @import("gdn.zig");
 pub const gdn_contract = @import("gdn_contract.zig");
 pub const gdn_hook = @import("gdn_hook.zig");
@@ -30,8 +38,10 @@ pub const model = @import("model.zig");
 pub const moe_gpu = @import("moe_gpu.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
+pub const kv_grow = @import("kv_grow.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
+pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");
@@ -42,12 +52,20 @@ pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
+/// Staged references: a round's stage rows copied to their planes (tf-qwen27-run --stages).
+pub const stage_planes = @import("stage_planes.zig");
+pub const sn_mtp = @import("sn_mtp.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
+    _ = yarn;
+    _ = loop;
+    _ = loop_affine;
     _ = disk;
     _ = @import("core").gpu_profile;
+    _ = @import("core").qwen35_stages;
+    _ = stage_planes;
     _ = session;
     _ = @import("gdn_test.zig");
     _ = @import("simd_attention.zig");
@@ -70,7 +88,12 @@ test {
     _ = checkpoint;
     _ = weights;
     _ = @import("weights_test.zig");
+    _ = @import("mtp_load_test.zig");
+    _ = @import("mtp_step_test.zig");
     _ = @import("geometry_test.zig");
+    _ = @import("slot_pages_test.zig");
+    _ = sn_mtp;
+    _ = @import("sn_mtp_scratch.zig");
 }
 
 pub const residency = @import("residency.zig");

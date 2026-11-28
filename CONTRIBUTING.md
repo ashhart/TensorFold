@@ -15,21 +15,29 @@ Building with a coding agent? Have it load the [contributor skill](docs/recipes/
 
 ### Contributing with agents
 
-Install or upgrade ATC to 0.9.4 or later, then run from an updated TensorFold clone:
+Install ATC 0.9.4 or later, pinned to a tag you have looked at, then run from an updated TensorFold clone:
 
 ```sh
-npm install -g github:ashhart/ATC
+npm install -g github:ashhart/ATC#v0.9.6
 atc check ISSUE --json
 atc claim ISSUE --json
 ```
 
 Replace `ISSUE` with the issue number and claim only after a complete check says the work is free.
-TensorFold enables automatic public check-ins: with ATC 0.7.0 or later, a successful new claim starts an anonymous session on the radar and returns its `session` number.
+TensorFold turns public check-ins on by default: with ATC 0.7.0 or later, a successful new claim without `--local` starts a session on the radar and returns its `session` number.
 Keep that number instead of starting a duplicate session.
 For work already yours, start a session with `atc start ISSUE --json`.
 Add `--github-name` to `claim` or `start` only if you want your verified GitHub name shown; showing it is an explicit opt-in. `--local` keeps a new session on your machine.
 The board shows the issue, activity state and last check-in; GitHub still associates the verification comment with its author.
 Check that `publication` is `public`; `unavailable` means the public update failed even if the local claim or session succeeded.
+
+#### What a public check-in sends
+
+- A `/atc presence` comment on the issue, posted from your GitHub account. Anyone can see it until the session lands.
+- To `https://tensorfold.dev`, which the TensorFold project runs: the issue number, a random session token, that comment's ID, the work state and whether the session shows your GitHub name (the name itself is not sent), on the claim or start and again on every pulse.
+- The comment ID lets the site operator look up your GitHub account, so "anonymous" means the public radar hides your name, not that the operator can't see it. The site also sees your IP address and when you work.
+
+Pass `--local` to keep a session on your machine. You can also claim an issue without ATC by opening a draft pull request whose description says `Fixes #<issue>`.
 
 Pulse only while the agent is working, before its five-minute check-in expires:
 
@@ -58,6 +66,10 @@ zig build test test-golden -Dcpu=apple_m1
 ```
 
 `native` writes `zig-out/native/bin/tensorfold-native`, the server.
+On Linux, `zig build native` compiles for the build machine's CPU, so the binary can stop with `Illegal instruction` on a
+machine without the same features (AVX-512, for example). To build for another machine, name its CPU: `-Dcpu=baseline`
+runs on any x86_64, as the release archives do, and `-Dcpu=x86_64_v3` on an x86-64-v3-capable machine (AVX2 class).
+
 Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
 To build one stripped server for one GPU (`zig build -Dgpu=spark -Dnvcc=...`, about 69% smaller than the four-target server), see [Build a server for one GPU](RUNBOOK.md#build-a-server-for-one-gpu).
 The `apple_m1` CPU target keeps the macOS binary compatible with M1 through M5.
@@ -116,11 +128,10 @@ Verify these contracts at the same checkpoint, backend, runtime and settings:
 
 A new or changed GPU kernel registers with the [kernel contract](docs/kernel-contract.md), and its pull request posts each backend's `SUMMARY` line. How to bound, profile and measure a speed change is in [docs/optimizing.md](docs/optimizing.md).
 Keep the checkpoint's activation precision and the required accumulation precision.
-A changed reduction order needs an independent FP64 reference for each affected projection class, with native error no worse than the current reference.
-Compare prompt and decode references separately on identical input rows.
-Report worst per-column differences as well as aggregate error; an average must not hide a worse column.
-For model fidelity, use teacher-forced histories and record all top-token differences and margins.
-A documented one-step tie policy applies only to the same two contenders with both margins within that policy.
+A change to reduction order, accumulation order or rounding point must keep every output bit equal to main's: the same token ids and the same logits bits, by default and with any switch on.
+An FP64 reference or an error bound does not make a different result acceptable, and lower-precision formats are not accepted, even opt-in.
+The one exception is a checkpoint's own trained format (for example a KV cache format the checkpoint was trained and published in), checked bit for bit against the serial reference.
+Compare prompt and decode separately on identical input rows.
 
 ## Performance receipts
 

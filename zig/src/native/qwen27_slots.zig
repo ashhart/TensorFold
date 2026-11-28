@@ -1,7 +1,6 @@
 //! The 27B lane backend's slots: a stream's prompt into its slot, slot 0's hand-over and a lone stream's serial loop.
 const std = @import("std");
 const mtl = @import("metal");
-const api = @import("engine_api");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lanes = tf.lanes;
@@ -19,7 +18,10 @@ pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_ro
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     var f = try opening(b, s, slot);
     defer closing(b, s);
-    while (!try chunk(b, s, &f, 0)) {}
+    while (!(chunk(b, s, &f, 0) catch |err| {
+        if (err == error.Cancelled and slot == 0) leave(b, s);
+        return err;
+    })) {}
 }
 
 /// A prompt pass begins in `slot`: its kept state restored and its images encoded (one image prompt fills at a time).
@@ -40,6 +42,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     if (resumed == 0) {
         if (d) |x| try x.reset() else try b.runner.reset(slot);
         try clearContext(b, slot);
+        try b.runner.admit(slot, @intCast(ids.len)); // a fresh pass: the slot takes its prompt's rows at once
     }
     s.cached = resumed;
     var at: usize = resumed;
@@ -55,6 +58,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
                 try clearContext(b, slot);
             }
         } else s.reuse_failed = true;
+        if (s.reuse_failed) try lanes.memory_restore.refuseFallback(s); // never a placeholder row as text
     };
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
@@ -82,18 +86,21 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     b.runner.images = f.images;
     defer b.runner.images = null;
     b.runner.settleSlot(slot); // a mark's kept state read the slot: its blit lands before this chunk writes it
-    if (s.isCancelled()) return error.Cancelled;
+    if (s.isCancelled()) {
+        s.keepInterruptedPrefill(@intCast(f.at));
+        return error.Cancelled;
+    }
     if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
         if (f.at > f.from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(f.at));
         if (slot == 0) leave(b, s); // and slot 0 stands at it for the next prompt
         return error.Yielded;
     }
     const at = f.at;
-    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s, at), ids.len, s.chunks, s.decode_spans);
-    if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
-    end = resume_rules.rewindEnd(at, end, f.rewind);
     var decoded = false;
     for (s.decode_spans) |span| decoded = decoded or (at >= span[0] and at < span[1]);
+    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").chunk(b, s, at, decoded), ids.len, s.chunks, s.decode_spans);
+    if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
+    end = resume_rules.rewindEnd(at, end, f.rewind);
     var mark_bank: ?q.gdn_pool_gpu.PromptMarks = null;
     defer {
         if (mark_bank) |*m| {
@@ -132,17 +139,16 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         const session = q.session.Session{ .runner = b.runner, .slot = slot };
         if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
         if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
+        try @import("sensenova_features.zig").recordChunk(b, s, slot, at, part.len, last);
     }
     charge(b, s, before);
     lanes.prefill_widths.completed(b.gpa, s, part.len);
     f.at = end;
     s.fill_at.store(@intCast(end), .monotonic); // a prompt chunk waits: `at` is landed progress
     if (end == f.rewind) saveRewind(b, f.rewind);
-    if (s.isCancelled()) return error.Cancelled;
     if (mark_bank) |*m| {
         try m.complete(slot, @intCast(end));
         if (s.reuse.hook) |k| for (m.position.rows) |row| {
-            if (s.isCancelled()) return error.Cancelled;
             if (row != 0) k.at(k.ptr, s, m.position.start + row);
         };
     }
@@ -150,6 +156,10 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
     } else if (end == f.checkpoint) {
         if (b.checkpoint_hook) |k| k.at(k.ptr, s, @intCast(end));
+    }
+    if (s.isCancelled()) {
+        s.keepInterruptedPrefill(@intCast(end));
+        return error.Cancelled;
     }
     if (end == ids.len) b.runner.settleSlot(slot); // the stream's first round writes the slot next
     return end == ids.len;
@@ -159,9 +169,16 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
 pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
     const slot = b.slotOf(s) orelse (free(b) orelse return error.NoFreeSlot);
     try ready(b, slot, s);
+    if (b.owners[slot] != s) try b.runner.promise(slot, promiseRows(b, s));
     b.dropTreeOf(slot);
     b.owners[slot] = s;
     return slot;
+}
+
+/// Rows a paged slot promises `s` as it opens: its prompt and one widest pass; its reply's are promised as they come.
+fn promiseRows(b: *const Metal, s: *const lanes.Stream) u32 {
+    const rows = @as(u64, s.prompt().len) + b.runner.model.frame.capacity;
+    return @intCast(@min(rows, b.runner.capacity));
 }
 
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
@@ -174,7 +191,7 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     defer pool.pop();
     if (!b.fills.contains(s)) {
         const slot = try bind(b, s);
-        errdefer b.owners[slot] = null;
+        errdefer drop(b, slot);
         const f = try opening(b, s, slot);
         errdefer closing(b, s);
         try b.fills.put(b.gpa, s, f);
@@ -182,8 +199,9 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const f = b.fills.getPtr(s).?;
     const slot = f.slot;
     const done = chunk(b, s, f, 0) catch |err| {
+        if (err == error.Cancelled and slot == 0) leave(b, s);
         endFill(b, s);
-        b.owners[slot] = null;
+        drop(b, slot);
         return err;
     };
     if (done) endFill(b, s);
@@ -196,6 +214,13 @@ pub fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
     if (b.fills.get(s)) |f| s.keepInterruptedPrefill(@intCast(f.at));
 }
 
+/// A pass that failed or went back to the queue frees its slot, pages and promise (a standing slot 0's rows stay).
+fn drop(b: *Metal, slot: u32) void {
+    b.give_back[slot] = b.runner.kv_step != null;
+    b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0);
+    b.owners[slot] = null;
+}
+
 /// A stepped pass is over, or its stream left mid-pass.
 pub fn endFill(b: *Metal, s: *lanes.Stream) void {
     if (b.fills.remove(s)) closing(b, s);
@@ -206,6 +231,11 @@ pub fn slotResumeEnv() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
 }
 
+/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
+pub fn adaptiveBlockEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
+}
+
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
 fn slotResume(b: *const Metal) bool {
     return b.slot_resume and b.vision == null;
@@ -213,7 +243,7 @@ fn slotResume(b: *const Metal) bool {
 
 /// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
 fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null;
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and !s.memory_active and s.embedding == null and resume_rules.plain(s.cache_salt);
 }
 
 /// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
@@ -265,11 +295,23 @@ fn dropRewind(b: *Metal) u32 {
 }
 
 /// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.
-fn leave(b: *Metal, s: *const lanes.Stream) void {
-    const at = b.runner.offsets[0];
+fn leave(b: *Metal, s: *lanes.Stream) void {
+    var at = b.runner.offsets[0];
     const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
     if (!slotResume(b) or !plain(s) or !standsAt(b, at)) return b.standing.deinit(b.gpa);
-    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended }, s.context.items, s.decode_spans);
+    var landed = s.fill_at.load(.monotonic);
+    if (s.reason == .cancelled or s.isCancelled()) {
+        const point = resume_rules.cancelPoint(at, landed, b.standing.rewind_at);
+        if (point > 0 and point < at) {
+            const buf = b.rewind orelse return b.standing.deinit(b.gpa);
+            if (b.draft) |d| d.model.reset() catch return b.standing.deinit(b.gpa);
+            q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), point, buf) catch return b.standing.deinit(b.gpa);
+            at = point;
+            landed = point;
+        }
+        s.keepInterruptedPrefill(at);
+    }
+    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = landed, .ended = ended }, s.context.items, s.decode_spans);
 }
 
 /// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
@@ -371,7 +413,8 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     defer added.deinit(b.gpa);
     try added.appendSlice(b.gpa, try b.runner.ensure(slot));
     if (context_missing) {
-        const x = try Context.init(b.gpa, b.draft.?.model, drafting);
+        const x = try Context.initGrow(b.gpa, b.draft.?.model, drafting, b.runner.kv_step);
+        x.settle = .{ .ctx = b.runner, .slot = slot, .run = q.decode_round.Runner.settleOpaque };
         b.contexts[slot] = x;
         try x.buffers(&added, b.gpa);
     }
@@ -380,8 +423,12 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
 
 /// A drafter context's bytes: the taps ring, and K/V caches when the slot drafts.
 fn contextBytes(c: q.dflash.config.Config, drafting: bool) usize {
-    const ring = @as(usize, c.window) * c.tapWidth() * 2;
-    return ring + if (drafting) @as(usize, c.layers) * 2 * (@as(usize, c.window) + 16) * c.kvWidth() * 2 else 0;
+    const ring = @as(usize, c.span()) * c.ringWidth() * 2;
+    var caches: usize = 0;
+    if (drafting) for (0..c.layers) |i| {
+        caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
+    };
+    return ring + caches;
 }
 
 /// A free slot for a new stream, slot 0 (the drafter's) first.
@@ -398,17 +445,42 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     b.dropRound();
     b.dropTreeOf(slot);
     if (b.release_hook) |hook| if (!b.runner.failed and s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
+    if (slot == 0 and b.draft_block.enabled) {
+        std.log.info("q27_dflash_block rounds_8={d} rounds_16={d}", .{ b.draft_block.narrow_rounds, b.draft_block.wide_rounds });
+        b.draft_block.drop();
+        if (b.draft) |d| d.generation.draft.tree_block = @import("qwen27_draft_block.zig").wide;
+    }
     if (slot == 0) leave(b, s);
+    b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
     if (slot == 0) b.promote_due = b.draft != null; // the next backend call moves a stream in, after this reply is out
     var live: usize = 0;
     for (b.owners[0..b.runner.slots]) |owner| live += @intFromBool(owner != null);
     if (live <= 1) b.runner.trimBefore();
+    b.give_back[slot] = b.runner.kv_step != null;
+    giveBack(b);
+}
+
+/// Free, unread slots give back grown K/V and rings without waiting; slot 0 keeps what a next turn resumes from.
+pub fn giveBack(b: *Metal) void {
+    for (0..b.runner.slots) |k| {
+        if (!b.give_back[k]) continue;
+        const slot: u32 = @intCast(k);
+        if (b.owners[k] != null) {
+            b.give_back[k] = false;
+            continue;
+        }
+        if ((slot == 0 and b.standing.tokens.len > 0) or b.runner.busy(slot)) continue;
+        b.give_back[k] = false;
+        b.runner.releaseGrown(slot) catch |err| std.log.warn("qwen27: slot {d} keeps its K/V ({s})", .{ slot, @errorName(err) });
+        clearContext(b, slot) catch {};
+    }
 }
 
 /// A promote unbind left for later, once no round is pending: a stream still in slot 0 or none to move ends it.
 pub fn promoteDue(b: *Metal) void {
+    giveBack(b);
     if (!b.promote_due or b.round != null) return;
     b.promote_due = false;
     promote(b);
@@ -433,6 +505,8 @@ pub fn promote(b: *Metal) void {
         };
         b.owners[0] = s;
         b.owners[k] = null;
+        b.runner.release(from, false); // slot 0 holds its rows now, and the stream's promise with them
+        b.runner.promise(0, promiseRows(b, s)) catch {}; // the pages slot `from` gave back hold it
         b.runner.rope[0] = b.runner.rope[k];
         b.runner.rope[k] = .{};
         clearContext(b, from) catch {};
@@ -464,13 +538,14 @@ fn copyRows() !u32 {
 }
 
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).
-pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
+pub fn lone(b: *Metal, s: *lanes.Stream, hooks: @import("engine_api").LoneHooks) !bool {
     const d = b.draft orelse return error.DraftNotAttached;
     if (s.sampling != null) return error.GreedyDraftsOnly;
     if (b.owners[0] != null) return error.StreamBusy;
     b.owners[0] = s;
     var handed = false;
     defer if (!handed) unbind(b, s);
+    try b.runner.promise(0, promiseRows(b, s));
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     try d.generation.settle();
@@ -497,12 +572,14 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
         const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
+        if (b.draft_block.enabled) try g.draft.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
         const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
         else
             try g.runRound(room, @min(b.nodes, 15), s.eos, true, extend, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
+        if (result.rounds > 0) b.draft_block.observe(@intFromPtr(s), result.tree_landed);
         if (result.extended > 0) {
             try copies.lookup.observe(result.extended, result.extension_landed);
             if (result.extension_landed == result.extended) extra = @min(cap, extra * 2) else if (2 * result.extension_landed < result.extended) extra = @max(@min(cap, 16), extra / 2);

@@ -5,7 +5,7 @@ fn has(comptime prior: anytype, comptime record: anytype) bool {
     return false;
 }
 fn count(comptime prior: anytype, comptime additional: anytype) usize {
-    @setEvalBranchQuota(4000000);
+    @setEvalBranchQuota(8000000);
     var n: usize = 0;
     for (additional) |r| if (!has(prior, r)) {
         n += 1;
@@ -13,7 +13,7 @@ fn count(comptime prior: anytype, comptime additional: anytype) usize {
     return n;
 }
 pub fn extra(comptime prior: anytype, comptime additional: anytype) [count(prior, additional)]@TypeOf(additional[0]) {
-    @setEvalBranchQuota(4000000);
+    @setEvalBranchQuota(8000000);
     var out: [count(prior, additional)]@TypeOf(additional[0]) = undefined;
     var n: usize = 0;
     for (additional) |r| if (!has(prior, r)) {

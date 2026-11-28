@@ -144,3 +144,18 @@ test "GLM expiry: actual store borrow query lasts until the last release and exc
     s.release(second);
     try std.testing.expect(!s.borrowed(saved));
 }
+
+test "an expired state reaches the eviction-only disk store before RAM releases it" {
+    const fixture = @import("rows_async_fixture.zig");
+    const x = try fixture.Fixture.open("expired-spill", .evicted, true, 1 << 30);
+    defer x.close();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var p = fixture.prompt(71);
+    try x.keep(&p, 1000);
+    const entry = (try x.s.lookup(arena.allocator(), &p, 0, &.{}, x.f.starts, x.f.spans)).entry.?;
+    x.s.expired(entry.saved);
+    x.s.release(entry);
+    try std.testing.expectEqual(@as(usize, 0), x.s.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), x.r.states.items.len);
+}

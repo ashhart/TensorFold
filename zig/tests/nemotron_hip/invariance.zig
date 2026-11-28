@@ -206,9 +206,10 @@ fn checkResumePrefix(gpa: std.mem.Allocator, e: *nem.engine.Engine, prompt: []co
     {
         const l_seed = try h.make();
         defer h.free(l_seed);
+        l_seed.key = prompt;
         var adopt_seed: std.ArrayList(u32) = .empty;
         defer adopt_seed.deinit(gpa);
-        const plan_seed = try h.prefix.begin(prompt, 128, &.{}, l_seed, &adopt_seed);
+        const plan_seed = try h.prefix.begin(prompt, null, 128, &.{}, l_seed, &adopt_seed);
         defer gpa.free(plan_seed.marks);
         if (plan_seed.marks.len == 0) return error.NoPrefixMark;
         var at: usize = 0;
@@ -226,13 +227,11 @@ fn checkResumePrefix(gpa: std.mem.Allocator, e: *nem.engine.Engine, prompt: []co
     defer h.free(l_res);
     var adopt_res: std.ArrayList(u32) = .empty;
     defer adopt_res.deinit(gpa);
-    const plan_res = try h.prefix.begin(prompt, 0, &.{}, l_res, &adopt_res);
+    const plan_res = try h.prefix.begin(prompt, null, 0, &.{}, l_res, &adopt_res);
     defer gpa.free(plan_res.marks);
     if (plan_res.from == 0) return error.PrefixNotReused;
     if (adopt_res.items.len > 0) try l_res.s.adopt(&e.pool, adopt_res.items, false);
-    l_res.s.len = plan_res.from;
-    l_res.s.mtp_len = plan_res.from - 1;
-    l_res.resumed = true;
+    l_res.s.resumeAt(plan_res.from);
     try l_res.s.cover(&e.pool, prompt.len);
     const y_res_t = try h.chunk(l_res, prompt, plan_res.from, prompt.len, null);
 

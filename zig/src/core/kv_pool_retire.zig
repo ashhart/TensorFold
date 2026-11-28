@@ -12,20 +12,24 @@ pub const Credit = struct { token: u64, lease: *Lease };
 
 /// A pool's retired pages: each one's last reader, the readers done, pages waiting on them, promises owed.
 pub const Retired = struct {
-    /// A page's last reader's token, 0 for none; allocated at the pool's first retire.
-    tokens: []u64 = &.{},
-    /// Pages whose token is not 0, and each one's place in this list (`slots[id]`).
+    /// Last-reader tokens parallel to marked: only pages with retirement bookkeeping.
+    tokens: std.ArrayList(u64) = .empty,
     marked: std.ArrayList(u32) = .empty,
-    slots: []u32 = &.{},
+    slots: std.AutoHashMapUnmanaged(u32, usize) = .empty,
     /// Every reader up to this token is done.
     settled: u64 = 0,
-    /// Pages nobody holds whose readers are not done (room for every page, from the first retire).
+    /// Pages nobody holds whose readers are not done; room reserved before a new mark is published.
     pending: std.ArrayList(u32) = .empty,
     credits: std.ArrayList(Credit) = .empty,
 
+    pub fn token(r: *const Retired, id: usize) u64 {
+        const i = r.slots.get(@intCast(id)) orelse return 0;
+        return r.tokens.items[i];
+    }
+
     pub fn deinit(r: *Retired, gpa: std.mem.Allocator) void {
-        gpa.free(r.tokens);
-        gpa.free(r.slots);
+        r.tokens.deinit(gpa);
+        r.slots.deinit(gpa);
         r.marked.deinit(gpa);
         r.pending.deinit(gpa);
         r.credits.deinit(gpa);
@@ -37,23 +41,21 @@ pub fn retire(p: *Pool, l: *Lease, i: usize, token: u64) error{OutOfMemory}!void
     const r = &p.retired;
     const id = l.ids.items[i];
     if (id == none) std.debug.panic("kv pool: lease entry {d} retired twice", .{i});
-    if (r.tokens.len == 0) { // the pool's first retire: room for a token, a mark and a pending slot a page
-        try r.pending.ensureTotalCapacity(p.gpa, p.total());
-        try r.marked.ensureTotalCapacity(p.gpa, p.total());
-        const slots = try p.gpa.alloc(u32, p.total());
-        errdefer p.gpa.free(slots);
-        r.tokens = try p.gpa.alloc(u64, p.total());
-        @memset(r.tokens, 0);
-        r.slots = slots;
-    }
+    try r.pending.ensureTotalCapacity(p.gpa, r.marked.items.len + 1);
+    try r.marked.ensureUnusedCapacity(p.gpa, 1);
+    try r.tokens.ensureUnusedCapacity(p.gpa, 1);
+    try r.slots.ensureUnusedCapacity(p.gpa, 1);
     try r.credits.ensureUnusedCapacity(p.gpa, 1);
     p.enter();
     defer p.leave();
-    if (r.tokens[id] == 0) {
-        r.slots[id] = @intCast(r.marked.items.len);
+    const entry = r.slots.getOrPutAssumeCapacity(id);
+    if (!entry.found_existing) {
+        entry.value_ptr.* = r.marked.items.len;
         r.marked.appendAssumeCapacity(id);
+        r.tokens.appendAssumeCapacity(0);
     }
-    r.tokens[id] = @max(r.tokens[id], token);
+    const reader = &r.tokens.items[entry.value_ptr.*];
+    reader.* = @max(reader.*, token);
     l.ids.items[i] = none;
     p.unlease(id);
     r.credits.appendAssumeCapacity(.{ .token = token, .lease = l });
@@ -61,13 +63,13 @@ pub fn retire(p: *Pool, l: *Lease, i: usize, token: u64) error{OutOfMemory}!void
 
 /// Whether page `id` carries a retired page's token: not free to take, even when nobody holds it.
 pub fn held(p: *const Pool, id: usize) bool {
-    return p.retired.marked.items.len > 0 and p.retired.tokens[id] != 0;
+    return p.retired.token(id) != 0;
 }
 
 /// Whether any page of [start, start + k) carries a token.
 pub fn anyHeld(p: *const Pool, start: usize, k: usize) bool {
     if (p.retired.marked.items.len == 0) return false;
-    for (start..start + k) |i| if (p.retired.tokens[i] != 0) return true;
+    for (start..start + k) |i| if (p.retired.token(i) != 0) return true;
     return false;
 }
 
@@ -79,8 +81,9 @@ pub fn idle(p: *const Pool) bool {
 /// A page nobody holds: free when its readers are done, else pending until `settle` passes its token.
 pub fn freeOrPend(p: *Pool, id: u32) void {
     const r = &p.retired;
-    if (r.marked.items.len > 0 and r.tokens[id] > r.settled) return r.pending.appendAssumeCapacity(id); // room: one a page
+    if (r.token(id) > r.settled) return r.pending.appendAssumeCapacity(id); // reserved before its mark
     clear(p, id);
+    if (p.freed) |f| f.call(f.ctx, id);
     p.free[p.nfree] = id;
     p.nfree += 1;
 }
@@ -93,11 +96,12 @@ pub fn settle(p: *Pool, token: u64) error{LaneMemory}!void {
     r.settled = @max(r.settled, token);
     var keep: usize = 0;
     for (r.pending.items) |id| {
-        if (r.tokens[id] > r.settled) {
+        if (r.token(id) > r.settled) {
             r.pending.items[keep] = id;
             keep += 1;
         } else {
             clear(p, id);
+            if (p.freed) |f| f.call(f.ctx, id);
             p.free[p.nfree] = id;
             p.nfree += 1;
         }
@@ -111,20 +115,19 @@ pub fn settle(p: *Pool, token: u64) error{LaneMemory}!void {
 
 fn clear(p: *Pool, id: u32) void {
     const r = &p.retired;
-    if (r.tokens.len == 0 or r.tokens[id] == 0) return;
-    r.tokens[id] = 0;
-    const last = r.marked.pop().?;
-    if (last != id) {
-        r.marked.items[r.slots[id]] = last;
-        r.slots[last] = r.slots[id];
-    }
+    if (r.token(id) == 0) return;
+    const i = r.slots.fetchRemove(id).?.value;
+    _ = r.tokens.swapRemove(i);
+    _ = r.marked.swapRemove(i);
+    if (i < r.marked.items.len) r.slots.getPtr(r.marked.items[i]).?.* = i;
 }
 
 /// Pages the store alone holds whose readers are not done: reclaiming them frees nothing until `settle`.
 pub fn waiting(p: *const Pool) usize {
     const r = &p.retired;
     var n: usize = 0;
-    for (r.marked.items) |id| n += @intFromBool(r.tokens[id] > r.settled and p.refs[id] == 1 and p.leased[id] == 0);
+    for (r.marked.items, r.tokens.items) |id, reader|
+        n += @intFromBool(reader > r.settled and p.refs[id] == 1 and p.leased[id] == 0);
     return n;
 }
 

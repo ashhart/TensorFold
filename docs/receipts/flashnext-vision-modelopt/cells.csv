@@ -1,0 +1,9 @@
+run,build,leg,prompt_set,checkpoint,vision,temperature,streams,end_to_end_tps,per_stream_tps,per_request_decode_tps,makespan_s,alone_equal,alone_unequal,timing_valid,gap_percent,verdict
+M1,main,text,golden.json,nvfp4,0,0.0,1,155.7,160.8,160.8,1.64,3,0,True,-1.11,level
+B1,branch,text,golden.json,nvfp4,0,0.0,1,152.1,157.0,157.0,1.68,3,0,True,-1.11,level
+B2,branch,text,golden.json,nvfp4,0,0.0,1,153.1,158.2,158.2,1.67,3,0,True,-1.11,level
+M2,main,text,golden.json,nvfp4,0,0.0,1,152.9,157.9,157.9,1.67,3,0,True,-1.11,level
+M1,main,text,golden.json,nvfp4,0,0.0,4,65.5,63.2,63.2,15.64,12,0,True,-0.82,level
+B1,branch,text,golden.json,nvfp4,0,0.0,4,64.4,63.0,62.9,15.90,12,0,True,-0.82,level
+B2,branch,text,golden.json,nvfp4,0,0.0,4,64.3,62.4,62.5,15.93,12,0,True,-0.82,level
+M2,main,text,golden.json,nvfp4,0,0.0,4,64.3,62.2,62.2,15.93,12,0,True,-0.82,level

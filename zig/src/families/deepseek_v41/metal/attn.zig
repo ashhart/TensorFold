@@ -6,6 +6,9 @@ const weights = @import("weights.zig");
 const scratch = @import("scratch.zig");
 const pipelines = @import("pipelines.zig");
 const indexer = @import("indexer.zig");
+const segs_ = @import("segs.zig");
+const each = @import("attn_segs.zig");
+const kv = @import("kv.zig");
 
 const Ctx = ctx_.Ctx;
 const Ref = ctx_.Ref;
@@ -33,6 +36,8 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     const ix_src = ratio > 0 and c.isIndexSource(l);
     var buf: [pipelines.max_rows]Ctx = undefined;
     const segs = x.parts(&buf);
+    // rows of several slots: each slot-bound stage is one dispatch over the layer's slot table
+    const tab: ?Ref = if (segs_.many(x)) try segs_.table(x, l) else null;
     // every reader of hq and hn: wq_a, wkv, the compressor's linears, the index weights
     try x.proj(e, s.hq, w.wq_a, s.qa, false);
     try x.proj(e, s.hq, w.wkv, s.kv, false);
@@ -41,7 +46,7 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     e.barrier();
     // q_norm; the window key (kv_norm, RoPE, act_quant) into both mirror slots of the ring; the ratio-2 pool
     try f.normq(&x.p.fused, e, cv(f.Ref, s.qa), cv(f.Ref, w.q_norm), cv(f.Ref, s.qr), cv(f.Ref, s.qrq), R, c.q_lora, c.eps);
-    for (segs) |*px| {
+    if (tab) |t| try each.kv(x, e, w, t) else for (segs) |*px| {
         const region = &px.slot.regions[l];
         const k: f.Kv = .{
             .kv = cv(f.Ref, px.row(s.kv, D * 2)),
@@ -57,7 +62,9 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
         };
         try f.kv(&x.p.fused, e, k, px.rows, D, c.eps);
     }
-    if (kv_src and ratio != 1) pool(x, e, w, segs);
+    if (kv_src and ratio != 1) {
+        if (tab) |t| each.pool(x, e, t) else pool(x, e, w, segs);
+    }
     e.barrier();
     // wq_b and the index queries' wq_b on the q latent; the compressed latent's norm
     try x.proj(e, s.qrq, w.wq_b, s.q, false);
@@ -79,28 +86,28 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     }
     if (kv_src) {
         g.rmsnorm(gp, e, s.ik, w.ix_k_norm.?, s.ikn, R, c.index_dim, c.eps);
-        for (segs) |*px| {
-            cp.fp4rt(&x.p.compress, e, px.row(s.latr, D * 2), whole(px.slot.regions[l].pool.?), px.byRatio(Meta.dest, ratio), px.rows, D);
+        if (tab) |t| each.roundTrip(x, e, ratio, t) else for (segs) |*px| {
+            cp.fp4rt(&x.p.compress, e, px.row(s.latr, D * 2), kv.poolRef(&px.slot.regions[l]), px.byRatio(Meta.dest, ratio), px.rows, D);
         }
         e.barrier();
         try g.rope(gp, e, s.ikn, s.ikr, cpos, table, R, 1, c.index_dim, @intCast(x.tables.positions));
         e.barrier();
-        for (segs) |*px| {
-            const keys = whole(px.slot.regions[l].keys.?);
+        if (tab) |t| each.pack(x, e, ratio, t) else for (segs) |*px| {
+            const keys = kv.keysRef(&px.slot.regions[l]);
             const p: cp.Pack = .{ .blocks = c.index_dim / 32, .in_stride = c.index_dim, .code_row = 68, .scale_row = 68, .scale_off = c.index_dim / 2, .dest = px.byRatio(Meta.dest, ratio) };
             cp.fp4pack(&x.p.compress, e, px.row(s.ikr, c.index_dim * 2), keys, keys, px.rows, p);
         }
     }
     if (ix_src or kv_src) e.barrier();
-    if (ix_src) try indexer.select(x, e, w, ratio);
+    if (ix_src) try indexer.select(x, e, w, ratio, tab);
     // sparse attention over the window and the selected compressed rows, each slot's rows over its own state
-    for (segs) |*px| {
+    if (tab) |t| try each.attend(x, e, w, ratio, t) else for (segs) |*px| {
         const region = &px.slot.regions[l];
         const src = px.slot.source(c, l);
         const b: attn.Bind = .{
             .q = cv(attn.Ref, px.row(s.qrope, c.heads * D * 2)),
             .w = .{ .buf = region.window },
-            .c = .{ .buf = if (src) |r| r.pool.? else region.window },
+            .c = cv(attn.Ref, if (src) |r| kv.poolRef(r) else whole(region.window)),
             .i = cv(attn.Ref, px.row(s.sel, attn.max_selected * 4)),
             .m = cv(attn.Ref, px.metaRow(if (ratio > 0) Meta.attn_comp else Meta.attn_swa, 8)),
             .sk = cv(attn.Ref, w.sink),

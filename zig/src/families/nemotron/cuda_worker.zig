@@ -280,6 +280,8 @@ fn take(r: anytype, c: Config, t: anytype, rows: usize, headed: bool, first: u64
 const Follower = struct {
     link: Link,
     ops: kern.Ops,
+    side: ?fwd.Side = null, // a window's shared expert rows, beside its routed pairs
+    shared_plans: u64 = 0, // each window row count's shared plan, made at load (0: planned at each job)
     scratch: latent.Scratch,
     c: Config,
     out: u64,
@@ -297,7 +299,9 @@ const Follower = struct {
     }
 
     pub fn run(x: *const Follower, t: latent.Tables, at: [3]u64, rows: usize) !void {
-        try latent.partials(x.ops, t, x.scratch, at[0], at[1], at[2], rows, x.c.ownShares(), x.c, x.out);
+        var s = x.scratch;
+        if (x.shared_plans != 0 and rows <= state.windowRows(x.c)) s.shared_plan = state.Buffers.latentPlanFrom(x.shared_plans, x.c, rows, s.plan.rank, s.plan.hist);
+        try latent.partials(x.ops, x.side, t, s, at[0], at[1], at[2], rows, x.c.ownShares(), x.c, x.out);
         try x.link.send(x.out, latent.partFloats(x.c, rows) * 4);
     }
 };
@@ -339,10 +343,10 @@ fn loadLayers(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8
 }
 
 /// Rank r > 0: its expert shares of every MoE layer, computed for rank 0's jobs until rank 0 ends.
-pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, precision: ?@import("config.zig").Precision) !void {
+pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, precision: ?@import("config.zig").Precision, placed: ?latent.At) !void {
     const t0 = std.Io.Clock.awake.now(io);
     var c = try Config.read(gpa, io, dir);
-    try latent.place(&c);
+    if (placed) |x| try latent.placeAt(&c, x) else try latent.place(&c); // the server's launch, or a tool's variables
     var load_cache = core.checkpoint.cache.Load.begin(io, c.world > 1);
     defer load_cache.deinit();
     if (c.rank == 0 or c.latent == 0) return error.NotAnExpertRank;
@@ -351,6 +355,12 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     try cuda.tp_watch.start(io, c.rank, c.world); // rank 0's line before NCCL: either rank's failure stops both
     var stream = try cuda.Stream.init(ctx.d, true);
     defer stream.deinit();
+    var side: fwd.Side = .{ .s = try cuda.Stream.init(ctx.d, true), .fork = try cuda.Event.init(ctx.d, false), .join = try cuda.Event.init(ctx.d, false) };
+    defer {
+        side.s.deinit();
+        side.fork.deinit();
+        side.join.deinit();
+    }
     var k = try kern.Kernels.load(gpa, io, ctx, null);
     defer k.deinit();
     try k.loadModelopt(ctx);
@@ -375,7 +385,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const ssw = c.shared_width / c.shares;
     const items = kern.maxItems(pairs, c.experts * own, 16);
     const ck4 = if (c.ck) @import("cuda_latent_ck.zig").rowsBytes(c, R) else 0; // NVFP4 rows (checkpoint math)
-    const sizes = [_]usize{ firstBytes(c), payloadBytes(c, R), pairs * sw * 2, R * own * ssw * 2, R * own * 4, latent.partFloats(c, R) * 4, pairs * 4, items * 12, 8, pairs * 4, (pairs + 1023) / 1024 * c.experts * own * 4, ck4 };
+    const plans = if (c.bolt) 0 else state.windowRows(c) * state.Buffers.latentPlanWords(c) * 4; // rank 0's initShared layout
+    const sizes = [_]usize{ firstBytes(c), payloadBytes(c, R), pairs * sw * 2, R * own * ssw * 2, R * own * 4, latent.partFloats(c, R) * 4, pairs * 4, items * 12, 8, pairs * 4, (pairs + 1023) / 1024 * c.experts * own * 4, ck4, plans };
     var total: usize = 0;
     for (sizes) |n| total += std.mem.alignForward(usize, n, 256);
     var arena = try cuda.DeviceBuffer.alloc(ctx.d, total);
@@ -391,6 +402,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const out = at[5];
     const scratch: latent.Scratch = .{ .plan = .{ .members = at[6], .items = at[7], .counts = at[8], .rank = at[9], .hist = at[10] }, .act = at[2], .sact = at[3], .sids = at[4], .ck4 = if (c.ck) at[11] else 0 };
     try latent.initShareIds(k.latent.?, stream, scratch.sids, R, own);
+    const shared_plans = if (plans != 0) at[12] else 0;
+    if (plans != 0) for (1..state.windowRows(c) + 1) |rows| try ops.plan(scratch.sids, rows * own, own, 16, state.Buffers.latentPlanFrom(shared_plans, c, rows, scratch.plan.rank, scratch.plan.hist));
     try stream.synchronize();
     var blocks: usize = 0;
     for (layers.blocks) |t| blocks += @intFromBool(t != null);
@@ -398,7 +411,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const loaded = content.?;
     content = null;
     try load_cache.finishAfter(.{ io, try loaded.finish() }, cuda.tp_watch.ready);
-    const follower: Follower = .{ .link = .{ .g = &g, .s = stream, .peer = 0 }, .ops = ops, .scratch = scratch, .c = c, .out = out };
+    const follower: Follower = .{ .link = .{ .g = &g, .s = stream, .peer = 0 }, .ops = ops, .side = side, .shared_plans = shared_plans, .scratch = scratch, .c = c, .out = out };
     const n = try follow(&follower, c, layers.blocks, layers.mtp, first, long);
     cuda.tp_watch.ended();
     try stream.synchronize();

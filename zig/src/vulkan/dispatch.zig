@@ -9,13 +9,15 @@ const hazard = @import("hazard.zig");
 
 const check = runtime.check;
 
-pub const Error = runtime.Error || error{ BadSpirv, NoLocalSize, TooManyBindings, BadPushSize, BadWorkgroup, BadGroupCount, BadBindings, Aliased };
+pub const Error = runtime.Error || error{ BadSpirv, NoLocalSize, TooManyBindings, BadPushSize, BadWorkgroup, BadGroupCount, BadBindings, Aliased, DescriptorSetsBusy };
 
 pub const max_bindings = 10;
 
 /// Dispatches recorded into one submission, so a descriptor set per dispatch; run submits at half of it.
-pub const batch_max: u32 = 256;
+pub const batch_max: u32 = 1024;
 const batch_flush: u32 = batch_max / 2;
+
+const Lease = struct { stream: u64 = 0, epoch: u64 = 0 };
 
 /// The shader's set 0: storage buffers 0..bindings-1, its push bytes, and a mask of the bindings it writes.
 pub const Layout = struct { bindings: u32, push_bytes: u32, writes: u32 };
@@ -32,10 +34,12 @@ pub const Pipeline = struct {
     pipeline_layout: c.VkPipelineLayout = null,
     pipeline: c.VkPipeline = null,
     pool: c.VkDescriptorPool = null,
-    /// One set per dispatch recorded since the last submission; bind fills the next one, record binds the current one.
+    /// Pool of descriptor sets leased per dispatch and released only when the owning stream fences or discards.
     sets: [batch_max]c.VkDescriptorSet = @splat(null),
-    slot: usize = 0,
+    leases: [batch_max]Lease = @splat(.{}),
+    next_slot: usize = 0,
     bound: bool = false,
+    staged: [max_bindings]c.VkDescriptorBufferInfo = undefined,
     /// The byte range of each binding of the current bind, for the hazard check of the next run.
     ranges: [max_bindings]hazard.Range = undefined,
 
@@ -137,38 +141,67 @@ pub const Pipeline = struct {
         api.vkDestroyDescriptorSetLayout(h, p.set_layout, null);
     }
 
-    /// Fills the next descriptor set with checked device-local bindings; earlier recorded dispatches keep their sets.
+    /// Validates and stages device-local bindings; actual descriptor sets are written only at fence-checked checkout.
     pub fn bind(p: *Pipeline, bindings: []const Binding) Error!void {
         if (bindings.len != p.layout.bindings) return error.BadBindings;
         var infos: [max_bindings]c.VkDescriptorBufferInfo = undefined;
-        var writes: [max_bindings]c.VkWriteDescriptorSet = undefined;
         for (bindings, 0..) |b, i| {
             if (b.buffer.kind != .device or b.buffer.dev != p.dev) return error.BadBindings;
             if (b.len % 4 != 0) return error.Misaligned; // 32-bit element arrays: a ragged range drops its last element
             infos[i] = try b.buffer.descriptor(b.offset, b.len);
-            writes[i] = .{
-                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = p.sets[(p.slot + 1) % batch_max],
-                .dstBinding = @intCast(i),
-                .descriptorCount = 1,
-                .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .pBufferInfo = &infos[i],
-            };
         }
         try disjoint(bindings, p.layout.writes);
-        for (bindings, 0..) |b, i| p.ranges[i] = .{ .buffer = @intFromPtr(b.buffer.handle), .start = b.offset, .end = b.offset + b.len };
-        p.dev.api.vkUpdateDescriptorSets(p.dev.handle, p.layout.bindings, &writes, 0, null);
-        p.slot = (p.slot + 1) % batch_max;
+        for (bindings, 0..) |b, i| {
+            p.staged[i] = infos[i];
+            p.ranges[i] = .{ .buffer = @intFromPtr(b.buffer.handle), .start = b.offset, .end = b.offset + b.len };
+        }
         p.bound = true;
     }
 
-    /// Records one dispatch and a barrier after it, for callers that record into a command buffer themselves.
-    pub fn record(p: *const Pipeline, cmd: c.VkCommandBuffer, push: []const u8, groups: [3]u32) Error!void {
-        try p.dispatchOnly(cmd, push, groups);
-        commands.dispatchBarrier(p.dev, cmd);
+    fn findFreeSlot(p: *const Pipeline) ?usize {
+        for (0..batch_max) |off| {
+            const idx = (p.next_slot + off) % batch_max;
+            const l = p.leases[idx];
+            if (commands.isLeaseFree(l.stream, l.epoch)) return idx;
+        }
+        return null;
     }
 
-    fn dispatchOnly(p: *const Pipeline, cmd: c.VkCommandBuffer, push: []const u8, groups: [3]u32) Error!void {
+    fn checkoutSet(p: *Pipeline, cmds: *commands.Commands, timeout_ns: ?u64) Error!struct { set: c.VkDescriptorSet, slot: usize } {
+        const sid = try cmds.streamId();
+        var slot = p.findFreeSlot();
+        if (slot == null) {
+            if (timeout_ns) |t| if (cmds.recording) {
+                var owns_any = false;
+                for (p.leases) |l| if (l.stream == sid) {
+                    owns_any = true;
+                    break;
+                };
+                if (owns_any) {
+                    try cmds.submit(t);
+                    slot = p.findFreeSlot();
+                }
+            };
+        }
+        const idx = slot orelse return error.DescriptorSetsBusy;
+        var writes: [max_bindings]c.VkWriteDescriptorSet = undefined;
+        for (0..p.layout.bindings) |i| {
+            writes[i] = .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = p.sets[idx],
+                .dstBinding = @intCast(i),
+                .descriptorCount = 1,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &p.staged[i],
+            };
+        }
+        p.dev.api.vkUpdateDescriptorSets(p.dev.handle, p.layout.bindings, &writes, 0, null);
+        p.leases[idx] = .{ .stream = sid, .epoch = cmds.epoch };
+        p.next_slot = (idx + 1) % batch_max;
+        return .{ .set = p.sets[idx], .slot = idx };
+    }
+
+    fn validateDispatch(p: *const Pipeline, push: []const u8, groups: [3]u32) Error!void {
         if (!p.bound) return error.BadBindings;
         if (push.len != p.layout.push_bytes) return error.BadPushSize;
         const most = p.dev.properties.limits.maxComputeWorkGroupCount;
@@ -176,17 +209,29 @@ pub const Pipeline = struct {
             std.log.err("vulkan: dispatch {any} groups refused, device allows {any}", .{ groups, most });
             return e;
         };
+    }
+
+    /// Records one dispatch and a barrier after it into an already-open command buffer on `cmds`.
+    pub fn record(p: *Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32) Error!void {
+        try p.validateDispatch(push, groups);
+        if (cmds.poison) |err| return err;
+        if (!cmds.recording) return error.CommandBufferInvalid;
+        const leased = try p.checkoutSet(cmds, null);
+        p.dispatchSet(cmds.cmd, leased.set, push, groups);
+        commands.dispatchBarrier(p.dev, cmds.cmd);
+    }
+
+    fn dispatchSet(p: *const Pipeline, cmd: c.VkCommandBuffer, set: c.VkDescriptorSet, push: []const u8, groups: [3]u32) void {
         const api = &p.dev.api;
         api.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
-        api.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline_layout, 0, 1, &p.sets[p.slot], 0, null);
+        api.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline_layout, 0, 1, &set, 0, null);
         if (push.len > 0) api.vkCmdPushConstants(cmd, p.pipeline_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, p.layout.push_bytes, push.ptr);
         api.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
     }
 
-    /// Records one dispatch, after a barrier only on a conflict; submits at half a batch or at a copy or fill.
-    pub fn run(p: *const Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32, timeout_ns: u64) Error!void {
-        var reads: [max_bindings]hazard.Range = undefined;
-        var writes: [max_bindings]hazard.Range = undefined;
+    /// Splits bound ranges into reads and writes; an unbound pipeline's ranges are undefined, so refuse first.
+    fn hazardSplit(p: *const Pipeline, reads: *[max_bindings]hazard.Range, writes: *[max_bindings]hazard.Range) Error!struct { reads: []hazard.Range, writes: []hazard.Range } {
+        if (!p.bound) return error.BadBindings;
         var n_reads: usize = 0;
         var n_writes: usize = 0;
         for (p.ranges[0..p.layout.bindings], 0..) |r, i| {
@@ -198,13 +243,26 @@ pub const Pipeline = struct {
                 n_reads += 1;
             }
         }
-        const cmd = try cmds.begin();
-        if (cmds.hazards.conflicts(reads[0..n_reads], writes[0..n_writes])) {
+        return .{ .reads = reads[0..n_reads], .writes = writes[0..n_writes] };
+    }
+
+    /// Records one dispatch, after a barrier only on a conflict; submits at half a batch or on descriptor exhaustion.
+    pub fn run(p: *Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32, timeout_ns: u64) Error!void {
+        try p.validateDispatch(push, groups);
+        var reads: [max_bindings]hazard.Range = undefined;
+        var writes: [max_bindings]hazard.Range = undefined;
+        const split = try p.hazardSplit(&reads, &writes);
+        const leased = try p.checkoutSet(cmds, timeout_ns);
+        const cmd = cmds.begin() catch |e| {
+            p.leases[leased.slot] = .{};
+            return e;
+        };
+        if (cmds.hazards.conflicts(split.reads, split.writes)) {
             commands.dispatchBarrier(p.dev, cmd);
             cmds.hazards.clear();
         }
-        try p.dispatchOnly(cmd, push, groups);
-        cmds.hazards.add(reads[0..n_reads], writes[0..n_writes]);
+        p.dispatchSet(cmd, leased.set, push, groups);
+        cmds.hazards.add(split.reads, split.writes);
         cmds.pending += 1;
         if (cmds.pending >= batch_flush) try cmds.submit(timeout_ns);
     }
@@ -361,4 +419,119 @@ test "device limits refuse bindings, push bytes, workgroups and group counts pas
     try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings + 1, .push_bytes = 120, .writes = 1 << 10 }, .{ 256, 1, 1 }));
     l.maxPerStageDescriptorStorageBuffers = 8;
     try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings, .push_bytes = 120, .writes = 1 << 9 }, .{ 256, 1, 1 }));
+}
+
+test "hazardSplit refuses an unbound pipeline before reading its ranges" {
+    var p: Pipeline = .{
+        .dev = @ptrFromInt(0x5000),
+        .layout = .{ .bindings = 3, .push_bytes = 0, .writes = 0b010 },
+        .local = .{ 32, 1, 1 },
+    };
+    var reads: [max_bindings]hazard.Range = undefined;
+    var writes: [max_bindings]hazard.Range = undefined;
+    try std.testing.expectError(error.BadBindings, p.hazardSplit(&reads, &writes));
+    p.bound = true;
+    p.ranges[0] = .{ .buffer = 0x10, .start = 0, .end = 64 };
+    p.ranges[1] = .{ .buffer = 0x20, .start = 0, .end = 128 };
+    p.ranges[2] = .{ .buffer = 0x30, .start = 0, .end = 256 };
+    const split = try p.hazardSplit(&reads, &writes);
+    try std.testing.expectEqual(2, split.reads.len);
+    try std.testing.expectEqual(1, split.writes.len);
+    try std.testing.expectEqual(0x20, split.writes[0].buffer);
+}
+
+test "fence-tied descriptor checkout handles >1024 dispatches, interleaved streams and poisoned submits" {
+    const Mock = struct {
+        var updates: usize = 0;
+        var submits: usize = 0;
+        var wait_result: c.VkResult = c.VK_SUCCESS;
+        fn okResetCmd(_: c.VkCommandBuffer, _: c.VkCommandBufferResetFlags) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn okBegin(_: c.VkCommandBuffer, _: [*c]const c.VkCommandBufferBeginInfo) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn okEnd(_: c.VkCommandBuffer) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn okSubmit(_: c.VkQueue, _: c_uint, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+            submits += 1;
+            return c.VK_SUCCESS;
+        }
+        fn okWait(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence, _: c.VkBool32, _: c_ulonglong) callconv(.c) c.VkResult {
+            return wait_result;
+        }
+        fn okResetFence(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn noopUpdate(_: c.VkDevice, _: c_uint, _: [*c]const c.VkWriteDescriptorSet, _: c_uint, _: [*c]const c.VkCopyDescriptorSet) callconv(.c) void {
+            updates += 1;
+        }
+        fn noopBindPipe(_: c.VkCommandBuffer, _: c.VkPipelineBindPoint, _: c.VkPipeline) callconv(.c) void {}
+        fn noopBindDesc(_: c.VkCommandBuffer, _: c.VkPipelineBindPoint, _: c.VkPipelineLayout, _: c_uint, _: c_uint, _: [*c]const c.VkDescriptorSet, _: c_uint, _: [*c]const c_uint) callconv(.c) void {}
+        fn noopDispatch(_: c.VkCommandBuffer, _: c_uint, _: c_uint, _: c_uint) callconv(.c) void {}
+        fn noopBarrier(_: c.VkCommandBuffer, _: c.VkPipelineStageFlags, _: c.VkPipelineStageFlags, _: c.VkDependencyFlags, _: c_uint, _: [*c]const c.VkMemoryBarrier, _: c_uint, _: [*c]const c.VkBufferMemoryBarrier, _: c_uint, _: [*c]const c.VkImageMemoryBarrier) callconv(.c) void {}
+    };
+    var dev: Device = undefined;
+    dev.handle = @ptrFromInt(0x1000);
+    dev.queue = @ptrFromInt(0x2000);
+    dev.properties = std.mem.zeroes(c.VkPhysicalDeviceProperties);
+    dev.properties.limits.maxComputeWorkGroupCount = .{ 65535, 65535, 65535 };
+    dev.properties.limits.minStorageBufferOffsetAlignment = 16;
+    dev.properties.limits.maxStorageBufferRange = 1 << 20;
+    dev.api.vkResetCommandBuffer = Mock.okResetCmd;
+    dev.api.vkBeginCommandBuffer = Mock.okBegin;
+    dev.api.vkEndCommandBuffer = Mock.okEnd;
+    dev.api.vkQueueSubmit = Mock.okSubmit;
+    dev.api.vkWaitForFences = Mock.okWait;
+    dev.api.vkResetFences = Mock.okResetFence;
+    dev.api.vkUpdateDescriptorSets = Mock.noopUpdate;
+    dev.api.vkCmdBindPipeline = Mock.noopBindPipe;
+    dev.api.vkCmdBindDescriptorSets = Mock.noopBindDesc;
+    dev.api.vkCmdDispatch = Mock.noopDispatch;
+    dev.api.vkCmdPipelineBarrier = Mock.noopBarrier;
+    var p: Pipeline = .{ .dev = &dev, .layout = .{ .bindings = 2, .push_bytes = 0, .writes = 0b10 }, .local = .{ 64, 1, 1 } };
+    for (&p.sets, 0..) |*s, idx| s.* = @ptrFromInt(0x10000 + idx * 8);
+    const in_buf: Buffer = .{ .dev = &dev, .handle = @ptrFromInt(0x10), .memory = null, .len = 256, .kind = .device, .mapped = null, .coherent = false };
+    const out_buf: Buffer = .{ .dev = &dev, .handle = @ptrFromInt(0x20), .memory = null, .len = 256, .kind = .device, .mapped = null, .coherent = false };
+    // Multiple binds before dispatch never mutate live descriptor sets.
+    const upd0 = Mock.updates;
+    try p.bind(&.{ .{ .buffer = &in_buf, .len = 64 }, .{ .buffer = &out_buf, .len = 64 } });
+    try p.bind(&.{ .{ .buffer = &in_buf, .len = 64 }, .{ .buffer = &out_buf, .len = 64 } });
+    try std.testing.expectEqual(upd0, Mock.updates);
+    // >1024 dispatches wrap safely across fenced submits.
+    var ca: commands.Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x3000), .fence = @ptrFromInt(0x4000) };
+    var cb: commands.Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x3100), .fence = @ptrFromInt(0x4100) };
+    var cc: commands.Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x3200), .fence = @ptrFromInt(0x4200) };
+    defer {
+        ca.discard();
+        cb.discard();
+        cc.discard();
+    }
+    for (0..batch_max * 4 + 32) |_| try p.run(&ca, &.{}, .{ 1, 1, 1 }, 1000);
+    try ca.submit(1000);
+    try std.testing.expect(Mock.submits >= 8);
+    // Interleaved streams: ca/cb hold batch_flush-1 sets each; cc uses 2 and flushes itself without stealing.
+    for (0..batch_flush - 1) |_| try p.run(&ca, &.{}, .{ 1, 1, 1 }, 1000);
+    for (0..batch_flush - 1) |_| try p.run(&cb, &.{}, .{ 1, 1, 1 }, 1000);
+    try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
+    try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
+    const sub_before = Mock.submits;
+    try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
+    try std.testing.expectEqual(sub_before + 1, Mock.submits);
+    // When other streams hold all batch_max sets, a stream with no sets of its own gets DescriptorSetsBusy.
+    var cd: commands.Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x3300), .fence = @ptrFromInt(0x4300) };
+    try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
+    try std.testing.expectError(error.DescriptorSetsBusy, p.run(&cd, &.{}, .{ 1, 1, 1 }, 1000));
+    try ca.submit(1000);
+    try cb.submit(1000);
+    try cc.submit(1000);
+    // A timed-out submit keeps its leased sets locked (not reused while GPU completion is unknown).
+    try p.run(&cd, &.{}, .{ 1, 1, 1 }, 1000);
+    const leased_sid = try cd.streamId();
+    const leased_ep = cd.epoch;
+    Mock.wait_result = c.VK_TIMEOUT;
+    defer Mock.wait_result = c.VK_SUCCESS;
+    try std.testing.expectError(error.Timeout, cd.submit(1000));
+    try std.testing.expect(!commands.isLeaseFree(leased_sid, leased_ep));
 }

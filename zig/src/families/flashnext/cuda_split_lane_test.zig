@@ -111,6 +111,7 @@ const Rig = struct {
         r.k.native_lane.prompt = null;
         r.s = undefined;
         r.s.cap = 256;
+        r.s.slots = wt.slots;
         r.s.part = part_at;
         r.s.native_part = native_part_at;
         r.s.dummy = 0x99;
@@ -124,6 +125,7 @@ const Rig = struct {
         r.c = undefined;
         r.c.rank = 0;
         r.c.failed = false;
+        r.c.round_graph = null;
         r.c.comm = @ptrFromInt(0x1000);
         r.c.link = .{ .fd = r.pair[0] };
         r.c.timeout_ms = 1000;
@@ -280,6 +282,7 @@ test "shared expert composition keeps whole direct slots and split full-K output
         var native: @import("cuda_mixed_experts.zig").Owned = undefined;
         native.rank = rank;
         native.split_shared = split;
+        native.shared_width = wt.moe_w;
         const width: usize = if (split) wt.moe_w / 2 else wt.moe_w;
         const columns: usize = if (split) dims / 2 else dims;
         for (0..3) |i| native.shared[i].native = cuda.modelopt.bf16Weight(0x2000, if (i == 2) columns else width, if (i == 2) wt.moe_w else dims);
@@ -332,6 +335,7 @@ test "shared expert composition keeps whole direct slots and split full-K output
     var native: @import("cuda_mixed_experts.zig").Owned = undefined;
     native.rank = 0;
     native.split_shared = false;
+    native.shared_width = wt.moe_w;
     for (0..3) |i| native.shared[i].native = cuda.modelopt.bf16Weight(0x2000, if (i == 2) dims else wt.moe_w, if (i == 2) wt.moe_w else dims);
     native.shared[2].native.?.npad += 1;
     var self: Self = .{ .k = &r.k, .s = &r.s, .m = r.pass(64, true).m, .stream = .{ .d = &r.d, .handle = null }, .tri = .{ .own = &glue } };

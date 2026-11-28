@@ -3,7 +3,6 @@ const api = @import("engine_api");
 const drama_host = @import("drama_host.zig");
 const Allocator = std.mem.Allocator;
 const setting = @import("cuda_device.zig").setting;
-const getenv = @import("cuda_device.zig").getenv;
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const settings = @import("sys").environment;
@@ -13,10 +12,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
-        return null;
-    }
-    if (o.cfg_enabled or o.cfg_batched) {
-        problem.* = "this engine revision implements Drama CFG on Metal only; use the pinned CUDA quant engine on Linux";
         return null;
     }
     if (o.tp != 1 or o.rank != 0 or (o.lanes_fixed and (o.lanes == 0 or o.lanes > 8))) {
@@ -57,7 +52,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "Drama 3 uses one prompt segment at a time: use --segments 1";
         return null;
     }
-    if (getenv("TENSORFOLD_CUDA_KERNELS")) |path| if (path.len > 0 and !std.mem.eql(u8, path, "native")) {
+    if (settings.rawText("TENSORFOLD_CUDA_KERNELS")) |path| if (path.len > 0 and !std.mem.eql(u8, path, "native")) {
         problem.* = "Drama 3 uses embedded native kernels, not captured kernel sets: unset TENSORFOLD_CUDA_KERNELS or set it to native";
         return null;
     };
@@ -69,8 +64,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .max_frames = o.max_frames,
         .prefill_rows = prefill_rows,
         .reference_entries = entries,
+        .cfg_enabled = o.cfg_enabled,
+        .cfg_batched = o.cfg_batched,
     }) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the native Drama 3 CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
+        problem.* = if (e == error.DramaLanesOverMemory)
+            try std.fmt.allocPrint(a, "Drama 3 lanes and their CFG guidance states do not fit this CUDA device's memory; serve fewer --parallel lanes", .{})
+        else
+            try std.fmt.allocPrint(a, "the native Drama 3 CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
         return null;
     };
 }

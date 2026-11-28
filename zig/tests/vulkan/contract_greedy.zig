@@ -281,8 +281,8 @@ pub const Greedy = struct {
                 });
                 var push: [4]u8 align(4) = undefined;
                 std.mem.writeInt(u32, &push, @intCast(n), .little);
-                const cmd = try self.cmds.sync();
-                try pipe.record(cmd, &push, .{ @intCast(rows), 1, 1 });
+                _ = try self.cmds.sync();
+                try pipe.record(self.cmds, &push, .{ @intCast(rows), 1, 1 });
                 // Timeout or InFlight leaves completion unknown: exit here, never unwind into the rig's frees.
                 try vk.orExit(self.cmds.submit(self.timeout));
                 try vk.orExit(vk.download(self.cmds, maxima.*, 0, self.staging, self.rig.outs.items, self.timeout));
@@ -402,7 +402,7 @@ test "the eighths fill is bf16-exact and tie-rich, and greedyRef and the fixture
     try testing.expectEqual(try fx.referenceBits(bits), want);
     var best = -std.math.inf(f32);
     for (wide) |v| best = @max(best, v);
-    try testing.expectEqual(@as(u32, @intCast(std.mem.indexOfScalar(f32, wide, best).?)), want); // the tie's lowest index
+    try testing.expectEqual(@as(u32, @intCast(std.mem.indexOfScalar(f32, wide, best).?)), want); // lowest index
 }
 
 test "the nonfinite plant covers every row, keeps the loser rows' winner, and names the first offender" {

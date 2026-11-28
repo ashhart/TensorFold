@@ -5,6 +5,7 @@ const tf = @import("tensorfold");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const at_ = @import("metal_q27_attn.zig");
+const pages_ = @import("q27_paged_cases.zig");
 
 const c = contract.spec;
 const g = contract.gates;
@@ -18,19 +19,19 @@ const u = 0x1p-24;
 const scale = 0.0625;
 
 /// One Mac's head counts (a rank's 12 over 2 merges as a pair, so its rows are not one call's).
-pub const heads = [_]at_.Heads{ .q27b, .gqa16, .q9b };
+pub const heads = [_]at_.Heads{ .q27b, .gqa16, .q9b, .q35b };
 
 /// decode: a round's trees and chains as decode_round.zig plans them; prompt: one chain through the prompt kernel.
 pub const Which = enum { decode, prompt };
 
 /// `control`: values that aren't finite go to P V as they are, so a row's 0 for a key it must not see gives NaN.
-pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false };
+pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false, paged: bool = false, stale: bool = false };
 
-/// The control's edit: prompts never pick the masked kernel; decode rows before M5 take the tail (no control).
-fn controlEdit(w: Which, tensor: bool) ?at_.Edit {
+/// The control's edit: prompts never pick the masked kernel; decode rows off a shared prefix take the tail, no control.
+fn controlEdit(w: Which, shared: bool) ?at_.Edit {
     return switch (w) {
         .prompt => .{ .from = "if (simd_any(inf != 0) && lane == 0) atomic_fetch_or", .to = "if (false && lane == 0) atomic_fetch_or" },
-        .decode => if (tensor) .{ .from = "const bool masked = MASKED && q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
+        .decode => if (shared) .{ .from = "const bool masked = MASKED && q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
     };
 }
 
@@ -61,6 +62,7 @@ pub fn served(comptime h: at_.Heads, comptime w: Which) []const c.Shape {
 }
 
 fn nameOf(comptime r: Reg) []const u8 {
+    if (r.paged) return std.fmt.comptimePrint("{s}qwen27 paged prompt {s}{s}", .{ if (r.control or r.stale) "control: " else "metal ", comptime at_.label(r.heads), if (r.control) " unmasked nonfinite" else if (r.stale) " stale second page" else "" });
     const what = if (r.which == .decode) "decode rows" else "prompt rows";
     if (r.control) return std.fmt.comptimePrint("control: qwen27 attention {s} {s} with non-finite values unmasked", .{ comptime at_.label(r.heads), what });
     return std.fmt.comptimePrint("metal qwen27 attention {s} {s}", .{ comptime at_.label(r.heads), what });
@@ -68,6 +70,13 @@ fn nameOf(comptime r: Reg) []const u8 {
 
 /// fp32 scores and sums, half probabilities into P V, the gate's bf16 sigmoid; `mids`: bf16(o) and bf16(sigmoid).
 pub fn spec(r: Reg) c.Spec {
+    if (r.paged) return switch (r.heads) {
+        inline else => |h| switch (r.control) {
+            inline else => |ctl| switch (r.stale) {
+                inline else => |stale| .{ .name = nameOf(.{ .heads = h, .which = .prompt, .control = ctl, .paged = true, .stale = stale }), .accum = .f32, .depth = oneRounding, .ops = 8, .mids = 2, .out = .bf16, .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 512 } }, .served = pages_.served(geometryHeads(h)), .replaces = "contiguous q27 prompt on the same chip and logical rows" },
+            },
+        },
+    };
     return switch (r.heads) {
         inline else => |h| switch (r.which) {
             inline else => |w| switch (r.control) {
@@ -77,9 +86,13 @@ pub fn spec(r: Reg) c.Spec {
     };
 }
 
-/// Whether this chip has the control: decode rows before M5 run the tail kernel, whose round sees every key it reads.
-pub fn hasControl(w: Which, tensor: bool) bool {
-    return controlEdit(w, tensor) != null;
+/// Whether these rows have the control: off a shared prefix decode rows run the tail kernel, which sees every key.
+pub fn hasControl(w: Which, shared: bool) bool {
+    return controlEdit(w, shared) != null;
+}
+
+fn geometryHeads(comptime h: at_.Heads) usize {
+    return at_.geometry(h, false).heads;
 }
 
 fn bf(x: u16) f64 {
@@ -91,7 +104,11 @@ pub const Attn = struct {
     rig: rig_.Rig,
     reg: Reg,
     op: attn.Attention,
-    tensor: bool,
+    shared: bool,
+    base_op: ?attn.Attention = null,
+    base_st: ?at_.State = null,
+    base_caches: [planning.max_streams]attn.Cache = undefined,
+    baseline: bool = false,
     st: ?at_.State = null,
     rd: at_.Round = .{},
     q_in: []u16 = &.{},
@@ -106,30 +123,43 @@ pub const Attn = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, r: Reg) !Attn {
         const tensor = device.tensorUnits();
         if (!tensor) try q.simd_attention.check(device, queue);
-        const gm = at_.geometry(r.heads, tensor);
-        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, false);
+        const shared = try q.simd_attention.sharedPrefix(tensor);
+        const gm = at_.geometry(r.heads, shared);
+        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, r.paged);
         defer a.free(body);
-        const text = if (!r.control) try a.dupe(u8, body) else edit: {
-            const e = controlEdit(r.which, tensor) orelse return error.ControlEdit;
+        const text = if (r.stale) try pages_.fault(a, body) else if (!r.control) try a.dupe(u8, body) else edit: {
+            const e = controlEdit(r.which, shared) orelse return error.ControlEdit;
             if (std.mem.count(u8, body, e.from) != 1) return error.ControlEdit;
             break :edit try std.mem.replaceOwned(u8, a, body, e.from, e.to);
         };
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        const op = try attn.Attention.init(device, lib);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .reg = r, .op = op, .tensor = tensor };
+        var op = try attn.Attention.init(device, lib);
+        errdefer op.deinit();
+        var base_op: ?attn.Attention = null;
+        if (r.paged) {
+            const base = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, false);
+            defer a.free(base);
+            const base_lib = try mtl.Library.fromSource(device, base, mtl.CompileOptions.mlx());
+            defer base_lib.deinit();
+            base_op = try attn.Attention.init(device, base_lib);
+        }
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .reg = r, .op = op, .shared = shared, .base_op = base_op };
     }
 
     pub fn deinit(t: *Attn) void {
         t.release();
         t.op.deinit();
+        if (t.base_op) |*op| op.deinit();
         t.rig.deinit();
     }
 
     fn release(t: *Attn) void {
         if (t.st) |*s| s.deinit();
         t.st = null;
+        if (t.base_st) |*s| s.deinit();
+        t.base_st = null;
         for ([_]*[]u16{ &t.q_in, &t.gate_in, &t.k_in, &t.v_in, &t.kc, &t.vc }) |p| {
             t.a.free(p.*);
             p.* = &.{};
@@ -137,13 +167,13 @@ pub const Attn = struct {
     }
 
     pub fn kernel(t: *Attn) g.Kernel {
-        return .{ .spec = spec(t.reg), .ctx = t, .vt = &vt, .control = if (t.reg.control) .nonfinite else null };
+        return .{ .spec = spec(t.reg), .ctx = t, .vt = &vt, .control = if (t.reg.control) .nonfinite else if (t.reg.stale) .shapes else null };
     }
 
     const vt = g.hooks(Attn);
 
     fn geo(t: *const Attn) planning.Geometry {
-        return at_.geometry(t.reg.heads, t.tensor);
+        return at_.geometry(t.reg.heads, t.shared);
     }
 
     fn at(t: *const Attn, s: usize, hk: usize, row: usize) usize {
@@ -161,8 +191,8 @@ pub const Attn = struct {
         t.rig.reset();
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        // on an M5 gate 1's decode round is a chain: only a chain's prefix kernel reads keys that a row must not see
-        const trees = t.reg.which == .decode and !(t.tensor and fill == .nonfinite);
+        // a shared prefix makes gate 1's decode round a chain: only its prefix kernel reads keys a row must not see
+        const trees = t.reg.which == .decode and !(t.shared and fill == .nonfinite);
         t.rd = at_.Round.init(shape, t.reg.which == .prompt, trees, rng);
         const r = &t.rd;
         t.q_in = try t.a.alloc(u16, r.rows * nh * D);
@@ -188,10 +218,23 @@ pub const Attn = struct {
             const keys = try t.rig.input(std.mem.sliceAsBytes(t.kc[s * per ..][0..per]));
             const values = try t.rig.input(std.mem.sliceAsBytes(t.vc[s * per ..][0..per]));
             t.caches[s] = .{ .keys = at_.ref(keys), .values = at_.ref(values), .capacity = @intCast(r.cap) };
+            t.base_caches[s] = t.caches[s];
+            if (t.reg.paged) {
+                const table = try pages_.table(t.a, r.cap);
+                defer t.a.free(table);
+                const kt = try pages_.pack(t.a, t.kc[s * per ..][0..per], hk, r.cap, table);
+                defer t.a.free(kt);
+                const values_pack = try pages_.pack(t.a, t.vc[s * per ..][0..per], hk, r.cap, table);
+                defer t.a.free(values_pack);
+                t.caches[s].keys = at_.ref(try t.rig.input(std.mem.sliceAsBytes(kt)));
+                t.caches[s].values = at_.ref(try t.rig.input(std.mem.sliceAsBytes(values_pack)));
+                t.caches[s].pages = .{ .table = at_.ref(try t.rig.input(std.mem.sliceAsBytes(table))), .page_bytes = hk * 256 * D * 2 };
+            }
         }
         t.refs[4] = try t.rig.output(r.rows * nh * D * 2);
         t.st = try at_.State.init(t.a, t.rig.device, r, gm, t.caches[0..r.streams]);
-        if (t.tensor and t.reg.which == .decode and fill == .nonfinite and !t.st.?.plan.fused) return error.PlantedRoundMissesPrefix;
+        if (t.reg.paged) t.base_st = try at_.State.init(t.a, t.rig.device, r, gm, t.base_caches[0..r.streams]);
+        if (t.shared and t.reg.which == .decode and fill == .nonfinite and !t.st.?.plan.fused) return error.PlantedRoundMissesPrefix;
         return true;
     }
 
@@ -229,14 +272,23 @@ pub const Attn = struct {
     }
 
     pub fn run(t: *Attn) !void {
-        const s = &t.st.?;
+        const s = if (t.baseline) &t.base_st.? else &t.st.?;
+        const op = if (t.baseline) &t.base_op.? else &t.op;
+        const caches = if (t.baseline) t.base_caches[0..t.rd.streams] else t.caches[0..t.rd.streams];
         const p = t.rig.begin();
-        t.op.encode(p.e, &s.scratch, &s.binding, s.plan, at_.ref(t.refs[0]), at_.ref(t.refs[1]), at_.ref(t.refs[2]), at_.ref(t.refs[4]), t.caches[0..t.rd.streams], at_.ref(t.refs[3]), t.reg.which == .prompt, false) catch |err| {
+        op.encodeContiguous(p.e, &s.scratch, &s.binding, s.plan, at_.ref(t.refs[0]), at_.ref(t.refs[1]), at_.ref(t.refs[2]), at_.ref(t.refs[4]), caches, at_.ref(t.refs[3]), t.reg.which == .prompt, false) catch |err| {
             p.e.end();
             p.pool.pop();
             return err;
         };
         try t.rig.finish(p);
+    }
+
+    pub fn replaced(t: *Attn) ![]const u8 {
+        t.baseline = true;
+        defer t.baseline = false;
+        try t.run();
+        return t.rig.bytes(t.refs[4], t.count() * 2);
     }
 
     pub fn count(t: *Attn) usize {
@@ -357,27 +409,33 @@ pub const Suite = struct {
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         // each chip's control edit must match its source once, checked on every chip, so an M4 run sees a stale M5 edit
-        for ([_]bool{ false, true }) |units| for (std.enums.values(Which)) |w| if (controlEdit(w, units)) |e| {
-            const gm = at_.geometry(.q27b, units);
-            const body = try q.simd_attention.grouped(s.a, units, true, gm.group(), gm.kv_heads, false);
-            defer s.a.free(body);
-            if (std.mem.count(u8, body, e.from) != 1) {
-                std.debug.print("control edit for {s} rows (tensor units {}) matches {d} times, not once: {s}\n", .{ @tagName(w), units, std.mem.count(u8, body, e.from), e.from });
-                return error.ControlEdit;
-            }
-        };
+        for ([_]bool{ false, true }) |units| {
+            const shared = try q.simd_attention.sharedPrefix(units);
+            for (std.enums.values(Which)) |w| if (controlEdit(w, shared)) |e| {
+                const gm = at_.geometry(.q27b, shared);
+                const body = try q.simd_attention.grouped(s.a, units, true, gm.group(), gm.kv_heads, false);
+                defer s.a.free(body);
+                if (std.mem.count(u8, body, e.from) != 1) {
+                    std.debug.print("control edit for {s} rows (tensor units {}) matches {d} times, not once: {s}\n", .{ @tagName(w), units, std.mem.count(u8, body, e.from), e.from });
+                    return error.ControlEdit;
+                }
+            };
+        }
         const tensor = s.device.tensorUnits();
         var regs: std.ArrayList(Reg) = .empty;
         defer regs.deinit(s.a);
         for (heads) |h| for (std.enums.values(Which)) |w| try regs.append(s.a, .{ .heads = h, .which = w });
-        for (std.enums.values(Which)) |w| if (hasControl(w, tensor)) try regs.append(s.a, .{ .heads = .q27b, .which = w, .control = true });
+        for (std.enums.values(Which)) |w| if (hasControl(w, try q.simd_attention.sharedPrefix(tensor))) try regs.append(s.a, .{ .heads = .q27b, .which = w, .control = true });
+        for (std.enums.values(at_.Heads)) |h| try regs.append(s.a, .{ .heads = h, .which = .prompt, .paged = true });
+        try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .paged = true, .control = true });
+        try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .paged = true, .stale = true });
         for (regs.items) |r| {
             if (only) |o| if (std.mem.indexOf(u8, spec(r).name, o) == null) continue;
             const x = try s.a.create(Attn);
             errdefer s.a.destroy(x);
             x.* = try Attn.init(s.a, s.device, s.queue, r);
-            try s.attns.append(s.a, x);
-            try s.kernels.append(s.a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(s.a, &s.attns, &s.kernels, x, x.kernel());
         }
     }
 

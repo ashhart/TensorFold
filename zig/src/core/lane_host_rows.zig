@@ -16,7 +16,7 @@ pub fn drain(ctx: *anyopaque) void {
 
 pub fn drainThread(h: *LaneHost) void {
     h.lock();
-    h.closing = true;
+    h.closing.store(true, .release);
     h.wake.broadcast(h.io);
     h.unlock();
     if (h.thread) |t| t.join();
@@ -28,7 +28,7 @@ pub fn ask(ctx: *anyopaque, a: *api.ImprintAsk) bool {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
     h.lock();
     defer h.unlock();
-    if (h.closing or !h.disk.push(h.gpa, a)) return false;
+    if (h.closing.load(.acquire) or (a.op == .flush and h.cache == null) or !h.disk.push(h.gpa, a)) return false; // no store: 501
     h.wake.signal(h.io);
     return true;
 }
@@ -40,9 +40,24 @@ pub fn answer(h: *LaneHost) void {
     };
     h.lock();
     const list = h.disk.take(h.gpa);
+    // a flush waits for the requests in flight to end; admit.pick and the planner hold new ones meanwhile
+    var flushes = if (h.admitted.items.len == 0 and h.core.activeCount() == 0) h.disk.takeFlushes() else Flushes.empty;
     h.unlock();
     defer h.gpa.free(list);
+    defer flushes.deinit(h.gpa);
     for (list) |a| a.answer(h.cache, .{ .spans = h.decoded_rows }); // keyed as its lookups are
+    for (flushes.items) |a| a.answer(h.cache, .{});
+    if (flushes.items.len > 0) published(h);
+}
+
+const Flushes = std.ArrayList(*api.ImprintAsk);
+
+/// The status copies after a flush, whole at once: an idle planner publishes none until its next round.
+fn published(h: *LaneHost) void {
+    h.lock();
+    h.cache_at = 0;
+    h.unlock();
+    @import("lane_host_status.zig").noteLive(h);
 }
 
 /// Asks left when the engine stops: answered as having no disk states.
@@ -55,7 +70,7 @@ pub fn ready(h: *LaneHost) bool {
     const store = h.cache orelse return false;
     const r = store.disk orelse return false;
     if (!rows.write.ready(r)) return false;
-    if (h.queued.items.len > 0 or h.admitted.items.len > 0 or h.cancels.items.len > 0 or h.closing) return false;
+    if (h.queued.items.len > 0 or h.admitted.items.len > 0 or h.cancels.items.len > 0 or h.closing.load(.acquire)) return false;
     return !r.sync_writes or h.disk.quiet(h.admissions, std.Io.Clock.awake.now(h.io).toNanoseconds());
 }
 

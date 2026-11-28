@@ -122,13 +122,9 @@ contributions are in it.
   stages 2- and 3-bit codes the same way.
 - The native Vulkan dense Qwen3.5-2B engine (`zig/src/families/qwen3_5/backend/vulkan/`) follows the same frozen
   dense-lane design ([lane_qmm.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py),
-  [#34](https://github.com/ashhart/TensorFold/pull/34)) for its per-lane qmm decomposition.
-- Nine compute shaders are code-unchanged from Joshua Warren's MIT-licensed omarchy-mlx: `argreduce_chunk`,
-  `argreduce_combine`, `cast`, `conv_dw1d`, `copy_general`, `dequant`, `gather_take`, `gdn_conv_decode` and
-  `qmm.comp`. `omarchy_trig.h` is also code-unchanged; its comments are condensed.
-- Eight compute shaders are adapted: `binary_vec`, `fast_norm`, `fast_norm_gated`, `fast_rope`, `gated_delta_decode`,
-  `gated_delta_prefill_oracle`, `sdpa_decode_native` and `swiglu`. Their headers record the changed lines.
-- `attention_gate`, `finite_logits`, `gdn_split`, `qmm_q4_vec4` and the contract controls are new work for this engine.
+  [#34](https://github.com/ashhart/TensorFold/pull/34)) for its per-lane qmm decomposition. All Vulkan compute shaders
+  and `vulkan_trig.h` under `zig/kernels/vulkan/` are written for TensorFold against the behaviour specifications in
+  `docs/vulkan-shader-specs/`.
 - @di37 made the engine read the GPU generation once from `applegpu_gN`, and a virtual machine's GPU as none, in
   [#209](https://github.com/ashhart/TensorFold/pull/209)
   ([device.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/device.py)), as
@@ -156,6 +152,10 @@ contributions are in it.
   a change to the TensorFold engine vendored there, Apache-2.0) deferred a kept chain's DeltaNet replay into the next
   slot scan. The Qwen3.5 family's pending kept rows carry its code: the replay and write-back in
   `zig/kernels/cuda/qwen35_slots.cuh`, and `Cache.flush` and `fold` in `zig/src/families/qwen3_5/cuda_cache.zig`.
+- @christopherowen added continuation-ranked band matching, adaptive doubling (`8 -> 15`) and expected-yield gating
+  to DeepSeek-V4.1's lookup planner (`zig/src/families/deepseek_v41/draft/lookup.zig`) in
+  [#2638](https://github.com/ashhart/TensorFold/pull/2638), first tried in
+  [christopherowen/spark-ds41f](https://github.com/christopherowen/spark-ds41f).
 
 ## EXL3
 
