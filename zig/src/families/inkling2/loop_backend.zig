@@ -11,6 +11,8 @@ const prompt_rows = engine.prompt_rows;
 const window_rows = engine.window_rows;
 const round_rows = engine.round_rows;
 const token_ring = 1024;
+const LogRow = lanes.LogprobRow;
+const row_words = lanes.logprob.words;
 
 const Lane = struct {
     len: usize = 0,
@@ -20,6 +22,7 @@ const Lane = struct {
     last: u64,
     rule: u64,
     sampled: bool = false,
+    first: ?LogRow = null, // the first token's logprob row, with `logprobs`
 };
 
 /// The bytes a slot's lane buffers ask for: a vocabulary row of last logits and a sampling rule.
@@ -45,6 +48,7 @@ pub const Backend = struct {
     tokens: cuda.DeviceBuffer,
     logits16: cuda.DeviceBuffer,
     meta: cuda.DeviceBuffer,
+    words: cuda.DeviceBuffer, // logprob words, a round's rows of row_words
     slot: [engine.max_slots][2]cuda.DeviceBuffer = undefined, // each slot's last prompt logits and sampling rule
     next: u64 = 0,
     held: usize = 0, // slots with buffers
@@ -59,7 +63,9 @@ pub const Backend = struct {
         errdefer logits16.free();
         var meta = try cuda.DeviceBuffer.alloc(d, 16);
         errdefer meta.free();
-        var b: Backend = .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .tokens = tokens, .logits16 = logits16, .meta = meta };
+        var words = try cuda.DeviceBuffer.alloc(d, round_rows * row_words * 4);
+        errdefer words.free();
+        var b: Backend = .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .tokens = tokens, .logits16 = logits16, .meta = meta, .words = words };
         try b.slotBuffers(m.n_slots);
         return b;
     }
@@ -86,6 +92,7 @@ pub const Backend = struct {
     pub fn deinit(b: *Backend) void {
         for (&b.lanes_) |*x| if (x.*) |*l| l.rows.deinit(b.gpa);
         for (b.slot[0..b.held]) |*pair| for (pair) |*x| x.free();
+        b.words.free();
         b.meta.free();
         b.logits16.free();
         b.tokens.free();
@@ -162,6 +169,7 @@ pub const Backend = struct {
         }
         const l = try b.laneOf(s);
         l.sampled = false;
+        l.first = null;
         if (cuda.sample.ruleFor(s.sampling)) |r| {
             try b.upload(l.rule, std.mem.asBytes(&r));
             l.sampled = true;
@@ -209,6 +217,13 @@ pub const Backend = struct {
         try b.k.draws.draw(b.s, b.logits16.ptr, v, l.rule, b.meta.ptr, 0, b.tokens.ptr + at * 4, rows, null, null);
     }
 
+    /// Logprob words at word row `word_row` for `rows` fp32 rows drawn at tokens `at`: the bf16 rows a draw reads.
+    fn wordRows(b: *Backend, l: *const Lane, logits: u64, rows: usize, at: usize, k: u8, word_row: usize) !void {
+        const v = b.m.w.c.text.unpadded_vocab;
+        if (!l.sampled) try ops.tobf(&b.k.glue, b.s, logits, rows, v, v, b.logits16.ptr, v, 0, v);
+        try b.k.draws.logprobRows(b.s, b.logits16.ptr, v, b.tokens.ptr + at * 4, k, false, b.words.ptr + word_row * row_words * 4, rows);
+    }
+
     fn read(ptr: *anyopaque, h: u64) anyerror!u32 {
         const b = self(ptr);
         if (h >= b.next or b.next - h > token_ring) return error.NoSuchToken;
@@ -229,6 +244,7 @@ pub const Backend = struct {
         .keep = keep,
         .draft = draft,
         .release = release,
+        .first_row = firstRow,
         .reports_fill = true,
     };
 
@@ -252,8 +268,21 @@ pub const Backend = struct {
         const l = try b.laneOf(s);
         if (position != l.len or l.fill != null) return error.PositionMismatch;
         const h = b.next;
-        try b.drawRows(l, l.last, 1, position, b.handle());
+        const at = b.handle();
+        try b.drawRows(l, l.last, 1, position, at);
+        if (s.logprobs) |k| {
+            try b.wordRows(l, l.last, 1, at, k, 0);
+            var w: [row_words]u32 = undefined;
+            try b.s.synchronize();
+            try b.words.download(0, std.mem.sliceAsBytes(&w));
+            l.first = LogRow.fromWords(&w, try read(b, h), k);
+        }
         return h;
+    }
+
+    fn firstRow(ptr: *anyopaque, s: *lanes.Stream) anyerror!LogRow {
+        const l = try self(ptr).laneOf(s);
+        return l.first orelse error.NoFirstRow;
     }
 
     fn firstMasked(_: *anyopaque, _: *lanes.Stream, _: u64, _: []const u32) anyerror!u64 {
@@ -304,20 +333,32 @@ pub const Backend = struct {
         try b.m.forwardChains(b.k, b.s, chains[0..windows.len], 0, total, true);
         const v = b.m.w.c.text.unpadded_vocab;
         var at: usize = 0;
-        for (windows) |w| {
+        var any_rows = false;
+        for (windows, out) |w, o| {
             const l = try b.laneOf(w.stream);
-            try b.drawRows(l, b.m.s.logits + at * v * 4, l.rows.items.len, w.positions[0], token_ring + at);
-            at += l.rows.items.len;
+            const n = l.rows.items.len;
+            try b.drawRows(l, b.m.s.logits + at * v * 4, n, w.positions[0], token_ring + at);
+            if (o.rows.len > 0) {
+                if (o.rows.len != n) return error.LogprobRowsMismatch;
+                try b.wordRows(l, b.m.s.logits + at * v * 4, n, token_ring + at, w.stream.logprobs orelse return error.LogprobRowsMismatch, at);
+                any_rows = true;
+            }
+            at += n;
         }
         var got: [round_rows]u32 = undefined;
+        var words: [round_rows * row_words]u32 = undefined;
         try b.s.synchronize();
         try b.tokens.download(token_ring * 4, std.mem.sliceAsBytes(got[0..total]));
+        if (any_rows) try b.words.download(0, std.mem.sliceAsBytes(words[0 .. total * row_words]));
         at = 0;
         for (windows, out) |w, *o| {
             const l = try b.laneOf(w.stream);
             const n = l.rows.items.len;
             @memcpy(o.sampled[0..n], got[at..][0..n]);
             @memcpy(o.drafts[0 .. n - 1], l.rows.items[1..n]);
+            if (o.rows.len > 0) for (o.rows, 0..) |*r, i| {
+                r.* = LogRow.fromWords(words[(at + i) * row_words ..][0..row_words], got[at + i], w.stream.logprobs.?);
+            };
             l.len = l.base + n;
             at += n;
         }
