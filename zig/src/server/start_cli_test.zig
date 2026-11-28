@@ -344,7 +344,7 @@ test "start CLI: a failed first reply is fatal and still reaps its serve child" 
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
     try r.cache();
-    const refusal = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "500 Internal Server Error", "{\"error\": {\"message\": \"generation failed\", \"type\": \"server_error\"}}")});
+    const refusal = try a.dupe([]const fake.Write, &.{try a.dupe(fake.Write, &.{ .{ .bytes = try std.fmt.allocPrint(a, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{"{\"error\": {\"message\": \"generation failed\", \"type\": \"server_error\"}}".len}), .pause_ms = 200 }, .{ .bytes = "{\"error\": {\"message\": \"generation failed\", \"type\": \"server_error\"}}" } })});
     const f = try world(&r, refusal);
     defer f.stop();
     try r.standIn(f.port);

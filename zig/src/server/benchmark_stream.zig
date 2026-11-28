@@ -217,6 +217,32 @@ const Exchange = struct {
 
 /// A complete refusal body up to 16 KiB, read for 100 ms; oversized, timed-out and incomplete bodies return none.
 pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
+    return errorBodyWithTimeout(a, io, resp, 0.1);
+}
+
+/// A complete bounded-size refusal body read inline under the caller's outer deadline.
+pub const CompleteBody = struct {
+    wait: BodyWait,
+
+    pub fn init(resp: *const std.http.Client.Response) ?CompleteBody {
+        if (resp.head.transfer_encoding != .none) return null;
+        const declared = resp.head.content_length;
+        if (declared != null and declared.? > 16 << 10) return null;
+        return .{ .wait = .{ .in = resp.request.reader.in, .want = @min(declared orelse 16 << 10, 16 << 10), .exact = declared != null } };
+    }
+
+    pub fn run(b: *CompleteBody) void {
+        b.wait.run();
+    }
+
+    /// Keep all bytes that arrived, including an incomplete body after caller cancellation.
+    pub fn text(b: *const CompleteBody, a: Allocator) []const u8 {
+        const got = b.wait.in.buffered();
+        return a.dupe(u8, got[0..@min(got.len, b.wait.want)]) catch "";
+    }
+};
+
+fn errorBodyWithTimeout(a: Allocator, io: std.Io, resp: *const std.http.Client.Response, timeout_s: ?f64) []const u8 {
     if (resp.head.transfer_encoding != .none) return "";
     const declared = resp.head.content_length;
     if (declared != null and declared.? > 16 << 10) return "";
@@ -224,7 +250,9 @@ pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response
     if (wait.exact and wait.in.buffered().len >= wait.want) {
         wait.complete = true;
     } else {
-        _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);
+        if (timeout_s) |seconds| {
+            _ = bounded(io, deadlineAfter(io, seconds), BodyWait.run, &wait);
+        } else BodyWait.run(&wait);
         if (!wait.complete) return "";
     }
     const got = wait.in.buffered();

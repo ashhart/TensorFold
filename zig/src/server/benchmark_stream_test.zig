@@ -497,6 +497,37 @@ test "an unbuffered refusal body is read after its head without a timed sender p
     try std.testing.expectEqualStrings(refusal_body, stream.errorBody(a, io, &resp));
 }
 
+test "chat CLI: managed first reply bounds empty and partial refusal bodies and redacts partial text" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = "fixture-stall-secret";
+    const forms = [_][]const u8{secret};
+    for ([_][]const u8{ "", "partial upstream failure " ++ secret }) |partial| {
+        var gate: std.Io.Event = .unset;
+        const head = try std.fmt.allocPrint(a, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{partial.len + 20});
+        const writes = [_]fake.Write{.{ .bytes = try std.mem.concat(a, u8, &.{ head, partial }), .after = &gate }};
+        const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "POST", .path = "/v1/chat/completions", .replies = &.{&writes} }});
+        defer {
+            gate.set(io);
+            f.stop();
+        }
+        var out: std.Io.Writer.Allocating = .init(a);
+        const started = stream.now(io);
+        const ended = try turn.runManagedStart(a, io, try f.url(a, "/v1/chat/completions"), null, .{ .forms = &forms }, try a.dupe(u8, "{}"), &out.writer, .{}, false);
+        const took: i64 = @intCast(stream.now(io) - started);
+        try std.testing.expect(took >= 30 * std.time.ns_per_s and ended == .failed and ended.failed.status == 500);
+        try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, "HTTP 500") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, "refusal body timed out after 30 seconds") != null);
+        if (partial.len != 0) {
+            try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, "partial upstream failure") != null);
+            try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, "[redacted]") != null);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, secret) == null);
+    }
+}
+
 fn checkDefaultMode(switchable: ?bool, applicable: ?bool) !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
