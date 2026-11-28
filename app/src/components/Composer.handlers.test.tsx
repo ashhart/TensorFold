@@ -14,9 +14,9 @@ import { isComposerSendKey } from '../lib/composer-keyboard'
 
 // Compile the production handlers verbatim so the tests exercise Composer's ownership and
 // acceptance wiring, while the filesystem/OCR/host transport boundaries remain controlled.
-const source = ts.createSourceFile('Composer.tsx', readFileSync(path.join(__dirname, 'Composer.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
-const composer = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'Composer')!
-assert.ok(composer?.body)
+const source = ts.createSourceFile('Composer.tsx', ['composer/useComposerState.ts', 'composer/useComposerSubmit.tsx', 'composer/ComposerView.tsx'].map(file => readFileSync(path.join(__dirname, file), 'utf8')).join('\n'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
+const composer = source
+assert.ok(composer.statements.length > 0)
 const printer = ts.createPrinter()
 const operationDeclarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'attachmentOperation' || ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === 'attachmentOperations'))
 assert.equal(operationDeclarations.length, 2)
@@ -24,7 +24,9 @@ const operationCode = ts.transpileModule(`${operationDeclarations.map((node) => 
 const attachmentOperation = new Function(operationCode)()
 function handlers(names: string[], environment: Record<string, any>): any {
   const declarations = names.map((name) => {
-    const statement = composer.body!.statements.find((node) => ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name))
+    let statement: ts.VariableStatement | undefined
+    const visit = (node: ts.Node) => { if (ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name)) statement = node; ts.forEachChild(node, visit) }
+    visit(composer)
     assert.ok(statement, `Production handler ${name} exists`)
     return printer.printNode(ts.EmitHint.Unspecified, statement, source)
   }).join('\n')

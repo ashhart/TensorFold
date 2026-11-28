@@ -184,6 +184,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const http = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool visibility HTTP:"} }));
     http.has_side_effects = true;
     b.step("test-tool-visibility-http-host", "Rejected tool envelopes survive actual chat JSON and SSE replies").dependOn(&http.step);
+    const finish = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool finish:"} }));
+    b.step("test-tool-finish-host", "A capped tool reply's finish_reason, whole and streamed, without devices").dependOn(&finish.step);
     const windows = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Nemotron window:", "model discovery", "thinking reserve" } }));
     b.step("test-nemotron-window-host", "Nemotron advertised capacity and unchanged chat admission without devices").dependOn(&windows.step);
     b.step("test-thinking-request-host", "Client refusals and internal note and lesson requests without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking request:"} })).step);

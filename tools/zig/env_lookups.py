@@ -159,6 +159,6 @@ NOT_READ: dict[str, str] = {
     "TENSORFOLD_BIN": "set for the web app's child process, not read",
     "MCDMA_FABRIC_QOS": "set for the MCDMA library, which reads it",
     **{n: "a prefix --confidential refuses in the environment, not read" for n in (
-        "CUDA_INJECTION", "LD_AUDIT", "LD_PRELOAD", "METAL_CAPTURE", "METAL_DEVICE_WRAPPER_TYPE", "MTL_CAPTURE",
-        "MTL_DEBUG_LAYER", "MTL_SHADER_VALIDATION", "NVTX_INJECTION")},
+        "CUDA_INJECTION", "METAL_CAPTURE", "METAL_DEVICE_WRAPPER_TYPE", "MTL_CAPTURE", "MTL_DEBUG_LAYER",
+        "MTL_SHADER_VALIDATION", "NVTX_INJECTION")},
 }

@@ -233,3 +233,7 @@ test "the forward refuses a token id at the vocabulary before any launch" {
     const bad = [_]u32{ 1, w.c.text.vocab };
     try std.testing.expectError(error.InvalidToken, m.forward(undefined, undefined, &bad, 0, 0, 1, false));
 }
+
+test "Mini CUDA weights: shared traversal preserves the complete file-backed loader" {
+    std.mem.doNotOptimizeAway(&@import("loop_weights.zig").loadWith);
+}
