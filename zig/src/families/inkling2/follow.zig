@@ -142,6 +142,8 @@ pub const Leader = struct {
         const id = x.next_id;
         x.next_id += 1; // an id is used once, even when this rank's copy then fails
         if (at == 0 or at != x.e.pos()) return error.BadKeep;
+        // room to tell the other ranks of every kept state's drop, this one's included, so `drop` never allocates
+        if (x.link != null) try x.dropped.ensureUnusedCapacity(x.e.gpa, x.e.states.map.count() + 1);
         try x.send(.{ .kind = @backingInt(Kind.save), .a = id, .seed = at }, &.{});
         x.e.keepAs(id, at) catch |err| {
             x.drop(id);
@@ -152,8 +154,9 @@ pub const Leader = struct {
 
     /// A state rank 0's store let go: freed here now, on the other ranks at the next step.
     pub fn drop(x: *Leader, id: u64) void {
+        // the other ranks' notice is queued before this rank's copy goes: if it cannot be, every rank keeps the state
+        if (x.link != null) x.dropped.append(x.e.gpa, id) catch return;
         x.e.dropState(id);
-        if (x.link != null) x.dropped.append(x.e.gpa, id) catch {};
     }
 
     /// No stream is left: the other ranks sleep on their lines until the next step instead of spinning in NCCL.
