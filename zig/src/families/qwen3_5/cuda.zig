@@ -122,3 +122,7 @@ test "the shard plan's head widths are the kernels'" {
 test {
     _ = @import("cuda_request_starts_test.zig");
 }
+
+test {
+    _ = @import("cuda_modelopt_prompt_test.zig");
+}
