@@ -63,6 +63,7 @@ const Echo = struct {
         _ = e.calls.fetchAdd(1, .monotonic);
         _ = e.peak.fetchMax(e.active.fetchAdd(1, .acq_rel) + 1, .acq_rel);
         defer _ = e.active.fetchSub(1, .acq_rel);
+        if (e.hold_ms > 0) std.Io.sleep(t.io, .fromMilliseconds(e.hold_ms), .awake) catch {};
         const p = request.prompt;
         if (request.return_progress) sink.event(sink.ctx, id, &.{ .progress = .{ .done = @intCast(p.len), .total = @intCast(p.len), .cached = 0 } });
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
@@ -312,13 +313,15 @@ test "a prompt's stop string is its own choice's, not the merged reply's" {
     try t.expect(body.get("stop_sequence") == null); // choice 0's stop is not the request's
 }
 
-test "under --max-inflight a prompt list takes turns in its one place" {
+test "prompt progress: under --max-inflight a prompt list takes turns in its one place" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var echo: Echo = .{ .hold_ms = 20 };
+    const started = std.Io.Timestamp.now(t.io, .awake);
     var got: Capture = .{ .a = a };
     try serve(a, &echo, .{ .max_inflight = 4 }, "[\"a\",\"b\",\"c\",\"d\"]", two, &got);
+    try t.expect(started.durationTo(std.Io.Timestamp.now(t.io, .awake)).nanoseconds >= 4 * echo.hold_ms * std.time.ns_per_ms);
     try t.expectEqual(@as(?u16, 200), got.status);
     try t.expectEqual(@as(usize, 4), (try json.parse(a, got.whole)).ok.get("choices").?.array.len);
     try t.expectEqual(@as(usize, 1), echo.peak.load(.acquire)); // not its four prompts in the engine at once
