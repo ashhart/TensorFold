@@ -79,6 +79,16 @@ pub fn Loader(comptime Buffer: type) type {
         arena: Buffer,
         used: usize = 0,
 
+        pub fn experts(l: *@This(), ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan, i: u32, out: *Layer) !void {
+            const format: modelopt.Format = switch (p.layers[i].precision) {
+                .nvfp4 => .nvfp4,
+                .mxfp8 => .mxfp8,
+                else => return error.UnsupportedExpertFormat,
+            };
+            var prefix: [96]u8 = undefined;
+            out.experts = try modelopt.load(l, ck, try std.fmt.bufPrint(&prefix, "model.llm.layers.{d}.mlp.experts.", .{i}), format, c.text.experts, c.text.hidden, c.text.expert_inter);
+        }
+
         pub fn alloc(l: *@This(), len: usize) !u64 {
             const at = std.mem.alignForward(usize, l.used, 256);
             const end = try std.math.add(usize, at, len);
@@ -88,13 +98,13 @@ pub fn Loader(comptime Buffer: type) type {
             return l.arena.ptr + at;
         }
 
-        fn put(l: *@This(), bytes: []const u8) !u64 {
+        pub fn put(l: *@This(), bytes: []const u8) !u64 {
             const p = try l.alloc(bytes.len);
             try l.arena.upload(p - l.arena.ptr, bytes);
             return p;
         }
 
-        fn tensor(l: *@This(), ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.safetensors.DType, dims: []const usize) !u64 {
+        pub fn tensor(l: *@This(), ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.safetensors.DType, dims: []const usize) !u64 {
             var buf: [256]u8 = undefined;
             const name = try std.fmt.bufPrint(&buf, fmt, args);
             return l.put((try ck.expect(name, dtype, dims)).bytes);
@@ -133,13 +143,10 @@ fn controllers(l: anytype, ck: *core.Checkpoint, c: *const config.Text, i: u32, 
 /// Load every text tensor, including all four controller triplets and both cross-pass query matrices.
 pub fn load(comptime Buffer: type, gpa: std.mem.Allocator, d: anytype, ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan) !Weights(Buffer) {
     if (c.text.loop == null) return error.Inkling2LoopRequired;
-    var formats: [config.max_layers]modelopt.Format = undefined;
-    for (p.layers[0..c.text.layers], 0..) |layer, k| {
-        formats[k] = switch (layer.precision) {
-            .nvfp4 => .nvfp4,
-            .mxfp8 => .mxfp8,
-        };
-    }
+    for (p.layers[0..c.text.layers]) |layer| switch (layer.precision) {
+        .nvfp4, .mxfp8 => {},
+        else => return error.UnsupportedExpertFormat,
+    };
     const total = try checkpointBytes(ck);
     var arena = try Buffer.alloc(d, @max(total, 256));
     var w: Weights(Buffer) = .{ .gpa = gpa, .c = c.*, .p = p };
@@ -152,6 +159,13 @@ pub fn load(comptime Buffer: type, gpa: std.mem.Allocator, d: anytype, ck: *core
     w.attn_queries = try gpa.alloc(u64, c.text.layers);
     w.mlp_queries = try gpa.alloc(u64, c.text.layers);
     var l: Loader(Buffer) = .{ .w = &w, .arena = arena };
+    try fill(&l, ck, c, p);
+    return w;
+}
+
+/// Shared tensor traversal; the backend owns optional expert formats and their cleanup.
+pub fn fill(l: anytype, ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan) !void {
+    const w = l.w;
     const h: usize = c.text.hidden;
     w.embed = try l.tensor(ck, "model.llm.embed.weight", .{}, .bf16, &.{ c.text.vocab, h });
     w.embed_norm = try l.tensor(ck, "model.llm.embed_norm.weight", .{}, .bf16, &.{h});
@@ -176,58 +190,56 @@ pub fn load(comptime Buffer: type, gpa: std.mem.Allocator, d: anytype, ck: *core
             w.attn_queries[k] = try l.tensor(ck, "model.llm.attn_res.attn_queries.{d}", .{i - 1}, .f32, &.{h});
         }
         const A = struct {
-            fn put(loader: *Loader(Buffer), checkpoint: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dims: []const usize) !u64 {
+            fn put(loader: anytype, checkpoint: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dims: []const usize) !u64 {
                 return loader.tensor(checkpoint, fmt, args, .bf16, dims);
             }
         };
         layer.attn = .{
-            .wq = try A.put(&l, ck, "model.llm.layers.{d}.attn.wq_du.weight", L, &.{ q, h }),
-            .wk = try A.put(&l, ck, "model.llm.layers.{d}.attn.wk_dv.weight", L, &.{ kv, h }),
-            .wv = try A.put(&l, ck, "model.llm.layers.{d}.attn.wv_dv.weight", L, &.{ kv, h }),
-            .wr = try A.put(&l, ck, "model.llm.layers.{d}.attn.wr_du.weight", L, &.{ @as(usize, hd.q) * c.text.d_rel, h }),
-            .wo = try A.put(&l, ck, "model.llm.layers.{d}.attn.wo_ud.weight", L, &.{ h, q }),
-            .gate = try A.put(&l, ck, "model.llm.layers.{d}.attn.gate_attn.weight", L, &.{ q, h }),
-            .sink = try A.put(&l, ck, "model.llm.layers.{d}.attn.attn_sink_proj.weight", L, &.{ hd.q, h }),
-            .q_scale = try A.put(&l, ck, "model.llm.layers.{d}.attn.q_l2_clip.scale", L, &.{ hd.q, hd.dim }),
-            .rel_scale = try A.put(&l, ck, "model.llm.layers.{d}.attn.rel_l2_clip.scale", L, &.{ hd.q, c.text.d_rel }),
-            .rel_proj = try A.put(&l, ck, "model.llm.layers.{d}.attn.rel_logits_proj.proj", L, &.{ c.text.d_rel, c.text.extent(i) }),
+            .wq = try A.put(l, ck, "model.llm.layers.{d}.attn.wq_du.weight", L, &.{ q, h }),
+            .wk = try A.put(l, ck, "model.llm.layers.{d}.attn.wk_dv.weight", L, &.{ kv, h }),
+            .wv = try A.put(l, ck, "model.llm.layers.{d}.attn.wv_dv.weight", L, &.{ kv, h }),
+            .wr = try A.put(l, ck, "model.llm.layers.{d}.attn.wr_du.weight", L, &.{ @as(usize, hd.q) * c.text.d_rel, h }),
+            .wo = try A.put(l, ck, "model.llm.layers.{d}.attn.wo_ud.weight", L, &.{ h, q }),
+            .gate = try A.put(l, ck, "model.llm.layers.{d}.attn.gate_attn.weight", L, &.{ q, h }),
+            .sink = try A.put(l, ck, "model.llm.layers.{d}.attn.attn_sink_proj.weight", L, &.{ hd.q, h }),
+            .q_scale = try A.put(l, ck, "model.llm.layers.{d}.attn.q_l2_clip.scale", L, &.{ hd.q, hd.dim }),
+            .rel_scale = try A.put(l, ck, "model.llm.layers.{d}.attn.rel_l2_clip.scale", L, &.{ hd.q, c.text.d_rel }),
+            .rel_proj = try A.put(l, ck, "model.llm.layers.{d}.attn.rel_logits_proj.proj", L, &.{ c.text.d_rel, c.text.extent(i) }),
             .k_conv = undefined,
             .v_conv = undefined,
             .norms = undefined,
         };
         inline for ([2][]const u8{ "k", "v" }, 0..) |kind, j| {
             const conv = if (config.isGlobal(i))
-                try A.put(&l, ck, "model.llm.layers.{d}.attn." ++ kind ++ "_sconv.static_w", L, &.{ config.conv_taps, kv })
+                try A.put(l, ck, "model.llm.layers.{d}.attn." ++ kind ++ "_sconv.static_w", L, &.{ config.conv_taps, kv })
             else
-                try A.put(&l, ck, "model.llm.layers.{d}.attn." ++ kind ++ "_sconv.weight", L, &.{ kv, 1, config.conv_taps });
+                try A.put(l, ck, "model.llm.layers.{d}.attn." ++ kind ++ "_sconv.weight", L, &.{ kv, 1, config.conv_taps });
             if (j == 0) layer.attn.k_conv = conv else layer.attn.v_conv = conv;
             if (config.isGlobal(i)) {
-                const dyn = try A.put(&l, ck, "model.llm.layers.{d}.attn." ++ kind ++ "_sconv.weight_proj", L, &.{ @as(usize, hd.kv) * config.conv_taps, h });
+                const dyn = try A.put(l, ck, "model.llm.layers.{d}.attn." ++ kind ++ "_sconv.weight_proj", L, &.{ @as(usize, hd.kv) * config.conv_taps, h });
                 if (j == 0) layer.attn.k_dynamic = dyn else layer.attn.v_dynamic = dyn;
             }
             const norm = if (config.isGlobal(i))
-                try A.put(&l, ck, "model.llm.layers.{d}." ++ kind ++ "_input_norm.weight", L, &.{h})
+                try A.put(l, ck, "model.llm.layers.{d}." ++ kind ++ "_input_norm.weight", L, &.{h})
             else if (j == 0)
-                try A.put(&l, ck, "model.llm.layers.{d}.attn_norm.weight", L, &.{h})
+                try A.put(l, ck, "model.llm.layers.{d}.attn_norm.weight", L, &.{h})
             else
                 layer.attn.norms[1]; // a sliding layer's k and v share one attn_norm upload
             layer.attn.norms[j + 1] = norm;
         }
         layer.attn.norms[0] = if (config.isGlobal(i))
-            try A.put(&l, ck, "model.llm.layers.{d}.q_input_norm.weight", L, &.{h})
+            try A.put(l, ck, "model.llm.layers.{d}.q_input_norm.weight", L, &.{h})
         else
             layer.attn.norms[1];
-        layer.attn_conv = try A.put(&l, ck, "model.llm.layers.{d}.attn_sconv.weight", L, &.{ h, 1, config.conv_taps });
-        layer.mlp_norm = try A.put(&l, ck, "model.llm.layers.{d}.mlp_norm.weight", L, &.{h});
-        layer.mlp_conv = try A.put(&l, ck, "model.llm.layers.{d}.mlp_sconv.weight", L, &.{ h, 1, config.conv_taps });
-        layer.router = try A.put(&l, ck, "model.llm.layers.{d}.mlp.gate.weight", L, &.{ c.text.experts, h });
+        layer.attn_conv = try A.put(l, ck, "model.llm.layers.{d}.attn_sconv.weight", L, &.{ h, 1, config.conv_taps });
+        layer.mlp_norm = try A.put(l, ck, "model.llm.layers.{d}.mlp_norm.weight", L, &.{h});
+        layer.mlp_conv = try A.put(l, ck, "model.llm.layers.{d}.mlp_sconv.weight", L, &.{ h, 1, config.conv_taps });
+        layer.router = try A.put(l, ck, "model.llm.layers.{d}.mlp.gate.weight", L, &.{ c.text.experts, h });
         layer.router_bias = try l.tensor(ck, "model.llm.layers.{d}.mlp.gate.bias", L, .f32, &.{c.text.experts});
-        var prefix: [96]u8 = undefined;
-        layer.experts = try modelopt.load(&l, ck, try std.fmt.bufPrint(&prefix, "model.llm.layers.{d}.mlp.experts.", L), formats[k], c.text.experts, h, c.text.expert_inter);
+        try l.experts(ck, c, p, i, layer);
         @memset(&layer.controllers, .{ .down = 0, .forget = 0, .gain = 0 });
         const lp = c.text.loop.?;
-        if (i >= lp.core_start and i < lp.core_end) try controllers(&l, ck, &c.text, i, lp.gate_rank, &layer.controllers);
+        if (i >= lp.core_start and i < lp.core_end) try controllers(l, ck, &c.text, i, lp.gate_rank, &layer.controllers);
     }
     if (ck.unused() != 0) return error.UnusedCheckpointTensor;
-    return w;
 }
