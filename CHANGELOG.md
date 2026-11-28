@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `--confidential` refuses existing Linux tracers and, where whole-process locking is supported, locks current and future process memory against swap or refuses startup; Darwin currently refuses because this locking is unavailable.
+
 - HIP, Qwen 3.5 and Nemotron on one GPU: long prompt chunks keep the next layer queued while they poll for a cancel, rather than draining the GPU at every layer; tokens unchanged, and a cancel still drains before the pass ends (#4887).
 
 - Qwen3.8-27B on Metal: Q and K head norm and RoPE run as one `q27_qk_norm_rope` dispatch instead of two head-norm launches, the barrier between them and two RoPE launches, on every chip and pass, keys-only prompt tails included; on an M5 Ultra every cache row and `qa` byte and the served replies match the previous path (#2955, part of #2940).
