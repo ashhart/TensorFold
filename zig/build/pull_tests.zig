@@ -15,9 +15,9 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     }) }));
     b.step("test-rm-host", "Checkpoint removal in a temporary cache: shared blobs, refs, dry runs, refusals and links out").dependOn(&rm.step);
     test_step.dependOn(&rm.step);
-    if (target.result.os.tag != .windows) { // the journal fixture listens on a POSIX socket
+    if (target.result.os.tag != .windows) { // its fixture is plain files under std.testing.tmpDir; the one POSIX item is `follow`'s rotation check on the stat inode
         const journal_log = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/journal_log.zig"), .target = target, .optimize = optimize }) }));
-        b.step("test-journal-log-host", "tensorfold log over a fixture request journal: list, show, --json and follow across a rotation").dependOn(&journal_log.step);
+        b.step("test-journal-log-host", "tensorfold log over a fixture journal and request-log file: list, show, --json and follow across a rotation").dependOn(&journal_log.step);
         test_step.dependOn(&journal_log.step);
     }
     const mod = b.createModule(.{

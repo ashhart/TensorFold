@@ -8,7 +8,7 @@ const Entry = log.Entry;
 
 pub fn entry(a: Allocator, out: *Writer, e: Entry) !void {
     try out.print("id        {s}\nstarted   ", .{e.id});
-    try log.stamp(out, if (e.start) |s| log.int(s, "at") else null);
+    try log.stamp(out, e.startedAt());
     try out.writeAll(" UTC\n");
     try out.print("route     {s}\nmodel     {s}\n", .{ log.pathOf(e), log.modelOf(e) });
     try out.writeAll("status    ");
@@ -19,11 +19,11 @@ pub fn entry(a: Allocator, out: *Writer, e: Entry) !void {
     try out.writeAll("\n");
     if (e.finish) |f| {
         try out.writeAll("tokens    prompt ");
-        try opt(out, log.int(f, "prompt_tokens"));
+        try log.optInt(out, log.int(f, "prompt_tokens"));
         try out.writeAll(", cached ");
-        try opt(out, log.int(f, "cached_tokens"));
+        try log.optInt(out, log.int(f, "cached_tokens"));
         try out.writeAll(", completion ");
-        try opt(out, log.int(f, "completion_tokens"));
+        try log.optInt(out, log.int(f, "completion_tokens"));
         try out.writeAll("\ntimings   queue ");
         try optMs(out, log.num(f, "queue_ms"));
         try out.writeAll(", first token ");
@@ -32,16 +32,42 @@ pub fn entry(a: Allocator, out: *Writer, e: Entry) !void {
         if (log.num(f, "decode_tps")) |v| try out.print("{d:.1} tok/s\n", .{v}) else try out.writeAll("-\n");
     }
     try out.writeAll("\nrequest\n");
-    try request(a, out, e);
+    try request(out, e);
     try out.writeAll("\nreply\n");
     const f = e.finish orelse return out.writeAll("  (none yet)\n");
-    const encoded = log.str(f, "reply_base64") orelse {
-        return out.print("  not kept: {d} bytes, sha256 {s}, token sha256 {s}\n", .{ log.int(f, "reply_bytes") orelse 0, log.str(f, "reply_sha256") orelse "-", log.str(f, "token_sha256") orelse "-" });
+    if (log.str(f, "reply_base64")) |encoded| {
+        const codec = std.base64.standard.Decoder;
+        const bytes = try a.alloc(u8, codec.calcSizeForSlice(encoded) catch return out.writeAll("  (its base64 is unreadable)\n"));
+        codec.decode(bytes, encoded) catch return out.writeAll("  (its base64 is unreadable)\n");
+        return reply(a, out, bytes, stream(f));
+    }
+    if (f.object.get("kind") != null) return out.print("  not kept: {d} bytes, sha256 {s}, token sha256 {s}\n", .{ log.int(f, "reply_bytes") orelse 0, log.str(f, "reply_sha256") orelse "-", log.str(f, "token_sha256") orelse "-" });
+    return replyRecord(out, f); // a request-log reply record holds its own text
+}
+
+/// A request-log reply record's own fields: reasoning, text, finish reason, or a refusal's message.
+fn replyRecord(out: *Writer, f: Value) !void {
+    const names = [_]struct { key: []const u8, label: []const u8 }{
+        .{ .key = "reasoning", .label = "reasoning" },
+        .{ .key = "text", .label = "text" },
+        .{ .key = "finish_reason", .label = "finish reason" },
+        .{ .key = "error", .label = "error" },
     };
-    const codec = std.base64.standard.Decoder;
-    const bytes = try a.alloc(u8, codec.calcSizeForSlice(encoded) catch return out.writeAll("  (its base64 is unreadable)\n"));
-    codec.decode(bytes, encoded) catch return out.writeAll("  (its base64 is unreadable)\n");
-    try reply(a, out, bytes, stream(f));
+    var kept = false;
+    for (names) |n| if (log.str(f, n.key)) |t| {
+        try one(out, n.label, t);
+        kept = true;
+    };
+    if (f.object.get("truncated")) |tr| if (tr == .bool and tr.bool) {
+        try out.writeAll("  (its text was cut at the record's limit)\n");
+        kept = true;
+    };
+    if (!kept) try out.writeAll("  (nothing kept)\n");
+}
+
+/// One `  label: value` line.
+fn one(out: *Writer, label: []const u8, value: []const u8) !void {
+    try out.print("  {s}: {s}\n", .{ label, value });
 }
 
 fn stream(f: Value) bool {
@@ -50,11 +76,9 @@ fn stream(f: Value) bool {
 }
 
 /// The body as journaled: each message's role and text (other parts as JSON, redactions kept), or the prompt.
-fn request(a: Allocator, out: *Writer, e: Entry) !void {
+fn request(out: *Writer, e: Entry) !void {
     const s = e.start orelse return out.writeAll("  (its start record is not in the kept files)\n");
-    const body = s.object.get("body") orelse {
-        return out.print("  not kept: {d} bytes (too large for one record)\n", .{log.int(s, "body_bytes") orelse 0});
-    };
+    const body = e.body() orelse return out.print("  not kept: {d} bytes (too large for one record)\n", .{log.int(s, "body_bytes") orelse 0});
     if (body != .object) return out.writeAll("  (unreadable body)\n");
     if (body.object.get("messages")) |messages| if (messages == .array) {
         for (messages.array.items) |m| {
@@ -74,7 +98,6 @@ fn request(a: Allocator, out: *Writer, e: Entry) !void {
         try content(out, prompt);
         return out.writeAll("\n");
     }
-    _ = a;
     try out.writeAll("  ");
     try std.json.Stringify.value(body, .{}, out);
     try out.writeAll("\n");
@@ -153,10 +176,6 @@ fn take(a: Allocator, r: *Reply, v: Value, delta: bool) !void {
         if (log.str(fun, "name")) |n| try r.calls.items[at].name.appendSlice(a, n);
         if (log.str(fun, "arguments")) |x| try r.calls.items[at].arguments.appendSlice(a, x);
     }
-}
-
-fn opt(out: *Writer, v: ?i64) !void {
-    if (v) |n| try out.print("{d}", .{n}) else try out.writeAll("-");
 }
 
 fn optMs(out: *Writer, v: ?f64) !void {

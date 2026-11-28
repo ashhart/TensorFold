@@ -203,7 +203,8 @@ fn loadWeights(m: *Model, dir: []const u8) !Weights {
                     .hidden = config.text.hidden,
                     .inter = config.text.expert_inter,
                 },
-                m.tfq3_tables.?,
+                m.tfq3_tables,
+                m.tfq4_tables,
             );
         } else {
             l.gu = try matrix(c, layer, "w13", p.precision, 2304, 2304);
@@ -246,6 +247,7 @@ pub const Model = struct {
     runtime: [runtime_names.len]mtl.Pipeline,
     sample: sample_file.SamplePipelines,
     tfq3_tables: ?mtl.Buffer = null,
+    tfq4_tables: ?ink2_tfq3.LoadedTables4 = null,
     tfq3_maps: std.ArrayList(ink2_tfq3.MappedShard) = .empty,
     tfq3_bufs: std.ArrayList(mtl.Buffer) = .empty,
     tfq3_pipes: ?ink2_tfq3.Pipelines = null,
@@ -279,6 +281,7 @@ pub const Model = struct {
         m.checkpoint = ck.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
         m.tfq3_tables = null;
+        m.tfq4_tables = null;
         m.tfq3_maps = .empty;
         m.tfq3_bufs = .empty;
         m.tfq3_pipes = null;
@@ -292,13 +295,14 @@ pub const Model = struct {
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
 
-        // Mini uses TFQ3 when pw_v3_tables.bin + layer_NN.tffpw exist, else NVFP4 for layers 0-19 and MXFP8 for 20-23.
+        // Mini uses TFQ3/TFQ4 when tables + layer_NN.tffpw exist, else NVFP4 for layers 0-19 and MXFP8 for 20-23.
         var precisions: [24]layer_plan.Precision = undefined;
         var has_tfq3 = false;
         const has_tables = ink2_tfq3.hasTables(dir);
+        const has_tables4 = ink2_tfq3.hasTables4(dir);
         for (&precisions, 0..) |*p, i| {
             if (ink2_tfq3.hasLayer(dir, i)) {
-                if (!has_tables) return error.MissingTfq3Tables;
+                if (!has_tables and !has_tables4) return error.MissingTfq3Tables;
                 p.* = .tfq3;
                 has_tfq3 = true;
             } else {
@@ -309,7 +313,10 @@ pub const Model = struct {
         if (m.weight_plan.n_visits != 48) return error.UnsupportedInkling2Loop;
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "model.llm.");
         if (has_tfq3) {
-            m.tfq3_tables = try ink2_tfq3.loadTables(gpa, m.device, &m.tfq3_bufs, &m.tfq3_maps, &m.tfq3_bytes, dir);
+            if (has_tables) {
+                m.tfq3_tables = try ink2_tfq3.loadTables(gpa, m.device, &m.tfq3_bufs, &m.tfq3_maps, &m.tfq3_bytes, dir);
+            }
+            m.tfq4_tables = try ink2_tfq3.loadTables4Optional(gpa, m.device, &m.tfq3_bufs, &m.tfq3_maps, &m.tfq3_bytes, dir);
         }
         m.weights = try loadWeights(m, dir);
         try initPipelines(m);

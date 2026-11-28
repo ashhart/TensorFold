@@ -9,6 +9,7 @@ pub const Owned = struct {
     experts: routed.Owned,
     tfq3: ?cuda.tfq3.OwnedMoeLayer = null,
     tfq3_tables: ?cuda.DeviceBuffer = null,
+    tfq4_tables: ?cuda.tfq4.UploadedTables = null,
     shared: [3]wt.Q4,
     rank: usize,
     world: usize,
@@ -18,6 +19,7 @@ pub const Owned = struct {
 
     pub fn free(self: *Owned) void {
         if (self.tfq3) |*t| t.deinit();
+        if (self.tfq4_tables) |*b| b.free();
         if (self.tfq3_tables) |*b| b.free();
         self.experts.free();
         for (&self.shared) |*p| p.free();
