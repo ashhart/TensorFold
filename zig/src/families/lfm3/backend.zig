@@ -241,6 +241,9 @@ pub const Metal = struct {
             .handle => |h| std.math.cast(u32, h) orelse return error.InvalidLfmToken,
         };
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
+        const best = self.scratch.best.slice(u32, 2);
+        const greedy_row = if (stream.sampling) |settings| settings.temperature <= 0 else true;
+        if (greedy_row and best[1] == 0) return best[0];
         return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
     }
 
@@ -271,11 +274,18 @@ pub const Metal = struct {
         }
         try fwd.run(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all);
         const logits = self.scratch.logits.slice(u16, total * c.vocab);
+        const best = self.scratch.best.slice(u32, 2 * total);
         var base: usize = 0;
         for (windows, out) |w, o| {
             if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidLfmOutputs;
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
+                // A greedy row takes the GPU's pick (greedy.select's); a nonfinite row errors in draw.
+                const greedy_row = if (w.stream.sampling) |s| s.temperature <= 0 else true;
+                if (greedy_row and mask.len == 0 and best[2 * (base + r) + 1] == 0) {
+                    t.* = best[2 * (base + r)];
+                    continue;
+                }
                 t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
             }
             @memcpy(o.drafts, w.tokens);

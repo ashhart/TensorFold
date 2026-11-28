@@ -16,7 +16,7 @@ fn equalBytes(expected: []const u8, actual: []const u8) !void {
     return error.ExactBytesMismatch;
 }
 
-fn equal(a: *const st.Cache, b: *const st.Cache) !void {
+pub fn equal(a: *const st.Cache, b: *const st.Cache) !void {
     if (a.len != b.len) return error.CacheLengthMismatch;
     try equalBytes(a.logits.contents()[0 .. c.vocab * 2], b.logits.contents()[0 .. c.vocab * 2]);
     try equalState(a, b);
@@ -294,6 +294,7 @@ pub fn main(init: std.process.Init) !void {
     const public = [_]u32{ 825, 264, 15352, 4829, 9944, 13, 271, 279, 854, 22373 };
     for (&ids, 0..) |*id, i| id.* = public[(i * 7 + i / 11) % public.len];
     var result: Result = .{};
+    result.record("one-token backend queue: greedy, zero temperature and keyed sampling versus serial", @import("lfm3_queue.zig").check(m, ids[0..13]));
     for ([_]usize{ 1, 127, 128, 129, 300 }) |length| {
         var name: [128]u8 = undefined;
         result.record(try std.fmt.bufPrint(&name, "prompt {d}: chunk128 versus one row", .{length}), chunkCase(m, &chunk, &solo, ids[0..length]));
@@ -315,7 +316,7 @@ pub fn main(init: std.process.Init) !void {
             result.record(try std.fmt.bufPrint(&name, "long seam {d}: chunk2048 versus one row", .{length}), seam(m, init.gpa, length));
         }
     }
-    std.debug.print("LFM3_EXACT mode={s} passed={d} failed={d} skipped=0 prompt=5 windows=60 shared=2 snapshots=1 long={d} gpu_seconds={d:.3}\n", .{
+    std.debug.print("LFM3_EXACT mode={s} passed={d} failed={d} skipped=0 prompt=5 windows=60 shared=2 snapshots=1 queue=3 long={d} gpu_seconds={d:.3}\n", .{
         if (long) "long" else "default", result.passed, result.failed, @as(usize, if (long) 5 else 0), fwd.gpu_seconds,
     });
     if (result.failed != 0) return error.ExactnessFailed;

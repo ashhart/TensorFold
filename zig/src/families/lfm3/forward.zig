@@ -249,7 +249,16 @@ fn execute(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     }
 
     try stage(&enc, trace, "final_norm", s.x, total, c.hidden, &cb, &ended);
-    if (head == .all) try enc.projection(embedding, s.x, 0, s.logits, 0, total) else {
+    if (head == .all) {
+        try enc.projection(embedding, s.x, 0, s.logits, 0, total);
+        try enc.begin(.dense); // counted with the head projection whose rows it reads
+        enc.pipe("lfm3_argmax");
+        enc.e.setBuffer(s.logits, 0, 0);
+        enc.e.setValue(@as(u32, c.vocab), 1);
+        enc.e.setBuffer(s.best, 0, 2);
+        enc.groups(.{ total, 1, 1 }, .{ 1024, 1, 1 });
+        try enc.end();
+    } else {
         try enc.projection(embedding, s.x, (total - 1) * c.hidden * 2, s.logits, 0, 1);
     }
     if (m.profile) |profile| try profile.finishEncoding(&enc.e) else enc.e.end();

@@ -1,4 +1,4 @@
-//! LFM2's greedy pick of every verify row (lfm2_argmax): the lowest id of a row's largest bf16 logit, and a flag.
+//! The greedy pick of every verify row (lfm2_argmax, LFM3's lfm3_argmax): the lowest id of the largest logit, a flag.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -10,6 +10,22 @@ const controls = @import("metal_lfm2_controls.zig");
 
 const vocab = 128000;
 pub const name = "metal lfm2 argmax";
+
+/// The families whose verify rows take this pick: lfm2.metal's lfm2_argmax, and LFM3 ops.metal's lfm3_argmax.
+pub const Family = enum { lfm2, lfm3 };
+
+/// The probe's name, or its control's, in `family`; LFM3 runs the argmax controls alone.
+pub fn familyName(family: Family, m: controls.Mutation) []const u8 {
+    return switch (family) {
+        .lfm2 => if (m == .none) name else m.name(),
+        .lfm3 => switch (m) {
+            .none => "metal LFM3 argmax",
+            .argmax_last_tie => "control: metal LFM3 argmax, a tie goes to the highest id",
+            .argmax_no_flag => "control: metal LFM3 argmax, a nonfinite logit is not flagged",
+            else => unreachable,
+        },
+    };
+}
 
 /// rows: a verify's head rows, one to a shared round's 32.
 const shapes = [_]c.Shape{ .{ .rows = 1, .n = vocab, .k = 1 }, .{ .rows = 9, .n = vocab, .k = 1 }, .{ .rows = 32, .n = vocab, .k = 1 } };
@@ -35,15 +51,21 @@ pub const Probe = struct {
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     mutation: controls.Mutation,
+    family: Family = .lfm2,
     rows: usize = 0,
     x: []u16 = &.{},
     args: [2]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !Probe {
-        const text = try controls.source(a, mutation);
+        return initFor(a, device, queue, .lfm2, mutation);
+    }
+
+    pub fn initFor(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, family: Family, mutation: controls.Mutation) !Probe {
+        const text = try controls.edited(a, mutation, if (family == .lfm2) sources.lfm2 else sources.lfm3);
         defer if (mutation != .none) a.free(text);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, text, "lfm2_argmax"), .mutation = mutation };
+        const kernel_name = if (family == .lfm2) "lfm2_argmax" else "lfm3_argmax";
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, text, kernel_name), .mutation = mutation, .family = family };
     }
 
     fn drop(p: *Probe) void {
@@ -61,7 +83,7 @@ pub const Probe = struct {
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
         var s = spec();
-        if (p.mutation != .none) s.name = p.mutation.name();
+        s.name = familyName(p.family, p.mutation);
         return .{ .ctx = p, .vt = &vt, .spec = s, .control = p.mutation.gate() };
     }
 
