@@ -230,42 +230,87 @@ fn removable(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[409
     return 0;
 }
 
+const NativeMutation = struct {
+    fn open(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[4096:0]u16, access: u32) c_int {
+        return removable(root, path, handle, name_buf, access);
+    }
+
+    fn attributes(handle: HANDLE, out: *u32) c_int {
+        var info: FileInfo = undefined;
+        if (GetFileInformationByHandle(handle, &info) == 0) {
+            const cause = c.lastError();
+            _ = CloseHandle(handle);
+            _ = c.fail(cause);
+            return -1;
+        }
+        out.* = info.attributes;
+        return 0;
+    }
+
+    fn set(handle: HANDLE, status: *IoStatus, info: *const anyopaque, len: u32, class: u32) i32 {
+        return NtSetInformationFile(handle, status, info, len, class);
+    }
+
+    fn close(handle: HANDLE) void {
+        _ = CloseHandle(handle);
+    }
+
+    fn typeError(handle: HANDLE, cause: c.E) void {
+        closeFailed(handle, cause);
+    }
+
+    fn failedStatus(status: i32) c_int {
+        return failed(status);
+    }
+};
+
+fn classUnsupported(status: i32) bool {
+    return status == @as(i32, @bitCast(@as(u32, 0xc000_0003))); // STATUS_INVALID_INFO_CLASS
+}
+
 pub fn unlinkAt(root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
+    return unlinkAtWith(NativeMutation, root, path, removedir);
+}
+
+fn unlinkAtWith(comptime Api: type, root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
     var buf: [4096:0]u16 = undefined;
     var handle: HANDLE = undefined;
     // DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES
-    if (removable(root, path, &handle, &buf, 0x0011_0080) != 0) return -1;
-    var info: FileInfo = undefined;
-    if (GetFileInformationByHandle(handle, &info) == 0) {
-        const cause = c.lastError();
-        _ = CloseHandle(handle);
-        _ = c.fail(cause);
-        return -1;
-    }
-    const reparse = info.attributes & 0x400 != 0;
-    const is_dir = info.attributes & 0x10 != 0;
+    if (Api.open(root, path, &handle, &buf, 0x0011_0080) != 0) return -1;
+    var attributes_: u32 = undefined;
+    if (Api.attributes(handle, &attributes_) != 0) return -1;
+    const reparse = attributes_ & 0x400 != 0;
+    const is_dir = attributes_ & 0x10 != 0;
     if (reparse and removedir) {
-        closeFailed(handle, .NOTDIR);
+        Api.typeError(handle, .NOTDIR);
         return -1;
     }
     if (!reparse and removedir != is_dir) {
-        closeFailed(handle, if (removedir) .NOTDIR else .ISDIR);
+        Api.typeError(handle, if (removedir) .NOTDIR else .ISDIR);
         return -1;
     }
     var status: IoStatus = undefined;
     const disposition: Disposition = .{ .flags = 0x3 }; // DELETE | POSIX_SEMANTICS
     // Class 64 is FileDispositionInformationEx, which applies DELETE with POSIX semantics.
-    const rc = NtSetInformationFile(handle, &status, &disposition, @sizeOf(Disposition), 64);
-    _ = CloseHandle(handle);
-    return if (rc < 0) failed(rc) else 0;
+    var rc = Api.set(handle, &status, &disposition, @sizeOf(Disposition), 64);
+    if (classUnsupported(rc)) {
+        const legacy: u8 = 1; // FILE_DISPOSITION_INFORMATION.DeleteFile (BOOLEAN)
+        rc = Api.set(handle, &status, &legacy, @sizeOf(@TypeOf(legacy)), 13);
+    }
+    Api.close(handle);
+    return if (rc < 0) Api.failedStatus(rc) else 0;
 }
 
 pub fn renameAt(old_root: HANDLE, old: [*:0]const u8, new_root: HANDLE, new: [*:0]const u8) c_int {
+    return renameAtWith(NativeMutation, old_root, old, new_root, new);
+}
+
+fn renameAtWith(comptime Api: type, old_root: HANDLE, old: [*:0]const u8, new_root: HANDLE, new: [*:0]const u8) c_int {
     var old_buf: [4096:0]u16 = undefined;
     var handle: HANDLE = undefined;
     // GENERIC_WRITE | DELETE | SYNCHRONIZE
-    if (removable(old_root, old, &handle, &old_buf, 0x4011_0000) != 0) return -1;
-    defer _ = CloseHandle(handle);
+    if (Api.open(old_root, old, &handle, &old_buf, 0x4011_0000) != 0) return -1;
+    defer Api.close(handle);
     var buf: [4096:0]u16 = undefined;
     const units = wideName(&buf, new) orelse return -1;
     var info: RenameInfo = undefined;
@@ -275,8 +320,13 @@ pub fn renameAt(old_root: HANDLE, old: [*:0]const u8, new_root: HANDLE, new: [*:
     @memcpy(info.name[0..units.len], units);
     var status: IoStatus = undefined;
     const len: u32 = @intCast(@max(@offsetOf(RenameInfo, "name") + units.len * 2, 24));
-    const rc = NtSetInformationFile(handle, &status, &info, len, 65); // FileRenameInformationEx
-    return if (rc < 0) failed(rc) else 0;
+    var rc = Api.set(handle, &status, &info, len, 65); // FileRenameInformationEx
+    if (classUnsupported(rc)) {
+        // FILE_RENAME_INFORMATION has the same following fields, but starts with BOOLEAN ReplaceIfExists.
+        info.flags = 1;
+        rc = Api.set(handle, &status, &info, len, 10);
+    }
+    return if (rc < 0) Api.failedStatus(rc) else 0;
 }
 
 pub const Stream = struct {
@@ -313,6 +363,184 @@ pub fn next(stream: *Stream, name: []u8, kind: *u8) c_int {
         stream.length = status.info;
         if (stream.length == 0) return 0;
     }
+}
+
+const FakeMutation = struct {
+    var attributes_: u32 = 0;
+    var primary: i32 = 0;
+    var fallback: i32 = 0;
+    var present = true;
+    var destination = false;
+    var peer_present = true;
+    var deleted = false;
+    var renamed = false;
+    var closed: usize = 0;
+    var calls: usize = 0;
+    var classes: [2]u32 = @splat(0);
+    var lengths: [2]u32 = @splat(0);
+    var access: u32 = 0;
+    var leaf: []const u8 = "";
+    var cause: ?c.E = null;
+    var failed_status: ?i32 = null;
+
+    fn reset() void {
+        attributes_ = 0;
+        primary = 0;
+        fallback = 0;
+        present = true;
+        destination = false;
+        peer_present = true;
+        deleted = false;
+        renamed = false;
+        closed = 0;
+        calls = 0;
+        classes = @splat(0);
+        lengths = @splat(0);
+        access = 0;
+        leaf = "";
+        cause = null;
+        failed_status = null;
+    }
+
+    fn open(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[4096:0]u16, access_: u32) c_int {
+        _ = root;
+        _ = name_buf;
+        access = access_;
+        leaf = std.mem.span(path);
+        handle.* = @ptrFromInt(0x100);
+        return 0;
+    }
+
+    fn attributes(handle: HANDLE, out: *u32) c_int {
+        _ = handle;
+        out.* = attributes_;
+        return 0;
+    }
+
+    fn set(handle: HANDLE, status: *IoStatus, info: *const anyopaque, len: u32, class: u32) i32 {
+        _ = handle;
+        _ = status;
+        _ = info;
+        classes[calls] = class;
+        lengths[calls] = len;
+        calls += 1;
+        const rc = if (class == 64 or class == 65) primary else fallback;
+        if (rc == 0) switch (class) {
+            64, 13 => {
+                deleted = true;
+                present = false;
+            },
+            65, 10 => {
+                renamed = true;
+                present = false;
+                destination = true;
+            },
+            else => unreachable,
+        };
+        return rc;
+    }
+
+    fn close(handle: HANDLE) void {
+        _ = handle;
+        closed += 1;
+    }
+
+    fn typeError(handle: HANDLE, cause_: c.E) void {
+        cause = cause_;
+        FakeMutation.close(handle);
+    }
+
+    fn failedStatus(status: i32) c_int {
+        failed_status = status;
+        return -1;
+    }
+};
+
+fn fakeRoot() HANDLE {
+    return @ptrFromInt(0x40);
+}
+
+const unsupported_class: i32 = @bitCast(@as(u32, 0xc000_0003));
+
+test "Windows rename: unsupported class 65 uses legacy class 10" {
+    const t = std.testing;
+    FakeMutation.reset();
+    FakeMutation.primary = unsupported_class;
+    try t.expectEqual(@as(c_int, 0), renameAtWith(FakeMutation, fakeRoot(), "old", fakeRoot(), "new"));
+    try t.expectEqualSlices(u32, &.{ 65, 10 }, &FakeMutation.classes);
+    try t.expectEqualStrings("old", FakeMutation.leaf);
+    try t.expectEqual(@as(u32, 0x4011_0000), FakeMutation.access);
+    try t.expect(FakeMutation.renamed and FakeMutation.destination and !FakeMutation.present);
+    try t.expectEqual(@as(usize, 1), FakeMutation.closed);
+}
+
+test "Windows rename: ordinary and error controls do not retry" {
+    const t = std.testing;
+    FakeMutation.reset();
+    try t.expectEqual(@as(c_int, 0), renameAtWith(FakeMutation, fakeRoot(), "old", fakeRoot(), "new"));
+    try t.expectEqualSlices(u32, &.{ 65, 0 }, &FakeMutation.classes);
+    try t.expect(FakeMutation.renamed and FakeMutation.destination and !FakeMutation.present);
+
+    FakeMutation.reset();
+    FakeMutation.primary = @bitCast(@as(u32, 0xc000_0022)); // STATUS_ACCESS_DENIED
+    try t.expectEqual(@as(c_int, -1), renameAtWith(FakeMutation, fakeRoot(), "old", fakeRoot(), "new"));
+    try t.expectEqualSlices(u32, &.{ 65, 0 }, &FakeMutation.classes);
+    try t.expectEqual(FakeMutation.primary, FakeMutation.failed_status.?);
+    try t.expect(FakeMutation.present and !FakeMutation.destination and !FakeMutation.renamed);
+}
+
+fn expectLegacyDelete(file_attributes: u32, removedir: bool) !void {
+    const t = std.testing;
+    FakeMutation.reset();
+    FakeMutation.attributes_ = file_attributes;
+    FakeMutation.primary = unsupported_class;
+    try t.expectEqual(@as(c_int, 0), unlinkAtWith(FakeMutation, fakeRoot(), "victim", removedir));
+    try t.expectEqualSlices(u32, &.{ 64, 13 }, &FakeMutation.classes);
+    try t.expectEqual(@as(u32, 1), FakeMutation.lengths[1]);
+    try t.expectEqualStrings("victim", FakeMutation.leaf);
+    try t.expectEqual(@as(u32, 0x0011_0080), FakeMutation.access);
+    try t.expect(FakeMutation.deleted and !FakeMutation.present and FakeMutation.peer_present);
+    try t.expectEqual(@as(usize, 1), FakeMutation.closed);
+}
+
+test "Windows deletion: unsupported class 64 removes the intended file through class 13" {
+    try expectLegacyDelete(0, false);
+}
+
+test "Windows deletion: unsupported class 64 removes the intended directory through class 13" {
+    try expectLegacyDelete(0x10, true);
+}
+
+test "Windows deletion: ordinary and error controls preserve checks and do not retry" {
+    const t = std.testing;
+    FakeMutation.reset();
+    try t.expectEqual(@as(c_int, 0), unlinkAtWith(FakeMutation, fakeRoot(), "victim", false));
+    try t.expectEqualSlices(u32, &.{ 64, 0 }, &FakeMutation.classes);
+    try t.expect(FakeMutation.deleted and !FakeMutation.present);
+
+    FakeMutation.reset();
+    FakeMutation.primary = @bitCast(@as(u32, 0xc000_0022));
+    try t.expectEqual(@as(c_int, -1), unlinkAtWith(FakeMutation, fakeRoot(), "victim", false));
+    try t.expectEqualSlices(u32, &.{ 64, 0 }, &FakeMutation.classes);
+    try t.expectEqual(FakeMutation.primary, FakeMutation.failed_status.?);
+    try t.expect(FakeMutation.present and !FakeMutation.deleted);
+
+    inline for (.{ .{ 0x10, false, c.E.ISDIR }, .{ 0, true, c.E.NOTDIR }, .{ 0x400, true, c.E.NOTDIR } }) |case| {
+        FakeMutation.reset();
+        FakeMutation.attributes_ = case[0];
+        try t.expectEqual(@as(c_int, -1), unlinkAtWith(FakeMutation, fakeRoot(), "victim", case[1]));
+        try t.expectEqual(case[2], FakeMutation.cause.?);
+        try t.expectEqual(@as(usize, 0), FakeMutation.calls);
+        try t.expect(FakeMutation.present and !FakeMutation.deleted);
+        try t.expectEqual(@as(usize, 1), FakeMutation.closed);
+    }
+
+    FakeMutation.reset();
+    FakeMutation.attributes_ = 0x400;
+    FakeMutation.primary = unsupported_class;
+    try t.expectEqual(@as(c_int, 0), unlinkAtWith(FakeMutation, fakeRoot(), "link", false));
+    try t.expectEqualStrings("link", FakeMutation.leaf);
+    try t.expect(FakeMutation.deleted and !FakeMutation.present and FakeMutation.peer_present);
 }
 
 pub fn close(handle: HANDLE) void {
