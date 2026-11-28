@@ -7,20 +7,12 @@ const back = @import("contract_back_suites.zig");
 
 /// Whether `only` names kernels to keep: without plain words (none, or only `-word`s) the run is a full one.
 pub fn filtered(only: []const []const u8) bool {
-    for (only) |w| if (!std.mem.startsWith(u8, w, "-")) return true;
-    return false;
+    return shard.hasPositive(only);
 }
 
 /// Whether `name` holds no `-word` and, when plain words are given, one of them.
 pub fn wanted(name: []const u8, only: []const []const u8) bool {
-    var named = !filtered(only);
-    for (only) |w| {
-        const minus = std.mem.startsWith(u8, w, "-");
-        const hit = std.mem.indexOf(u8, name, if (minus) w[1..] else w) != null;
-        if (minus and hit) return false;
-        named = named or hit;
-    }
-    return named;
+    return shard.wanted(name, only);
 }
 
 /// Keeps the kernels `wanted` keeps; empty keeps every one.
@@ -48,11 +40,7 @@ fn sharedPrefix(gpu: check.Gpu) !void {
     return @import("contract_qwen_shared_prefix.zig").run(gpu, &.{});
 }
 
-fn int4Skipped(gpu: check.Gpu) !void {
-    return @import("contract_int4_run.zig").skippedAlone(gpu);
-}
-
-/// The standalone suites of a full run, in serial order.
+/// The served, paged, pending, learning, lane, TFQ3, SwiGLU and int4 skipped suites of a full run.
 const served = [_]back.Suite{
     back.entry("tfq3", @import("tfq3_tests.zig").run),
     back.entry("qwen-served", @import("contract_qwen_served.zig").run),
@@ -62,7 +50,7 @@ const served = [_]back.Suite{
     back.entry("qwen-learning", @import("contract_qwen_learning.zig").numerical),
     back.entry("fn-lanes", @import("contract_fn_lanes.zig").run),
     back.entry("prompt-swiglu", @import("contract_prompt_swiglu.zig").run),
-    back.entry("int4-skipped", int4Skipped),
+    back.entry("int4-skipped", @import("contract_int4_run.zig").skippedAlone),
 };
 
 pub const Part = enum { back, after };
