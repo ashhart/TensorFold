@@ -166,7 +166,7 @@ test "DeepSeek runtime: legacy aliases, sets, case and pair grammar retain accep
     for ([_][3][]const u8{
         .{ "BRANCHES", "StReAmS", "1" },        .{ "BRANCHES", "e4", "0" },
         .{ "LIN2", "LaNeS", "2" },              .{ "LIN2", "LINEAR", "3" },
-        .{ "DRAFT_GRAPHS", "device", "1" },     .{ "DRAFT_BATCH_PROJ", "check", "2" },
+        .{ "DRAFT_GRAPHS", "device", "2" },     .{ "DRAFT_BATCH_PROJ", "check", "2" },
         .{ "ROUND_GRAPH", "split, gate", "3" }, .{ "ROUND_GRAPH", "gate,gate", "2" },
         .{ "L2PF_SITES", "X, o, f", "7" },      .{ "L2PF_SITES", "x,x,x", "1" },
         .{ "L2PF_AT", ",BEFORE,", "1" },        .{ "KV_SPLIT_COMPACT", "YES", "1" },

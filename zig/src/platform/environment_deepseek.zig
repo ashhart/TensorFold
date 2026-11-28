@@ -16,7 +16,7 @@ pub fn rules(comptime Rule: type) [119]Rule {
         .{ .name = "TF_DSV41_BRANCHES", .scope = .dsv41, .kind = .word, .words = &.{ "0", "off", "serial", "e4", "1", "on", "streams" }, .word_values = &.{ 0, 0, 0, 0, 1, 1, 1 }, .fold = true, .trim = " \t", .forms = "0 or off or serial or e4 or 1 or on or streams" },
         .{ .name = "TF_DSV41_BRANCHES_ROWS", .scope = .dsv41, .kind = .u32, .min = 1, .max = 4096, .trim = " \t", .forms = "a whole count 1..4096 (default 64)" },
         .{ .name = "TF_DSV41_BRANCHES_PRIO", .scope = .dsv41, .kind = .word, .words = &.{ "main", "side", "equal" }, .fold = false, .trim = " \t", .forms = "main or side or equal" },
-        .{ .name = "TF_DSV41_DRAFT_GRAPHS", .scope = .dsv41, .kind = .word, .words = &.{ "0", "device", "1" }, .word_values = &.{ 0, 1, 2 }, .fold = false, .forms = "0 (host), 1 (device candidates and CUDA graphs), or device (eager device candidates); unset or blank: host" },
+        .{ .name = "TF_DSV41_DRAFT_GRAPHS", .scope = .dsv41, .kind = .word, .words = &.{ "0", "device", "1" }, .word_values = &.{ 0, 2, 1 }, .fold = false, .forms = "0 (host), 1 (device candidates and CUDA graphs), or device (eager device candidates); unset or blank: host" },
         .{ .name = "TF_DSV41_DRAFT_GRAPHS_MAX", .scope = .dsv41, .kind = .u32, .blank_default = false, .forms = "a whole maximum draft graph count from 0 to 4294967295 (unset: 32)" },
         .{ .name = "TF_DSV41_GRAPH_FLOOR", .scope = .dsv41, .kind = .word, .words = &.{ "shed", "hold" }, .fold = false, .forms = "shed or hold (unset or blank: shed)" },
         .{ .name = "TF_DSV41_DRAFT_CHAIN", .scope = .dsv41, .kind = .flag, .forms = "0 or 1 (1 runs the draft chain on the device; unset or blank: host chain)" },
