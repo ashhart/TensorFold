@@ -71,8 +71,17 @@ const Frame = struct { event: ?[]const u8, data: V };
 
 /// What one request's client read: its frames (null event: a plain ``data:`` frame), or the whole body.
 fn post(a: A, script: *Script, route: Route, request: []const u8) ![]Frame {
+    return postObserved(a, script, route, request, .{});
+}
+
+const Observed = struct {
+    journal: ?*@import("request_journal.zig").Journal = null,
+    reply_log: ?[]const u8 = null,
+};
+
+fn postObserved(a: A, script: *Script, route: Route, request: []const u8, observed: Observed) ![]Frame {
     var plain: scan.Text = .{};
-    const srv = try Server.init(a, std.testing.io, script.engine(), plain.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .sse_keepalive_s = 2 }, null);
+    const srv = try Server.init(a, std.testing.io, script.engine(), plain.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .sse_keepalive_s = 2, .journal = observed.journal, .request_log = observed.reply_log, .request_log_replies = observed.reply_log != null }, null);
     defer srv.deinit();
     var headers = [_]http.Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{request.len}) }};
     var capture: Capture = .{ .a = a, .script = script };
@@ -173,5 +182,34 @@ test "prompt progress: a whole reply, a false flag and the Messages route ask th
         const frames = try post(a, &script, c[0], try body(a, c[0], c[1], c[2]));
         try std.testing.expectEqual(@as(?bool, false), script.asked);
         for (frames) |f| try std.testing.expect(countsOf(f) == null);
+    }
+}
+
+test "prompt progress: Responses counts survive journal-only and reply-log-only traces" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the reply log stays off on Windows
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const journal_path = try std.fmt.allocPrint(a, "{s}/requests.jsonl", .{root});
+    const reply_path = try std.fmt.allocPrint(a, "{s}/replies.jsonl", .{root});
+    for ([_]bool{ true, false }) |journal_only| {
+        var journal: ?*@import("request_journal.zig").Journal = null;
+        if (journal_only) journal = try @import("request_journal.zig").Journal.open(a, std.testing.io, journal_path);
+        defer if (journal) |j| j.close();
+        var script: Script = .{};
+        const observed: Observed = if (journal_only) .{ .journal = journal } else .{ .reply_log = reply_path };
+        const frames = try postObserved(a, &script, .responses, try body(a, .responses, true, true), observed);
+        try std.testing.expectEqual(@as(?bool, true), script.asked);
+        var shown: std.ArrayList(i64) = .empty;
+        var reply: std.ArrayList(u8) = .empty;
+        for (frames) |f| {
+            if (countsOf(f)) |c| try shown.append(a, c.get("done").?.int64().?);
+            try reply.appendSlice(a, textOf(f));
+        }
+        try std.testing.expectEqualSlices(i64, &.{ 8, 16, 32 }, shown.items);
+        try std.testing.expectEqualStrings("OK", reply.items);
     }
 }
