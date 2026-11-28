@@ -44,6 +44,22 @@ pub fn launchHostTests(b: *std.Build, all: *std.Build.Step) void {
     all.dependOn(&run.step);
 }
 
+/// --confidential's loader policy over Level Zero: XPU discovery and initialization ask it before any open.
+pub fn confidentialXpuHostTests(b: *std.Build, all: *std.Build.Step) void {
+    if (b.graph.host.result.os.tag == .windows) return; // Level Zero and std.DynLib: Linux and macOS only
+    const ze = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/ze.zig"), .target = b.graph.host, .link_libc = true });
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/xpu/confidential_loader_test.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "ze", .module = ze }},
+    }) });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    b.step("test-confidential-xpu-host", "--confidential refuses Level Zero's loader for XPU discovery and init").dependOn(&run.step);
+    all.dependOn(&run.step);
+}
+
 /// The server's JSON values as a module (zig/src/server/json.zig), so a family's serving code shares them.
 pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{

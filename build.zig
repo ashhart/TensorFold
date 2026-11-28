@@ -109,6 +109,7 @@ pub fn build(b: *std.Build) void {
     server_build.webHostTests(b, test_step);
     server_build.ollamaHostTests(b, test_step);
     server_build.launchHostTests(b, test_step);
+    server_build.confidentialXpuHostTests(b, test_step);
     @import("zig/build/qwen4.zig").steps(b, test_step);
     @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);

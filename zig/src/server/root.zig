@@ -417,4 +417,5 @@ test {
     _ = @import("witness_race_test.zig");
     _ = @import("witness_reply_test.zig");
     _ = @import("confidential_test.zig");
+    _ = @import("confidential_libraries_test.zig");
 }

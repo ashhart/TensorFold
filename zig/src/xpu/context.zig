@@ -25,7 +25,7 @@ pub const Driver = struct {
     x: Extra,
 
     pub fn open() Error!Driver {
-        var lib = std.DynLib.open("libze_loader.so.1") catch return error.LoaderUnavailable;
+        var lib = try ze.openLoader();
         errdefer lib.close();
         const d: Driver = .{ .lib = lib, .api = try ze.resolve(ze.Api, &lib), .x = try ze.resolve(Extra, &lib) };
         try d.check(d.api.zeInit(1), "zeInit"); // GPU drivers only

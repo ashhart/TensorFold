@@ -6,9 +6,10 @@ const ze = @import("ze");
 /// Discover the first Level Zero device's PCI ID; XPU_DEVICE_ID bypasses discovery (for example 0xe211 B60).
 pub fn detectDeviceId() !u32 {
     if (try @import("sys").environment.read(?u32, "XPU_DEVICE_ID", null)) |id| return id;
-    // Level Zero's loader is Linux's libze_loader.so.1; elsewhere std.DynLib cannot open it, so no device is found
+    // a confined process asks the loader policy first, on any system; then only Linux has Level Zero's loader
+    if (!@import("sys").load_policy.allows(ze.loader)) return error.LoaderUnavailable;
     if (comptime builtin.os.tag != .linux) return error.LoaderUnavailable;
-    var lib = std.DynLib.open("libze_loader.so.1") catch return error.LoaderUnavailable;
+    var lib = try ze.openLoader();
     defer lib.close();
     const api = try ze.resolve(ze.Api, &lib);
     try ze.check(api.zeInit(1));
