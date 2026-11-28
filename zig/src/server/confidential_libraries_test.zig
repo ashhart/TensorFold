@@ -68,3 +68,31 @@ test "confidential: once confined on macOS, the real loader refuses a path outsi
     var system = try sys.DynLib.open("libSystem.B.dylib");
     system.close();
 }
+
+test "confidential: a symlink inside the engine's folder is judged by its target, so one pointing out is refused" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(t.io, "engine/lib");
+    try tmp.dir.createDirPath(t.io, "outside");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "engine/lib/libtfgrammar.so", .data = "in" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "outside/libevil.so", .data = "out" });
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    const outside = try std.fs.path.join(t.allocator, &.{ root, "outside", "libevil.so" });
+    defer t.allocator.free(outside);
+    try tmp.dir.symLink(t.io, outside, "engine/lib/libescape.so", .{});
+    try tmp.dir.symLink(t.io, "libtfgrammar.so", "engine/lib/libalias.so", .{});
+    const folder = try std.fs.path.join(t.allocator, &.{ root, "engine", "lib" });
+    defer t.allocator.free(folder);
+    const here = [_][]const u8{folder};
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const at = struct {
+        fn path(b: []u8, dir: []const u8, name: []const u8) ![]const u8 {
+            return std.fmt.bufPrint(b, "{s}/{s}", .{ dir, name });
+        }
+    };
+    try t.expect(policy.allowedIn(&here, try at.path(&buf, folder, "libtfgrammar.so")));
+    try t.expect(policy.allowedIn(&here, try at.path(&buf, folder, "libalias.so"))); // a link that stays inside
+    try t.expect(!policy.allowedIn(&here, try at.path(&buf, folder, "libescape.so")));
+}

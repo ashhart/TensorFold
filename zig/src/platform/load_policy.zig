@@ -62,10 +62,23 @@ pub fn allowedIn(engine: []const []const u8, path: []const u8) bool {
     const full = if (std.mem.startsWith(u8, path, at_exe))
         resolve(&buf, &.{ engine[0], path[at_exe.len..] })
     else if (path[0] == '/') resolve(&buf, &.{path}) else null; // a relative path would be read from the working dir
-    const p = full orelse return false;
+    const lexical = full orelse return false;
+    var real: [std.fs.max_path_bytes]u8 = undefined;
+    const p = target(lexical, &real) orelse lexical; // a symlink is judged by the file it names, not by its own folder
     for (engine) |folder| if (folder.len > 1 and inside(folder, p)) return true;
     for (system_folders) |folder| if (std.mem.startsWith(u8, p, folder)) return true;
     return false;
+}
+
+/// The file `path` names after every symlink is followed; null: no such file, which the loader cannot open either.
+fn target(path: []const u8, out: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    if (comptime builtin.os.tag == .windows) return null;
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    if (path.len >= z.len) return null;
+    @memcpy(z[0..path.len], path);
+    z[path.len] = 0;
+    const r = realpath(@ptrCast(&z), out) orelse return null;
+    return std.mem.span(r);
 }
 
 fn inside(folder: []const u8, path: []const u8) bool {

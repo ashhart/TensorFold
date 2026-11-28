@@ -10,7 +10,27 @@ fn refused() u32 {
     return policy.refusals.load(.monotonic);
 }
 
-test "confidential: XPU discovery asks the loader policy and is refused" {
+/// XPU_DEVICE_ID skips discovery, so a host that sets it would never reach the policy: blank for the test, as unset
+/// (an unsetenv of a variable present at start would break std's scan of the environment).
+const NoOverride = struct {
+    saved: ?[:0]u8 = null,
+    fn take() !NoOverride {
+        const sys = @import("sys");
+        const was = sys.getenv("XPU_DEVICE_ID") orelse return .{};
+        const saved = try t.allocator.dupeSentinel(u8, was, 0);
+        _ = sys.env.setenv("XPU_DEVICE_ID", "", 1);
+        return .{ .saved = saved };
+    }
+    fn restore(n: NoOverride) void {
+        const v = n.saved orelse return;
+        defer t.allocator.free(v);
+        _ = @import("sys").env.setenv("XPU_DEVICE_ID", v, 1);
+    }
+};
+
+test "confidential: XPU discovery asks the loader policy and is refused, whatever XPU_DEVICE_ID the host sets" {
+    const kept = try NoOverride.take();
+    defer kept.restore();
     policy.confine();
     defer policy.release();
     const before = refused();
