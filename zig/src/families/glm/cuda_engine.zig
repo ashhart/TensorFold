@@ -30,13 +30,11 @@ pub const max_drafts = 15;
 /// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
 const pair_bytes = 16;
 const pick_rows = @import("cuda_engine_pick.zig").pick_rows;
-
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
 pub const solo_rows = fw.solo_rows;
 pub const max_together = @import("cuda_state.zig").prompt_heads;
 pub const Prompt = struct { slot: u32, ids: []const u32 };
-
 /// A shared verify's max rows and streams: under hc_pre's 64-row block change; 16 streams take 2 rows each.
 pub const shared_rows = 32;
 pub const max_shared = 16;
