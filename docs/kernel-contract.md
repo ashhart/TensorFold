@@ -707,6 +707,14 @@ once in the vendor's order with nothing fused. Each output must be the host's re
 TP=2 rank's half; gate 4 runs whole logits with whole ranges and power-of-two weights, where every step is exact
 (`ernie5_5-head`; two controls: each term's multiply and add fused into an fma, and the last term's square dropped).
 
+CUDA also checks GigaChat 4's GatedNorm (`gigachat4/gated_norm.cu`, `tf_gc4_gated_norm`), one row a block: the RMSNorm
+times its weight, rounded to bf16, then the row times 2 sigmoid(down(silu(up(row)))) through the 16-wide gate, with
+torch's bf16 roundings after the normed row, up, silu, down and the sigmoid, and the scaled row's. Each output must
+lie in float64's range at those points, where fp32's sums and steps may land (`contract_interval.zig`), at the 37B's
+hidden width (a decode row, a 7-row verify window, 16 and 512-row prompt chunks), q_a (1536) and kv_a (512); gate 4
+runs integer rows whose squares reach 2^20 with the gate's weights zero (`gigachat4-norm`; five controls, each
+leaving one of the five rounding points in fp32).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

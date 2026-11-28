@@ -666,3 +666,20 @@ against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` reb
 `Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
 The drafter's weights ship in Thinking Machines' Inkling 2 Small release under Apache-2.0. The kernels are TensorFold's
 own.
+
+## GigaChat 4 test fixtures
+
+`zig/src/families/gigachat4/fixtures/` holds values taken from three releases by ai-sage, with no weights.
+`config_708b.json` is a byte-identical copy of the `config.json` of
+[ai-sage/GigaChat4-708B-A41B](https://huggingface.co/ai-sage/GigaChat4-708B-A41B) at revision
+`2baf8b0cf71f1528c14e7a274877d9c8fbf22697`, MIT License, Copyright (c) 2026 Giga (see
+[the license text](LICENSES/GigaChat4-MIT.txt)); `header_708b_fp8.txt` lists the names, dtypes and shapes in that
+release's 45 model shards' safetensors headers. `header_37b_fp8.txt` and `header_37b_bf16.txt` list the same for
+[ai-sage/GigaChat4-37B-A4B](https://huggingface.co/ai-sage/GigaChat4-37B-A4B) at revision
+`1bf9a4b2b8d7d0f970e48d6458be77d49e07bcfc` and
+[ai-sage/GigaChat4-37B-A4B-bf16](https://huggingface.co/ai-sage/GigaChat4-37B-A4B-bf16) at revision
+`e8f40e01f289d9bd71b10a21ca3fbad8a8f0d6dc`, and `zig/src/families/gigachat4/config_test.zig` rebuilds the 37B
+release's `config.json` from the 708B's with the 13 values in which they differ; no file of the 37B releases is copied.
+The 37B weights are under the Noncommercial License for individuals 1.0 (see
+[the license text](LICENSES/GigaChat4-Noncommercial-1.0.txt)); TensorFold's Apache-2.0 licence does not change it.
+`tools/zig/gigachat4_fixtures.py` rebuilds the fixtures from the headers alone.
