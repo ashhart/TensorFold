@@ -1,0 +1,1 @@
+- Flash Next TFQ3 on CUDA: the host dequantized weights keep their 2-byte alignment through the loader, so `serve` no longer aborts at startup with a safe-allocator alignment panic on TFQ3 checkpoints such as Qwen3.8-Flash-Next-TFQ3 (#5467, fixes #5459).
