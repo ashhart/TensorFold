@@ -11,6 +11,20 @@ pub fn swiglu(gate: f64, up: f64) f64 {
     return gate * sigmoid(gate) * up;
 }
 
+/// SiTU (ERNIE 5.5, Kimi K3): beta tanh(gate / beta) sigmoid(gate) times lin tanh(up / lin).
+pub fn situ(gate: f64, up: f64, beta: f64, lin: f64) f64 {
+    return beta * std.math.tanh(gate / beta) * sigmoid(gate) * (lin * std.math.tanh(up / lin));
+}
+
+/// situ's partial derivatives in gate and in up.
+pub fn situSlopes(gate: f64, up: f64, beta: f64, lin: f64) [2]f64 {
+    const t = std.math.tanh(gate / beta);
+    const s = sigmoid(gate);
+    const tu = std.math.tanh(up / lin);
+    const da = (1 - t * t) * s + beta * t * s * (1 - s);
+    return .{ da * lin * tu, beta * t * s * (1 - tu * tu) };
+}
+
 /// DFlash2's dynamic conv at one value: x k0 + prev k1 with the taps as rounded (k_t = bf16(base_t + dyn_t)).
 pub fn dconv(x: f64, prev: f64, k0: f64, k1: f64) f64 {
     return x * k0 + prev * k1;
@@ -198,4 +212,15 @@ test "the soft cap: rounding points against hand values, ends ordered, within a 
         try std.testing.expect(r[0] <= r[1]);
         try std.testing.expect(@abs(r[0] - 30 * std.math.tanh(x / 30)) <= 0x1p-6 * 30);
     }
+}
+
+test "SiTU is vLLM's situ_and_mul, (beta / 2) tanh(g / beta) (1 + tanh(g / 2)) times lin tanh(u / lin), its slopes too" {
+    for ([_]f64{ -30, -4, -1, -0.25, 0, 0.5, 2, 7, 40 }) |g| for ([_]f64{ -60, -3, 0.75, 25, 90 }) |u| {
+        const vllm = 0.5 * 4 * std.math.tanh(g / 4) * (1 + std.math.tanh(g / 2)) * (25 * std.math.tanh(u / 25));
+        try std.testing.expectApproxEqAbs(vllm, situ(g, u, 4, 25), 1e-13 * (1 + @abs(vllm)));
+        const d = situSlopes(g, u, 4, 25);
+        const h = 1e-6;
+        try std.testing.expectApproxEqAbs((situ(g + h, u, 4, 25) - situ(g - h, u, 4, 25)) / (2 * h), d[0], 1e-6);
+        try std.testing.expectApproxEqAbs((situ(g, u + h, 4, 25) - situ(g, u - h, 4, 25)) / (2 * h), d[1], 1e-6);
+    };
 }
