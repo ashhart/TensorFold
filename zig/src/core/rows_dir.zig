@@ -3,10 +3,11 @@ const std = @import("std");
 const platform = @import("sys");
 const builtin = @import("builtin");
 
-const windows_test = builtin.is_test and platform.windows;
 const RenameAt = *const fn (c_int, [*:0]const u8, c_int, [*:0]const u8) callconv(.c) c_int;
-/// Windows tests enter this direct Zig boundary through the fixture's exported wrapper.
-pub var test_renameat: if (windows_test) ?RenameAt else void = if (windows_test) null else {};
+const Fsync = *const fn (c_int) callconv(.c) c_int;
+/// Test-only direct boundaries make publication faults deterministic on every host.
+pub var test_renameat: if (builtin.is_test) ?RenameAt else void = if (builtin.is_test) null else {};
+pub var test_fsync: if (builtin.is_test) ?Fsync else void = if (builtin.is_test) null else {};
 
 var serial: std.atomic.Value(u64) = .init(0);
 
@@ -35,11 +36,9 @@ pub fn openIdentity(root: c_int, name: [*:0]const u8) !c_int {
     return openAt(root, name);
 }
 
-/// An independently owned descriptor of the same directory; a detached worker can therefore outlive its store.
+/// An independently opened directory has its own scan offset; a detached worker can outlive its store.
 pub fn clone(fd: c_int) !c_int {
-    if (comptime platform.windows) return openAt(fd, ".");
-    const out = platform.c.fcntl(fd, platform.c.F.DUPFD_CLOEXEC, @as(c_int, 0));
-    return if (out < 0) error.RowsDir else out;
+    return openAt(fd, ".");
 }
 
 pub fn close(fd: c_int) void {
@@ -59,7 +58,7 @@ pub fn scan(fd: c_int) !*platform.c.DIR {
 pub fn sync(fd: c_int) !void {
     if (comptime platform.windows) return;
     while (true) {
-        const rc = platform.c.fsync(fd);
+        const rc = syncRaw(fd);
         if (rc == 0) return;
         if (platform.c.errno(rc) == .INTR) continue;
         return error.RowsDir;
@@ -77,7 +76,10 @@ pub fn unlink(fd: c_int, name: [*:0]const u8) !void {
 /// A staged leaf made visible under the same pinned directory and its rename made durable.
 pub fn rename(fd: c_int, temporary: [*:0]const u8, destination: [*:0]const u8) !void {
     if (renameAt(fd, temporary, fd, destination) != 0) return error.RowsDir;
-    try sync(fd);
+    sync(fd) catch |err| {
+        _ = platform.c.unlinkat(fd, destination, 0);
+        return err;
+    };
 }
 
 /// The exact file size of `name`, with links refused.
@@ -153,6 +155,11 @@ fn mkdirAt(fd: c_int, name: [*:0]const u8, mode: platform.c.mode_t) c_int {
 }
 
 fn renameAt(old_fd: c_int, old: [*:0]const u8, new_fd: c_int, new: [*:0]const u8) c_int {
-    if (comptime windows_test) if (test_renameat) |hook| return hook(old_fd, old, new_fd, new);
+    if (comptime builtin.is_test) if (test_renameat) |hook| return hook(old_fd, old, new_fd, new);
     return platform.c.renameat(old_fd, old, new_fd, new);
+}
+
+fn syncRaw(fd: c_int) c_int {
+    if (comptime builtin.is_test) if (test_fsync) |hook| return hook(fd);
+    return platform.c.fsync(fd);
 }

@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
 const env = platform.env;
+const rowdir = @import("../core/rows_dir.zig");
 fn value(name: [:0]const u8) ?[]const u8 {
     const raw = std.c.getenv(name) orelse return null;
     return std.mem.span(raw);
@@ -217,4 +218,26 @@ test "Windows dot reopen scans independently of its parent handle" {
     var bytes: [8]u8 = undefined;
     try t.expectEqual(@as(isize, 8), platform.c.read(file, &bytes, bytes.len));
     try t.expectEqualStrings("contents", &bytes);
+}
+
+test "POSIX dot reopen scans independently after an earlier scan reached parent EOF" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const a = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "entry", .data = "contents" });
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(root);
+    const dir = try rowdir.openPath(root);
+    defer rowdir.close(dir);
+    for (0..2) |_| {
+        const stream = try rowdir.scan(dir);
+        defer _ = platform.c.closedir(stream);
+        var found = false;
+        while (platform.c.readdir(stream)) |entry| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&entry.name, 0), "entry")) found = true;
+        }
+        try t.expect(found);
+    }
 }
