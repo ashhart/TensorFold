@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA can keep request-start snapshots with shared KV pages (`TF_GLM_REQUEST_STARTS=1` with `TF_KV_SHARE`): the snapshot owns only its tail, shared prefix pages stay untouched, and a resumed request matches a cold run (#5377). Thanks to @laidick for the request. Thanks @laidick for the report.
+
 - Server: GLM tool calls stream to OpenAI-compatible clients as incremental `tool_calls` deltas (the header, then argument fragments) instead of one chunk when the call closes; streamed deltas concatenate to exactly the non-streaming response, and generated tokens are unchanged (#5470).
 
 - Core: a chat template's content.N index counts only the code points up to the requested index instead of the whole string; rendered text and token ids are unchanged (#5396). Thanks to @BadAd84.
