@@ -106,7 +106,7 @@ pub const Backend = struct {
 
     fn features(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
         const b = self(ptr);
-        if (!std.mem.eql(u32, taps, &dspark.taps) or b.m.s.taps == 0) return error.UnpreparedInkling2Taps;
+        if (!std.mem.eql(u32, taps, &dspark.taps) or b.m.s.taps == 0 or b.k.draft == null) return error.UnpreparedInkling2Taps;
         const l = try b.laneOf(s);
         if (start < l.base or count == 0 or start + count > l.base + l.tap_rows) return error.Inkling2TapsNotHeld;
         const row_bytes = dspark.taps.len * dspark.hidden * 2;
@@ -122,7 +122,7 @@ pub const Backend = struct {
 
     fn prefillFeatures(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, sink: be.FeatureSink) anyerror!void {
         const b = self(ptr);
-        if (!std.mem.eql(u32, taps, &dspark.taps) or b.m.s.taps == 0) return error.UnpreparedInkling2Taps;
+        if (!std.mem.eql(u32, taps, &dspark.taps) or b.m.s.taps == 0 or b.k.draft == null) return error.UnpreparedInkling2Taps;
         const l = try b.opening(s);
         errdefer release(ptr, s);
         while (true) {

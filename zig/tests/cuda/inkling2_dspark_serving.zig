@@ -210,19 +210,60 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
         if (got.reuse_failed or (i < 3 and got.cached != reuse[i].at)) return error.DSparkConcurrentSnapshotNotRestored;
     }
     check.pass("Mini CUDA DSpark four-stream resumed greedy/sampled target equality", .{});
-    // A closed drafter must release its CUDA module and permit a fresh head on the same target.
+    // Closing an initialized drafter must disable target tap capture so plain prefill and decode still succeed.
     var rebound = try ink.native.open(gpu.gpa, gpu.io, gpu.ctx, model, null, .{ .context = 512, .drafts = true });
     defer rebound.deinit(rebound.ctx);
     const first_head = try ink.native.openDrafter(gpu.gpa, gpu.io, rebound.ctx, model, 1);
+    var first_drafted = try lanes.drafted.Drafted.init(gpu.gpa, rebound.backend, first_head.drafter);
+    const first_proposed = try generate(gpu, first_drafted.backend(), first_drafted.facts(rebound.facts), short, true, null, 32, .{});
+    defer first_proposed.deinit(gpu.gpa);
+    if (first_proposed.accepted == 0) return error.DSparkNotExercised;
+    first_drafted.deinit();
     first_head.close(first_head.ctx);
+    if (rebound.target.model.s.taps != 0 or rebound.target.kernels.draft != null) return error.DSparkCloseLeftTapsEnabled;
+    const after_close_plain = try generate(gpu, rebound.backend, rebound.facts, short, false, null, 32, .{});
+    defer after_close_plain.deinit(gpu.gpa);
+    if (!std.mem.eql(u32, first_proposed.ids, after_close_plain.ids)) return error.DSparkClosePlainChangedTokens;
+    check.pass("Mini CUDA DSpark close restores plain target generation", .{});
+    // Reattaching a fresh drafter on the same target must still preserve exact target tokens.
     const next_head = try ink.native.openDrafter(gpu.gpa, gpu.io, rebound.ctx, model, 1);
     defer next_head.close(next_head.ctx);
     var next_drafted = try lanes.drafted.Drafted.init(gpu.gpa, rebound.backend, next_head.drafter);
     defer next_drafted.deinit();
-    const next_plain = try generate(gpu, rebound.backend, rebound.facts, short, false, null, 32, .{});
-    defer next_plain.deinit(gpu.gpa);
     const next_proposed = try generate(gpu, next_drafted.backend(), next_drafted.facts(rebound.facts), short, true, null, 32, .{});
     defer next_proposed.deinit(gpu.gpa);
-    if (!std.mem.eql(u32, next_plain.ids, next_proposed.ids) or next_proposed.accepted == 0) return error.DSparkReattachChangedTokens;
+    if (!std.mem.eql(u32, after_close_plain.ids, next_proposed.ids) or next_proposed.accepted == 0)
+        return error.DSparkReattachChangedTokens;
     check.pass("Mini CUDA DSpark reattached head preserves target tokens", .{});
+    // Near-full-context holds (< 8 positions left) must complete with plain parity and never raise DSparkHoldGeometry.
+    const near_limit = try gpu.gpa.alloc(u32, 509);
+    defer gpu.gpa.free(near_limit);
+    for (near_limit, 0..) |*id, i| id.* = short[i % short.len];
+    // Four positions left in the 512-token context with max_new = 3 triggers a one-draft hold.
+    const near_plain_1 = try generate(gpu, rebound.backend, rebound.facts, near_limit[0..508], false, null, 3, .{});
+    defer near_plain_1.deinit(gpu.gpa);
+    const near_draft_1 = try generate(gpu, next_drafted.backend(), next_drafted.facts(rebound.facts), near_limit[0..508], true, null, 3, .{});
+    defer near_draft_1.deinit(gpu.gpa);
+    if (!std.mem.eql(u32, near_plain_1.ids, near_draft_1.ids)) return error.DSparkNearLimitChangedTokens;
+    if (near_draft_1.proposed == 0) return error.DSparkNearLimitNotExercised;
+    // Four positions left with max_new = 4 completes right up to the full 512-token context limit.
+    const near_plain_full = try generate(gpu, rebound.backend, rebound.facts, near_limit[0..508], false, null, 4, .{});
+    defer near_plain_full.deinit(gpu.gpa);
+    const near_draft_full = try generate(gpu, next_drafted.backend(), next_drafted.facts(rebound.facts), near_limit[0..508], true, null, 4, .{});
+    defer near_draft_full.deinit(gpu.gpa);
+    if (!std.mem.eql(u32, near_plain_full.ids, near_draft_full.ids)) return error.DSparkNearLimitChangedTokens;
+    if (near_draft_full.proposed == 0) return error.DSparkNearLimitNotExercised;
+    // Batched cohort mixing near-limit streams (4 and 3 positions left) with sibling streams.
+    try rebound.reserve(rebound.ctx, 4);
+    try next_head.reserve(next_head.ctx, 4);
+    const near_prompts = [4][]const u32{ near_limit[0..508], short, near_limit[0..509], chat };
+    const near_cohort_plain = try cohort(gpu, rebound.backend, rebound.facts, near_prompts, false, .{ .{}, .{}, .{}, .{} }, 3);
+    defer for (near_cohort_plain) |r| r.deinit(gpu.gpa);
+    const near_cohort_draft = try cohort(gpu, next_drafted.backend(), next_drafted.facts(rebound.facts), near_prompts, true, .{ .{}, .{}, .{}, .{} }, 3);
+    defer for (near_cohort_draft) |r| r.deinit(gpu.gpa);
+    for (near_cohort_plain, near_cohort_draft) |want, got| {
+        if (!std.mem.eql(u32, want.ids, got.ids)) return error.DSparkNearLimitBatchChangedTokens;
+        if (got.proposed == 0) return error.DSparkNearLimitNotExercised;
+    }
+    check.pass("Mini CUDA DSpark near-full-context holds match plain (4 and 3 positions left, solo and batched)", .{});
 }

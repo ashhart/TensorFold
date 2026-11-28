@@ -19,6 +19,7 @@ pub const Drafter = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     s: cuda.Stream,
+    target: *engine.Model,
     kernels: *engine.Kernels,
     context: u32,
     lane: cuda.qmmf.Lane,
@@ -44,6 +45,7 @@ pub const Drafter = struct {
         const head = try dspark.Head.init(gpa, d, &weights, &kernels.draft.?, &kernels.glue, .{ .w = target.w, .lane = &lane, .unembed = weights.unembed }, target.context);
         out.* = .{
             .gpa = gpa,
+            .target = target,
             .kernels = kernels,
             .d = d,
             .s = s,
@@ -105,7 +107,7 @@ pub const Drafter = struct {
             .plain_guard = false,
             .fixed_block = true,
             .batched = true,
-            .stream_bytes = 2 * (@as(usize, 2 * dspark.local_ring) + out.context) * dspark.kv * 2 + dspark.hidden * 2,
+            .stream_bytes = 2 * (@as(usize, 2 * dspark.local_ring) + dspark.globalRing(out.context)) * dspark.kv * 2 + dspark.hidden * 2,
         };
     }
 

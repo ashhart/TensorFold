@@ -53,7 +53,9 @@ pub const Head = struct {
         return b.ptr;
     }
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const dspark.Weights, k: *const dsp.Kernels, glue: *const ops.Kernels, t: dspark.Target, cap: usize) !Head {
+    /// `context`: the target's configured context; `cap` reserves `T` transient draft rows past it.
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const dspark.Weights, k: *const dsp.Kernels, glue: *const ops.Kernels, t: dspark.Target, context: usize) !Head {
+        const cap = std.math.add(usize, context, T) catch return error.DSparkHoldGeometry;
         var h: Head = .{ .gpa = gpa, .w = w, .k = k, .glue = glue, .t = t, .d = d, .cap = cap };
         errdefer h.deinit(gpa);
         const batch = max_streams * T;
@@ -139,7 +141,9 @@ pub const Head = struct {
         var at: [max_streams * T][2]i32 = undefined;
         var walk: [max_streams * T]u32 = @splat(0);
         for (contexts, pending, 0..) |c, token, stream| {
-            if (c.end <= c.from or c.end + T > h.cap or token >= h.t.w.c.text.vocab) return error.DSparkHoldGeometry;
+            if (c.end <= c.from or c.end + T > h.cap or c.end + T - c.from > c.rings[1] or token >= h.t.w.c.text.vocab)
+                return error.DSparkHoldGeometry;
+            for (c.rings, contexts[0].rings) |ring, first_ring| if (ring != first_ring) return error.DSparkHoldGeometry;
             walk[stream * T] = token;
             const p: i32 = @intCast(c.end);
             table[stream] = .{ .frnn = c.newest.ptr, .p = p };
@@ -217,3 +221,18 @@ pub const Head = struct {
         try (DeviceBuffer{ .d = h.d, .ptr = h.walk, .len = n * T * 4, .borrowed = true }).download(0, std.mem.sliceAsBytes(out));
     }
 };
+
+test "dspark head reserves transient draft rows past configured context without aliasing or chunk overflow" {
+    for ([_]u32{ 64, 512, 1024, 2042, 4096, 8192 }) |context| {
+        const cap: usize = @as(usize, context) + T;
+        const ring = dspark.globalRing(context);
+        const maxc = cap / dsp.chunk + 2;
+        for ([_]u64{ context - 4, context - 1, context }) |end| {
+            try std.testing.expect(end + T <= cap);
+            try std.testing.expect(end + T <= ring);
+            try std.testing.expect(dsp.chunks(0, @intCast(end + T - 1)) <= maxc);
+        }
+        // Even a non-zero starting offset spans at most maxc chunks.
+        try std.testing.expect(dsp.chunks(dsp.chunk - 1, @intCast(dsp.chunk - 1 + context + T - 1)) <= maxc);
+    }
+}

@@ -22,6 +22,11 @@ pub const taps = [_]u32{ 5, 23, 41, 48 };
 /// The local rings retain the last 1,024 committed keys plus eight transient draft keys.
 pub const local_ring = 1024 + rows;
 
+/// The global ring retains `capacity` committed keys plus eight transient draft keys.
+pub fn globalRing(capacity: u32) u32 {
+    return capacity + rows;
+}
+
 pub const Proj = struct { qkv: Lane, ctx_kv: Lane, o: Lane, gu: Lane, down: Lane };
 const Norms = struct { input: u64, post: u64, q: u64, k: u64, k_ctx: u64 };
 
@@ -197,13 +202,21 @@ pub const Context = struct {
     k: [3]DeviceBuffer,
     v: [3]DeviceBuffer,
     rings: [3]u32,
+    limit: u32,
     newest: DeviceBuffer,
     from: u64 = 0,
     end: u64 = 0,
 
-    /// `capacity`: the global layer's longest context.
+    /// `capacity`: the global layer's longest committed context; `rings[1]` adds `rows` transient slots.
     pub fn init(d: *const cuda.Driver, capacity: u32) !Context {
-        var c: Context = .{ .k = undefined, .v = undefined, .rings = .{ local_ring, capacity, local_ring }, .newest = undefined };
+        if (capacity == 0 or capacity > std.math.maxInt(u32) - rows) return error.DSparkContextFull;
+        var c: Context = .{
+            .k = undefined,
+            .v = undefined,
+            .rings = .{ local_ring, globalRing(capacity), local_ring },
+            .limit = capacity,
+            .newest = undefined,
+        };
         var made: usize = 0;
         errdefer for (0..made) |i| {
             c.k[i].free();
@@ -235,13 +248,21 @@ pub const Context = struct {
     pub fn admit(c: *const Context, start: u64, n: usize) !Span {
         if (start < c.end) return error.DraftContextGap;
         const from = if (start > c.end) start else c.from;
-        if (start + n - from > c.rings[1]) return error.DSparkContextFull;
+        if (start + n - from > c.limit) return error.DSparkContextFull;
         return .{ .from = from, .end = start + n };
     }
 };
 
 test "a rejected absorb leaves the context's span whole and the next one lands" {
-    var c: Context = .{ .k = undefined, .v = undefined, .rings = .{ local_ring, 64, local_ring }, .newest = undefined, .from = 10, .end = 20 };
+    var c: Context = .{
+        .k = undefined,
+        .v = undefined,
+        .rings = .{ local_ring, globalRing(64), local_ring },
+        .limit = 64,
+        .newest = undefined,
+        .from = 10,
+        .end = 20,
+    };
     try std.testing.expectError(error.DSparkContextFull, c.admit(100, 65));
     try std.testing.expectError(error.DraftContextGap, c.admit(19, 1));
     try std.testing.expectEqual(@as(u64, 10), c.from);
@@ -253,6 +274,9 @@ test "a rejected absorb leaves the context's span whole and the next one lands" 
     c.from, c.end = .{ s.from, s.end };
     try std.testing.expectError(error.DraftContextGap, c.admit(163, 1));
     try std.testing.expectEqual(@as(u64, 164), c.end);
+    // Transient block rows fit past the committed context limit without aliasing committed slots.
+    try std.testing.expectEqual(@as(u32, 64 + rows), c.rings[1]);
+    try std.testing.expect(c.end + rows - c.from <= c.rings[1]);
 }
 
 /// The target's embedding and unembedding remain the plain server's exact weights.

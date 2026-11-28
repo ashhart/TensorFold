@@ -144,8 +144,10 @@ pub const OpenedDrafter = struct {
 
 fn closeDrafter(ptr: *anyopaque) void {
     const d: *cuda_dspark.Drafter = @ptrCast(@alignCast(ptr));
+    const target = d.target;
     const kernels = d.kernels;
     d.deinit();
+    target.clearTaps();
     kernels.draft.?.unload();
     kernels.draft = null;
 }
@@ -277,4 +279,49 @@ test "Mini CUDA weights: shared traversal preserves the complete file-backed loa
 test "Mini DSpark serving: native target and drafter entrypoints compile together" {
     std.mem.doNotOptimizeAway(&open);
     std.mem.doNotOptimizeAway(&openDrafter);
+}
+
+test "clearing target taps frees the tap buffer and restores plain state" {
+    const Track = struct {
+        allocs: usize = 0,
+        frees: usize = 0,
+        next: u64 = 1 << 32,
+        fn alloc(ctx: *anyopaque, len: usize) ?u64 {
+            const t: *@This() = @ptrCast(@alignCast(ctx));
+            t.allocs += 1;
+            t.next += std.mem.alignForward(u64, len, 512);
+            return t.next;
+        }
+        fn free(ctx: *anyopaque, _: u64) bool {
+            const t: *@This() = @ptrCast(@alignCast(ctx));
+            t.frees += 1;
+            return true;
+        }
+    };
+    var why: config.Why = .{};
+    var w: @import("loop_weights.zig").Weights = undefined;
+    w.c = try config.parse(std.testing.allocator, @import("config_test.zig").mini, &why);
+    var m: engine.Model = .{
+        .gpa = std.testing.allocator,
+        .d = @ptrFromInt(0x1000),
+        .w = &w,
+        .context = 64,
+        .layout = undefined,
+        .s = std.mem.zeroes(@FieldType(engine.Model, "s")),
+    };
+    var track: Track = .{};
+    const before = cuda.memory.currentHook();
+    cuda.memory.setHook(.{ .ctx = &track, .alloc = Track.alloc, .free = Track.free });
+    defer cuda.memory.setHook(before);
+    try m.prepareTaps();
+    try std.testing.expect(m.s.taps != 0 and m.taps_buf != null and track.allocs == 1 and track.frees == 0);
+    m.clearTaps();
+    try std.testing.expect(m.s.taps == 0 and m.taps_buf == null and track.frees == 1);
+    // Repeated close and re-prepare leave no leaked buffers.
+    m.clearTaps();
+    try std.testing.expectEqual(@as(usize, 1), track.frees);
+    try m.prepareTaps();
+    try std.testing.expect(m.s.taps != 0 and track.allocs == 2);
+    m.clearTaps();
+    try std.testing.expect(m.s.taps == 0 and track.frees == 2);
 }

@@ -143,6 +143,7 @@ pub const Model = struct {
     slot: usize = 0, // the slot snapshots and rewinds use; forwards share the scratch
     recorded: [max_slots]bool = @splat(false), // slots whose `backup` and `hist` hold their last window
     s: Scratch = undefined,
+    taps_buf: ?cuda.DeviceBuffer = null,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
 
     pub fn slotBase(m: *const Model) u64 {
@@ -314,7 +315,18 @@ pub const Model = struct {
     }
 
     pub fn prepareTaps(m: *Model) !void {
-        if (m.s.taps == 0) m.s.taps = try m.alloc(prompt_rows * dspark.taps.len * m.w.c.text.hidden * 2);
+        if (m.taps_buf == null) {
+            m.taps_buf = try cuda.DeviceBuffer.alloc(m.d, prompt_rows * dspark.taps.len * m.w.c.text.hidden * 2);
+        }
+        m.s.taps = m.taps_buf.?.ptr;
+    }
+
+    pub fn clearTaps(m: *Model) void {
+        m.s.taps = 0;
+        if (m.taps_buf) |*buf| {
+            buf.free();
+            m.taps_buf = null;
+        }
     }
 
     fn deinitBuffers(m: *Model) void {
@@ -323,6 +335,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        m.clearTaps();
         m.deinitBuffers();
         for (m.slots[0..m.n_slots]) |*slot| for ([4]*cuda.DeviceBuffer{ &slot.hist, &slot.backup, &slot.sites, &slot.cache }) |b| b.free();
         m.* = undefined;

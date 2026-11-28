@@ -83,9 +83,12 @@ pub fn forward(m: *Model, k: *const Kernels, s: cuda.Stream, chains: []const Cha
     const lp = c.loop.?;
 
     for (m.w.p.visits[0..m.w.p.n_visits], 0..) |visit, vi| {
-        if (m.s.taps != 0) for (dspark.taps[0 .. dspark.taps.len - 1], 0..) |tap, channel| {
-            if (vi == tap) try @import("dspark_ops.zig").miniTap(&k.draft.?, s, partial, m.s.taps, rows, channel, h);
-        };
+        if (m.s.taps != 0) {
+            const dk = if (k.draft) |*dk| dk else return error.DSparkKernelsMissing;
+            for (dspark.taps[0 .. dspark.taps.len - 1], 0..) |tap, channel| {
+                if (vi == tap) try @import("dspark_ops.zig").miniTap(dk, s, partial, m.s.taps, rows, channel, h);
+            }
+        }
         const layer = m.w.p.at(visit.layer);
         const lw = &m.w.layers[visit.layer];
         if (visit.pass >= 2 and visit.layer == lp.core_start) {
@@ -243,7 +246,10 @@ pub fn forward(m: *Model, k: *const Kernels, s: cuda.Stream, chains: []const Cha
 
     if (heads == 0 and m.s.taps == 0) return;
     try ops.mix(&k.glue, s, m.mixArgs(m.s.blocks[0..n_blocks], partial, m.w.output_query, .{ m.w.norm, m.w.norm, m.w.norm }, m.s.hidden, 1, true, rows));
-    if (m.s.taps != 0) try @import("dspark_ops.zig").miniTap(&k.draft.?, s, m.s.hidden, m.s.taps, rows, dspark.taps.len - 1, h);
+    if (m.s.taps != 0) {
+        const dk = if (k.draft) |*dk| dk else return error.DSparkKernelsMissing;
+        try @import("dspark_ops.zig").miniTap(dk, s, m.s.hidden, m.s.taps, rows, dspark.taps.len - 1, h);
+    }
     if (heads == 0) return;
     try ops.rowdot(&k.glue, s, m.s.hidden + head0 * h * 2, m.w.unembed, m.s.logits, heads, c.unpadded_vocab, h, false, false);
     try loop_math.roundBf16(&k.loop, s, m.s.logits, m.s.logits, heads * c.unpadded_vocab);
