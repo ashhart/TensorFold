@@ -35,11 +35,11 @@ fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
 /// The checkpoint's bytes as both ranks see them: TENSORFOLD_CHECKPOINT_SHA256 when set, else the cached full digest.
 pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usize, chunk: usize) !Identity {
     var checkpoint: [32]u8 = undefined;
-    const given = @import("sys").environment.rawText("TENSORFOLD_CHECKPOINT_SHA256");
-    @import("sys").environment.check("TENSORFOLD_CHECKPOINT_SHA256", given) catch return error.NoCheckpointIdentity;
-    if (given) |digest| {
-        if (digest.len != 64) return error.NoCheckpointIdentity;
-        _ = std.fmt.hexToBytes(&checkpoint, digest) catch return error.NoCheckpointIdentity;
+    const env = @import("sys").environment;
+    const digest = try env.path("TENSORFOLD_CHECKPOINT_SHA256", (env.Process{}).get("TENSORFOLD_CHECKPOINT_SHA256"));
+    if (digest) |given| {
+        if (given.len != 64) return error.NoCheckpointIdentity;
+        _ = std.fmt.hexToBytes(&checkpoint, given) catch return error.NoCheckpointIdentity;
     } else checkpoint = try @import("core").checkpoint_identity.fullIdentity(a, io, dir);
     const config = try std.fs.path.join(a, &.{ dir, "config.json" });
     defer a.free(config);
@@ -52,7 +52,8 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
 
 /// How long a rank waits for its peer: a minute with a given digest, 30 when the peer may be hashing every byte.
 pub fn linkWait() u64 {
-    return if (@import("sys").environment.rawText("TENSORFOLD_CHECKPOINT_SHA256") != null) 60_000 else 30 * 60_000;
+    const env = @import("sys").environment;
+    return if ((env.path("TENSORFOLD_CHECKPOINT_SHA256", (env.Process{}).get("TENSORFOLD_CHECKPOINT_SHA256")) catch null) != null) 60_000 else 30 * 60_000;
 }
 
 pub const Session = struct {

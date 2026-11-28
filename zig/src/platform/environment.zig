@@ -351,6 +351,15 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
+    .{ .name = "FZ_BATCH_MTP_CHAIN", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (1 chains a batch's MTP drafts; default 0)" },
+    .{ .name = "FZ_BATCH_MTP_SERIAL", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (1 gives each stream its own draft buffers; default 0)" },
+    .{ .name = "FZ_VERIFY_OVERLAP", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 verifies on a serial encoder; default 1)" },
+    .{ .name = "FZ_SETTLE_SYNC", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (set drops the cross-round fence; default unset)" },
+    .{ .name = "TF_FLASHNEXT_TEMPERATURE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite sampling temperature (default 1)" },
+    .{ .name = "TF_FLASHNEXT_TOP_P", .scope = .flashnext, .kind = .signed_real, .forms = "a finite nucleus probability (default 0.95)" },
+    .{ .name = "TF_FLASHNEXT_TOP_K", .scope = .flashnext, .kind = .u32, .forms = "a whole top-k count from 0 to 4294967295 (default 20)" },
+    .{ .name = "TF_FLASHNEXT_REPEAT", .scope = .flashnext, .kind = .size, .forms = "a whole decode repeat count (default 1)" },
+    .{ .name = "TF_FLASHNEXT_SEED", .scope = .flashnext, .kind = .u64, .blank_default = false, .forms = "a whole unsigned 64-bit sampling seed (unset keeps sampling off)" },
 };
 
 pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;

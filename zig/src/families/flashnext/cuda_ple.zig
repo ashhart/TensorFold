@@ -379,9 +379,12 @@ pub const Ngram = struct {
         const modelopt = wm.contains(first);
         g.format = if (modelopt) try ple_fp8.format(gpa, io, model_dir, wm, first) else .mlx;
         if (modelopt) {
-            const default_mode: ple_reader.Mode = if (@import("builtin").os.tag == .linux) .pread else .mmap;
-            const mode_index = @import("sys").environment.read(usize, "TF_FLASHNEXT_PLE_IO", @backingInt(default_mode)) catch return error.BadPleIoMode;
-            g.read_mode = @fromBackingInt(@intCast(mode_index));
+            const k = try @import("sys").environment.read(?u32, "TF_FLASHNEXT_PLE_IO", null);
+            g.read_mode = if (k) |i| switch (i) {
+                0 => .mmap,
+                1 => .pread,
+                else => unreachable,
+            } else if (@import("builtin").os.tag == .linux) .pread else .mmap;
         }
         g.warm_ahead = try @import("sys").environment.read(bool, "TF_FLASHNEXT_WARM_AHEAD", false);
         g.scale = switch (g.format) {

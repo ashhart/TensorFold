@@ -25,13 +25,6 @@ const Mock = struct {
         return if (failed) abi.error_not_ready else 0;
     }
 };
-test "K32 expert tile: explicit opt-in modes and invalid settings" {
-    try t.expectEqual(tile.Mode.off, try tile.mode(null));
-    try t.expectEqual(tile.Mode.off, try tile.mode("0"));
-    try t.expectEqual(tile.Mode.up, try tile.mode("1"));
-    try t.expectEqual(tile.Mode.both, try tile.mode("2"));
-    for ([_][]const u8{ "", "true", "3", "2,0,1" }) |v| try t.expectError(error.BadPromptExpertTile, tile.mode(v));
-}
 test "K32 expert tile: actual launch preserves every pointer, scalar and ragged block" {
     var d: Driver = undefined;
     d.api.cuLaunchKernel = Mock.launch;

@@ -27,19 +27,19 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
         try e.checkScope(.flashnext, fx);
         return t.expect(why == null);
     }
-    try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
+    try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
     try t.expect(std.mem.startsWith(u8, why.?, name));
     try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 46 settings: 30 switches, 10 integers, 1 real, 5 structured" {
+test "Flash Next strict env: the table holds all 55 settings: 34 switches, 13 integers, 3 reals, 5 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
-        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256"));
+        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.startsWith(u8, r.name, "FZ_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 30, 10, 1, 5 }, counts);
+    try t.expectEqual([4]usize{ 34, 13, 3, 5 }, counts);
 }
 
 test "Flash Next strict env: unset reads the caller default and every row keeps its blank contract" {
@@ -60,13 +60,7 @@ test "Flash Next strict env: unset reads the caller default and every row keeps 
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
-            .structured => {
-                if (r.kind == .path) {
-                    try t.expect(try e.parse(r.name, raw) == null);
-                } else {
-                    try t.expect(try e.value(?u64, r.name, raw, null) == null);
-                }
-            },
+            .structured => if (r.kind == .path) try t.expect(try e.path(r.name, raw) == null) else try t.expect(try e.value(?u64, r.name, raw, null) == null),
             .integers => try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
         }
     };
@@ -189,4 +183,74 @@ test "Flash Next strict env: the scope refuses only its own settings" {
         try t.expect(why == null);
         try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
     }
+}
+fn checkPath(name: []const u8, raw: []const u8, valid: bool) !void {
+    const fx: Fixture = .{ .name = name, .raw = raw };
+    const why = try e.refusal(t.allocator, fx, .{ .flashnext = true });
+    defer if (why) |w| t.allocator.free(w);
+    if (valid) {
+        try e.checkScope(.flashnext, fx);
+        return t.expect(why == null);
+    }
+    try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+    try t.expect(std.mem.startsWith(u8, why.?, name));
+    try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
+}
+
+const Moved = struct { name: []const u8, good: []const u8, bad: []const u8 };
+const moved = [_]Moved{
+    .{ .name = "FZ_BATCH_MTP_CHAIN", .good = "1", .bad = "2" },
+    .{ .name = "FZ_BATCH_MTP_SERIAL", .good = "1", .bad = "2" },
+    .{ .name = "FZ_VERIFY_OVERLAP", .good = "0", .bad = "2" },
+    .{ .name = "FZ_SETTLE_SYNC", .good = "1", .bad = "2" },
+    .{ .name = "TF_FLASHNEXT_PROMPT_EXPERT_TILE", .good = "2", .bad = "3" },
+    .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .good = "0", .bad = "2" },
+    .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .good = "1", .bad = "2" },
+    .{ .name = "TF_FLASHNEXT_LOAD_THREADS", .good = "32", .bad = "33" },
+    .{ .name = "TF_FLASHNEXT_TEMPERATURE", .good = "0.8", .bad = "nan" },
+    .{ .name = "TF_FLASHNEXT_TOP_P", .good = "0.9", .bad = "inf" },
+    .{ .name = "TF_FLASHNEXT_TOP_K", .good = "20", .bad = "-1" },
+    .{ .name = "TF_FLASHNEXT_REPEAT", .good = "2", .bad = "abc" },
+    .{ .name = "TF_FLASHNEXT_SEED", .good = "7", .bad = "x" },
+    .{ .name = "TF_FLASHNEXT_DRAFT_HEAD", .good = "affine4", .bad = "fp8" },
+    .{ .name = "TF_FLASHNEXT_PLE_IO", .good = "pread", .bad = "direct" },
+    .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .good = "abababababababababababababababababababababababababababababababab", .bad = "ab\nab" },
+    .{ .name = "TENSORFOLD_PREFILL_SHARE", .good = "0.5", .bad = "1.5" },
+};
+
+test "Flash Next migrated settings: unset, one valid value and one malformed value per row" {
+    for (moved) |m| {
+        const unset: Fixture = .{ .name = m.name };
+        try e.checkScope(.flashnext, unset);
+        try t.expect(try e.refusal(t.allocator, unset, .{ .flashnext = true }) == null);
+        switch (e.rule(m.name).kind) {
+            .path => {
+                try checkPath(m.name, m.good, true);
+                try checkPath(m.name, m.bad, false);
+            },
+            else => {
+                try check(m.name, m.good, true);
+                try check(m.name, m.bad, false);
+            },
+        }
+    }
+}
+
+test "Flash Next migrated shared names keep checkpoint scope and common prefill validation" {
+    const other: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .dsv41 = true, .glm = true };
+    const checkpoint: Fixture = .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .raw = "bad\npath" };
+    const outside = try e.refusal(t.allocator, checkpoint, other);
+    defer if (outside) |why| t.allocator.free(why);
+    try t.expect(outside == null);
+    const inside = (try e.refusal(t.allocator, checkpoint, .{ .flashnext = true })).?;
+    defer t.allocator.free(inside);
+    try t.expect(std.mem.startsWith(u8, inside, checkpoint.name));
+
+    const share: Fixture = .{ .name = "TENSORFOLD_PREFILL_SHARE", .raw = "0" };
+    const common = (try e.refusal(t.allocator, share, other)).?;
+    defer t.allocator.free(common);
+    try t.expect(std.mem.startsWith(u8, common, share.name));
+    const flash = (try e.refusal(t.allocator, share, .{ .flashnext = true })).?;
+    defer t.allocator.free(flash);
+    try t.expect(std.mem.startsWith(u8, flash, share.name));
 }
