@@ -10,8 +10,7 @@ fn refused() u32 {
     return policy.refusals.load(.monotonic);
 }
 
-/// XPU_DEVICE_ID skips discovery, so a host that sets it would never reach the policy: blank for the test, as unset
-/// (an unsetenv of a variable present at start would break std's scan of the environment).
+/// XPU_DEVICE_ID skips discovery, so it is blank for the test (unsetenv would break std's environment scan).
 const NoOverride = struct {
     saved: ?[:0]u8 = null,
     fn take() !NoOverride {
