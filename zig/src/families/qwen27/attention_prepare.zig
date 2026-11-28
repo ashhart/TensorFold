@@ -105,7 +105,7 @@ test "qwen27 mixed: fused M5 prepare writes cache and packed Q without append pa
         var e = Recording{};
         const p = .{ .geometry = .{ .dim = @as(u32, 256), .heads = @as(u32, 24), .kv_heads = @as(u32, 4), .rotary = @as(u32, 64) }, .rows = @as(u32, 1), .qg = Ref{}, .mixed = Ref{}, .q_gain = Ref{}, .k_gain = Ref{}, .positions = Ref{}, .norm_q = Ref{}, .norm_k = Ref{}, .query = Ref{}, .rotated_key = Ref{}, .key_row_stride = @as(u32, 0), .eps = @as(f32, 1e-6), .theta = @as(f64, 10000000), .h_end = @as(u32, 12), .w_end = @as(u32, 10), .plane = @as(u32, 1) };
         const args = .{ .dim = @as(u32, 256), .kv_heads = @as(u32, 4), .packed_rows = @as(u32, 16) };
-        try @import("attention_input.zig").project(&e, &e, .{ .q = Event.q, .kv = Event.kv }, &e, @as(?Ref, null), 1);
+        try @import("attention_input.zig").project(&e, &e, .{ .q = Weight{ .event = .q }, .kv = Weight{ .event = .kv } }, &e, @as(?Ref, null), 1, 0);
         if (!direct(units, fused)) encode(RecordingSize, &e, pipes[11], p, false);
         cache(RecordingSize, &e, pipes, if (direct(units, fused)) @as(?@TypeOf(p), p) else null, &e, &e, .{ .rows = @as(u32, 1) }, Ref{}, Ref{}, Ref{}, args);
         e.barrier(); // first consumer, after all cache and QA writes
