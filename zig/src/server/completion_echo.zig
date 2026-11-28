@@ -58,7 +58,7 @@ fn echo(srv: *Server, cx: *Cx, reply: *chat.Reply, input: chat.Input) errors.Ref
     for (all[1..ids.len], ids[1..], rows) |*slot, id, row| {
         var best = row;
         best.count = @min(row.count, n); // the engine may hold more for prompt_logprobs' count
-        slot.* = logprobs.rowValue(srv, a, id, best, &.{}, false) catch |e| return switch (e) {
+        slot.* = logprobs.rowValue(srv, a, id, best, &.{}, false, .{}) catch |e| return switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             error.Failed => cx.other("the engine's prompt rows are out of step with the prompt"),
         };

@@ -1,0 +1,12 @@
+label	arm	verdict	run1_ms	run2_ms	peak_rss_bytes	elapsed_s
+pr0-old	old	TIMING_RECORD_VALID	3364	3386	1528725504	7.883
+pr1-new	new	TIMING_RECORD_VALID	3244	3260	1528184832	7.631
+pr2-new	new	TIMING_RECORD_VALID	3250	3258	1529479168	7.633
+pr3-old	old	TIMING_RECORD_VALID	3364	3399	1528479744	7.884
+pr4-old	old	TIMING_RECORD_VALID	3370	3377	1528496128	7.638
+pr5-new	new	TIMING_RECORD_VALID	3243	3248	1529970688	7.632
+pair	order	old_run2_ms	new_run2_ms	run2_gain	old_run1_ms	new_run1_ms	run1_gain
+1	old,new	3386	3260	0.037212	3364	3244	0.035672
+2	new,old	3399	3258	0.041483	3364	3250	0.033888
+3	old,new	3377	3248	0.038200	3370	3243	0.037685
+summary	run2_gain_median=0.038200	min=0.037212	max=0.041483	speedup_rule=MET

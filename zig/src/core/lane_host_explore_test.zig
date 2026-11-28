@@ -30,6 +30,8 @@ const Box = struct {
 
     fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
         const b: *Box = @ptrCast(@alignCast(ctx));
+        // the engine turn a finish comes in, stored before the box shows it: the test thread sends after that turn
+        if (e.* == .finished) if (current) |x| x.last_end.store(x.turns.load(.acquire), .release);
         b.mutex.lockUncancelable(io);
         defer b.mutex.unlock(io);
         if (b.ends > 0) b.late = true;
@@ -62,6 +64,9 @@ const Explorer = struct {
     calls: []usize, // each request's prompt calls so far (its chunk index next)
     next: usize = 0, // the next request to arrive
     active: usize = 0, // yield points in progress; the test thread sends only when none is
+    turns: std.atomic.Value(u64) = .init(0), // engine turns begun (the host's activity scope opens each)
+    turned: std.atomic.Value(u64) = .init(0), // engine turns ended (at the turn's end, or before it waits idle)
+    last_end: std.atomic.Value(u64) = .init(0), // the turn the latest finished event came in
     lanes: usize, // the host's lanes: the backend never holds more
     budget: u64, // prompt rows a visit beside decoders (0: none)
     rows: u64 = 0, // prompt rows stepped beside a decoder since the core's last round
@@ -163,16 +168,27 @@ const Explorer = struct {
         return x.dial;
     }
 
-    /// Whether every request sent has ended; if so, and some are left, the test thread sends the next (true: all done).
+    /// Whether every request sent has ended; if so, some are left and a whole turn ran after the last end's, the next.
     fn idle(x: *Explorer) bool {
-        const n = x.sent();
-        for (x.boxes[0..n]) |*b| if (!b.finished()) return false;
-        if (n == x.requests.len) return true;
         x.mutex.lockUncancelable(io);
         defer x.mutex.unlock(io);
+        for (x.boxes[0..x.next]) |*b| if (!b.finished()) return false;
+        if (x.next == x.requests.len) return true;
         if (x.active != 0) return false; // a yield point is still deciding this schedule
-        x.sendLocked(); // no yield point starts while nothing is in flight: the send cannot race one
+        if (x.turned.load(.acquire) <= x.last_end.load(.acquire)) return false; // no empty turn after that one yet
+        x.sendLocked(); // past an empty turn the send meets no visit: a later turn's head admits it
         return false;
+    }
+
+    /// The host's activity scope, opened as an engine turn begins and closed as it ends: the turns counted.
+    fn begin(ctx: *anyopaque) void {
+        const x: *Explorer = @ptrCast(@alignCast(ctx));
+        _ = x.turns.fetchAdd(1, .acq_rel);
+    }
+
+    fn end(ctx: *anyopaque) void {
+        const x: *Explorer = @ptrCast(@alignCast(ctx));
+        _ = x.turned.fetchAdd(1, .acq_rel);
     }
 
     /// A prompt call for `s`: its chunk index must be its request's next (named by its prompt's last token).
@@ -340,6 +356,7 @@ fn explore(kind: Kind, seed: u64, tally: *Tally) !u64 {
     }
     var x: Explorer = .{ .rng = .init(seed), .engine = host.engine(), .core = &core, .target = &target, .requests = requests[0..n], .boxes = boxes[0..n], .calls = calls[0..n], .lanes = slots, .budget = host.share.rows, .digest = .init(seed), .tally = tally };
     host.pressure = .{ .source = .{ .ctx = &x, .read = Explorer.reading }, .calm_ns = 0, .every_ns = 0 };
+    host.activity = .{ .ctx = &x, .begin = Explorer.begin, .end = Explorer.end };
     target.prefill_hook = Explorer.chunk;
     target.prefill_hook_ctx = &x;
     current = &x;
@@ -348,7 +365,7 @@ fn explore(kind: Kind, seed: u64, tally: *Tally) !u64 {
     try host.start();
     var running = true;
     defer if (running) host.stop();
-    // the test thread sends the rest only when nothing is in flight: the engine thread's own sends stay seeded
+    // the test thread sends the rest only when nothing is in flight and an empty turn has run since: seeded
     var waited: usize = 0;
     while (!x.idle()) : (waited += 1) {
         if (waited > 20_000) return error.ScheduleStalled;
