@@ -1,0 +1,161 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Causal multi-row SDPA decode. One workgroup of 256 threads per
+// (query head, row): scores for keys 0..key_end-1 in shared memory,
+// softmax, then a per-dimension weighted V sum over 16-key blocks.
+// Shared usage: 7168*4 + 256*4 + 256*4 = 30720 bytes, at the host's
+// declared limit, so the served context is capped by kStreamKeys.
+
+const uint kStreamKeys = 7168u;
+
+#ifndef SDPA_DIM
+#define SDPA_DIM 256
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+    uint dims;
+    uint shape[4];
+    uint in_strides[4];
+    uint out_strides[4];
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+// NaN-propagating max: GLSL max() may quietly drop a NaN operand, which would
+// hide a corrupt score behind the softmax maximum.
+float nan_max(float a, float b) { return isnan(a) ? a : (isnan(b) ? b : max(a, b)); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(F32_Q)
+layout(set = 0, binding = 0, std430) readonly buffer Q { float v[]; } qbuf;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer Q { uint16_t v[]; } qbuf;
+#endif
+layout(set = 0, binding = 1, std430) readonly buffer KC { uint16_t v[]; } kbuf;
+layout(set = 0, binding = 2, std430) readonly buffer VC { uint16_t v[]; } vbuf;
+#if defined(F32_OUT)
+layout(set = 0, binding = 3, std430) writeonly buffer Y { float v[]; } ybuf;
+#else
+layout(set = 0, binding = 3, std430) writeonly buffer Y { uint16_t v[]; } ybuf;
+#endif
+
+shared float scores[kStreamKeys];
+shared float red[256];
+shared float qs[256];
+
+void main() {
+    const uint head = gl_WorkGroupID.x;
+    const uint row = gl_WorkGroupID.y;
+    const uint thread = gl_LocalInvocationID.x;
+    const uint D = SDPA_DIM;
+
+    // The causal bound the served shapes ride, capped by the shared score
+    // buffer.
+    uint key_end = min(params.matrix_k - params.dims + row + 1u, kStreamKeys);
+    uint kv_head = head / (params.matrix_m / params.matrix_n);
+    uint k_row_stride = params.shape[2];
+    uint k_head_base = kv_head * params.shape[1];
+
+    uint qbase = (row * params.matrix_m + head) * D;
+    if (thread < 256u) {
+#if defined(F32_Q)
+        qs[thread] = params.alpha * qbuf.v[qbase + thread];
+#else
+        qs[thread] = params.alpha * bf16_to_f32(uint(qbuf.v[qbase + thread]));
+#endif
+    }
+    barrier();
+
+    float lmax = -3.4028234663852886e38;
+    for (uint index = thread; index < key_end; index += 256u) {
+        uint kbase = k_head_base + index * k_row_stride;
+        float s = 0.0;
+        for (uint d = 0u; d < D; ++d) {
+            s += qs[d] * bf16_to_f32(uint(kbuf.v[kbase + d]));
+        }
+        scores[index] = s;
+        lmax = nan_max(lmax, s);
+    }
+    red[thread] = lmax;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (thread < stride) red[thread] = nan_max(red[thread], red[thread + stride]);
+        barrier();
+    }
+    float m = red[0];
+
+    uint obase = row * params.out_strides[0] + head * D + thread;
+    uint v0 = k_head_base + thread;
+
+    if (key_end == 1u && !isnan(m) && !isinf(m)) {
+        // Synthena bug #7: a single finite score means the softmax weight is
+        // exactly 1 — transport V[0] bit-for-bit instead of accumulating.
+#if defined(F32_OUT)
+        ybuf.v[obase] = bf16_to_f32(uint(vbuf.v[v0]));
+#else
+        ybuf.v[obase] = vbuf.v[v0];
+#endif
+        return;
+    }
+
+    float lsum = 0.0;
+    for (uint index = thread; index < key_end; index += 256u) {
+        float w = exp(scores[index] - m);
+        scores[index] = w;
+        lsum += w;
+    }
+    red[thread] = lsum;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (thread < stride) red[thread] += red[thread + stride];
+        barrier();
+    }
+    float denom = red[0];
+
+    // Sequential over the visible keys, 16-key blocks then the tail.
+    float acc = 0.0;
+    uint key = 0u;
+    for (; key + 16u <= key_end; key += 16u) {
+        float b = 0.0;
+        for (uint j = 0u; j < 16u; ++j) {
+            b += scores[key + j] * bf16_to_f32(uint(vbuf.v[k_head_base + (key + j) * k_row_stride + thread]));
+        }
+        acc += b;
+    }
+    for (; key < key_end; ++key) {
+        acc += scores[key] * bf16_to_f32(uint(vbuf.v[k_head_base + key * k_row_stride + thread]));
+    }
+#if defined(F32_OUT)
+    ybuf.v[obase] = acc / denom;
+#else
+    ybuf.v[obase] = f32_to_bf16(acc / denom);
+#endif
+}

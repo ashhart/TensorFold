@@ -1,0 +1,155 @@
+#version 460
+
+// Clean-room Q4 affine projection over tiled weights, row-blocked
+// (issue #5215): out[m, n] = sum_k x[m, k] * (q[n, k] * scale[n, k / 64] +
+// bias[n, k / 64]) in float32, with each thread covering a 4-row by 2-column
+// block: columns c0 = tile * 32 + sub and c1 = c0 + 16 share loaded weight
+// vectors across the block's rows, and each row's activations serve both
+// columns. Weight layout is the tile.zig repack: vector j of column c at
+// uvec4 index ((c / 32) * (k / 32) + j) * 32 + c % 32; group g parameter of
+// column c at element index ((c / 32) * (k / 64) + g) * 32 + c % 32.
+// Behaviour from spec-qmm-q4-4.md; ABI from zig/src/vulkan/ops_q4.zig.
+
+// BF16 halves ride the low and high 16 bits of each loaded word.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Two packed BF16 activations per word: low half first, then high half.
+float act_elem(uvec4 v, uint i) {
+  uint word = v[i / 2u];
+  uint bits = i % 2u == 0u ? (word & 0xffffu) << 16u : word & 0xffff0000u;
+  return uintBitsToFloat(bits);
+}
+
+// Round-to-nearest-even f32 -> bf16: add 0x7fff + the kept lsb, then truncate;
+// a NaN keeps its class with the quiet bit set.
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16u) | 0x0040u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  uvec4 values[];
+} input_x;
+layout(set = 0, binding = 1, std430) readonly buffer InputW {
+  uvec4 values[];
+} input_w;
+layout(set = 0, binding = 2, std430) readonly buffer Scales {
+  uint16_t values[];
+} scales;
+layout(set = 0, binding = 3, std430) readonly buffer Biases {
+  uint16_t values[];
+} biases;
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
+  uint16_t values[];
+} output_data;
+
+layout(push_constant, std430) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} p;
+
+void main() {
+  // Grid: ceil(m / 4) row blocks by ceil(n / 32) column tiles, 16 threads a
+  // tile; thread sub covers columns tile * 32 + sub and tile * 32 + sub + 16.
+  uint col_tiles = (p.matrix_n + 31u) / 32u;
+  uint tile_threads = col_tiles * 16u;
+  uint tid = gl_GlobalInvocationID.x;
+  if (tid >= ((p.matrix_m + 3u) / 4u) * tile_threads) {
+    return;
+  }
+  uint row_block = tid / tile_threads;
+  uint rem = tid % tile_threads;
+  uint tile = rem / 16u;
+  uint sub = rem % 16u;
+  uint m0 = row_block * 4u;
+  uint c0 = tile * 32u + sub;
+  uint c1 = c0 + 16u;
+
+  uint vectors = p.matrix_k / 32u;
+  uint groups = p.matrix_k / 64u;
+
+  // Both columns share tile; their lanes sit sub and sub + 16 apart.
+  uint w_base = p.rhs_offset / 4u + tile * vectors * 32u + sub;
+  uint sb_base = p.aux_offset + tile * groups * 32u + sub;
+  uint x_vecs = p.lhs_offset / 8u + m0 * (p.matrix_k / 8u);
+
+  float acc0[4];
+  float acc1[4];
+  for (uint r = 0u; r < 4u; ++r) {
+    acc0[r] = 0.0;
+    acc1[r] = 0.0;
+  }
+
+  for (uint g = 0u; g < groups; ++g) {
+    // One group's weight vectors for both columns, loaded once for all rows.
+    uvec4 w0v0 = input_w.values[w_base + (g * 2u) * 32u];
+    uvec4 w0v1 = input_w.values[w_base + (g * 2u + 1u) * 32u];
+    uvec4 w1v0 = input_w.values[w_base + (g * 2u) * 32u + 16u];
+    uvec4 w1v1 = input_w.values[w_base + (g * 2u + 1u) * 32u + 16u];
+    float s0 = uintBitsToFloat(uint(scales.values[sb_base + g * 32u]) << 16u);
+    float b0 = uintBitsToFloat(uint(biases.values[sb_base + g * 32u]) << 16u);
+    float s1 = uintBitsToFloat(uint(scales.values[sb_base + g * 32u + 16u]) << 16u);
+    float b1 = uintBitsToFloat(uint(biases.values[sb_base + g * 32u + 16u]) << 16u);
+
+    for (uint r = 0u; r < 4u; ++r) {
+      uint m = m0 + r;
+      if (m >= p.matrix_m) {
+        break;
+      }
+      // Row m's activations: 8 uvec4 a group, shared by both columns.
+      uint xg = x_vecs + r * (p.matrix_k / 8u) + g * 8u;
+      for (uint v = 0u; v < 2u; ++v) {
+        uvec4 w0 = v == 0u ? w0v0 : w0v1;
+        uvec4 w1 = v == 0u ? w1v0 : w1v1;
+        for (uint i = 0u; i < 4u; ++i) {
+          uvec4 packed_x = input_x.values[xg + v * 4u + i];
+          for (uint e = 0u; e < 8u; ++e) {
+            float xv = act_elem(packed_x, e);
+            // Dequantized weight per code: x * (q * s + b); the factored
+            // form goes NaN on (inf, q=0).
+            acc0[r] += xv * (float((w0[i] >> (4u * e)) & 0xfu) * s0 + b0);
+            acc1[r] += xv * (float((w1[i] >> (4u * e)) & 0xfu) * s1 + b1);
+          }
+        }
+      }
+    }
+  }
+
+  for (uint r = 0u; r < 4u; ++r) {
+    uint m = m0 + r;
+    if (m >= p.matrix_m) {
+      break;
+    }
+    if (c0 < p.matrix_n) {
+      output_data.values[p.output_offset + m * p.matrix_n + c0] = bf16_store(acc0[r]);
+    }
+    if (c1 < p.matrix_n) {
+      output_data.values[p.output_offset + m * p.matrix_n + c1] = bf16_store(acc1[r]);
+    }
+  }
+}

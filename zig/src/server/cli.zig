@@ -8,7 +8,7 @@ const Allocator = std.mem.Allocator;
 const cli_flag = @import("cli_flag.zig");
 pub const Kind = cli_flag.Kind;
 pub const Flag = cli_flag.Flag;
-const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
+const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=vulkan")) &.{ "auto", "vulkan" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
 /// The flags past the common ones the binary's backend serves, from its root's `serves` (test roots: none).
 const native_serves: []const []const u8 = if (@hasDecl(@import("root"), "serves")) @import("root").serves else &.{};
 
@@ -124,7 +124,7 @@ pub const flags = [_]Flag{
     .{ .name = "--ple-on-ssd", .kind = .store_true, .native = builtin.os.tag == .macos },
     .{ .name = "--fsr-route-trace", .path = true, .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
-    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
+    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm", "vulkan" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .native = served("--tp") }, // 1 to 64; each family admits its own worlds
     .{ .name = "--pp", .native = served("--tp") }, // 1 until pipeline stages serve (#2005)
     .{ .name = "--rank", .native = served("--tp") },
@@ -483,6 +483,7 @@ const cli = @This();
 /// The private flag helpers cli_test.zig checks.
 pub const Test = if (builtin.is_test) struct {
     pub const cuda_build = cli.cuda_build;
+    pub const backend_values = cli.backend_values;
     pub const native_serves = cli.native_serves;
     pub const servedBy = cli.servedBy;
     pub const cudaFlag = cli.cudaFlag;
