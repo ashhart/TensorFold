@@ -1,4 +1,4 @@
-//! A single bounded decode graph, recaptured when sequence owners, scratch or attention geometry change.
+//! A single bounded decode graph, recaptured when sequence owners or buffers, scratch or attention geometry change.
 const std = @import("std");
 const cuda = @import("cuda");
 
@@ -10,6 +10,9 @@ pub fn enabled() bool {
 pub const Key = struct {
     count: usize,
     owners: [32]u64 = @splat(0),
+    /// Each lane's buffers (window_graph.pieces): a drafted window's settle swaps its states, so the key moves too.
+    buffers: [32]u64 = @splat(0),
+    caps: [32]u64 = @splat(0),
     chunks: [32]u32 = @splat(0),
     score_tiles: [32]u32 = @splat(0),
     scratch: u64,
@@ -22,6 +25,8 @@ pub const Key = struct {
         for (seqs, 0..) |q, i| {
             if (q.rank_id == 0) return error.UnsupportedRankOperation;
             key.owners[i] = q.rank_id;
+            key.buffers[i] = @import("cuda_window_graph.zig").pieces(q);
+            key.caps[i] = q.cap;
             const end = q.fed + 1;
             key.chunks[i] = @intCast((@min(end, 2051) + 511) / 512);
             key.score_tiles[i] = if (end / 4 > 512) @intCast(((end + 3) / 4 + 63) / 64) else 0;
@@ -33,14 +38,19 @@ pub const Key = struct {
 pub const Cache = struct {
     exec: ?cuda.graph.Exec = null,
     key: ?Key = null,
+    /// Rounds captured and replayed since start (logged each 64th capture and 1024th replay); a clear keeps them.
+    captures: u64 = 0,
+    replays: u64 = 0,
 
     pub fn clear(c: *Cache) void {
         if (c.exec) |*e| e.deinit();
-        c.* = .{};
+        c.* = .{ .captures = c.captures, .replays = c.replays };
     }
 
     pub fn run(c: *Cache, key: Key, pass: anytype, ids: []const u32) !void {
         try @import("cuda_window_graph.zig").stageWindow(pass, ids, 0);
+        // the key holds no pocket or its row scales (Engine.taught_rows), so a pass with one is refused
+        if (pass.m.pocket != null) return error.UnexpectedTensor;
         if (c.key == null or !std.meta.eql(c.key.?, key)) {
             c.clear();
             try cuda.graph.beginCapture(pass.stream, .thread_local);
@@ -57,30 +67,15 @@ pub const Cache = struct {
             errdefer c.clear();
             try c.exec.?.upload(pass.stream);
             c.key = key;
+            c.captures += 1;
+            if (c.captures % 64 == 1) std.log.info("flashnext: decode round graphs: {d} captured, {d} replayed", .{ c.captures, c.replays });
+        } else {
+            c.replays += 1;
+            if (c.replays % 1024 == 0) std.log.info("flashnext: decode round graphs: {d} captured, {d} replayed", .{ c.captures, c.replays });
         }
         try c.exec.?.launchOn(pass.stream);
     }
 };
-
-test "decode graph keys invalidate on owner order, attention seams and score tile seams" {
-    const Seq = struct { rank_id: u64, fed: usize };
-    var first: Seq = .{ .rank_id = 1, .fed = 10 };
-    var second: Seq = .{ .rank_id = 2, .fed = 10 };
-    const base = try Key.init(@as([]const *Seq, &.{ &first, &second }), 1, 2, 3);
-    try std.testing.expect(!std.meta.eql(base, try Key.init(@as([]const *Seq, &.{ &second, &first }), 1, 2, 3)));
-    first.fed = 511;
-    const before = try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3);
-    first.fed = 512;
-    try std.testing.expect(!std.meta.eql(before, try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3)));
-    first.fed = 2048;
-    const dense = try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3);
-    first.fed = 2051;
-    try std.testing.expect(!std.meta.eql(dense, try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3)));
-    first.fed = 2303;
-    const score = try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3);
-    first.fed = 2304;
-    try std.testing.expect(!std.meta.eql(score, try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3)));
-}
 
 test {
     _ = @import("cuda_round_graph_test.zig");

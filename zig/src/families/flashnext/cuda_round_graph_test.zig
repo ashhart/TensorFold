@@ -12,6 +12,7 @@ const dims = 2560;
 const Fake = struct {
     var capturing = false;
     var captures: usize = 0;
+    var captured_gathers: usize = 0;
     var capture_copies: usize = 0;
     var instantiates: usize = 0;
     var launches: usize = 0;
@@ -19,7 +20,7 @@ const Fake = struct {
     var token: i32 = 0;
     var position: i32 = 0;
     var seen: [2]i32 = undefined;
-    var order: [4]enum { graph_destroy, comm_abort } = undefined;
+    var order: [32]enum { graph_destroy, comm_abort } = undefined;
     var order_len: usize = 0;
     var allocations: [32]?[]align(16) u8 = @splat(null);
 
@@ -93,6 +94,14 @@ const Fake = struct {
         order_len += 1;
         return 0;
     }
+    fn allGather(_: abi.DevicePtr, _: abi.DevicePtr, _: usize, _: cuda.nccl.DataType, _: cuda.nccl.Comm, _: abi.Stream) callconv(.c) c_int {
+        if (capturing) captured_gathers += 1;
+        return 0;
+    }
+    fn asyncError(_: cuda.nccl.Comm, state: *c_int) callconv(.c) c_int {
+        state.* = 0;
+        return 0;
+    }
     fn abort(_: cuda.nccl.Comm) callconv(.c) c_int {
         order[order_len] = .comm_abort;
         order_len += 1;
@@ -103,13 +112,14 @@ const Fake = struct {
     }
     fn launch(_: abi.GraphExec, _: abi.Stream) callconv(.c) abi.Result {
         std.debug.assert(!capturing and copies == 4 * (launches + 1));
-        seen[launches] = token;
+        if (launches < seen.len) seen[launches] = token;
         launches += 1;
         return 0;
     }
     fn driver() cuda.Driver {
         capturing = false;
         captures = 0;
+        captured_gathers = 0;
         instantiates = 0;
         launches = 0;
         copies = 0;
@@ -170,13 +180,14 @@ const Pass = struct {
     s: *Scratch,
     stream: cuda.Stream,
     io: std.Io = t.io,
-    m: struct { ngram: *const ple.Ngram },
+    m: struct { ngram: *const ple.Ngram, collective: ?*collective.Collective = null, pocket: ?*anyopaque = null },
     seq: parts.SeqState,
     lanes: []const parts.Lane,
     prepared: bool = false,
     staged: bool = false,
     pos0: usize = 0,
     chunks: usize = 0,
+    split: bool = false,
     pub fn upload(p: *Pass, dst: u64, bytes: []const u8) !void {
         try cuda.copy_source.enqueue(p.stream.d, dst, bytes, p.stream);
     }
@@ -191,9 +202,91 @@ const Pass = struct {
     }
     pub fn chunk(p: *Pass, ids: []const u32, _: usize, _: ?[]u8) !void {
         if (!p.staged) try p.stage(ids);
+        if (p.split) {
+            try p.m.collective.?.gather(p.stream, 0x7000, 0x8000, 4);
+            try p.m.collective.?.gatherF32(p.stream, 0x9000, 0xa000, 4);
+        }
         p.chunks += 1;
     }
 };
+
+const Buf = struct { ptr: u64 };
+const linear_n = @import("cuda_prompt_wt.zig").linear_n;
+const attn_n = @import("cuda_prompt_wt.zig").attn_n;
+
+/// A sequence's owner, length and the buffer addresses a round's lane takes from it.
+const Seq = struct {
+    rank_id: u64,
+    fed: usize = 10,
+    cap: usize = 1024,
+    conv: [linear_n]Buf = undefined,
+    state: [linear_n]Buf = undefined,
+    kc: [attn_n]Buf = undefined,
+    vc: [attn_n]Buf = undefined,
+    ikc: [attn_n]Buf = undefined,
+    pooled: [attn_n]Buf = undefined,
+    tail: Buf = undefined,
+    pg: @import("cuda_glue.zig").Pg = .{},
+
+    fn at(owner: u64, base: u64) Seq {
+        var q: Seq = .{ .rank_id = owner };
+        var a = base;
+        inline for (.{ "conv", "state", "kc", "vc", "ikc", "pooled" }) |f| {
+            for (&@field(q, f)) |*b| {
+                b.ptr = a;
+                a += 0x10000;
+            }
+        }
+        q.tail.ptr = a;
+        return q;
+    }
+
+    fn settle(q: *Seq, spare: *[linear_n]Buf) void {
+        for (&q.state, spare) |*a, *b| std.mem.swap(Buf, a, b);
+    }
+};
+
+fn spares(base: u64) [linear_n]Buf {
+    var s: [linear_n]Buf = undefined;
+    for (&s, 0..) |*b, i| b.ptr = base + i * 0x10000;
+    return s;
+}
+
+fn keyOf(seqs: []const *const Seq) !round.Key {
+    return round.Key.init(seqs, 1, 2, 3);
+}
+
+test "decode graph keys: owner order, attention and score tile seams, each lane's buffers and length" {
+    var first: Seq = .at(1, 0x1000_0000);
+    var second: Seq = .at(2, 0x2000_0000);
+    const base = try keyOf(&.{ &first, &second });
+    try t.expectEqual(base, try keyOf(&.{ &first, &second }));
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &second, &first })));
+    const alone = try keyOf(&.{&first});
+    var spare = spares(0x3000_0000);
+    second.settle(&spare);
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    try t.expectEqual(alone, try keyOf(&.{&first}));
+    second.settle(&spare);
+    try t.expectEqual(base, try keyOf(&.{ &first, &second }));
+    second.tail.ptr += 0x100;
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    second.tail.ptr -= 0x100;
+    second.cap = 2048;
+    try t.expect(!std.meta.eql(base, try keyOf(&.{ &first, &second })));
+    first.fed = 511;
+    const before = try keyOf(&.{&first});
+    first.fed = 512;
+    try t.expect(!std.meta.eql(before, try keyOf(&.{&first})));
+    first.fed = 2048;
+    const dense = try keyOf(&.{&first});
+    first.fed = 2051;
+    try t.expect(!std.meta.eql(dense, try keyOf(&.{&first})));
+    first.fed = 2303;
+    const score = try keyOf(&.{&first});
+    first.fed = 2304;
+    try t.expect(!std.meta.eql(score, try keyOf(&.{&first})));
+}
 
 fn ngram(g: *ple.Ngram, buffers: *[2][3][]u8) !void {
     g.* = .{ .gpa = t.allocator, .scale = 1, .hash = try ple.Hash.init(.{
@@ -261,6 +354,71 @@ test "rank graphs: plain rounds stage uploads before capture and before every re
     try t.expectEqual(@as(usize, 2), scratch.waits);
     try t.expectEqual(@as(usize, 2), scratch.fences);
     try t.expect(!Fake.capturing);
+    try t.expectEqual([2]u64{ 1, 1 }, [2]u64{ cache.captures, cache.replays });
+    cache.clear();
+    try t.expectEqual([2]u64{ 1, 1 }, [2]u64{ cache.captures, cache.replays });
+}
+
+fn runKey(c: *round.Cache, key: round.Key, p: *Pass) !void {
+    p.prepared = false;
+    p.staged = false;
+    try c.run(key, p, &.{7});
+}
+
+test "rank graphs: dense gathers, settled lanes and pocket refusal" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var d = Fake.driver();
+    defer {
+        cuda.copy_source.synchronizeContext(&d) catch unreachable;
+        std.debug.assert(!cuda.copy_source.keepDriver(&d));
+    }
+    var pair: [2]c_int = undefined;
+    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
+    defer for (pair) |fd| {
+        _ = std.c.close(fd);
+    };
+    var col: collective.Collective = .{ .lib = undefined, .api = undefined, .comm = @as(cuda.nccl.Comm, @ptrFromInt(3)), .link = .{ .fd = pair[0] }, .timeout_ms = 1 };
+    col.lib.api.ncclAllGather = Fake.allGather;
+    col.api.ncclCommGetAsyncError = Fake.asyncError;
+    col.api.ncclCommAbort = Fake.abort;
+    var cache: round.Cache = .{};
+    defer cache.clear();
+    var scratch: Scratch = .{};
+    var buffers: [2][3][]u8 = @splat(@splat(&.{}));
+    defer for (buffers) |row| for (row) |b| t.allocator.free(b);
+    var g: ple.Ngram = undefined;
+    try ngram(&g, &buffers);
+    var history = [2]i64{ 99, 99 };
+    var seq: parts.SeqState = undefined;
+    seq.history = &history;
+    var lanes = [_]parts.Lane{.{ .seq = seq, .pos = 5 }};
+    var p: Pass = .{ .s = &scratch, .stream = .{ .d = &d, .handle = null }, .m = .{ .ngram = &g, .collective = &col }, .seq = seq, .lanes = &lanes, .split = true };
+    const plain: Seq = .at(1, 0x1000_0000);
+    var drafted: Seq = .at(2, 0x2000_0000);
+    var spare = spares(0x3000_0000);
+    for (0..3) |_| try runKey(&cache, try keyOf(&.{&plain}), &p);
+    try t.expectEqual([3]u64{ 1, 2, 2 }, [3]u64{ cache.captures, cache.replays, Fake.captured_gathers });
+    for (0..3) |_| {
+        cache.clear();
+        try runKey(&cache, try keyOf(&.{&plain}), &p);
+    }
+    try t.expectEqual([3]u64{ 4, 2, 8 }, [3]u64{ cache.captures, cache.replays, Fake.captured_gathers });
+    for (0..4) |_| {
+        try runKey(&cache, try keyOf(&.{&plain}), &p);
+        drafted.settle(&spare);
+    }
+    try t.expectEqual([2]u64{ 4, 6 }, [2]u64{ cache.captures, cache.replays });
+    for (0..3) |_| {
+        try runKey(&cache, try keyOf(&.{ &plain, &drafted }), &p);
+        try runKey(&cache, try keyOf(&.{ &plain, &drafted }), &p);
+        drafted.settle(&spare);
+    }
+    try t.expectEqual([2]u64{ 7, 9 }, [2]u64{ cache.captures, cache.replays });
+    cache.clear();
+    p.m.pocket = @ptrFromInt(0x10);
+    try t.expectError(error.UnexpectedTensor, runKey(&cache, try keyOf(&.{&plain}), &p));
+    try t.expect(cache.exec == null);
+    try t.expectEqual([3]u64{ 7, 9, 7 }, [3]u64{ cache.captures, cache.replays, Fake.captures });
 }
 
 test "rank graphs: collective abort releases the decode graph before ncclCommAbort" {

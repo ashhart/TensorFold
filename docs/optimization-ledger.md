@@ -573,6 +573,8 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | flashnext (C), TP=2 | prompt passes reduce-scatter the experts' slots by rows: rank 0 sends 5.81 → 3.43 MiB a prompt token, cold prefill +26.5..+26.8 % on two GB10s, +30.9..+33.9 % on two RTX PRO 6000s, same replies | [#2977] |
     | flashnext (C), TP=2 | control-link waits poll 50 µs for 50 ms before they block: drafted decode +1.4..+1.5 % at one stream, +3.7..+4.7 % at four on two GB10s, same replies | [#2971] |
+    | flashnext (C), TP=2 | collectives on a blocking split when both ranks share a host: plain decode 28.9 → 73.3 tok/s, drafted code 114 → 211 on 2 × RTX PRO 6000; ranks on two hosts keep the nonblocking communicator, 2 × GB10 decode level with main; same replies | [#2978] |
+    | flashnext (C), TP=2 | opt-in decode graph with the dense split, keyed by each lane's buffers: 2 × GB10 plain decode +5.9..+6.0 %, drafted level; a drafted and a plain stream no longer recapture once a verify; same replies; off by default | [#2982] |
 
 26. **Pipeline stages.** Layer ranges on different nodes, one hidden row a token over Ethernet, so a GB10 and a Mac
     can serve one model ([#2005]). The stage link and its protocol are [#2012] and [#2060]; the 27B as a stage is
@@ -842,6 +844,8 @@ below; these are estimates for planning a port, not results.
 [#3305]: https://github.com/ashhart/TensorFold/issues/3305
 [#2941]: https://github.com/ashhart/TensorFold/issues/2941
 [#2971]: https://github.com/ashhart/TensorFold/pull/2971
+[#2978]: https://github.com/ashhart/TensorFold/pull/2978
+[#2982]: https://github.com/ashhart/TensorFold/pull/2982
 [#3741]: https://github.com/ashhart/TensorFold/issues/3741
 [#3811]: https://github.com/ashhart/TensorFold/issues/3811
 [#4673]: https://github.com/ashhart/TensorFold/pull/4673
