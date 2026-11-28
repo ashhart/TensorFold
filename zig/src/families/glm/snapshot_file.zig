@@ -1,7 +1,7 @@
 //! GLM learned halves use a versioned checksum envelope; legacy, corrupt and partial files never enter a cache.
 const std = @import("std");
 const platform = @import("sys");
-const checked = @import("../../core/snapshot_file.zig");
+const checked = @import("snapshot_file");
 const magic: u32 = 0x474c4d54;
 pub const Head = extern struct { magic: u32 = magic, version: u32 = 1, at: u32, reserved: u32 = 0, bytes: u64 };
 pub fn write(file: [:0]const u8, at: u32, payload: []const u8) !void {

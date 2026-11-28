@@ -9,7 +9,7 @@ const Snap = snapshot.Snap;
 
 const FILE_MAGIC: u32 = 0x4e454d54; // "NEMT": checksummed
 const HEAD = 5; // magic, position, head flag, bytes (2)
-const checked = @import("../../core/snapshot_file.zig");
+const checked = @import("snapshot_file");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// A learned state's file: <dir>/<key>.bin.

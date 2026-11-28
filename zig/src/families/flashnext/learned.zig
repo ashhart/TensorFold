@@ -21,7 +21,7 @@ pub fn path(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
 /// `st` to `file` (its header, then its bytes), through a temporary file renamed into place.
 pub fn writeFile(st: *const State, file: [:0]const u8) !void {
     const head: Head = .{ .magic = FILE_MAGIC, .layout = @backingInt(st.layout), .at = st.at, .bytes = st.bytes, .hist = st.hist };
-    try @import("../../core/snapshot_file.zig").publish(file, &.{ std.mem.asBytes(&head), st.buf.contents()[0..st.bytes] });
+    try @import("snapshot_file").publish(file, &.{ std.mem.asBytes(&head), st.buf.contents()[0..st.bytes] });
 }
 
 /// `file`'s state after `at` tokens, in a buffer from the engine's pool; another position, layout or size is refused.

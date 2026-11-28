@@ -1,4 +1,4 @@
-//! `sys` (zig/src/platform/sys.zig) for every module the build compiles, by one walk of the step graph once declared.
+//! `sys` and `snapshot_file`: one shared module per target, wired across each declared source graph.
 
 const std = @import("std");
 
@@ -6,8 +6,9 @@ pub fn wire(b: *std.Build) void {
     var seen_steps: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
     var seen_mods: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
     var per_target: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
+    var snapshot_targets: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
     var memory_targets: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
-    var w: Walk = .{ .b = b, .seen_steps = &seen_steps, .seen_mods = &seen_mods, .per_target = &per_target, .memory_targets = &memory_targets };
+    var w: Walk = .{ .b = b, .seen_steps = &seen_steps, .seen_mods = &seen_mods, .per_target = &per_target, .memory_targets = &memory_targets, .snapshot_targets = &snapshot_targets };
     for (b.top_level_steps.values()) |top| w.step(&top.step);
 }
 
@@ -17,6 +18,7 @@ const Walk = struct {
     seen_mods: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
     per_target: *std.StringHashMapUnmanaged(*std.Build.Module),
 
+    snapshot_targets: *std.StringHashMapUnmanaged(*std.Build.Module),
     memory_targets: *std.StringHashMapUnmanaged(*std.Build.Module),
 
     fn step(w: *Walk, s: *std.Build.Step) void {
@@ -31,6 +33,8 @@ const Walk = struct {
         // only TensorFold's own sources see it; the sys module itself and generated modules do not
         if (m.root_source_file) |root| if (root == .src_path and !m.import_table.contains("sys") and !std.mem.endsWith(u8, root.src_path.sub_path, "platform/sys.zig"))
             m.addImport("sys", w.sys(target));
+        if (m.root_source_file) |root| if (root == .src_path and !m.import_table.contains("snapshot_file") and !std.mem.endsWith(u8, root.src_path.sub_path, "core/snapshot_file.zig"))
+            m.addImport("snapshot_file", w.snapshot(target));
         if (m.root_source_file) |root| if (root == .src_path) {
             const path = root.src_path.sub_path;
             if ((std.mem.endsWith(u8, path, "native/metal.zig") or std.mem.endsWith(u8, path, "tests/contract/metal_main.zig")) and !m.import_table.contains("qwen4"))
@@ -49,6 +53,13 @@ const Walk = struct {
         const key = target.result.zigTriple(w.b.allocator) catch @panic("OOM");
         const slot = w.memory_targets.getOrPut(w.b.allocator, key) catch @panic("OOM");
         if (!slot.found_existing) slot.value_ptr.* = w.b.createModule(.{ .root_source_file = w.b.path("zig/src/families/flashnext/load_memory.zig"), .target = target });
+        return slot.value_ptr.*;
+    }
+
+    fn snapshot(w: *Walk, target: std.Build.ResolvedTarget) *std.Build.Module {
+        const key = target.result.zigTriple(w.b.allocator) catch @panic("OOM");
+        const slot = w.snapshot_targets.getOrPut(w.b.allocator, key) catch @panic("OOM");
+        if (!slot.found_existing) slot.value_ptr.* = w.b.createModule(.{ .root_source_file = w.b.path("zig/src/core/snapshot_file.zig"), .target = target, .link_libc = true });
         return slot.value_ptr.*;
     }
 
