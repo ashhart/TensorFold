@@ -9,6 +9,7 @@ const attention = @import("kernels.zig");
 const modelopt = @import("modelopt.zig");
 const loop_math = @import("loop_math_cuda.zig");
 const round = @import("loop_round.zig");
+const kept_state = @import("kept_state.zig");
 
 pub const prompt_rows: usize = 2048;
 pub const window_rows: usize = 16;
@@ -382,49 +383,34 @@ pub const Model = struct {
         buf: cuda.DeviceBuffer,
     };
 
+    /// Every visit's caches as the shared kept-state walk sees them: head-major `[kv head][ring][dim]` (attention.cu).
+    pub fn keptVisits(m: *const Model, out: *[config.max_visits]kept_state.Visit) []const kept_state.Visit {
+        for (out[0..m.w.p.n_visits], m.w.p.visits[0..m.w.p.n_visits]) |*kv, visit| {
+            const layer = m.w.p.at(visit.layer);
+            const cache = m.cacheOf(visit.cache_slot);
+            const ring = m.layerGeometry(visit.layer).ring;
+            kv.* = .{ .k = cache.k, .v = cache.v, .heads = layer.heads.kv, .ring = ring, .row = @as(u64, layer.heads.dim) * 2, .global = layer.kind == .global };
+        }
+        return out[0..m.w.p.n_visits];
+    }
+
     /// Compact bytes for all valid K/V rows and every convolution state of all 48 visits.
     pub fn snapshotBytes(m: *const Model, at: usize) u64 {
-        var bytes = m.layout.bytes - m.layout.at(0).conv_offset;
-        for (0..m.w.p.n_visits) |v| {
-            const layer = m.w.p.at(m.w.p.visits[v].layer);
-            const global = layer.kind == .global;
-            const count = if (global) at else @min(at, m.w.c.text.window - 1);
-            const row = @as(u64, layer.heads.kv) * layer.heads.dim * 2;
-            bytes += 2 * count * row;
-        }
-        return bytes;
+        var visits: [config.max_visits]kept_state.Visit = undefined;
+        return m.layout.bytes - m.layout.at(0).conv_offset + kept_state.bytes(m.keptVisits(&visits), m.w.c.text.window, at);
     }
 
     fn copyState(m: *const Model, s: cuda.Stream, saved: *const Saved, out: bool) !void {
-        const at: usize = saved.at;
-        var off: usize = 0;
-        for (0..m.w.p.n_visits) |v| {
-            const visit = m.w.p.visits[v];
-            const layer = m.w.p.at(visit.layer);
-            const geometry = m.layerGeometry(visit.layer);
-            const rb = @as(usize, layer.heads.dim) * 2; // the caches are head-major: [kv head][ring][dim]
-            const global = layer.kind == .global;
-            const count = if (global) at else @min(at, m.w.c.text.window - 1);
-            const first = at - count;
-            const cache = m.cacheOf(visit.cache_slot);
-            for ([2]u64{ cache.k, cache.v }) |k_or_v| for (0..layer.heads.kv) |head| {
-                const base = k_or_v + head * geometry.ring * rb;
-                var pos = first;
-                while (pos < at) {
-                    const row = pos % geometry.ring;
-                    const n = @min(at - pos, geometry.ring - row);
-                    const dev = base + row * rb;
-                    const src = if (out) dev else saved.buf.ptr + off;
-                    const dst = if (out) saved.buf.ptr + off else dev;
-                    try m.copy(s, dst, src, n * rb);
-                    off += n * rb;
-                    pos += n;
-                }
-            };
+        var visits: [config.max_visits]kept_state.Visit = undefined;
+        var walk = kept_state.Walk.init(m.keptVisits(&visits), m.w.c.text.window, saved.at);
+        while (walk.next()) |p| {
+            const kept = saved.buf.ptr + p.offset;
+            try m.copy(s, if (out) kept else p.cache, if (out) p.cache else kept, p.len);
         }
         const conv = m.slotBase() + m.layout.at(0).conv_offset;
         const bytes = m.layout.bytes - m.layout.at(0).conv_offset;
-        try m.copy(s, if (out) saved.buf.ptr + off else conv, if (out) conv else saved.buf.ptr + off, bytes);
+        const off = saved.buf.ptr + walk.offset;
+        try m.copy(s, if (out) off else conv, if (out) conv else off, bytes);
     }
 
     pub fn save(m: *const Model, s: cuda.Stream, at: u32) !*Saved {
@@ -444,6 +430,8 @@ pub const Model = struct {
         if (saved.visits != m.w.p.n_visits or saved.passes != lp.passes or saved.hidden != m.w.c.text.hidden)
             return error.StateOfAnotherModel;
         if (saved.at == 0 or saved.at > m.context or saved.buf.len < snapshotBytes(m, saved.at)) return error.BadLoopSnapshot;
+        var visits: [config.max_visits]kept_state.Visit = undefined;
+        if (!kept_state.fits(m.keptVisits(&visits), m.w.c.text.window, saved.at)) return error.BadLoopSnapshot;
         try m.copyState(s, saved, false);
     }
 

@@ -9,6 +9,9 @@ test {
     _ = @import("names_test.zig");
     _ = @import("plan.zig");
     _ = @import("loop.zig");
+    _ = @import("kept_state.zig");
+    _ = @import("dspark_lanes.zig");
+    _ = @import("dspark_lanes_test.zig");
     _ = @import("loop_model.zig");
     _ = @import("loop_model_test.zig");
     _ = @import("prompt.zig");

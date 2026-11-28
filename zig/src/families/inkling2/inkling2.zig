@@ -7,6 +7,7 @@ pub const ops = @import("ops.zig");
 pub const experts = @import("experts.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const loop = @import("loop.zig");
+pub const kept_state = @import("kept_state.zig");
 pub const loop_model = @import("loop_model.zig");
 pub const loop_math_cuda = @import("loop_math_cuda.zig");
 pub const native = @import("cuda_native.zig");
@@ -24,6 +25,7 @@ test {
     _ = modelopt;
     _ = native;
     _ = loop;
+    _ = kept_state;
     _ = loop_model;
     _ = loop_math_cuda;
     _ = dspark_ops;
