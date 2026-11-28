@@ -54,8 +54,7 @@ pub const Options = struct {
     graphs: bool = false,
     /// --drafter on a follower: the drafter it opens its share of when rank 0 opens one.
     drafter: ?[]const u8 = null,
-    /// A failure the parity tool plants on one rank; a serve never sets one.
-    fault: halt.Fault = .{},
+    fault: halt.Fault = .{}, // a failure the parity tool plants on one rank; a serve never sets one
 };
 
 /// Plan ops: stop, decode rows, a prompt chunk, kept states (save, restore, drop, row copy), hello, a drafter's calls.
@@ -511,8 +510,9 @@ pub const Model = struct {
             };
             var g = try cuda.graph.endCapture(s);
             defer g.deinit();
+            try m.graphs.ensureUnusedCapacity(m.gpa, 1); // the map owns the executable from its instantiation
             const e = try g.instantiate();
-            try m.graphs.put(m.gpa, ng, e);
+            m.graphs.putAssumeCapacity(ng, e);
             try e.launchOn(s);
         } else {
             try m.warm.put(m.gpa, ng, {});
