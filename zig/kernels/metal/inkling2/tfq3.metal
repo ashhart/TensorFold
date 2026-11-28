@@ -12,7 +12,7 @@ struct Ink2Tfq3Args {
   uint  topk;
   float gate_cap;
   float up_cap;
-  uint  pad;
+  uint  table4_kind;
 };
 
 struct PwExpertMeta {

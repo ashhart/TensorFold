@@ -254,3 +254,17 @@ test "CUDA TFQ3: reserve rolls all slots back at each allocation failure" {
         try t.expectEqual(@as(usize, 0), Fake.duplicate_frees);
     }
 }
+
+test "CUDA TFQ3: DenseWeight.sliceRows preserves alignment and computes exact word and scale offsets" {
+    const base: tf.DenseWeight = .{ .words = 0x10000, .scales = 0x20000, .tables = 0x30000, .n = 248320, .k = 5120, .bits = 4 };
+    const first = try base.sliceRows(0, 98304);
+    try t.expectEqual(@as(u32, 98304), first.n);
+    try t.expectEqual(@as(u32, 0), first.row_off);
+    try t.expectEqual(base.words, first.words);
+    const tail = try base.sliceRows(247936, 384);
+    try t.expectEqual(@as(u32, 384), tail.n);
+    try t.expectEqual(@as(u32, 247936), tail.row_off);
+    try t.expectEqual(base.scales + @as(u64, 247936 / 128) * (5120 / 128) * 2, tail.scales);
+    try t.expectError(error.Tfq3Shape, base.sliceRows(64, 128));
+    try t.expectError(error.Tfq3Shape, base.sliceRows(248320, 128));
+}

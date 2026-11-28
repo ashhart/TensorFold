@@ -1,6 +1,6 @@
 //! Persistence identities and disk-open options under recording drivers, without shader producers.
 const std = @import("std");
-pub fn steps(b: *std.Build, native: *std.Build.Module, all: *std.Build.Step) void {
+pub fn steps(b: *std.Build, native: *std.Build.Module, all: *std.Build.Step, host: std.Build.ResolvedTarget, api: *std.Build.Module, core: *std.Build.Module) void {
     const open = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA disk open:"} }));
     b.step("test-cuda-disk-open-host", "CUDA's disk store takes --spill-gib's mode and --checkpoint-slots").dependOn(&open.step);
     all.dependOn(&open.step);
@@ -14,6 +14,10 @@ pub fn steps(b: *std.Build, native: *std.Build.Module, all: *std.Build.Step) voi
     witnessed.has_side_effects = true;
     b.step("test-execution-witness-cuda-host", "The witness's first CUDA path: hook, every weight byte, stamps, reloads").dependOn(&witnessed.step);
     all.dependOn(&witnessed.step);
+    const flash_disk = b.createModule(.{ .root_source_file = b.path("zig/src/native/flashnext_disk.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = core } } });
+    const flash_disk_run = b.addRunArtifact(b.addTest(.{ .root_module = flash_disk, .filters = &.{"Flash Next disk:"} }));
+    b.step("test-flashnext-disk-host", "Flash Next's served-state disk permit without devices").dependOn(&flash_disk_run.step);
+    all.dependOn(&flash_disk_run.step);
 }
 
 /// Compile the actual four Metal identity bodies without a shader producer, link or execution.

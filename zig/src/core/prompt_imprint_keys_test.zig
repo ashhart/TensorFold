@@ -116,6 +116,7 @@ test "the key index keeps the records, order, clock and victims of the linear sc
     const a = std.testing.allocator;
     var rb: [128]u8 = undefined;
     const root = try scratch(&rb, "random");
+    rmTree(root); // Windows reuses PIDs: an interrupted prior run must not become this run's initial state
     defer rmTree(root);
     var o: Model = .{};
     defer o.deinit(a);
