@@ -2,6 +2,7 @@
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = blk: {
+    @setEvalBranchQuota(100_000);
     var all: [48]M = undefined;
     var at: usize = 0;
     for (1..9) |sk| for ([_]usize{ 8, 16, 24, 32, 40, 48 }) |block| {
