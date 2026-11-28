@@ -8,6 +8,11 @@ const rowdir = @import("rows_dir.zig");
 const rows = @import("rows_store.zig");
 const Fake = @import("rows_fake.zig").Fake;
 
+const IndexSync = enum { off, record, parent_failed };
+threadlocal var index_sync: IndexSync = .off;
+threadlocal var index_fd: c_int = -1;
+threadlocal var rollback_synced = false;
+
 const SweepFailure = enum { none, unlink, sync };
 threadlocal var sweep_failure: SweepFailure = .none;
 var open_streams: std.atomic.Value(isize) = .init(0);
@@ -52,8 +57,30 @@ pub export fn unlinkat(fd: c_int, path: [*:0]const u8, flags: c_int) callconv(.c
     return systemCall(*const fn (c_int, [*:0]const u8, c_int) callconv(.c) c_int, "unlinkat")(actual, path, flags);
 }
 
+fn writable(fd: c_int) bool {
+    if (comptime builtin.os.tag == .windows) return false;
+    const flags = std.c.fcntl(fd, std.c.F.GETFL);
+    const mode: c_int = @bitCast(@as(u32, @bitCast(std.c.O{ .ACCMODE = .RDWR })));
+    return flags >= 0 and flags & mode == mode;
+}
+
+fn indexFailure(fd: c_int) c_int {
+    if (index_sync == .off) return fd;
+    if (writable(fd)) {
+        if (index_sync == .record) {
+            index_fd = fd;
+        } else if (index_sync == .parent_failed and fd == index_fd) rollback_synced = true;
+        return fd;
+    }
+    if (index_sync == .record and index_fd >= 0) {
+        index_sync = .parent_failed;
+        return -1;
+    }
+    return fd;
+}
+
 pub export fn fsync(fd: c_int) callconv(.c) c_int {
-    const actual = if (sweep_failure == .sync) -1 else fd;
+    const actual = if (sweep_failure == .sync) -1 else indexFailure(fd);
     if (comptime builtin.os.tag == .windows) return platform.c.fsync(actual);
     return systemCall(*const fn (c_int) callconv(.c) c_int, "fsync")(actual);
 }
@@ -383,6 +410,43 @@ test "unindexed payload sweeps close their directory after an unlink failure" {
 
 test "unindexed payload sweeps close their directory after a directory-sync failure" {
     try failedSweepBalances(.sync, "sweep-sync");
+}
+test "failed index parent sync durably rolls back before learner cleanup and reopen" {
+    if (platform.windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "index-rollback");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var payload_buf: [512]u8 = undefined;
+    const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+    const key = Imprint.keyOf(prompt[0..6]);
+    {
+        var im = try Imprint.open(a, root, 1, 1 << 20);
+        defer im.deinit();
+        im.admission = .{ .floor = 0 };
+        var f: @import("prompt_cache_fake.zig").Fake = .{ .gpa = a, .at = 5 };
+        var s = @import("prompt_cache.zig").Store.init(a, f.learned(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+        defer s.deinit();
+        s.imprint = &im;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+        index_sync = .record;
+        index_fd = -1;
+        rollback_synced = false;
+        defer index_sync = .off;
+        try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+        try std.testing.expect(rollback_synced);
+        try std.testing.expect(!im.has(key));
+        try std.testing.expect((try im.pendingWrite()) == null);
+        try std.testing.expectEqual(@as(usize, 1), f.disk_forgets);
+        const payload = try @import("prompt_cache_fake.zig").Fake.file(&payload_buf, im.dir, key);
+        try std.testing.expect(!exists(std.fs.path.dirname(payload).?, std.fs.path.basename(payload)));
+    }
+    var im = try Imprint.open(a, root, 1, 1 << 20);
+    defer im.deinit();
+    try std.testing.expect(!im.has(key));
+    try std.testing.expectEqual(@as(u64, 0), try im.indexScratchBytes());
 }
 
 test "row recency collision advances to a later exclusive nonce" {

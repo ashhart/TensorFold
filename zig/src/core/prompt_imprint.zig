@@ -199,7 +199,9 @@ pub const Imprint = struct {
         errdefer m.gpa.free(s);
         try m.metas.ensureUnusedCapacity(m.gpa, 1);
         try m.keys.ensureUnusedCapacity(m.gpa, 1);
-        errdefer _ = platform.c.ftruncate(fd, end);
+        errdefer {
+            if (platform.c.ftruncate(fd, end) == 0) _ = platform.c.fsync(fd);
+        }
         try record(fd, key, at, tokens, below, bytes);
         if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
         platform.atomic_file.syncParent(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) catch return error.ImprintWrite;

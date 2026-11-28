@@ -172,14 +172,13 @@ fn applySnapshot(sl: *Slots, k: Kind, w: []const u32) !void {
 fn leaseDisk(sl: *Slots, k: Kind, w: []const u32, dir: [:0]const u8) !bool {
     if (sl.disk.lease != null or sl.disk.covered) return true;
     // Rootless legacy commands proceed without acquiring a follower lease.
-    const leader_root = try initiatingRoot(w, required(k)) orelse return true;
+    if (try initiatingRoot(w, required(k)) == null) return true;
     if (k == .disk_finish) {
         try refuseDisk(sl, k);
         return false;
     }
     const root = @import("lanes").learned_dirs.rootOf(dir);
-    if (std.mem.eql(u8, root, leader_root)) sl.disk.covered = true;
-    if (!sl.disk.covered) sl.disk.lease = platform.folder_lock.hold(sl.gpa, root, true) catch {
+    sl.disk.lease = platform.folder_lock.hold(sl.gpa, root, true) catch {
         try refuseDisk(sl, k);
         return false;
     };
@@ -205,7 +204,7 @@ fn refuseDisk(sl: *Slots, k: Kind) !void {
     }
 }
 
-/// Learned commands own their root for a whole transaction, or borrow rank 0's proven identical-root lease.
+/// Learned commands own their local root for a whole transaction; equal pathnames do not establish rank 0's lease.
 pub fn applyDisk(sl: *Slots, kind: u32, w: []const u32) !void {
     errdefer releaseDisk(sl);
     const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;

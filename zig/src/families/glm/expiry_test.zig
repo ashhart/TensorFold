@@ -291,23 +291,22 @@ test "GLM expiry: a distinct follower root stays leased from peer planning throu
     try p.released();
 }
 
-test "GLM expiry: an identical leader and follower root reuses the active transaction lease" {
+test "GLM expiry: an identical pathname still refuses a local contender before retry" {
     var p: PeerDisk = .{};
     try p.init();
     defer p.deinit();
-    const leader = try platform.folder_lock.hold(a, p.root, true);
-    defer leader.release();
+    {
+        const contender = try platform.folder_lock.hold(a, p.root, true);
+        defer contender.release();
+        try p.applyFrom(.disk_need, &.{ 9, 0, 0 }, p.root);
+        try std.testing.expectEqual(std.math.maxInt(u64), try p.c[0].waitReplyValue());
+    }
     try p.applyFrom(.disk_need, &.{ 9, 0, 0 }, p.root);
     try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
-    try p.apply(.disk_reserve, &.{ 9, 77, 0, 0, 0 });
-    try std.testing.expect(try p.c[0].waitReply());
+    try p.locked();
     try p.apply(.disk_finish, &.{ 77, 0, 1 });
     try std.testing.expect(try p.c[0].waitReply());
-    // A rootless legacy command reuses the active lease but cannot prove that it needs a new one.
-    try p.applyLegacy(.disk_need, &.{ 9, 0, 0 });
-    try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
-    try p.applyLegacy(.disk_finish, &.{ 77, 0, 0 });
-    try std.testing.expect(try p.c[0].waitReply());
+    try p.released();
 }
 
 test "GLM expiry: a peer command error releases the follower root lease" {
