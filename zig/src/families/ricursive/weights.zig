@@ -108,6 +108,7 @@ pub fn blendOf(lambda: u16) f32 {
 }
 
 pub fn load(gpa: std.mem.Allocator, c: *const ck.Checkpoint, f: *const cfg.Config) !Weights {
+    if (f.exl3) return error.UnsupportedRicursivePrecision; // EXL3 packs run on CUDA only
     const h = f.hidden;
     var w = Weights{
         .embed = try dense(c, "model.", "embed_tokens.weight", f.vocab, h),

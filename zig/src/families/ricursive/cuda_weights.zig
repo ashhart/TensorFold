@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const cfg = @import("config.zig");
 const glue = @import("cuda_kernels.zig");
 const attn = @import("cuda_attn.zig");
+const x3 = @import("cuda_exl3.zig");
 
 const Config = cfg.Config;
 const Checkpoint = core.checkpoint.Checkpoint;
@@ -15,9 +16,9 @@ const DeviceBuffer = cuda.DeviceBuffer;
 /// Bytes a small tensor's device copy starts on: tf_rc_add_norm reads 16-byte chunks.
 const small_align = 256;
 
-/// What CUDA serves: the NVFP4 release's MLPs, and shapes the kernels and packers take.
+/// What CUDA serves: the NVFP4 release's MLPs or an EXL3 pack, and shapes the kernels and packers take.
 pub fn gate(c: *const Config) !void {
-    if (!c.fp4_mlp) return error.RicursiveCudaNeedsNvfp4;
+    if (!c.fp4_mlp and !c.exl3) return error.RicursiveCudaNeedsNvfp4;
     const g = c.group();
     // tf_window_decode_tc holds a key head's queries in one tile (at most 16); the prompt kernel pairs them
     if (g % attn.heads_a_block != 0 or g > 16) return error.UnsupportedRicursiveCudaShape;
@@ -138,12 +139,12 @@ pub fn blendOf(lambda: u16) f32 {
 }
 
 pub const Layer = struct {
-    qkg: Weight, // bf16 [q + kv + q, H]: q rows, k rows, g rows
-    v: Weight, // bf16 [kv, H]
-    o: Weight, // bf16 [H, q]
-    gate: Weight, // NVFP4 [I, H]
-    up: Weight,
-    down: Weight, // NVFP4 [H, I]
+    qkg: x3.Qkg, // bf16 [q + kv + q, H]: q rows, k rows, g rows (a pack: q, k and g)
+    v: x3.Proj, // bf16 [kv, H]
+    o: x3.Proj, // bf16 [H, q]
+    gate: x3.Proj, // NVFP4 [I, H]
+    up: x3.Proj,
+    down: x3.Proj, // NVFP4 [H, I]
     input_norm: u64, // bf16 [H]
     post_attn: u64,
     pre_ffn: u64,
@@ -170,7 +171,7 @@ pub const Weights = struct {
     gpa: std.mem.Allocator,
     config: Config,
     embed: u64 = 0, // bf16 [V, H] as stored (tf_rc_embed gathers rows)
-    head: Weight = undefined, // bf16 [V, H] packed
+    head: x3.Proj = undefined, // bf16 [V, H] packed (a pack: EXL3)
     norm: u64 = 0, // bf16 [H]
     layers: []Layer = &.{},
     buffers: std.ArrayList(DeviceBuffer) = .empty,
@@ -239,6 +240,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     try gate(&c);
     var ck = try Checkpoint.openModel(gpa, io, dir);
     defer core.checkpoint.cache.close(&ck);
+    if (c.exl3) return loadExl3(gpa, d, &ck, c);
     var m = try map(gpa, &ck, c);
     defer m.deinit();
     var w: Weights = .{ .gpa = gpa, .config = c };
@@ -246,7 +248,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     const h = c.hidden;
     w.layers = try gpa.alloc(Layer, c.layers);
     w.embed = try w.upload(d, m.embed.bytes);
-    w.head = try w.dense(d, &.{m.head}, h);
+    w.head = .{ .lane = try w.dense(d, &.{m.head}, h) };
     var small: Small = .{};
     defer small.bytes.deinit(gpa);
     const at_norm = try small.put(gpa, m.norm);
@@ -254,12 +256,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     defer gpa.free(offsets);
     for (w.layers, m.layers, offsets) |*l, t, *o| {
         l.* = .{
-            .qkg = try w.dense(d, &.{ t.q, t.k, t.g }, h),
-            .v = try w.dense(d, &.{t.v}, h),
-            .o = try w.dense(d, &.{t.o}, c.queryWidth()),
-            .gate = try w.fp4(d, t.gate),
-            .up = try w.fp4(d, t.up),
-            .down = try w.fp4(d, t.down),
+            .qkg = .{ .lane = try w.dense(d, &.{ t.q, t.k, t.g }, h) },
+            .v = .{ .lane = try w.dense(d, &.{t.v}, h) },
+            .o = .{ .lane = try w.dense(d, &.{t.o}, c.queryWidth()) },
+            .gate = .{ .lane = try w.fp4(d, t.gate) },
+            .up = .{ .lane = try w.fp4(d, t.up) },
+            .down = .{ .lane = try w.fp4(d, t.down) },
             .input_norm = 0,
             .post_attn = 0,
             .pre_ffn = 0,
@@ -269,6 +271,44 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
             .blend = blendOf(t.lambda),
         };
         for ([_]Tensor{ t.input_norm, t.post_attn, t.pre_ffn, t.post_ffn, t.q_norm, t.k_norm }, o) |x, *at| at.* = try small.put(gpa, x);
+    }
+    const base = try w.upload(d, small.bytes.items);
+    w.norm = base + at_norm;
+    for (w.layers, offsets) |*l, o| {
+        l.input_norm = base + o[0];
+        l.post_attn = base + o[1];
+        l.pre_ffn = base + o[2];
+        l.post_ffn = base + o[3];
+        l.q_norm = base + o[4];
+        l.k_norm = base + o[5];
+    }
+    return w;
+}
+
+/// An EXL3 pack's projection onto the device as stored (trellis, suh, svh).
+fn exl3Proj(w: *Weights, d: *const cuda.Driver, t: x3.Stored) !x3.X3 {
+    return x3.weight(try w.upload(d, t.trellis.bytes), try w.upload(d, t.suh.bytes), try w.upload(d, t.svh.bytes), t.n, t.k, t.halves);
+}
+
+/// An EXL3 pack (exllamav3, mul1) mapped, then onto the GPU: trellises for the projections and head, the rest bf16.
+fn loadExl3(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *Checkpoint, c: Config) !Weights {
+    var m = try x3.map(gpa, ck, c);
+    defer m.deinit();
+    var w: Weights = .{ .gpa = gpa, .config = c };
+    errdefer w.deinit();
+    w.layers = try gpa.alloc(Layer, c.layers);
+    w.embed = try w.upload(d, m.embed.bytes);
+    w.head = .{ .exl3 = try exl3Proj(&w, d, m.head) };
+    var small: Small = .{};
+    defer small.bytes.deinit(gpa);
+    const at_norm = try small.put(gpa, m.norm);
+    const offsets = try gpa.alloc([6]usize, c.layers);
+    defer gpa.free(offsets);
+    for (w.layers, m.layers, offsets) |*l, t, *o| {
+        var p: [8]x3.X3 = undefined;
+        for (t.proj, &p) |sp, *x| x.* = try exl3Proj(&w, d, sp);
+        l.* = .{ .qkg = .{ .exl3 = p[0..3].* }, .v = .{ .exl3 = p[3] }, .o = .{ .exl3 = p[4] }, .gate = .{ .exl3 = p[5] }, .up = .{ .exl3 = p[6] }, .down = .{ .exl3 = p[7] }, .input_norm = 0, .post_attn = 0, .pre_ffn = 0, .post_ffn = 0, .q_norm = 0, .k_norm = 0, .blend = blendOf(t.lambda) };
+        for (t.norms, o) |x, *at| at.* = try small.put(gpa, x);
     }
     const base = try w.upload(d, small.bytes.items);
     w.norm = base + at_norm;
@@ -299,6 +339,8 @@ test "ricursive cuda gate: the NVFP4 release passes, the BF16 checkpoint and unb
     try testing.expectEqual(@as(usize, 21504), qkgWidth(c));
     c.fp4_mlp = false;
     try testing.expectError(error.RicursiveCudaNeedsNvfp4, gate(&c));
+    c.exl3 = true; // an EXL3 pack of the BF16 checkpoint
+    try gate(&c);
     c = try release();
     c.kv_heads = 16; // group 5: the prompt kernel pairs query heads
     try testing.expectError(error.UnsupportedRicursiveCudaShape, gate(&c));
@@ -348,8 +390,8 @@ fn tiny() Config {
     return c;
 }
 
-/// A safetensors file of every tensor `c` names (zeros, each global scale 1).
-fn writeFixture(a: std.mem.Allocator, dir: std.Io.Dir, c: Config, input_scales: bool) !void {
+/// A safetensors file of every tensor `c` names (zeros, each global scale 1; `pack`: an EXL3 pack's, 5 bits).
+fn writeFixture(a: std.mem.Allocator, dir: std.Io.Dir, c: Config, input_scales: bool, pack: bool) !void {
     const E = struct { name: []const u8, dtype: []const u8, shape: []const usize };
     var list: std.ArrayList(E) = .empty;
     const h = c.hidden;
@@ -363,27 +405,41 @@ fn writeFixture(a: std.mem.Allocator, dir: std.Io.Dir, c: Config, input_scales: 
             try l.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale_2", .{pre}), .dtype = "F32", .shape = &.{} });
             if (input) try l.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.input_scale", .{pre}), .dtype = "F32", .shape = &.{} });
         }
+        fn trellis(l: *std.ArrayList(E), al: std.mem.Allocator, pre: []const u8, n: usize, k: usize) !void {
+            try l.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.trellis", .{pre}), .dtype = "I16", .shape = try al.dupe(usize, &.{ k / 16, n / 16, 80 }) });
+            try l.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.suh", .{pre}), .dtype = "F16", .shape = try al.dupe(usize, &.{k}) });
+            try l.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.svh", .{pre}), .dtype = "F16", .shape = try al.dupe(usize, &.{n}) });
+            try l.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.mul1", .{pre}), .dtype = "I32", .shape = &.{} });
+        }
+        fn proj(l: *std.ArrayList(E), al: std.mem.Allocator, pre: []const u8, n: usize, k: usize, x: bool) !void {
+            if (x) return trellis(l, al, pre, n, k);
+            try bf(l, al, try std.fmt.allocPrint(al, "{s}.weight", .{pre}), &.{ n, k });
+        }
     };
     try Add.bf(&list, a, "model.embed_tokens.weight", &.{ c.vocab, h });
-    try Add.bf(&list, a, "lm_head.weight", &.{ c.vocab, h });
+    try Add.proj(&list, a, "lm_head", c.vocab, h, pack);
     try Add.bf(&list, a, "model.norm.weight", &.{h});
     for (0..c.layers) |i| {
         const p = try std.fmt.allocPrint(a, "model.layers.{d}.", .{i});
         for ([_][]const u8{ "input_layernorm", "post_attention_layernorm", "pre_feedforward_layernorm", "post_feedforward_layernorm" }) |n| try Add.bf(&list, a, try std.fmt.allocPrint(a, "{s}{s}.weight", .{ p, n }), &.{h});
-        for ([_][]const u8{ "q_proj", "g_proj" }) |n| try Add.bf(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.{s}.weight", .{ p, n }), &.{ c.queryWidth(), h });
-        for ([_][]const u8{ "k_proj", "v_proj" }) |n| try Add.bf(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.{s}.weight", .{ p, n }), &.{ c.kvWidth(), h });
-        try Add.bf(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.o_proj.weight", .{p}), &.{ h, c.queryWidth() });
+        for ([_][]const u8{ "q_proj", "g_proj" }) |n| try Add.proj(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.{s}", .{ p, n }), c.queryWidth(), h, pack);
+        for ([_][]const u8{ "k_proj", "v_proj" }) |n| try Add.proj(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.{s}", .{ p, n }), c.kvWidth(), h, pack);
+        try Add.proj(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.o_proj", .{p}), h, c.queryWidth(), pack);
         for ([_][]const u8{ "q_norm", "k_norm" }) |n| try Add.bf(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.{s}.weight", .{ p, n }), &.{cfg.head_dim});
-        try Add.bf(&list, a, try std.fmt.allocPrint(a, "{s}self_attn.value_res_lambda", .{p}), &.{1});
-        for ([_][]const u8{ "gate_proj", "up_proj" }) |n| try Add.fp4(&list, a, try std.fmt.allocPrint(a, "{s}mlp.{s}", .{ p, n }), c.intermediate, h, input_scales);
-        try Add.fp4(&list, a, try std.fmt.allocPrint(a, "{s}mlp.down_proj", .{p}), h, c.intermediate, input_scales);
+        const lambda = try std.fmt.allocPrint(a, "{s}self_attn.value_res_lambda", .{p});
+        if (pack) try list.append(a, .{ .name = lambda, .dtype = "F32", .shape = try a.dupe(usize, &.{1}) }) else try Add.bf(&list, a, lambda, &.{1});
+        const mlp = [_]struct { []const u8, usize, usize }{ .{ "gate_proj", c.intermediate, h }, .{ "up_proj", c.intermediate, h }, .{ "down_proj", h, c.intermediate } };
+        for (mlp) |x| {
+            const pre = try std.fmt.allocPrint(a, "{s}mlp.{s}", .{ p, x[0] });
+            if (pack) try Add.trellis(&list, a, pre, x[1], x[2]) else try Add.fp4(&list, a, pre, x[1], x[2], input_scales);
+        }
     }
     var header: std.Io.Writer.Allocating = .init(a);
     try header.writer.writeAll("{");
     var at: usize = 0;
     const sizes = try a.alloc(usize, list.items.len);
     for (list.items, sizes, 0..) |e, *size, j| {
-        var n: usize = if (e.dtype[0] == 'B') 2 else if (e.dtype[0] == 'F' and e.dtype[1] == '3') 4 else 1;
+        var n: usize = if (e.dtype[0] == 'B' or std.mem.endsWith(u8, e.dtype, "16")) 2 else if (std.mem.endsWith(u8, e.dtype, "32")) 4 else 1;
         for (e.shape) |x| n *= x;
         size.* = n;
         try header.writer.print("{s}\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ if (j == 0) "" else ",", e.name, e.dtype });
@@ -400,6 +456,7 @@ fn writeFixture(a: std.mem.Allocator, dir: std.Io.Dir, c: Config, input_scales: 
     var off: usize = 0;
     for (list.items, sizes) |e, n| {
         if (std.mem.endsWith(u8, e.name, "weight_scale_2")) std.mem.writeInt(u32, file[8 + hd.len + off ..][0..4], @bitCast(@as(f32, 1)), .little);
+        if (std.mem.endsWith(u8, e.name, ".mul1")) std.mem.writeInt(u32, file[8 + hd.len + off ..][0..4], 0x83DCD12D, .little);
         off += n;
     }
     try dir.writeFile(tio, .{ .sub_path = "model.safetensors", .data = file });
@@ -418,7 +475,7 @@ test "ricursive cuda names: every tensor of a tiny NVFP4 release maps, input_sca
     for ([_]bool{ true, false }) |input| {
         var tmp = testing.tmpDir(.{});
         defer tmp.cleanup();
-        try writeFixture(a, tmp.dir, c, input);
+        try writeFixture(a, tmp.dir, c, input, false);
         var ck = try Checkpoint.openModel(testing.allocator, tio, try tmpPath(a, tmp));
         defer ck.close();
         var m = try map(testing.allocator, &ck, c);
@@ -428,4 +485,25 @@ test "ricursive cuda names: every tensor of a tiny NVFP4 release maps, input_sca
         try testing.expectEqual(@as(usize, 128), m.layers[0].gate.k);
         try testing.expectEqual(@as(f32, 0.5), blendOf(m.layers[4].lambda));
     }
+}
+
+test "ricursive cuda exl3 names: every tensor of a tiny EXL3 pack maps, 5-bit trellises, lambda as bf16 bits" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = tiny();
+    c.fp4_mlp = false;
+    c.exl3 = true;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFixture(a, tmp.dir, c, false, true);
+    var ck = try Checkpoint.openModel(testing.allocator, tio, try tmpPath(a, tmp));
+    defer ck.close();
+    var m = try x3.map(testing.allocator, &ck, c);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 5), m.layers.len);
+    try testing.expectEqual(@as(usize, 10), m.head.halves); // 80 i16 a 16x16 tile: 5 bits
+    try testing.expectEqual(@as(usize, 512), m.layers[2].proj[0].n); // q
+    try testing.expectEqual(@as(usize, 256), m.layers[2].proj[7].k); // down's input
+    try testing.expectEqual(@as(f32, 0.5), blendOf(m.layers[4].lambda));
 }

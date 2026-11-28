@@ -1,4 +1,4 @@
-//! Ripple's forward on CUDA: Metal forward.zig's layer order; prompt chunks of one slot, and rounds of rows over slots.
+//! Ripple's forward on CUDA: Metal forward.zig's layer order; prompt chunks of a slot, rounds of rows over slots, taps.
 const std = @import("std");
 const cuda = @import("cuda");
 const cfg = @import("config.zig");
@@ -6,12 +6,14 @@ const glue = @import("cuda_kernels.zig");
 const rp = @import("cuda_prep.zig");
 const attn = @import("cuda_attn.zig");
 const wts = @import("cuda_weights.zig");
+const x3 = @import("cuda_exl3.zig");
 
 const wa = cuda.window_attention;
 const Stream = cuda.Stream;
 const DeviceBuffer = cuda.DeviceBuffer;
 const Config = cfg.Config;
 const Weight = cuda.qmmf.Weight;
+const kv_arena = @import("cuda_arena.zig"); // the slots' caches in one buffer
 
 /// A prompt forward's rows at most (a chunk).
 pub const prompt_rows = 2048;
@@ -24,7 +26,22 @@ pub const head_rows = 128;
 /// A one-row round's rows: the round maximum of the CLI and the one-stream backend (one-row chain decode).
 pub const decode_rows = 1;
 /// Device offsets start on 256 bytes (the row kernels read 16-byte chunks).
-const buffer_align = 256;
+pub const buffer_align = 256;
+/// A slot's tap ring: a prompt chunk's rows and a 16-row verify window's (position p at row p % tap_rows).
+pub const tap_rows = prompt_rows + 16;
+/// Tapped layers at most (the Metal family's limit).
+pub const max_taps = 16;
+
+/// The tap rings' bytes for `slots` slots of `taps` tapped layers: tap_rows rows of taps x hidden bf16 a slot.
+pub fn tapBytes(c: Config, taps: usize, slots: usize) usize {
+    return slots * tap_rows * taps * c.hidden * 2;
+}
+
+/// A drafter's tapped layers: 1 to max_taps distinct layers of the model, in the drafter's column order.
+pub fn checkTaps(c: Config, layers: []const u32) !void {
+    if (layers.len == 0 or layers.len > max_taps) return error.UnsupportedRicursiveTaps;
+    for (layers, 0..) |l, j| if (l >= c.layers or std.mem.indexOfScalar(u32, layers[0..j], l) != null) return error.UnsupportedRicursiveTaps;
+}
 
 /// prompt: a chunk by the prompt kernels; decode: a round of one chain by the lane matmul and the decode attention.
 pub const Mode = enum { prompt, decode };
@@ -106,97 +123,11 @@ fn slidingWindow(c: Config) wa.Window {
     return attn.sliding(c.heads, c.kv_heads, c.window, ring_rows, c.scale());
 }
 
-/// The pages a slot's global layer holds: the context in whole pages.
-pub fn pagesOf(context: usize) usize {
-    return (context + page_tokens - 1) / page_tokens;
-}
-
-/// A layer's caches from slot 0: a sliding layer's rings [slots][ring][kv_heads][128], or (`pg`) a global's pages.
-pub const Cache = struct { kc: u64, vc: u64, pg: ?wa.Pages = null };
-
-/// One slot's rows of a layer as a snapshot copies them: position p at ring row p % ring_rows, or global row p.
-pub const Span = struct { k: u64, v: u64, rows: usize, row_bytes: usize, ring: bool };
-
-/// One slot's caches: a sliding layer's K and V rings, a global layer's K and V pages for `context`.
-pub fn slotBytes(c: Config, context: usize) usize {
-    const kvw = c.kvWidth();
-    const g = c.globals();
-    return (c.layers - g) * 2 * ring_rows * kvw * 2 + g * 2 * pagesOf(context) * page_tokens * kvw * 2;
-}
-
-/// Every slot's caches in one buffer, a layer at a time (each slot's rows, K then V), then the page table.
-pub const Arena = struct {
-    gpa: std.mem.Allocator,
-    kv: DeviceBuffer,
-    caches: []Cache, // a layer each, at slot 0
-    ids: []i32, // the page table's host copy [slots][per_slot]: the call tables gather its rows
-    slots: usize,
-    per_slot: usize, // pages a slot's global layer holds
-    kvw: usize,
-
-    /// `slots` slots' caches for `context` positions and the int32 table.
-    pub fn bytes(c: Config, context: usize, slots: usize) usize {
-        return slots * slotBytes(c, context) + std.mem.alignForward(usize, slots * pagesOf(context) * 4, buffer_align);
-    }
-
-    /// Zeroed caches (no stale bits under a masked key), the identity table: slot s's page j is page s * per_slot + j.
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: Stream, c: Config, context: usize, slots: usize) !Arena {
-        const kvw = c.kvWidth();
-        const per = pagesOf(context);
-        var kv = try DeviceBuffer.alloc(d, bytes(c, context, slots));
-        errdefer kv.free();
-        try d.check(d.api.cuMemsetD8Async(kv.ptr, 0, kv.len, s.handle), "cuMemsetD8Async");
-        const caches = try gpa.alloc(Cache, c.layers);
-        errdefer gpa.free(caches);
-        const ids = try gpa.alloc(i32, slots * per);
-        errdefer gpa.free(ids);
-        for (ids, 0..) |*x, i| x.* = @intCast(i);
-        const table_at = kv.len - std.mem.alignForward(usize, ids.len * 4, buffer_align);
-        try cuda.copy_source.enqueue(d, kv.ptr + table_at, std.mem.sliceAsBytes(ids), s);
-        var at: u64 = kv.ptr;
-        for (caches, 0..) |*cache, i| {
-            const half: usize = slots * if (c.global[i]) per * page_tokens * kvw * 2 else ring_rows * kvw * 2;
-            cache.* = .{ .kc = at, .vc = at + half };
-            if (c.global[i]) cache.pg = .{ .table = kv.ptr + table_at, .page_elems = page_tokens * kvw, .tokens = page_tokens, .stride = per };
-            at += 2 * half;
-        }
-        return .{ .gpa = gpa, .kv = kv, .caches = caches, .ids = ids, .slots = slots, .per_slot = per, .kvw = kvw };
-    }
-
-    pub fn deinit(a: *Arena) void {
-        a.gpa.free(a.ids);
-        a.gpa.free(a.caches);
-        a.kv.free();
-        a.* = undefined;
-    }
-
-    /// Layer i's caches of one slot as a prompt chunk reads them: its rings, or the pools and its table row (stride 0).
-    pub fn slotCache(a: *const Arena, i: usize, slot: usize) Cache {
-        const c = a.caches[i];
-        if (c.pg) |pg| {
-            var row = pg;
-            row.table += slot * a.per_slot * 4;
-            row.stride = 0;
-            return .{ .kc = c.kc, .vc = c.vc, .pg = row };
-        }
-        const ring = ring_rows * a.kvw * 2;
-        return .{ .kc = c.kc + slot * ring, .vc = c.vc + slot * ring };
-    }
-
-    /// Layer i's rows of one slot.
-    pub fn span(a: *const Arena, i: usize, slot: usize) Span {
-        const c = a.caches[i];
-        const row = a.kvw * 2;
-        const rows: usize = if (c.pg != null) a.per_slot * page_tokens else ring_rows;
-        return .{ .k = c.kc + slot * rows * row, .v = c.vc + slot * rows * row, .rows = rows, .row_bytes = row, .ring = c.pg == null };
-    }
-
-    /// The V pools' offset from the K pools in bf16 elements: the same in every global layer.
-    fn vOff(a: *const Arena) usize {
-        for (a.caches) |c| if (c.pg != null) return (c.vc - c.kc) / 2;
-        return 0;
-    }
-};
+pub const pagesOf = kv_arena.pagesOf;
+pub const Cache = kv_arena.Cache;
+pub const Span = kv_arena.Span;
+pub const slotBytes = kv_arena.slotBytes;
+pub const Arena = kv_arena.Arena;
 
 /// A round's rows on the host: positions and slots (int32 for the kernels, usize for the plan), the call table.
 const Host = struct { pos: []i32, slot: []i32, at: []usize, ctab: []i32 };
@@ -246,14 +177,21 @@ pub const Model = struct {
     graphs: bool = true,
     /// Captured rounds by row count ([n], n to round_rows), each the layers' launches over the staged rows.
     execs: []?cuda.graph.Exec,
+    /// The drafter's tapped layers (setTaps), tap column j the layer taps[j]; none: no ring and no tap launch.
+    taps: [max_taps]u32 = undefined,
+    n_taps: usize = 0,
+    /// Every slot's tap ring, [slots][tap_rows][n_taps][hidden] bf16.
+    tap: ?DeviceBuffer = null,
+    /// An EXL3 pack's projections: main's dense EXL3 kernels and their scratch, grown at init (null: the release).
+    dense: ?*cuda.exl3.Dense = null,
 
     /// The lane's slice partials of every projection and the head at up to `rows` rows (they reduce below fused_rows).
     fn partBytes(w: *const wts.Weights, k: *const Kernels, rows: usize) usize {
         var most: usize = 0;
         for ([_]usize{ rows, @min(rows, cuda.qmmf.fused_rows - 1) }) |m| {
-            most = @max(most, k.lane.partBytes(m, w.head));
-            for (w.layers) |l| for ([_]Weight{ l.qkg, l.v, l.o, l.gate, l.up, l.down }) |x| {
-                most = @max(most, k.lane.partBytes(m, x));
+            if (w.head == .lane) most = @max(most, k.lane.partBytes(m, w.head.lane));
+            for (w.layers) |l| for ([_]x3.Proj{ x3.first(l.qkg), l.v, l.o, l.gate, l.up, l.down }) |x| {
+                if (x == .lane) most = @max(most, k.lane.partBytes(m, x.lane));
             };
         }
         return most;
@@ -264,7 +202,7 @@ pub const Model = struct {
         const c = w.config;
         var b: Bufs = .{};
         const scratch = place(bufSizes(c, partBytes(w, k, round_rows), round_rows, pagesOf(context)), 0, &b);
-        return scratch + Arena.bytes(c, context, slots) + attn.GlobalDecode.bytes(round_rows, context);
+        return scratch + Arena.bytes(c, context, slots) + attn.GlobalDecode.bytes(round_rows, context) + x3.denseBytes(w.head, w.layers);
     }
 
     /// Scratch for `round_rows`-row rounds and `slots` slots of `context` positions; refuses a shape no ring holds.
@@ -296,11 +234,13 @@ pub const Model = struct {
             .at = try gpa.alloc(usize, round_rows),
             .ctab = try gpa.alloc(i32, round_rows * arena.per_slot),
         };
-        return .{ .gpa = gpa, .d = d, .s = s, .w = w, .k = k, .c = c, .context = context, .round_rows = round_rows, .scratch = scratch, .b = b, .gd = gd, .arena = arena, .host = h, .execs = execs };
+        return .{ .gpa = gpa, .d = d, .s = s, .w = w, .k = k, .c = c, .context = context, .round_rows = round_rows, .scratch = scratch, .b = b, .gd = gd, .arena = arena, .host = h, .execs = execs, .dense = if (!c.exl3) null else try x3.open(gpa, d, s, w.head, w.layers) };
     }
 
     pub fn deinit(m: *Model) void {
         m.dropGraphs();
+        if (m.tap) |*ring| ring.free();
+        if (m.dense) |de| x3.close(m.gpa, de);
         m.gpa.free(m.execs);
         m.gpa.free(m.host.ctab);
         m.gpa.free(m.host.at);
@@ -310,6 +250,49 @@ pub const Model = struct {
         m.gd.deinit();
         m.scratch.free();
         m.* = undefined;
+    }
+
+    /// The drafter's tapped layers, before its streams: a zeroed ring a slot; graphs dropped to recapture with taps.
+    pub fn setTaps(m: *Model, tapped: []const u32) !void {
+        try checkTaps(m.c, tapped);
+        try m.s.synchronize(); // no launch still writes an old ring
+        var ring = try DeviceBuffer.alloc(m.d, tapBytes(m.c, tapped.len, m.arena.slots));
+        errdefer ring.free();
+        try m.d.check(m.d.api.cuMemsetD8Async(ring.ptr, 0, ring.len, m.s.handle), "cuMemsetD8Async");
+        m.dropGraphs();
+        if (m.tap) |*old| old.free();
+        m.tap = ring;
+        @memcpy(m.taps[0..tapped.len], tapped);
+        m.n_taps = tapped.len;
+    }
+
+    /// A tap ring's row: n_taps x hidden bf16.
+    pub fn tapRowBytes(m: *const Model) usize {
+        return m.n_taps * m.c.hidden * 2;
+    }
+
+    /// A slot's tap ring (position p at row p % tap_rows), null without taps.
+    pub fn tapRing(m: *const Model, slot: usize) ?u64 {
+        const ring = m.tap orelse return null;
+        return ring.ptr + slot * tap_rows * m.tapRowBytes();
+    }
+
+    /// A tapped layer i's rows into its tap column: a chunk's at p0 + r of its slot, a round's at staged pos and slot.
+    fn tapRows(m: *const Model, i: usize, n: usize, pass: Pass) !void {
+        const ring = m.tap orelse return;
+        const col = std.mem.indexOfScalar(u32, m.taps[0..m.n_taps], @intCast(i)) orelse return;
+        var p: glue.TapRows = .{ .resid = m.b.resid, .ring = ring.ptr, .rows = n, .width = m.c.hidden, .taps = m.n_taps, .col = col, .ring_rows = tap_rows };
+        switch (pass) {
+            .chunk => |ch| {
+                p.p0 = ch.p0;
+                p.s0 = ch.slot;
+            },
+            .round => {
+                p.pos = m.b.pos;
+                p.slot = m.b.slot;
+            },
+        }
+        try glue.tap(&m.k.glue, m.s, p);
     }
 
     /// Zeroes a slot's positions [0, written) (a ring past its rows whole): a fresh arena's bytes, for another stream.
@@ -322,7 +305,12 @@ pub const Model = struct {
         }
     }
 
-    fn linear(m: *const Model, x: u64, ldx: usize, n: usize, w: Weight, y: u64, mode: Mode) !void {
+    /// x [n, k] into y [n, w's outputs], bf16: the lane or prompt matmul, or an EXL3 pack's dense kernel (ldx = k).
+    fn linear(m: *const Model, x: u64, ldx: usize, n: usize, p: x3.Proj, y: u64, mode: Mode) !void {
+        const w = switch (p) {
+            .lane => |w| w,
+            .exl3 => |w| return if (mode == .decode) m.dense.?.decode(m.s, w, x, .bf16, n, y, .bf16) else m.dense.?.prompt(m.s, w, x, .bf16, n, y, .bf16),
+        };
         if (mode == .decode) return m.k.lane.matmulOut(m.s, x, ldx, n, w, y, .bf16, m.b.part);
         return m.k.prompt.matmulOut(m.s, x, ldx, n, w, y, .bf16);
     }
@@ -354,10 +342,10 @@ pub const Model = struct {
         const k = m.k;
         const qw = c.queryWidth();
         const kvw = c.kvWidth();
-        const wq = wts.qkgWidth(c);
         const scale = c.scale();
-        const xq = rp.Rows.of(b.qkg, wq);
-        const xk = rp.Rows.of(b.qkg + qw * 2, wq);
+        const r = x3.qkgRows(l.qkg, b.qkg, n, qw, kvw);
+        const xq = rp.Rows.of(r.q, r.q_ld);
+        const xk = rp.Rows.of(r.k, r.k_ld);
         const xv = rp.Rows.of(b.v, kvw);
         switch (pass) {
             .chunk => |ch| {
@@ -388,18 +376,20 @@ pub const Model = struct {
         const h = c.hidden;
         const qw = c.queryWidth();
         const kvw = c.kvWidth();
-        const wq = wts.qkgWidth(c);
         const mode: Mode = if (pass == .chunk) .prompt else .decode;
         const ls = m.w.layers;
         try glue.embed(&k.glue, s, b.ids, m.w.embed, b.resid, b.v0, n, h, c.embed_scale);
         try glue.addNorm(&k.glue, s, .{ .resid = b.resid, .next = ls[0].input_norm, .v0 = b.v0, .x = b.x, .vx = b.vx, .rows = n, .width = h, .eps = c.eps, .blend = ls[0].blend });
         for (ls, 0..) |*l, i| {
-            try m.linear(b.x, h, n, l.qkg, b.qkg, mode);
+            const r = x3.qkgRows(l.qkg, b.qkg, n, qw, kvw);
+            switch (l.qkg) {
+                .lane => |w| try m.linear(b.x, h, n, .{ .lane = w }, b.qkg, mode),
+                .exl3 => |ws| for (ws, [_]u64{ r.q, r.k, r.g }) |w, y| try m.linear(b.x, h, n, .{ .exl3 = w }, y, mode),
+            }
             try m.linear(b.vx, h, n, l.v, b.v, mode);
             try m.attention(l, i, n, pass);
-            const g_at = b.qkg + (qw + kvw) * 2;
-            const g = if (n == 1) g_at else blk: { // tf_rc_gate reads G rows contiguous
-                try m.copy2D(g_at, wq * 2, b.g, qw * 2, qw * 2, n);
+            const g = if (n == 1 or r.g_ld == qw) r.g else blk: { // tf_rc_gate reads G rows contiguous
+                try m.copy2D(r.g, r.g_ld * 2, b.g, qw * 2, qw * 2, n);
                 break :blk b.g;
             };
             try glue.gate(&k.glue, s, b.att, g, n, qw);
@@ -412,6 +402,7 @@ pub const Model = struct {
                 const next = &ls[i + 1];
                 try glue.addNorm(&k.glue, s, .{ .resid = b.resid, .branch = b.y, .post = l.post_ffn, .next = next.input_norm, .v0 = b.v0, .x = b.x, .vx = b.vx, .rows = n, .width = h, .eps = c.eps, .blend = next.blend });
             } else try glue.addNorm(&k.glue, s, .{ .resid = b.resid, .branch = b.y, .post = l.post_ffn, .next = m.w.norm, .x = b.x, .rows = n, .width = h, .eps = c.eps });
+            try m.tapRows(i, n, pass); // the summed residual after layer i, as Metal's rc_tap reads it
         }
     }
 
@@ -495,20 +486,25 @@ pub const Model = struct {
     /// The last forward's row `row` through the bf16 head (the lane matmul) into `logits` [V].
     pub fn head(m: *const Model, row: usize) !void {
         const h = m.c.hidden;
-        try m.k.lane.matmulOut(m.s, m.b.x + row * h * 2, h, 1, m.w.head, m.b.logits, .bf16, m.b.part);
+        try m.linear(m.b.x + row * h * 2, h, 1, m.w.head, m.b.logits, .decode);
+    }
+
+    /// `rows` rows of x through an EXL3 pack's head into y (the drafter's candidates read the target's head).
+    pub fn headExl3(m: *const Model, x: u64, rows: usize, y: u64) !void {
+        return m.dense.?.decode(m.s, m.w.head.exl3, x, .bf16, rows, y, .bf16);
     }
 
     /// The last forward's rows [r0, r0 + rows) (at most head_rows) through the head (the prompt matmul) into `rows`.
     pub fn headRows(m: *const Model, r0: usize, rows: usize) !void {
         if (rows == 0 or rows > head_rows) return error.ForwardRows;
         const h = m.c.hidden;
-        try m.k.prompt.matmulOut(m.s, m.b.x + r0 * h * 2, h, rows, m.w.head, m.b.rows, .bf16);
+        try m.linear(m.b.x + r0 * h * 2, h, rows, m.w.head, m.b.rows, .prompt);
     }
 
     /// The last round's rows [0, rows) through the head (the lane matmul, as head's) into `rows` [rows, V].
     pub fn rowLogits(m: *const Model, rows: usize) !void {
         if (rows == 0 or rows > m.round_rows) return error.ForwardRows;
-        try m.k.lane.matmulOut(m.s, m.b.x, m.c.hidden, rows, m.w.head, m.b.rows, .bf16, m.b.part);
+        try m.linear(m.b.x, m.c.hidden, rows, m.w.head, m.b.rows, .decode);
     }
 
     /// The greedy draw of `logits` into `out` (int32).
@@ -580,6 +576,21 @@ test "ricursive cuda round rows: chains in order, each row its slot's table row;
     try testing.expectError(error.ForwardRows, fill(h, &table, per, 4, 1536, &.{.{ .slot = 1, .p0 = 0, .tokens = 9 }}, 9));
     try testing.expectError(error.NoSuchSlot, fill(h, &table, per, 4, 1536, &.{.{ .slot = 4, .p0 = 0, .tokens = 1 }}, 1));
     try testing.expectError(error.PastContext, fill(h, &table, per, 4, 1536, &.{.{ .slot = 3, .p0 = 1535, .tokens = 2 }}, 2));
+}
+
+test "ricursive cuda taps: 2,064 rows of 5 x 5,120 bf16 a slot; 1 to 16 distinct layers of the model" {
+    const c = try release();
+    try testing.expectEqual(@as(usize, 2064), tap_rows);
+    try testing.expectEqual(@as(usize, 105_676_800), tapBytes(c, 5, 1)); // 51,200 bytes a row
+    try testing.expectEqual(@as(usize, 8 * 105_676_800), tapBytes(c, 5, 8));
+    try testing.expectEqual(@as(usize, 0), tapBytes(c, 0, 8));
+    try checkTaps(c, &.{ 1, 20, 39, 58, 77 });
+    try checkTaps(c, &.{@intCast(c.layers - 1)});
+    try testing.expectError(error.UnsupportedRicursiveTaps, checkTaps(c, &.{}));
+    try testing.expectError(error.UnsupportedRicursiveTaps, checkTaps(c, &.{ 1, 20, 1 }));
+    try testing.expectError(error.UnsupportedRicursiveTaps, checkTaps(c, &.{@intCast(c.layers)}));
+    const many: [max_taps + 1]u32 = std.simd.iota(u32, max_taps + 1);
+    try testing.expectError(error.UnsupportedRicursiveTaps, checkTaps(c, &many));
 }
 
 test "ricursive cuda forward type-checks against the kernels' wrappers" {
