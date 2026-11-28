@@ -59,11 +59,12 @@ pub const Group = struct {
 
     fn grown(g: *Group, slot: *?Buf, bytes: usize, zero: ?cuda.Stream) !u64 {
         if (slot.*) |b| if (b.len >= bytes) return b.ptr;
-        const nb = try Buf.alloc(g.d, bytes);
+        var nb = try Buf.alloc(g.d, bytes);
+        errdefer nb.free();
+        // counters start at zero; each block's last program resets its own
+        if (zero) |s| try nb.fill8(0, s.handle);
         if (slot.*) |*old| old.free();
         slot.* = nb;
-        // counters start at zero; each block's last program resets its own
-        if (zero) |s| try slot.*.?.fill8(0, s.handle);
         return nb.ptr;
     }
 
@@ -132,4 +133,51 @@ test "proj_group: members of one width, K and warps fit; others do not" {
     try std.testing.expect(!Group.fits(&odd, 1));
     try std.testing.expectEqual(@as(usize, 136), @sizeOf(RotC));
     try std.testing.expectEqual(@as(usize, 504), @sizeOf(GroupC));
+}
+
+/// A host-only driver whose first `fail` stream fills are refused before they queue, as a bad stream's would be.
+const FillFault = struct {
+    var next: u64 = 0x1000;
+    var live: usize = 0;
+    var fail: usize = 0;
+    var filled: u64 = 0; // the last address a queued fill wrote
+    fn alloc(p: *cuda.abi.DevicePtr, _: usize) callconv(.c) cuda.abi.Result {
+        p.* = next;
+        next += 0x1000;
+        live += 1;
+        return 0;
+    }
+    fn free(_: cuda.abi.DevicePtr) callconv(.c) cuda.abi.Result {
+        live -= 1;
+        return 0;
+    }
+    fn fill(p: cuda.abi.DevicePtr, _: u8, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        if (fail > 0) {
+            fail -= 1;
+            return cuda.abi.error_not_ready;
+        }
+        filled = p;
+        return 0;
+    }
+};
+
+test "proj_group: a refused counter fill keeps the old buffer, and the retry zeroes the new one before use" {
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemAlloc_v2 = FillFault.alloc;
+    d.api.cuMemFree_v2 = FillFault.free;
+    d.api.cuMemsetD8Async = FillFault.fill;
+    var g: Group = .{ .d = &d, .rot = undefined, .fns = undefined, .pdl = false };
+    defer g.deinit();
+    const s: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x10) };
+    const old = try g.grown(&g.counters, 256, s);
+    FillFault.fail = 1;
+    try std.testing.expectError(error.NotReady, g.grown(&g.counters, 1024, s));
+    try std.testing.expectEqual(old, g.counters.?.ptr);
+    try std.testing.expectEqual(@as(usize, 256), g.counters.?.len);
+    try std.testing.expectEqual(@as(usize, 1), FillFault.live);
+    const new = try g.grown(&g.counters, 1024, s);
+    try std.testing.expect(new != old);
+    try std.testing.expectEqual(new, FillFault.filled);
+    try std.testing.expectEqual(new, g.counters.?.ptr);
+    try std.testing.expectEqual(@as(usize, 1), FillFault.live);
 }
