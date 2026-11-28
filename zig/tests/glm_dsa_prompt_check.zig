@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     const context = rows + 16;
     var L = try g.layer.Layer.init(a, device, w, &pk, 1, context, mtl.ResourceOptions.shared);
     var s = try g.gpu.Scratch.init(device, &c, context);
-    var q = try g.gpu.Prompt.init(device, &c, context);
+    var q = try g.gpu.Prompt.init(device, &c, context, false);
     var K = try g.layer.Kernels.load(a, device, &c);
     const hid = c.hidden;
     var prng = std.Random.DefaultPrng.init(5);
@@ -66,8 +66,8 @@ pub fn main(init: std.process.Init) !void {
         defer pool.pop();
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        try g.layer.route(&K, &L, &s, e, &c, n, .{ .buf = s.x }, null, null);
-        try g.layer.expertsGpu(&K, &L, &s, e, &c, n, .{ .buf = dec, .off = @as(usize, k) * hid * 4 });
+        const jobs_ready = try g.layer.route(&K, &L, &s, e, &c, n, .{ .buf = s.x }, null, null);
+        _ = try g.layer.expertsGpu(&K, &L, &s, e, &c, n, .{ .buf = dec, .off = @as(usize, k) * hid * 4 }, .{ 0, 0, 0, 0 }, .{ .buf = s.y }, jobs_ready);
         e.end();
         dec_ms += try finish(cb);
         @memcpy(q.pick.slice(i32, @as(usize, rows) * c.topk)[@as(usize, k) * c.topk ..][0 .. @as(usize, n) * c.topk], s.route[0].slice(i32, @as(usize, n) * c.topk));
@@ -134,7 +134,7 @@ fn attention(K: *g.layer.Kernels, L: *g.layer.Layer, s: *g.gpu.Scratch, q: *g.gp
         defer pool.pop();
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        try g.layer.attention(K, L, s, e, c, n, k + n - 1, null, .{ .buf = s.x }, .{ .buf = dec, .off = @as(usize, k) * hid * 4 });
+        _ = try g.layer.attention(K, L, s, e, c, n, k + n - 1, null, .{ .buf = s.x }, .{ .buf = dec, .off = @as(usize, k) * hid * 4 }, .{ 0, 0, 0, 0 }, .{ .buf = s.y });
         e.end();
         dec_ms += try finish(cb);
     }

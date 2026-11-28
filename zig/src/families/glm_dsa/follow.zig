@@ -5,7 +5,7 @@ const snap = @import("snap.zig");
 const Engine = eng.Engine;
 const R = @import("gpu.zig").max_rows;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, window_draft, extend_draft, window_tree, keep_path, window_tree_draft };
 
 fn send(e: *Engine, kind: Kind) !void {
     try e.pair.send(@backingInt(kind), e.words.items);
@@ -41,6 +41,47 @@ pub fn window(e: *Engine, wins: []const eng.Win, out: []u32) !void {
     try e.window(wins, out);
 }
 
+pub fn windowDraft(e: *Engine, slot: u32, tokens: []const u32, pred_depth: u32, out: []u32) !void {
+    e.words.clearRetainingCapacity();
+    try put(e, &.{ slot, pred_depth, @intCast(tokens.len) });
+    try put(e, tokens);
+    try send(e, .window_draft);
+    try e.windowDraft(slot, tokens, pred_depth, out);
+}
+
+pub fn extendDraft(e: *Engine, slot: u32, want: u32) !void {
+    e.words.clearRetainingCapacity();
+    try put(e, &.{ slot, want });
+    try send(e, .extend_draft);
+    try e.extendDraft(slot, want);
+}
+
+pub fn windowTree(e: *Engine, slot: u32, tokens: []const u32, parents: []const i32, out: []u32) !void {
+    e.words.clearRetainingCapacity();
+    try put(e, &.{ slot, @intCast(tokens.len) });
+    try put(e, tokens);
+    for (parents) |p| try put(e, &.{@bitCast(p)});
+    try send(e, .window_tree);
+    try eng.tr.windowTree(e, slot, tokens, parents, out);
+}
+
+pub fn windowTreeDraft(e: *Engine, slot: u32, tokens: []const u32, parents: []const i32, pred_depth: u32, out: []u32) !void {
+    e.words.clearRetainingCapacity();
+    try put(e, &.{ slot, pred_depth, @intCast(tokens.len) });
+    try put(e, tokens);
+    for (parents) |p| try put(e, &.{@bitCast(p)});
+    try send(e, .window_tree_draft);
+    try e.windowTreeDraft(slot, tokens, parents, pred_depth, out);
+}
+
+pub fn keepPath(e: *Engine, i: u32, path: []const u32) !void {
+    e.words.clearRetainingCapacity();
+    try put(e, &.{ i, @intCast(path.len) });
+    try put(e, path);
+    try send(e, .keep_path);
+    try eng.tr.keepPath(e, i, path);
+}
+
 pub fn keep(e: *Engine, i: u32, kept: u32) !void {
     e.words.clearRetainingCapacity();
     try put(e, &.{ i, kept });
@@ -52,8 +93,10 @@ pub fn draft(e: *Engine, reqs: []const eng.Draft) !void {
     e.words.clearRetainingCapacity();
     try put(e, &.{@intCast(reqs.len)});
     for (reqs) |q| {
-        try put(e, &.{ q.slot, @intFromBool(q.prompt), q.depth, @intCast(q.follow.len) });
+        const pn: u32 = if (q.path.len == q.follow.len and eng.tr.needsCompact(q.path)) @intCast(q.path.len) else 0;
+        try put(e, &.{ q.slot, @intFromBool(q.prompt), q.depth, @intCast(q.follow.len), pn });
         try put(e, q.follow);
+        if (pn > 0) try put(e, q.path);
     }
     try send(e, .draft);
     try e.draft(reqs);
@@ -134,7 +177,11 @@ pub fn follow(e: *Engine) !void {
                     const slot = try r.one();
                     const prompt = try r.one() != 0;
                     const depth = try r.one();
-                    q.* = .{ .slot = slot, .prompt = prompt, .depth = depth, .follow = try r.many(try r.one()) };
+                    const fn_len = try r.one();
+                    const pn = try r.one();
+                    const fol = try r.many(fn_len);
+                    const path = if (pn > 0) try r.many(pn) else &.{};
+                    q.* = .{ .slot = slot, .prompt = prompt, .depth = depth, .follow = fol, .path = path };
                 }
                 break :blk e.draft(reqs[0..n]);
             },
@@ -142,10 +189,43 @@ pub fn follow(e: *Engine) !void {
             .save => if (snap.save(e, try r.one(), try r.one(), try r.one())) |_| {} else |err| err,
             .restore => snap.restore(e, try r.one(), try r.one()),
             .drop => snap.drop(e, try r.one()),
+            .window_draft => blk: {
+                const slot = try r.one();
+                const pred_depth = try r.one();
+                const toks = try r.many(try r.one());
+                break :blk e.windowDraft(slot, toks, pred_depth, &out);
+            },
+            .extend_draft => e.extendDraft(try r.one(), try r.one()),
+            .window_tree => blk: {
+                const slot = try r.one();
+                const nrows = try r.one();
+                if (nrows == 0 or nrows > 8) return error.CommandOutOfStep;
+                const toks = try r.many(nrows);
+                const raw_p = try r.many(nrows);
+                var pars: [8]i32 = undefined;
+                for (raw_p, 0..) |u, j| pars[j] = @bitCast(u);
+                break :blk eng.tr.windowTree(e, slot, toks, pars[0..nrows], &out);
+            },
+            .keep_path => blk: {
+                const slot = try r.one();
+                const plen = try r.one();
+                break :blk eng.tr.keepPath(e, slot, try r.many(plen));
+            },
+            .window_tree_draft => blk: {
+                const slot = try r.one();
+                const pred_depth = try r.one();
+                const nrows = try r.one();
+                if (nrows == 0 or nrows > 8) return error.CommandOutOfStep;
+                const toks = try r.many(nrows);
+                const raw_p = try r.many(nrows);
+                var pars: [8]i32 = undefined;
+                for (raw_p, 0..) |u, j| pars[j] = @bitCast(u);
+                break :blk e.windowTreeDraft(slot, toks, pars[0..nrows], pred_depth, &out);
+            },
         };
         done catch |err| {
             if (err == error.PairLinkFailed or err == error.GpuFailure) return err;
-            std.log.warn("glm_dsa rank 1: {s} failed as on rank 0: {s}", .{ @tagName(kind), @errorName(err) });
+            std.log.warn("glm_dsa rank {d}: {s} failed as on rank 0: {s}", .{ e.rank(), @tagName(kind), @errorName(err) });
         };
     }
 }

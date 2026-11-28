@@ -143,6 +143,7 @@ pub const Endpoint = struct {
     config: Config,
     memory: []align(alignment) u8,
     ports: []Port,
+    peer_port: [max_ranks]?*Port = @splat(null),
     deadline_ns: u64 = 0,
     peer_status: ?PeerStatus = null,
     owns_library: bool = true,
@@ -152,6 +153,8 @@ pub const Endpoint = struct {
         const bytes = try validate(gpa, config);
         // the library places each arriving message on a CPU thread: user-interactive unless MCDMA_FABRIC_QOS is set
         _ = env.setenv("MCDMA_FABRIC_QOS", "1", 0);
+        // 1 QP per TB5 link avoids multi-QP contention on small decode all-reduces (+4-5% MTP throughput).
+        _ = env.setenv("MCDMA_FABRIC_QPS", "1", 0);
         const self = try gpa.create(Endpoint);
         errdefer gpa.destroy(self);
         var library = try abi.Library.open(library_path);
@@ -215,6 +218,7 @@ pub const Endpoint = struct {
                 return error.UnsupportedLink;
             }
             if (self.library.api.peer_length(port.peer.?) != self.memory.len) return error.WindowMismatch;
+            self.peer_port[port.spec.peer] = port;
         }
     }
 
@@ -253,7 +257,9 @@ pub const Endpoint = struct {
         if (local < abi.ws_room or !self.in(local - abi.ws_room, len + abi.ws_room) or !self.in(offset, len) or !self.in(flag, 8)) return error.OutOfBounds;
         if (flag % 8 != 0) return error.Unaligned;
         const port = try self.portFor(peer);
-        try port.mutex.lock(try self.end());
+        if (port.mutex.held.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            try port.mutex.lock(try self.end());
+        }
         defer port.mutex.unlock();
         if (port.link == roce) { // ConnectX has no fused message: the write, then the signal, on the one queue pair
             try self.checkPort(port, self.library.api.write(port.peer.?, local, offset, len));
@@ -324,8 +330,7 @@ pub const Endpoint = struct {
 
     fn portFor(self: *Endpoint, peer: u32) rma.Error!*Port {
         if (peer >= self.config.ranks) return error.NoSuchRank;
-        for (self.ports) |*port| if (port.spec.peer == peer) return port;
-        return error.NoSuchRank;
+        return self.peer_port[peer] orelse error.NoSuchRank;
     }
 
     fn in(self: *const Endpoint, offset: usize, len: usize) bool {
@@ -374,7 +379,9 @@ pub const Endpoint = struct {
             return;
         }
         const port = try self.portFor(peer);
-        try port.mutex.lock(try self.end());
+        if (port.mutex.held.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            try port.mutex.lock(try self.end());
+        }
         defer port.mutex.unlock();
         try self.post(port, peer, offset, bytes);
     }
@@ -390,7 +397,9 @@ pub const Endpoint = struct {
             return;
         }
         const port = try self.portFor(peer);
-        try port.mutex.lock(try self.end());
+        if (port.mutex.held.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            try port.mutex.lock(try self.end());
+        }
         defer port.mutex.unlock();
         if (total > self.config.staging_bytes) {
             try self.post(port, peer, offset, head);
@@ -434,7 +443,9 @@ pub const Endpoint = struct {
             return signal(ptr, peer, flag, value);
         }
         const port = try self.portFor(peer);
-        try port.mutex.lock(try self.end());
+        if (port.mutex.held.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            try port.mutex.lock(try self.end());
+        }
         defer port.mutex.unlock();
         if (total + room > self.config.staging_bytes - port.used) try self.flushPort(port);
         const local = self.config.window_bytes + peer * self.config.staging_bytes + port.used + room;
@@ -454,7 +465,9 @@ pub const Endpoint = struct {
             return;
         }
         const port = try self.portFor(peer);
-        try port.mutex.lock(try self.end());
+        if (port.mutex.held.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            try port.mutex.lock(try self.end());
+        }
         defer port.mutex.unlock();
         try self.checkPort(port, self.library.api.signal(port.peer.?, offset, value));
         port.pending = true;

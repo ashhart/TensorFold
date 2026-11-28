@@ -31,7 +31,7 @@ pub fn add(s: *Set, device: @import("metal").Device) !void {
     inline for (.{ "nemotron_glue", "nemotron_experts", "nemotron_round", "nemotron_head", "nemotron_sample", "train", "train_mixers" }) |name|
         try s.raw("nemotron", name, @field(ks, name));
     try s.raw("nemotron", "tree", if (s.units) ks.nemotron_tree else "#define TF_SIMD_LAYOUT 1\n" ++ ks.nemotron_tree);
-    inline for (.{ "glm_dsa_mla", "glm_dsa_index", "glm_dsa_glue", "glm_dsa_moe_jobs", "glm_ep" }) |name|
+    inline for (.{ "glm_dsa_mla", "glm_dsa_index", "glm_dsa_glue", "glm_dsa_moe_jobs", "glm_dsa_fp8_moe", "glm_dsa_fp8_moe_prompt", "glm_ep" }) |name|
         try s.raw("glm-dsa", name, @field(ks, name));
     inline for (.{ "glm_vision", "core_qwen_vision", "qwen_image", "step5_vision" }) |name|
         try s.fragments("vision-image", name, @field(ks, name));

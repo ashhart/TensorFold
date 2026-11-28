@@ -216,6 +216,14 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
     .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },
     .{ .name = "TF_GLM_KEEP_SEQS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_GLM_CONCURRENT", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_GLM_PROMPT_PROFILE", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_GLM_DRAFT_PROBS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_GLM_DFLASH2", .scope = .metal, .kind = .path, .forms = "a DFlash2 directory path without control characters, or 0 to disable" },
+    .{ .name = "TF_GLM_DFLASH2_ANE", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_PAIR_Q8_MIN_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole row count from 0 to 4294967295 (default 32)" },
+    .{ .name = "TF_PAIR_FUSED_WAIT", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_PAIR_INLINE_TX_MAX", .scope = .metal, .kind = .u32, .forms = "a whole byte threshold from 0 to 4294967295 (default 65536)" },
     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
@@ -351,6 +359,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
+    .{ .name = "TF_GLM_LM_Q8", .scope = .metal, .kind = .flag, .forms = "0 or 1 (draft-only INT8 g64 lm_head instead of INT4 g64; default 0)" },
 };
 
 pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;

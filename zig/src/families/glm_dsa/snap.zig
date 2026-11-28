@@ -19,7 +19,12 @@ fn rowBytes(e: *const Engine) u64 {
 }
 
 pub fn bytes(e: *const Engine, at: u32) u64 {
-    return @as(u64, at) * rowBytes(e) + e.m.c.hidden * 4;
+    var total = @as(u64, at) * rowBytes(e) + e.m.c.hidden * 4;
+    if (e.dflash2) |d| {
+        const n: u64 = @min(at, d.c.window);
+        total += @as(u64, d.c.layers) * 2 * n * @as(u64, d.kv_loc) * 128 * 2;
+    }
+    return total;
 }
 
 /// Each layer's cache rows of slot i, [0, at), between the slot and `buf` (`out`: into buf), then the hidden row.
@@ -48,6 +53,31 @@ fn copy(e: *Engine, i: u32, at: u32, buf: mtl.Buffer, out: bool) !void {
     const hid: usize = e.m.c.hidden * 4;
     const tail = (2 * R + @as(usize, i)) * hid;
     if (out) b.copy(e.xs, tail, buf, off, hid) else b.copy(buf, off, e.xs, tail, hid);
+    off += hid;
+    if (e.dflash2) |d| {
+        const sl = &d.slots[i];
+        const ring: usize = d.c.ring();
+        const row_b: usize = @as(usize, d.kv_loc) * 128 * 2;
+        const from: u32 = at -| d.c.window;
+        const n: usize = at - from;
+        if (n > 0) {
+            const p0: usize = from % ring;
+            const c1: usize = @min(n, ring - p0);
+            const c2: usize = n - c1;
+            for (0..d.c.layers) |li| {
+                inline for (.{ sl.k[li], sl.v[li] }) |kv| {
+                    if (out) {
+                        b.copy(kv, p0 * row_b, buf, off, c1 * row_b);
+                        if (c2 > 0) b.copy(kv, 0, buf, off + c1 * row_b, c2 * row_b);
+                    } else {
+                        b.copy(buf, off, kv, p0 * row_b, c1 * row_b);
+                        if (c2 > 0) b.copy(buf, off + c1 * row_b, kv, 0, c2 * row_b);
+                    }
+                    off += n * row_b;
+                }
+            }
+        }
+    }
     b.end();
     cb.commit();
     cb.wait();
@@ -76,6 +106,10 @@ pub fn restore(e: *Engine, i: u32, id: u32) !void {
     if (i >= e.slots.len or !e.slots[i].used or e.slots[i].len != 0 or s.at >= e.slots[i].prompt.items.len) return error.SnapshotOutOfStep;
     try copy(e, i, s.at, s.buf, false);
     e.slots[i].len = s.at;
+    if (e.dflash2) |d| {
+        d.slots[i].from = s.at -| d.c.window;
+        d.slots[i].end = s.at;
+    }
 }
 
 pub fn drop(e: *Engine, id: u32) void {

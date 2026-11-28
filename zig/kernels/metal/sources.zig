@@ -89,9 +89,16 @@ pub const core_pair_rows = @embedFile("core/pair_rows.metal");
 
 /// GLM-5.3 (glm_moe_dsa): MLA with rope over a bf16 latent cache, the DSA indexer and its top-k, fp32 glue.
 pub const glm_dsa_mla = @embedFile("glm_dsa/mla.metal");
+pub const glm_dsa_mla_prompt = @embedFile("glm_dsa/mla_prompt.metal");
 pub const glm_dsa_index = @embedFile("glm_dsa/index.metal");
 pub const glm_dsa_glue = @embedFile("glm_dsa/glue.metal");
 pub const glm_dsa_moe_jobs = @embedFile("glm_dsa/moe_jobs.metal");
+pub const glm_dsa_fp8_moe = @embedFile("glm_dsa/fp8_moe.metal");
+pub const glm_dsa_fp8_moe_prompt = @embedFile("glm_dsa/fp8_moe_prompt.metal");
+pub const glm_dsa_decode_fast = @embedFile("glm_dsa/decode_fast.metal");
+pub const glm_dsa_apex_fast = @embedFile("glm_dsa/apex_fast.metal");
+pub const glm_dsa_dflash2 = @embedFile("glm_dsa/dflash2.metal");
+pub const glm_dsa_dflash2_head = @embedFile("glm_dsa/dflash2_head.metal");
 pub const core_grammar_mask = @embedFile("core/grammar_mask.metal");
 pub const counter_probe = @embedFile("core/counter_probe.metal");
 
