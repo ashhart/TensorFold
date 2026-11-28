@@ -172,17 +172,17 @@ test "request starts: snap_cut_invariant: message starts are on by default for i
     try std.testing.expectEqual(@as(u32, 512), snaps.requestStep(Lfm));
     try std.testing.expectEqual(@as(u32, 4096), snaps.requestStep(Planned));
     try std.testing.expectEqual(@as(u32, 1), snaps.requestMinimum(Nemotron));
-    try std.testing.expect(snaps.passRules(Nemotron, 2048).chunk_starts and snaps.passRules(Planned, 4096).chunk_starts);
+    try std.testing.expect(snaps.passRules(Nemotron, 2048, 0).chunk_starts and snaps.passRules(Planned, 4096, 0).chunk_starts);
     // Qwen/GLM: still off without their switch, 256 apart, cache ignores request starts.
     try std.testing.expectEqual(@as(u32, 0), snaps.requestStep(Qwen));
     try std.testing.expectEqual(@as(u32, 0), snaps.requestStep(Glm));
     try std.testing.expectEqual(@as(u32, 256), snaps.requestMinimum(Qwen));
-    try std.testing.expect(!snaps.passRules(Qwen, 4096).chunk_starts and !snaps.passRules(Glm, 2048).chunk_starts);
+    try std.testing.expect(!snaps.passRules(Qwen, 4096, 0).chunk_starts and !snaps.passRules(Glm, 2048, 0).chunk_starts);
     // A store under invariant rules keeps its state at the message start the server now sends.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var store = api.prompt_cache.Store.init(std.testing.allocator, .{ .ptr = &Held.one, .vtable = &Held.vtable }, snaps.passRules(Planned, 4096), 1 << 30);
+    var store = api.prompt_cache.Store.init(std.testing.allocator, .{ .ptr = &Held.one, .vtable = &Held.vtable }, snaps.passRules(Planned, 4096, 0), 1 << 30);
     defer store.deinit();
     const prompt = try a.alloc(u32, 12000);
     for (prompt, 0..) |*t, j| t.* = @intCast(j + 1);
@@ -199,8 +199,8 @@ test "Qwen prompt rows: changing reported chunk cannot change planned cache mark
     const a = arena.allocator();
     const prompt = try a.alloc(u32, 32768);
     for (prompt, 0..) |*value, i| value.* = @intCast(i);
-    const old = snaps.passRules(F, 8192);
-    const corrected = snaps.passRules(F, 4096);
+    const old = snaps.passRules(F, 8192, 0);
+    const corrected = snaps.passRules(F, 4096, 0);
     try std.testing.expect(old.planned and corrected.planned and old.grid == 4096 and old.min_prompt == 0);
     var same = corrected;
     same.chunk = old.chunk;

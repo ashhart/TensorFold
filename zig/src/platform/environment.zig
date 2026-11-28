@@ -86,7 +86,7 @@ const stock_prefix_rules = [_]Rule{
     .{ .name = "TF_QMMF_HALF_BN", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 adds FP4, FP8 and FP8G half tiles below two blocks an SM; default 0)" },
     .{ .name = "TF_HY4_MEM_FLOOR_GIB", .scope = .cuda, .kind = .size, .forms = "whole GiB of MemAvailable below which the Hy4-flash CUDA loader stops (default 10)" },
     // Qwen 3.5 CUDA and HIP settings, read through this table:
-    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .trim = " ", .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },
     .{ .name = "TENSORFOLD_HIP_MEMORY_LIMIT_GB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission still fits its byte count in a 64-bit size)" },
     .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_GROUP_PROJ", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 groups same-input ModelOpt decode projections in one launch; default 0)" },

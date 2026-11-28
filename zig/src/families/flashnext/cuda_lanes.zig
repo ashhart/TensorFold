@@ -8,6 +8,7 @@ const mtp = @import("cuda_mtp.zig");
 const mtp_ops = @import("cuda_mtp_ops.zig");
 const lanes_draft = @import("cuda_lanes_draft.zig");
 const snap = @import("cuda_snap.zig");
+const snaps = @import("cuda_lanes_snap.zig");
 const ranks = @import("cuda_rank_engine.zig");
 const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");

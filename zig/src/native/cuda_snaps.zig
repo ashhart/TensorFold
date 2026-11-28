@@ -270,8 +270,8 @@ test "request starts: snap_cut_invariant: a chunk-invariant family keeps every m
     try std.testing.expectEqual(@as(u32, 1), requestMinimum(Nemotron));
     try std.testing.expectEqual(@as(u32, 1), requestMinimum(WithGrid));
     // The cache must cut at the same starts the server now sends.
-    try std.testing.expect(passRules(Nemotron, 2048).chunk_starts);
-    try std.testing.expect(passRules(WithGrid, 4096).chunk_starts);
+    try std.testing.expect(passRules(Nemotron, 2048, 0).chunk_starts);
+    try std.testing.expect(passRules(WithGrid, 4096, 0).chunk_starts);
 }
 
 test "request starts: snap_cut_invariant: a switch cannot opt an invariant family out, nor cache rules alter its starts" {

@@ -76,7 +76,7 @@ pub fn Copies(comptime of: anytype) type {
         }
 
         /// The kept state the stream's reuse names, restored when it fits: the prompt pass starts there.
-        pub fn resumeKept(self: *Cuda, s: *lanes.Stream, l: anytype, len: usize) !void {
+        pub fn resumeKept(self: anytype, s: *lanes.Stream, l: anytype, len: usize) !void {
             const saved = s.reuse.saved orelse return;
             const kept: *snap.Snap = @ptrCast(@alignCast(saved));
             if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= len) {

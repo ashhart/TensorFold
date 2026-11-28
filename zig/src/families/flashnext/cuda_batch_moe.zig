@@ -49,7 +49,7 @@ fn leaf(self: anytype, kernel: cuda.Function, out: u64, start: usize, log: usize
     a.add(s.wts);
     a.add(s.picks);
     a.add(out);
-    for ([_]usize{ dims, slots, start, log }) |v| a.add(batch.cint(v));
+    for ([_]usize{ dims, s.slots, start, log }) |v| a.add(batch.cint(v));
     try cuda.launch.launch(kernel, .{ .grid = .{ .x = @intCast(self.rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
 }
 
