@@ -57,6 +57,11 @@ pub fn View(comptime F: type) type {
             return c.head != null;
         }
 
+        /// The served window: the store's permit takes a state that long whole, within the RAM store's budget.
+        pub fn context(c: *const Target) usize {
+            return c.context;
+        }
+
         pub fn wordsOf(st: *const State) Words {
             return .{ .history = st.history, .at = st.at, .head = @intFromBool(st.head) };
         }
