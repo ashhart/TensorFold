@@ -12,6 +12,7 @@ const glue = @import("contract_inkling2_dspark_glue.zig");
 const pick = @import("contract_inkling2_ops_pick.zig");
 const opsref = @import("contract_inkling2_ops_ref.zig");
 const bm = @import("contract_inkling2_dspark_many.zig");
+const mini = @import("contract_inkling2_dspark_mini.zig");
 
 /// The drafter's registrations, each control after the kernel it breaks (the caller's heap set holds them).
 pub const Set = struct {
@@ -35,6 +36,8 @@ pub const Set = struct {
     racems: [2]opsref.Checked(pick.Race) = undefined,
     // the batched kernels over 3+ streams against each stream's one-stream launch, each with a table or stride fault
     twins: [8]bm.Many = undefined,
+    mini_taps: [2]ref.Checked(mini.Tap) = undefined,
+    mini_hiddens: [2]ref.Gated(mini.Hidden) = undefined,
 
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
         set.k = try dk.Kernels.load(gpu.d);
@@ -58,6 +61,8 @@ pub const Set = struct {
         for (&set.top1ms, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = undefined, .short = i == 1, .many = k } };
         for (&set.racems, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = undefined, .late = i == 1, .many = k } };
         for (&set.twins, 0..) |*x, i| x.* = .{ .rig = rig, .k = k, .kind = @fromBackingInt(@intCast(i / 2)), .fault = i % 2 == 1, .arena = .init(gpu.gpa) };
+        for (&set.mini_taps, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .fault = i == 1 } };
+        for (&set.mini_hiddens, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .fault = i == 1 } };
         for (&set.mixes) |*x| try list.append(a, x.kernel());
         for (&set.adds) |*x| try list.append(a, x.kernel());
         for (&set.qks) |*x| try list.append(a, x.kernel());
@@ -69,6 +74,8 @@ pub const Set = struct {
         for (&set.vocabs) |*x| try list.append(a, x.kernel());
         for (&set.picks) |*x| try list.append(a, x.kernel());
         inline for (.{ "qkms", "attms", "ctxms", "rnnms", "top1ms", "racems", "twins" }) |f| for (&@field(set, f)) |*x| try list.append(a, x.kernel());
+        for (&set.mini_taps) |*x| try list.append(a, x.kernel());
+        for (&set.mini_hiddens) |*x| try list.append(a, x.kernel());
     }
 
     pub fn deinit(set: *Set) void {
@@ -83,6 +90,8 @@ pub const Set = struct {
         for (&set.vocabs) |*x| x.deinit();
         for (&set.picks) |*x| x.deinit();
         inline for (.{ "qkms", "attms", "ctxms", "rnnms", "top1ms", "racems", "twins" }) |f| for (&@field(set, f)) |*x| x.deinit();
+        for (&set.mini_taps) |*x| x.deinit();
+        for (&set.mini_hiddens) |*x| x.deinit();
         set.k.unload();
     }
 };

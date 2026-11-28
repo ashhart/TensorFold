@@ -100,6 +100,8 @@ DSpark support is part of the plan on both backends, not an extra: H4, C5 and M6
 The engine slices C4 and M5 land first without it, so plain decode exists as the reference the drafter is checked against.
 The drafter taps by zero-based decoder visit: 5, 23 and 41 are the inputs to those visits, and 48 is the output after the final norm, not a cache slot.
 
+On CUDA, the Mini adapter reuses #4858's batched DSpark Q/K, attention, context, recurrence and pick kernels across the active lane streams. It advertises batched drafting to the shared lane scheduler; without that fact, the scheduler passes only one stream to each hold and cannot use the grouped kernels. The serving adapter limits requested drafts to two per stream: the eight-row head is a kernel capacity, not a reason to verify mostly rejected rows across concurrent streams. The drafter checks the full unembedding checkpoint shape but packs only the valid vocabulary rows, so the batched matmul output, softcap and picks use the same row stride. The target computes its final norm before capturing the fourth tap or unembedding; the drafter's seven recurrent contexts use mask rows 1–7, aligned with its hidden projection. The adapter verifies proposals through the ordinary target and rolls back rejected rows. Passing this device path does not waive the same-engine fidelity and speed gate below.
+
 ## Gate
 
 The gate is agreed; the speed bar below is its threshold.

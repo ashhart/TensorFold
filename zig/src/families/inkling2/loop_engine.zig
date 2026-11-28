@@ -9,6 +9,7 @@ const attention = @import("kernels.zig");
 const modelopt = @import("modelopt.zig");
 const loop_math = @import("loop_math_cuda.zig");
 const round = @import("loop_round.zig");
+const dspark = @import("dspark.zig");
 
 pub const prompt_rows: usize = 2048;
 pub const window_rows: usize = 16;
@@ -23,6 +24,7 @@ pub const Kernels = struct {
     sample_mod: cuda.Module,
     draws: cuda.sample.Draws,
     tfq3: ?cuda.tfq3.Kernels = null,
+    draft: ?dspark.Kernels = null,
 
     pub fn load(ctx: *const cuda.Context) !Kernels {
         return loadWith(ctx, false, 0, 0, 0);
@@ -63,6 +65,7 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         if (k.tfq3) |*tk| tk.unload();
         k.sample_mod.unload();
+        if (k.draft) |*draft| draft.unload();
         k.loop.unload();
         k.moe.unload();
         k.attn.unload();
@@ -112,6 +115,7 @@ const Scratch = struct {
     moe_scratch: u64,
     hidden: u64,
     logits: u64,
+    taps: u64 = 0, // allocated only when a DSpark drafter attaches
 };
 
 /// A stream's state (every visit's K/V rows and conv states, its rewind sites, its window's backup and history).
@@ -139,6 +143,7 @@ pub const Model = struct {
     slot: usize = 0, // the slot snapshots and rewinds use; forwards share the scratch
     recorded: [max_slots]bool = @splat(false), // slots whose `backup` and `hist` hold their last window
     s: Scratch = undefined,
+    taps_buf: ?cuda.DeviceBuffer = null,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
 
     pub fn slotBase(m: *const Model) u64 {
@@ -309,12 +314,28 @@ pub const Model = struct {
         return m;
     }
 
+    pub fn prepareTaps(m: *Model) !void {
+        if (m.taps_buf == null) {
+            m.taps_buf = try cuda.DeviceBuffer.alloc(m.d, prompt_rows * dspark.taps.len * m.w.c.text.hidden * 2);
+        }
+        m.s.taps = m.taps_buf.?.ptr;
+    }
+
+    pub fn clearTaps(m: *Model) void {
+        m.s.taps = 0;
+        if (m.taps_buf) |*buf| {
+            buf.free();
+            m.taps_buf = null;
+        }
+    }
+
     fn deinitBuffers(m: *Model) void {
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
     }
 
     pub fn deinit(m: *Model) void {
+        m.clearTaps();
         m.deinitBuffers();
         for (m.slots[0..m.n_slots]) |*slot| for ([4]*cuda.DeviceBuffer{ &slot.hist, &slot.backup, &slot.sites, &slot.cache }) |b| b.free();
         m.* = undefined;

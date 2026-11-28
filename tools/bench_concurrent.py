@@ -330,7 +330,7 @@ def main() -> None:
                     rep["pooled"] = bench_metrics.pooled(runs)
                     rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
                                        "cache_state", "complete", "token_sha", "token_sha256", "output_sha256",
-                                       "completion", "finish_reasons", "tool_calls", "tool_sha256")}
+                                       "completion", "finish_reasons", "tool_calls", "tool_sha256", "speculative")}
                                        for r in runs]
                     rep["client_intervals"] = [{"start": r["sent"], "first": r.get("first"),
                                                 "last": r.get("last"), "end": r.get("completed"),

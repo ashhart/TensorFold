@@ -8,6 +8,8 @@ const plan_ = @import("plan.zig");
 const loop = @import("loop.zig");
 const engine = @import("loop_engine.zig");
 const backend = @import("loop_backend.zig");
+const dspark = @import("dspark.zig");
+const cuda_dspark = @import("cuda_dspark.zig");
 
 pub const model_type = "inkling2_loop";
 pub const formats: []const []const u8 = &.{ "modelopt-mixed", "tfq3" };
@@ -16,6 +18,7 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = engine.prompt_rows;
 pub const window_rows: u32 = engine.window_rows;
 pub const explains_open = true;
+pub const takes_drafter = true;
 
 pub const VisionOptions = struct { image_tokens: u32, max_images: u32 };
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
@@ -36,6 +39,7 @@ pub const Options = struct {
 
 pub const Owned = struct {
     gpa: std.mem.Allocator,
+    dir: []u8,
     admission: loop.Admission,
     kernels: engine.Kernels,
     stream: cuda.Stream,
@@ -63,6 +67,7 @@ fn own(ptr: *anyopaque) *Owned {
 fn release(p: *anyopaque) void {
     const o = own(p);
     o.stream.synchronize() catch {};
+    o.gpa.free(o.dir);
     o.backend.deinit();
     o.stream.deinit();
     o.model.deinit();
@@ -86,7 +91,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.Inkling2CapturedKernels;
     if (o.segments != 1 or o.tp != 1 or o.rank != 0) return error.Inkling2LoopOneRankOnly;
     if (o.vision != null) return error.Inkling2LoopTextOnly;
-    if (o.drafter != null) return error.Inkling2DSparkPending;
     const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
@@ -123,12 +127,46 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer be.deinit();
     const out = try gpa.create(Owned);
     errdefer gpa.destroy(out);
-    out.* = .{ .gpa = gpa, .admission = .{ .context = @intCast(o.context) }, .kernels = k, .stream = stream, .weights = w, .model = m, .backend = be };
+    out.* = .{ .gpa = gpa, .dir = try gpa.dupe(u8, dir), .admission = .{ .context = @intCast(o.context) }, .kernels = k, .stream = stream, .weights = w, .model = m, .backend = be };
     // The value copies above own pointers to their old stack homes; retarget the live model/backend now.
     out.model.w = &out.weights;
     out.backend.m = &out.model;
     out.backend.k = &out.kernels;
     return .{ .backend = out.backend.backend(), .facts = out.backend.facts(), .rows = window_rows, .stream_bytes = backend.streamBytes(&out.model), .ctx = out, .deinit = release, .target = out };
+}
+
+pub const OpenedDrafter = struct {
+    drafter: lanes.drafter.Drafter,
+    ctx: *anyopaque,
+    close: *const fn (*anyopaque) void,
+    reserve: *const fn (*anyopaque, u32) anyerror!void,
+};
+
+fn closeDrafter(ptr: *anyopaque) void {
+    const d: *cuda_dspark.Drafter = @ptrCast(@alignCast(ptr));
+    const target = d.target;
+    const kernels = d.kernels;
+    d.deinit();
+    target.clearTaps();
+    kernels.draft.?.unload();
+    kernels.draft = null;
+}
+
+fn reserveDrafter(ptr: *anyopaque, streams: u32) anyerror!void {
+    const d: *cuda_dspark.Drafter = @ptrCast(@alignCast(ptr));
+    return d.reserve(streams);
+}
+
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, ptr: *anyopaque, dir: []const u8, _: u8) !OpenedDrafter {
+    const o = own(ptr);
+    if (o.kernels.draft != null) return error.DSparkAlreadyAttached;
+    o.kernels.draft = try dspark.Kernels.load(o.model.d);
+    errdefer {
+        o.kernels.draft.?.unload();
+        o.kernels.draft = null;
+    }
+    const d = try cuda_dspark.Drafter.init(gpa, io, &o.model, &o.kernels, o.stream, o.dir, dir);
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
 }
 
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
@@ -151,7 +189,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.Inkling2LoopOneRankOnly => "Inkling 2 Mini runs at one CUDA rank with one segment; TP and multi-segment modes are refused",
         error.Inkling2LoopTextOnly => "Inkling 2 Mini is text-only on CUDA: images and --vision are refused",
-        error.Inkling2DSparkPending => "the Mini DSpark drafter has names and taps but no native draft engine in this build",
+        error.UnsupportedInkling2Taps => "the DSpark checkpoint needs Mini's four visit taps in checkpoint order",
         error.Inkling2CapturedKernels => "Inkling 2 Mini runs the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.Inkling2TooManyStreams => "Inkling 2 Mini on CUDA holds at most 16 streams: lower --parallel",
         error.StructuresUnsupported, error.ChainsOnly => "Inkling 2 Mini serves only unconstrained, non-branching text drafts",
@@ -163,7 +201,7 @@ test "Mini native registration and refusal wording are explicit" {
     try std.testing.expectEqualStrings("inkling2_loop", model_type);
     try std.testing.expect(max_segments == 1 and prompt_rows == 2048 and window_rows == 16);
     try std.testing.expectEqual(16, engine.max_slots); // the stream cap explain() names
-    for ([_]anyerror{ error.Inkling2LoopOneRankOnly, error.Inkling2LoopTextOnly, error.Inkling2DSparkPending, error.Inkling2CapturedKernels, error.Inkling2TooManyStreams }) |err| {
+    for ([_]anyerror{ error.Inkling2LoopOneRankOnly, error.Inkling2LoopTextOnly, error.Inkling2CapturedKernels, error.Inkling2TooManyStreams }) |err| {
         try std.testing.expect(explain(null, err) != null);
     }
 }
@@ -236,4 +274,59 @@ test "the forward refuses a token id at the vocabulary before any launch" {
 
 test "Mini CUDA weights: shared traversal preserves the complete file-backed loader" {
     std.mem.doNotOptimizeAway(&@import("loop_weights.zig").loadWith);
+}
+
+test "Mini DSpark serving: native target and drafter entrypoints compile together" {
+    std.mem.doNotOptimizeAway(&open);
+    std.mem.doNotOptimizeAway(&openDrafter);
+}
+
+test {
+    _ = dspark;
+    _ = @import("dspark_head.zig");
+}
+
+test "clearing target taps frees the tap buffer and restores plain state" {
+    const Track = struct {
+        allocs: usize = 0,
+        frees: usize = 0,
+        next: u64 = 1 << 32,
+        fn alloc(ctx: *anyopaque, len: usize) ?u64 {
+            const t: *@This() = @ptrCast(@alignCast(ctx));
+            t.allocs += 1;
+            t.next += std.mem.alignForward(u64, len, 512);
+            return t.next;
+        }
+        fn free(ctx: *anyopaque, _: u64) bool {
+            const t: *@This() = @ptrCast(@alignCast(ctx));
+            t.frees += 1;
+            return true;
+        }
+    };
+    var why: config.Why = .{};
+    var w: @import("loop_weights.zig").Weights = undefined;
+    w.c = try config.parse(std.testing.allocator, @import("config_test.zig").mini, &why);
+    var m: engine.Model = .{
+        .gpa = std.testing.allocator,
+        .d = @ptrFromInt(0x1000),
+        .w = &w,
+        .context = 64,
+        .layout = undefined,
+        .s = std.mem.zeroes(@FieldType(engine.Model, "s")),
+    };
+    var track: Track = .{};
+    const before = cuda.memory.currentHook();
+    cuda.memory.setHook(.{ .ctx = &track, .alloc = Track.alloc, .free = Track.free });
+    defer cuda.memory.setHook(before);
+    try m.prepareTaps();
+    try std.testing.expect(m.s.taps != 0 and m.taps_buf != null and track.allocs == 1 and track.frees == 0);
+    m.clearTaps();
+    try std.testing.expect(m.s.taps == 0 and m.taps_buf == null and track.frees == 1);
+    // Repeated close and re-prepare leave no leaked buffers.
+    m.clearTaps();
+    try std.testing.expectEqual(@as(usize, 1), track.frees);
+    try m.prepareTaps();
+    try std.testing.expect(m.s.taps != 0 and track.allocs == 2);
+    m.clearTaps();
+    try std.testing.expect(m.s.taps == 0 and track.frees == 2);
 }
