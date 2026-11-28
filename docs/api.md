@@ -686,8 +686,10 @@ reasoning, before the grammar starts, stay in it.
 ### Prompt progress
 
 A streamed chat completion, completion or Responses request with `return_progress: true` hears how far its prompt
-pass has come before the reply starts. On chat and completions each count is a chunk of its own with an empty
-`choices` list, as the `include_usage` chunk has, and the counts under `tensorfold.progress`:
+pass has come before the reply starts. Chat and completions require one choice and one prompt: a streamed request
+with `n` above 1 or a completion prompt list is refused with HTTP 400 before generation. On chat and completions
+each count is a chunk of its own with an empty `choices` list, as the `include_usage` chunk has, and the counts under
+`tensorfold.progress`:
 
 ```json
 {"id": "chatcmpl-…", "object": "chat.completion.chunk", "created": 1763000000, "model": "m", "choices": [], "tensorfold": {"progress": {"done": 8192, "total": 32768, "cached": 4096}}}

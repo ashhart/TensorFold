@@ -206,56 +206,26 @@ test "a streamed prompt list: one head, every prompt's chunks by index, one usag
     }
 }
 
-test "prompt progress: streamed n choices and prompt lists keep counts, ordered finishes and one usage" {
+test "prompt progress: streamed n choices and prompt lists are refused before any submission" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const cases = [_]struct { prompt: []const u8, choice: []const u8, counts: []const i64, prompt_tokens: i64 }{
-        .{ .prompt = "\"ab\"", .choice = ",\"n\":2", .counts = &.{ 2, 2 }, .prompt_tokens = 2 },
-        .{ .prompt = list, .choice = "", .counts = &.{ 1, 2, 3 }, .prompt_tokens = 6 },
+    const cases = [_]struct { prompt: []const u8, choice: []const u8 }{
+        .{ .prompt = "\"ab\"", .choice = ",\"n\":2" },
+        .{ .prompt = list, .choice = "" },
     };
     for (cases) |case| {
         var echo: Echo = .{};
         var got: Capture = .{ .a = a };
         const extra = two ++ ",\"stream\":true,\"return_progress\":true,\"stream_options\":{\"include_usage\":true}";
         try complete(a, &echo, case.prompt, try std.mem.concat(a, u8, &.{ extra, case.choice }), &got);
-        var counts: std.ArrayList(i64) = .empty;
-        var finishes: std.ArrayList(i64) = .empty;
-        var usages: usize = 0;
-        try t.expectEqualStrings("[DONE]", got.events.items[got.events.items.len - 1]);
-        for (got.events.items[0 .. got.events.items.len - 1]) |text| {
-            const e = (try json.parse(a, text)).ok;
-            const choices = e.get("choices").?.array;
-            if (choices.len == 0) {
-                if (e.get("usage")) |u| {
-                    usages += 1;
-                    try t.expectEqual(case.prompt_tokens, int(u.get("prompt_tokens")));
-                    try t.expectEqual(@as(i64, @intCast(2 * case.counts.len)), int(u.get("completion_tokens")));
-                    continue;
-                }
-                const p = e.get("tensorfold").?.get("progress").?;
-                try t.expectEqual(@as(usize, 0), finishes.items.len);
-                try counts.append(a, int(p.get("done")));
-                continue;
-            }
-            const choice = choices[0];
-            if (choice.get("finish_reason").? == .null) continue;
-            try finishes.append(a, int(choice.get("index")));
-        }
-        try t.expectEqual(case.counts.len, counts.items.len);
-        for (case.counts) |wanted| {
-            var actual: usize = 0;
-            var expected: usize = 0;
-            for (counts.items) |count| if (count == wanted) {
-                actual += 1;
-            };
-            for (case.counts) |count| if (count == wanted) {
-                expected += 1;
-            };
-            try t.expectEqual(expected, actual);
-        }
-        for (case.counts, 0..) |_, i| try t.expectEqual(@as(i64, @intCast(i)), finishes.items[i]);
-        try t.expectEqual(@as(usize, 1), usages);
+        try t.expectEqual(@as(?u16, 400), got.status);
+        try t.expectEqual(@as(u32, 0), got.opens);
+        try t.expectEqual(@as(usize, 0), got.events.items.len);
+        const err = (try json.parse(a, got.whole)).ok.get("error").?;
+        try t.expectEqualStrings("invalid_request_error", err.strField("type").?);
+        try t.expectEqualStrings("return_progress cannot be served with n above 1 or a list of prompts", err.strField("message").?);
+        try t.expectEqual(@as(usize, 0), echo.calls.load(.monotonic));
     }
 }
 

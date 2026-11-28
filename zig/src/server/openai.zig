@@ -156,6 +156,8 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     input.fields = .{ .object = sampling };
     input.explicit_off = client_thinking and !(thinking.enable orelse true);
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
+    if (streamed and (fields.flag(body, "return_progress") orelse false) and (n > 1 or prompts.len > 0))
+        return cx.refuse("return_progress cannot be served with n above 1 or a list of prompts");
     input.logprobs = logprobs;
     input.cache_salt = try @import("cache_salt.zig").field(&srv.tool_ids, cx, body);
     input.kept_probs = try @import("kept_probs.zig").asked(cx, body, logprobs);
