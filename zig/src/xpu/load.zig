@@ -1,6 +1,7 @@
 //! Qwen3.8-27B weights onto the device: int4 projections (MLX affine 4/64 or GPTQ 4/128), sharded across TP={1,2,4}.
 const std = @import("std");
 const q = @import("qwen27.zig");
+const shape = @import("qwen27_config.zig");
 const dev = @import("dev.zig");
 const fwd = @import("forward.zig");
 const rope_table = @import("rope_table.zig");
@@ -14,7 +15,50 @@ const kvBytes = fwd.kvBytes;
 const off = dev.off;
 
 /// An int4 projection in the GEMM layout (words, fp16 scales, biases); `wide` picks the kernel family, `ilv` gate|up.
-pub const Proj = struct { w: *anyopaque, s: *anyopaque, bg: *anyopaque, n: u32, k: u32, wide: bool, gs: u32 = 64, ilv: bool = false };
+pub const Proj = struct { w: *anyopaque, s: *anyopaque, bg: *anyopaque, bias: ?*anyopaque = null, n: u32, k: u32, wide: bool, gs: u32 = 64, ilv: bool = false };
+
+pub const BiasTracker = struct {
+    start: usize,
+    used: []bool,
+
+    pub fn mark(self: *BiasTracker, idx: usize) void {
+        if (idx >= self.start and idx - self.start < self.used.len) self.used[idx - self.start] = true;
+    }
+
+    /// Sidecar-range tensor lookup; matching base-checkpoint keys are inert.
+    pub fn find(self: *const BiasTracker, c: *const Checkpoint, name: []const u8) ?usize {
+        for (c.tensors.items[self.start..], self.start..) |t, idx| {
+            if (std.mem.endsWith(u8, t.name, name) and (t.name.len == name.len or std.mem.startsWith(u8, t.name, "language_model.") or std.mem.startsWith(u8, t.name, "model.language_model."))) return idx;
+        }
+        return null;
+    }
+};
+
+fn tensorPrint(c: *const Checkpoint, comptime fmt: []const u8, args: anytype) !dev.Tensor {
+    const name = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(name);
+    return c.get(name);
+}
+
+fn optionalPrint(c: *const Checkpoint, comptime fmt: []const u8, args: anytype) !?dev.Tensor {
+    const name = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(name);
+    return c.getOptional(name);
+}
+
+fn optionalIndexPrint(c: *const Checkpoint, bt: *const BiasTracker, comptime fmt: []const u8, args: anytype) !?usize {
+    const name = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(name);
+    return bt.find(c, name);
+}
+
+fn validateBiasVector(t: dev.Tensor, full_n: u32) !void {
+    if (!std.mem.eql(u8, t.dtype, "F32") or t.rank != 1 or t.shape[0] != full_n or t.bytes.len != @as(usize, full_n) * 4) return error.BadBiasCorrVector;
+    for (0..@as(usize, full_n)) |i| {
+        const v: f32 = @bitCast(std.mem.readInt(u32, t.bytes[4 * i ..][0..4], .little));
+        if (!std.math.isFinite(v)) return error.NonFiniteBiasCorr;
+    }
+}
 
 pub const PartSlice = struct {
     suffix: []const u8,
@@ -69,6 +113,7 @@ pub const Model = struct {
     norm: *anyopaque,
     head: Proj,
     invf: *anyopaque,
+    biascorr_start: usize,
 };
 
 pub fn bf16Tensor(d: *Dev, c: *const Checkpoint, name: []const u8) !*anyopaque {
@@ -78,22 +123,28 @@ pub fn bf16Tensor(d: *Dev, c: *const Checkpoint, name: []const u8) !*anyopaque {
 }
 
 /// Fused projection from MLX parts (optionally sliced on N and/or K) stacked on N, repacked on the GPU.
-pub fn projectionSliced(d: *Dev, c: *const Checkpoint, prefix: []const u8, parts: []const PartSlice, wide: bool, min_n: u32, ilv: bool, stage: *anyopaque) !Proj {
+pub fn projectionSliced(d: *Dev, c: *const Checkpoint, prefix: []const u8, parts: []const PartSlice, wide: bool, min_n: u32, ilv: bool, stage: *anyopaque, bt_opt: ?*BiasTracker) !Proj {
     var n_total: u32 = 0;
     var k: u32 = 0;
     for (parts) |p| {
-        const w = try c.get(try std.fmt.allocPrint(alloc, "{s}{s}.weight", .{ prefix, p.suffix }));
+        const w = try tensorPrint(c, "{s}{s}.weight", .{ prefix, p.suffix });
+        const sc = try tensorPrint(c, "{s}{s}.scales", .{ prefix, p.suffix });
         const full_n: u32 = @intCast(w.shape[0]);
         const full_k: u32 = @intCast(w.shape[1] * 8);
         const nl = if (p.n_len == 0) full_n else p.n_len;
         const kl = if (p.k_len == 0) full_k else p.k_len;
         if (p.n_off + nl > full_n or p.k_off + kl > full_k or p.k_off % 64 != 0 or kl % 64 != 0) return error.UnexpectedShape;
+        if (bt_opt) |bt| {
+            if (q.prefill_int8 and sc.shape[1] != 0 and full_k / sc.shape[1] == 128) {
+                if (try optionalIndexPrint(c, bt, "{s}{s}.bias_corr", .{ prefix, p.suffix }) != null) return error.UnsupportedBiasPath;
+            }
+        }
         n_total += nl;
         k = kl;
     }
     const n_real = n_total;
     n_total = (@max(n_total, min_n) + 255) / 256 * 256;
-    const out: Proj = .{ .w = try d.alloc_(@as(usize, k / 8) * n_total * 4), .s = try d.alloc_(@as(usize, k / 64) * n_total * 2), .bg = try d.alloc_(@as(usize, k / 64) * n_total * 2), .n = n_total, .k = k, .wide = wide, .ilv = ilv };
+    var out: Proj = .{ .w = try d.alloc_(@as(usize, k / 8) * n_total * 4), .s = try d.alloc_(@as(usize, k / 64) * n_total * 2), .bg = try d.alloc_(@as(usize, k / 64) * n_total * 2), .n = n_total, .k = k, .wide = wide, .ilv = ilv };
     if (ilv and (parts.len != 2 or n_real != n_total)) return error.BadInterleave;
     if (n_real != n_total) {
         try d.fill(out.w, @as(u32, 0), @as(usize, k / 8) * n_total * 4);
@@ -102,9 +153,9 @@ pub fn projectionSliced(d: *Dev, c: *const Checkpoint, prefix: []const u8, parts
     }
     var n0: u32 = 0;
     for (parts, 0..) |p, pi| {
-        const w = try c.get(try std.fmt.allocPrint(alloc, "{s}{s}.weight", .{ prefix, p.suffix }));
-        const s = try c.get(try std.fmt.allocPrint(alloc, "{s}{s}.scales", .{ prefix, p.suffix }));
-        const b = try c.get(try std.fmt.allocPrint(alloc, "{s}{s}.biases", .{ prefix, p.suffix }));
+        const w = try tensorPrint(c, "{s}{s}.weight", .{ prefix, p.suffix });
+        const s = try tensorPrint(c, "{s}{s}.scales", .{ prefix, p.suffix });
+        const b = try tensorPrint(c, "{s}{s}.biases", .{ prefix, p.suffix });
         const full_n: u32 = @intCast(w.shape[0]);
         const full_k: u32 = @intCast(w.shape[1] * 8);
         const n: u32 = if (p.n_len == 0) full_n else p.n_len;
@@ -145,6 +196,40 @@ pub fn projectionSliced(d: *Dev, c: *const Checkpoint, prefix: []const u8, parts
         try d.launch(d.k.repack, .{ .x = (n + 15) / 16, .y = k / 8 }, .{ sw, ss, sb, out.w, out.s, out.bg, @as(i32, @intCast(n)), @as(i32, @intCast(k)), @as(i32, @intCast(n_total)), @as(i32, @intCast(n0)), @as(i32, if (ilv) @intCast(pi + 1) else 0) });
         try d.sync();
         n0 += n;
+    }
+    // Optional fused BiasCorr from the tracked sidecar only; untracked projections stay exact.
+    const bt_sidecar = bt_opt orelse return out;
+    var has_bias = false;
+    for (parts) |p| {
+        if (try optionalIndexPrint(c, bt_sidecar, "{s}{s}.bias_corr", .{ prefix, p.suffix })) |idx| {
+            bt_sidecar.mark(idx);
+            if (p.k_off == 0) has_bias = true;
+        }
+    }
+    if (has_bias) {
+        const hb = try alloc.alloc(f32, n_total);
+        defer alloc.free(hb);
+        @memset(hb, 0);
+        var bn0: u32 = 0;
+        for (parts, 0..) |p, pi| {
+            const w = try tensorPrint(c, "{s}{s}.weight", .{ prefix, p.suffix });
+            const full_n: u32 = @intCast(w.shape[0]);
+            const n: u32 = if (p.n_len == 0) full_n else p.n_len;
+            if (p.k_off == 0) {
+                if (try optionalIndexPrint(c, bt_sidecar, "{s}{s}.bias_corr", .{ prefix, p.suffix })) |bidx| {
+                    const bt = c.tensors.items[bidx];
+                    try validateBiasVector(bt, full_n);
+                    for (0..n) |ni| {
+                        const off_b = (p.n_off + ni) * 4;
+                        const bits = std.mem.readInt(u32, bt.bytes[off_b..][0..4], .little);
+                        const col: usize = if (ilv) (ni / 16) * 32 + pi * 16 + (ni % 16) else bn0 + ni;
+                        hb[col] = @bitCast(bits);
+                    }
+                }
+            }
+            bn0 += n;
+        }
+        out.bias = try d.upload(std.mem.sliceAsBytes(hb));
     }
     return out;
 }
@@ -286,7 +371,7 @@ pub fn vecTensor(d: *Dev, c: *const Checkpoint, name: []const u8, centred: bool)
 }
 
 /// Uploads the 3-segment `(Q | K | V)` causal conv1d weights `[nconv, 1, 4]` for `rank`.
-fn convWeightRank(d: *Dev, c: *const Checkpoint, name: []const u8, rank: u32, sh: q.TpShape) !*anyopaque {
+fn convWeightRank(d: *Dev, c: *const Checkpoint, name: []const u8, rank: u32, sh: shape.TpShape) !*anyopaque {
     const t = try c.get(name);
     const bpe: usize = if (std.mem.eql(u8, t.dtype, "F32")) 4 else 2;
     if (t.bytes.len != 10240 * 4 * bpe) return error.UnexpectedShape;
@@ -313,6 +398,7 @@ fn toBf16(v: f32) u16 {
 pub fn loadGptqRank(d: *Dev, c: *const Checkpoint, rank: u32, vocab_off: u32, vocab_len: u32) !Model {
     const sh = q.tpShape();
     var m: Model = undefined;
+    m.biascorr_start = std.math.maxInt(usize);
     const stage = try d.alloc_(800 << 20);
     const e = try c.get("model.embed_tokens.weight");
     if (!std.mem.eql(u8, e.dtype, "F16")) return error.UnexpectedDtype;
@@ -401,13 +487,19 @@ pub fn loadGptqRank(d: *Dev, c: *const Checkpoint, rank: u32, vocab_off: u32, vo
 }
 
 pub fn loadRank(d: *Dev, c: *const Checkpoint, rank: u32, vocab_off: u32, vocab_len: u32) !Model {
+    return loadRankTracked(d, c, rank, vocab_off, vocab_len, null);
+}
+
+pub fn loadRankTracked(d: *Dev, c: *const Checkpoint, rank: u32, vocab_off: u32, vocab_len: u32, bt_opt: ?*BiasTracker) !Model {
     if (c.has("in_proj_qkv.qweight")) {
+        if (bt_opt != null) return error.UnsupportedBiasPath;
         q.GS = 128;
         return loadGptqRank(d, c, rank, vocab_off, vocab_len);
     }
     q.GS = 64;
     const sh = q.tpShape();
     var m: Model = undefined;
+    m.biascorr_start = if (bt_opt) |bt| bt.start else std.math.maxInt(usize);
     const stage = try d.alloc_(800 << 20);
     const e_w = try c.get("model.embed_tokens.weight");
     const e_s = try c.get("model.embed_tokens.scales");
@@ -417,7 +509,7 @@ pub fn loadRank(d: *Dev, c: *const Checkpoint, rank: u32, vocab_off: u32, vocab_
     m.embed_s = try bf16Tensor(d, c, "model.embed_tokens.scales");
     m.embed_b = try bf16Tensor(d, c, "model.embed_tokens.biases");
     m.norm = try bf16Tensor(d, c, "model.norm.weight");
-    m.head = try projectionSliced(d, c, "lm_head", &.{.{ .suffix = "", .n_off = vocab_off, .n_len = vocab_len }}, true, 0, false, stage);
+    m.head = try projectionSliced(d, c, "lm_head", &.{.{ .suffix = "", .n_off = vocab_off, .n_len = vocab_len }}, true, 0, false, stage, null);
     const invf = rope_table.target();
     m.invf = try d.upload(std.mem.sliceAsBytes(&invf));
     for (&m.layers, 0..) |*l, i| {
@@ -436,20 +528,20 @@ pub fn loadRank(d: *Dev, c: *const Checkpoint, rank: u32, vocab_off: u32, vocab_
             .gu = try projectionSliced(d, c, f(p, "mlp."), &.{
                 .{ .suffix = "gate_proj", .n_off = rank * sh.ff, .n_len = sh.ff },
                 .{ .suffix = "up_proj", .n_off = rank * sh.ff, .n_len = sh.ff },
-            }, true, 0, true, stage),
+            }, true, 0, true, stage, bt_opt),
             .down = try projectionSliced(d, c, f(p, "mlp."), &.{
                 .{ .suffix = "down_proj", .k_off = rank * sh.ff, .k_len = sh.ff },
-            }, false, 0, false, stage),
+            }, false, 0, false, stage, bt_opt),
         };
         if (l.attn) {
             l.mixer_in = try projectionSliced(d, c, f(p, "self_attn."), &.{
                 .{ .suffix = "q_proj", .n_off = rank * sh.aq * 512, .n_len = sh.aq * 512 },
                 .{ .suffix = "k_proj", .n_off = rank * sh.akv * 256, .n_len = sh.akv * 256 },
                 .{ .suffix = "v_proj", .n_off = rank * sh.akv * 256, .n_len = sh.akv * 256 },
-            }, true, 0, false, stage);
+            }, true, 0, false, stage, bt_opt);
             l.mixer_out = try projectionSliced(d, c, f(p, "self_attn."), &.{
                 .{ .suffix = "o_proj", .k_off = rank * sh.od, .k_len = sh.od },
-            }, false, 0, false, stage);
+            }, false, 0, false, stage, bt_opt);
             l.qn = try bf16Tensor(d, c, f(p, "self_attn.q_norm.weight"));
             l.kn = try bf16Tensor(d, c, f(p, "self_attn.k_norm.weight"));
             l.kc = try d.alloc_(kvBytes());
@@ -462,10 +554,10 @@ pub fn loadRank(d: *Dev, c: *const Checkpoint, rank: u32, vocab_off: u32, vocab_
                 .{ .suffix = "in_proj_z", .n_off = rank * sh.vd, .n_len = sh.vd },
                 .{ .suffix = "in_proj_a", .n_off = rank * sh.gv, .n_len = sh.gv },
                 .{ .suffix = "in_proj_b", .n_off = rank * sh.gv, .n_len = sh.gv },
-            }, true, sh.gdn_in, false, stage);
+            }, true, sh.gdn_in, false, stage, bt_opt);
             l.mixer_out = try projectionSliced(d, c, f(p, "linear_attn."), &.{
                 .{ .suffix = "out_proj", .k_off = rank * sh.vd, .k_len = sh.vd },
-            }, false, 0, false, stage);
+            }, false, 0, false, stage, bt_opt);
             l.conv_w = try convWeightRank(d, c, f(p, "linear_attn.conv1d.weight"), rank, sh);
             l.alog = try vecTensorSliced(d, c, f(p, "linear_attn.A_log"), false, rank * sh.gv, sh.gv);
             l.dt = try vecTensorSliced(d, c, f(p, "linear_attn.dt_bias"), false, rank * sh.gv, sh.gv);

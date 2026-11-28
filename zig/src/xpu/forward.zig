@@ -2,6 +2,7 @@
 const std = @import("std");
 const ze = @import("ze");
 const q = @import("qwen27.zig");
+const shape = @import("qwen27_config.zig");
 const dev = @import("dev.zig");
 const loader = @import("load.zig");
 const D = q.D;
@@ -12,6 +13,7 @@ const MASK_WORDS = q.MASK_WORDS;
 const Model = loader.Model;
 const Proj = loader.Proj;
 const SPLIT = q.SPLIT;
+const PREMIN = 1024; // decode.cl's PREMIN: XPU_ATTN_PREF leaves rows below it on the slices
 const limits = @import("limits.zig");
 const cand = @import("cand.zig");
 const tail = @import("prompt_tail.zig");
@@ -43,6 +45,9 @@ pub const Acts = struct {
     pm: *anyopaque,
     pl: *anyopaque,
     po: *anyopaque,
+    pmp: *anyopaque, // XPU_ATTN_PREF partials of the prefix chunks: fp32 [16, aq, chunks], and pop [.., 256]
+    plp: *anyopaque,
+    pop: *anyopaque,
     pscr: *anyopaque, // fp32 [maxRows, D]
     logits: *anyopaque, // rank 0: fp16 [16, VOCAB] (peers: minimal stub)
     shard_logits: *anyopaque, // TP>1: fp16 [16, vocab_len]
@@ -75,6 +80,7 @@ pub const Acts = struct {
         const rows = q.maxRows();
         const nc = limits.chunks(rows);
         const ns = limits.splits(q.MAX_CTX, SPLIT);
+        const npc: usize = if (q.attn_pref != 0) q.MAX_CTX / q.attn_pref + 1 else 1;
         const h_cols: usize = @max(@as(usize, D), @max(@as(usize, sh.ff), @as(usize, sh.od)));
         const max_g_stride: usize = gStride(h_cols / 64);
         const p_cols: usize = @max(@as(usize, 2 * sh.ff), @max(@as(usize, sh.gdn_in), @as(usize, sh.att_in)));
@@ -99,6 +105,9 @@ pub const Acts = struct {
             .pm = try d.alloc_(16 * @as(usize, sh.aq) * ns * 4),
             .pl = try d.alloc_(16 * @as(usize, sh.aq) * ns * 4),
             .po = try d.alloc_(16 * @as(usize, sh.aq) * ns * 256 * 4),
+            .pmp = try d.alloc_(16 * @as(usize, sh.aq) * npc * 4),
+            .plp = try d.alloc_(16 * @as(usize, sh.aq) * npc * 4),
+            .pop = try d.alloc_(16 * @as(usize, sh.aq) * npc * 256 * 4),
             .pscr = try d.alloc_(rows * D * 4),
             .logits = try d.alloc_(if (rank == 0) 16 * VOCAB * 2 else 64),
             .shard_logits = try d.alloc_(if (q.TP > 1) 16 * @as(usize, vocab_len) * 2 else 64),
@@ -116,7 +125,7 @@ pub const Acts = struct {
             .ids = try d.alloc_(rows * 4),
             .zeros = try d.alloc_(rows * @as(usize, sh.gv) * 128 * 2),
             .ones = try d.alloc_(rows * @as(usize, sh.gv) * 4),
-            .chain = try d.upload(std.mem.sliceAsBytes(&chainTable())),
+            .chain = try d.upload(std.mem.sliceAsBytes(&cand.chainTable())),
             .tree = try d.alloc_(16 * 17 * 4),
             .path = try d.alloc_(16 * 4),
             .mpath = try d.alloc_(16 * 2 * 16 * 4),
@@ -133,18 +142,10 @@ pub const Acts = struct {
     }
 };
 
-pub fn chainTable() [16 * 17]i32 {
-    var t: [16 * 17]i32 = @splat(0);
-    for (0..16) |r| {
-        t[r * 17] = @intCast(r);
-        for (0..r + 1) |dd| t[r * 17 + 1 + dd] = @intCast(dd);
-    }
-    return t;
-}
-
 pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool, wide: bool) !*anyopaque {
     const sh = q.tpShape();
     if (q.prefill_int8 and wide and w.ilv and w.gs == 128) {
+        if (w.bias != null) return error.UnsupportedBiasPath;
         if (!pre) try quantA8(d, a, a.h, w.k, T, 0);
         try d.launch(d.k.a8_swiglu, a8Groups(w, T), a8Args(a, w, a.p, T));
         return a.p;
@@ -153,7 +154,7 @@ pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool, wide: bool)
         const M: i32 = @intCast(T);
         const tiles = (T + 63) / 64;
         const k = if (w.gs == 128) d.k.ngen_swiglu_g128 else d.k.ngen_swiglu;
-        try d.launch(k, .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 }, .{ a.h, w.w, w.s, w.bg, a.p, M, @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, @as(i32, @intCast((T + 7) / 8 * 8)), @as(i32, @intCast(w.k / w.gs)) });
+        try d.launch(k, .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 }, .{ a.h, w.w, w.s, w.bg, a.p, M, @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, @as(i32, @intCast((T + 7) / 8 * 8)), @as(i32, @intCast(w.k / w.gs)), w.bias });
         try d.launch(d.k.rowsums_ff, .{ .x = T }, .{ a.p, a.ahi, a.alo, gs, q.rot_on });
         return a.p;
     }
@@ -194,18 +195,18 @@ pub fn gemmRows(d: *Dev, pscr: *anyopaque, h: *anyopaque, ahi: *anyopaque, alo: 
     if (!wide) {
         if (w.wide)
             if (w.n >= 30000)
-                try d.launch(dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try d.launch(dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias })
             else
-                try d.launch(dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try d.launch(dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias })
         else
-            try d.launch(dec_narrow, .{ .x = 1, .y = w.n / 32 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
+            try d.launch(dec_narrow, .{ .x = 1, .y = w.n / 32 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias });
     } else {
         const tiles = (m + 63) / 64;
         const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 };
         if (is_wide)
-            try d.launch(ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+            try d.launch(ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias })
         else
-            try d.launch(ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, pscr });
+            try d.launch(ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, pscr, w.bias });
     }
     if (gemm_hook) |f| try f(d, h, w, out, m);
 }
@@ -263,7 +264,7 @@ comptime {
     for (TAP_LAYERS) |tl| if (tl == LAYERS - 1) @compileError("the XPU prompt tail assumes the last layer is not tapped");
 }
 
-fn atRows(a: *const Acts, base: usize, sh: q.TpShape) Acts {
+fn atRows(a: *const Acts, base: usize, sh: shape.TpShape) Acts {
     var t = a.*;
     t.x = off(a.x, base * D * 4);
     t.r = off(a.r, base * D * 2);
@@ -285,6 +286,7 @@ pub const no_q8: ?*anyopaque = null;
 
 pub fn pgemm(d: *Dev, a: *Acts, x: *anyopaque, w: Proj, out: *anyopaque, T: u32, pre: bool, qrot: i32, int4: bool, wide: bool) !void {
     if (!q.prefill_int8 or !wide or w.gs != 128) return gemmRows(d, a.pscr, x, a.ahi, a.alo, w, out, T, wide);
+    if (w.bias != null) return error.UnsupportedBiasPath;
     if (int4 and q.prefill_int4) {
         try d.launch(d.k.quant_a4, .{ .x = T }, .{ x, a.a8, a.sa, a.ahi, a.alo, @as(i32, @intCast(w.k)), @as(i32, @intCast(q.maxRows() + 32)), qrot });
         return d.launch(d.k.a4, a8Groups(w, T), a8Args(a, w, out, T));
@@ -418,8 +420,21 @@ pub fn forwardRunner(r: *q.Runner, ids: []const i32, p0: u32, mode: Mode) !?i32 
                 } else if (wide) {
                     try d.launch(d.k.attn_prompt, .{ .x = (wr + 7) / 8, .y = sh.akv }, .{ wa.q, l.kc.?, l.vc.?, wa.y, @as(i32, @intCast(ap0)), @as(i32, @intCast(wr)), @as(f32, 1.0 / 16.0) });
                 } else {
-                    try d.launch(d.k.attn_decode, .{ .x = T, .y = sh.akv, .z = ns }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi_max_pos != null) tree else table, mt, mpos, kvCap() });
-                    try d.launch(d.k.attn_merge, .{ .x = sh.aq * 16, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
+                    const multi = mode.multi_max_pos != null;
+                    const pre: u32 = if (!multi or !mode.tree) q.attn_pref else 0;
+                    const top: u32 = if (mode.multi_max_pos) |mp_top| mp_top else p0 + 15; // no row of the round is past it
+                    const nch: u32 = if (pre != 0 and top >= PREMIN + 16) (top - 16) / pre else 0; // chunks any row of the round uses
+                    if (nch != 0) {
+                        const npc: u32 = q.MAX_CTX / pre + 1;
+                        const nst: u32 = (@max(pre, PREMIN) + 16 + SPLIT - 1) / SPLIT; // a row's slices past its prefix
+                        const pg: ze.GroupCount = .{ .x = if (multi) T else (T * 6 + 7) / 8, .y = sh.akv, .z = nch };
+                        if (q.kv_i8) try d.launch(d.k.attn_pref8, pg, .{ a.q, l.kc.?, l.vc.?, a.pmp, a.plp, a.pop, t32, @as(i32, @intCast(npc)), @as(i32, @intCast(pre)), @as(f32, 1.0 / 16.0), mt, mpos, kvCap() }) else try d.launch(d.k.attn_pref, pg, .{ a.q, l.kc.?, l.vc.?, a.pmp, a.plp, a.pop, t32, @as(i32, @intCast(npc)), @as(i32, @intCast(pre)), @as(f32, 1.0 / 16.0), mt, mpos });
+                        try d.launch(d.k.attn_tail, .{ .x = T, .y = sh.akv, .z = nst }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(nst)), @as(f32, 1.0 / 16.0), if (multi) tree else table, mt, mpos, kvCap(), @as(i32, @intCast(pre)) });
+                        try d.launch(d.k.attn_merge2, .{ .x = sh.aq, .y = T }, .{ a.pmp, a.plp, a.pop, a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(npc)), @as(i32, @intCast(pre)), @as(i32, @intCast(nst)), table, mpos });
+                    } else {
+                        try d.launch(d.k.attn_decode, .{ .x = T, .y = sh.akv, .z = ns }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi_max_pos != null) tree else table, mt, mpos, kvCap() });
+                        try d.launch(d.k.attn_merge, .{ .x = sh.aq * 16, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
+                    }
                 }
                 if (q.kv8 & 1 != 0) try d.launch(d.k.rot_heads, .{ .x = wr, .y = sh.aq }, .{wa.y});
                 const p_attn: *anyopaque = if (tail_at) |t0| off(a.p, t0 * @as(usize, sh.att_in) * 2) else a.p;

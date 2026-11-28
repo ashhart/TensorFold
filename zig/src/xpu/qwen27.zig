@@ -52,78 +52,9 @@ pub const GDN_IN = 16640;
 pub const ATT_IN = 14336;
 pub var CHUNK: u32 = 1024;
 
-pub const TpShape = struct {
-    ff: u32,
-    gk: u32,
-    gv: u32,
-    nqk: u32,
-    vd: u32,
-    nconv: u32,
-    ga: u32,
-    gb: u32,
-    gdn_in: u32,
-    aq: u32,
-    akv: u32,
-    od: u32,
-    att_in: u32,
-    st_q: usize,
-    st_k: usize,
-    st_v: usize,
-    st_g: usize,
-    st_b: usize,
-    st_p: usize,
-    stash: usize,
-};
-
-pub fn tpShapeFor(tp: u32) TpShape {
-    const ff = FF / tp;
-    const gk = 16 / tp;
-    const gv = 48 / tp;
-    const nqk = gk * 128;
-    const vd = gv * 128;
-    const nconv = 2 * nqk + vd;
-    const ga = nconv + vd;
-    const gb = ga + gv;
-    const gdn_in = (gb + gv + 255) / 256 * 256;
-    const aq = 24 / tp;
-    const akv = 4 / tp;
-    const od = aq * 256;
-    const att_in = aq * 512 + 2 * akv * 256;
-    const st_q: usize = 0;
-    const st_k: usize = st_q + 16 * @as(usize, nqk) * 2;
-    const st_v: usize = st_k + 16 * @as(usize, nqk) * 2;
-    const st_g: usize = st_v + 16 * @as(usize, vd) * 2;
-    const st_b: usize = st_g + 16 * @as(usize, gv) * 4;
-    const st_p: usize = st_b + 16 * @as(usize, gv) * 4;
-    const stash: usize = st_p + 16 * @as(usize, gdn_in) * 2;
-    return .{
-        .ff = ff,
-        .gk = gk,
-        .gv = gv,
-        .nqk = nqk,
-        .vd = vd,
-        .nconv = nconv,
-        .ga = ga,
-        .gb = gb,
-        .gdn_in = gdn_in,
-        .aq = aq,
-        .akv = akv,
-        .od = od,
-        .att_in = att_in,
-        .st_q = st_q,
-        .st_k = st_k,
-        .st_v = st_v,
-        .st_g = st_g,
-        .st_b = st_b,
-        .st_p = st_p,
-        .stash = stash,
-    };
+pub fn tpShape() shape.TpShape {
+    return shape.tpShapeFor(TP);
 }
-
-pub fn tpShape() TpShape {
-    return tpShapeFor(TP);
-}
-
 pub fn maxRows() u32 {
     return CHUNK + 128;
 }
@@ -152,6 +83,8 @@ pub var prompt_tail_on = true;
 pub var a8_group: u32 = 0;
 pub var kv8: i32 = 0;
 pub var kv_i8 = false;
+/// XPU_ATTN_PREF=CH (a multiple of 32 from 64 to 4096): decode attention reads the prefix once a round on DPAS.
+pub var attn_pref: u32 = 0;
 pub var rot_on: i32 = 0;
 pub var prefill_int4 = false;
 pub var int4_sites: u32 = 8;
@@ -253,6 +186,10 @@ fn initDevKernels(d: *Dev, tp: u32) !void {
         .gdn_step = try d.kernel(md, "gdn_step", 16),
         .attn_decode = try d.kernel(md, "attn_decode", 16),
         .attn_merge = try d.kernel(md, "attn_merge", 16),
+        .attn_pref = try d.kernel(md, "attn_pref", 16),
+        .attn_pref8 = try d.kernel(md, "attn_pref8", 16),
+        .attn_tail = try d.kernel(md, "attn_tail", 16),
+        .attn_merge2 = try d.kernel(md, "attn_merge2", 16),
         .kv_move = try d.kernel(md, "kv_move", 16),
         .exl3_gemv = try d.kernel(md, "exl3_gemv", 16),
         .rot_heads = try d.kernel(mg, "rot_heads", 16),
@@ -262,13 +199,13 @@ fn initDevKernels(d: *Dev, tp: u32) !void {
         .dense_rows = try d.kernel(mg, "dense_rows", 256),
         .repack_gptq = try d.kernel(mg, "repack_gptq", 16),
         .quantize_mlx = try d.kernel(mg, "quantize_mlx", 16),
-        .dec_wide_g128 = try d.kernel(mm128, "w4k1_decode", 64),
-        .dec_wide64_g128 = try d.kernel(mm128, "w4k1_d64", 64),
-        .dec_narrow_g128 = try d.kernel(mm128, "w4k_dsplit", 64),
-        .ngen_wide_g128 = try d.kernel(mw128, "w4g_dpb", 256),
-        .ngen_narrow_g128 = try d.kernel(mn128, "w4g_s4dpb", 256),
-        .ngen_swiglu = try d.kernel(try d.g.module(&kb.ngen_swiglu), "w4g_dpb_swiglu", 256),
-        .ngen_swiglu_g128 = try d.kernel(try d.g.module(&kb.ngen_swiglu128), "w4g_dpb_swiglu", 256),
+        .dec_wide_g128 = try d.kernelArgs(mm128, "w4k1_decode", 64, 13),
+        .dec_wide64_g128 = try d.kernelArgs(mm128, "w4k1_d64", 64, 13),
+        .dec_narrow_g128 = try d.kernelArgs(mm128, "w4k_dsplit", 64, 13),
+        .ngen_wide_g128 = try d.kernelArgs(mw128, "w4g_dpb", 256, 13),
+        .ngen_narrow_g128 = try d.kernelArgs(mn128, "w4g_s4dpb", 256, 14),
+        .ngen_swiglu = try d.kernelArgs(try d.g.module(&kb.ngen_swiglu), "w4g_dpb_swiglu", 256, 13),
+        .ngen_swiglu_g128 = try d.kernelArgs(try d.g.module(&kb.ngen_swiglu128), "w4g_dpb_swiglu", 256, 13),
         .rowsums_ff = try d.kernel(mg, "rowsums_ff", 128),
         .fakequant_rows = try d.kernel(mg, "fakequant_rows", 256),
         .a8 = try d.kernel(try d.g.module(&kb.ngen_a8), "w4a8", 256),
@@ -276,16 +213,16 @@ fn initDevKernels(d: *Dev, tp: u32) !void {
         .quant_a8 = try d.kernel(mg, "quant_a8", 128),
         .quant_a4 = try d.kernel(mg, "quant_a4", 128),
         .a4 = try d.kernel(try d.g.module(&kb.ngen_a4), "w4a4", 256),
-        .dec_wide = try d.kernel(mm, "w4k1_decode", 64),
-        .dec_wide64 = try d.kernel(mm, "w4k1_d64", 64),
-        .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
+        .dec_wide = try d.kernelArgs(mm, "w4k1_decode", 64, 13),
+        .dec_wide64 = try d.kernelArgs(mm, "w4k1_d64", 64, 13),
+        .dec_narrow = try d.kernelArgs(mm, "w4k_dsplit", 64, 13),
         .gdn_prep = try d.kernel(mgd, "gdn_prep", 64),
         .gdn_state = try d.kernel(mgd, "gdn_state", 256),
         .gdn_out = try d.kernel(mgd, "gdn_out", 128),
-        .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
-        .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
+        .ngen_wide = try d.kernelArgs(mw, "w4g_dpb", 256, 13),
+        .ngen_narrow = try d.kernelArgs(mn, "w4g_s4dpb", 256, 14),
     };
-    for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);
+    for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.attn_pref, d.k.attn_pref8, d.k.attn_tail, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);
 }
 
 pub const Runner = struct {
@@ -375,6 +312,8 @@ pub const Runner = struct {
         if (std.c.getenv("XPU_DUMP")) |v| dump_dir = std.mem.span(v);
         if (std.c.getenv("XPU_PREFILL_INT8") != null) prefill_int8 = true;
         if (std.c.getenv("XPU_KV_INT8") != null) kv_i8 = true;
+        if (std.c.getenv("XPU_ATTN_PREF")) |v| attn_pref = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        if (attn_pref != 0 and (attn_pref % 32 != 0 or attn_pref < 64 or attn_pref > 4096)) return error.AttnPrefNotAMultipleOf32From64To4096;
         if (std.c.getenv("XPU_PREFILL_INT4") != null) prefill_int4 = true;
         if (std.c.getenv("XPU_PREFILL_INT4_SITES")) |v| int4_sites = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_KV8")) |v| kv8 = try std.fmt.parseInt(i32, std.mem.span(v), 10);
@@ -434,6 +373,8 @@ pub const Runner = struct {
                 }
             }
         }
+        var bias_sc = try @import("biascorr.zig").BiasSidecar.openFromEnv(alloc, &ckpt);
+        defer bias_sc.deinit(alloc);
 
         var open_gpus: [4]ze.Gpu = undefined;
         try device_id.openPeers(open_gpus[0..tp_deg]);
@@ -478,11 +419,12 @@ pub const Runner = struct {
         const sh = tpShape();
         for (0..tp_deg) |rk| {
             const d = r.devAt(rk);
-            r.modelAt(rk).* = try loader.loadRank(d, &ckpt, @intCast(rk), r.vocab_off[rk], r.vocab_len[rk]);
+            r.modelAt(rk).* = try loader.loadRankTracked(d, &ckpt, @intCast(rk), r.vocab_off[rk], r.vocab_len[rk], bias_sc.tracker());
             r.actsAt(rk).* = try Acts.initRank(d, @intCast(rk), r.vocab_len[rk]);
             try d.fill(r.actsAt(rk).zeros, @as(u16, 0), maxRows() * @as(usize, sh.gv) * 128 * 2);
             try d.fill(r.actsAt(rk).ones, @as(f32, 1.0), maxRows() * @as(usize, sh.gv) * 4);
         }
+        try bias_sc.finishAndLog(&ckpt);
         prof.on = prof_on;
 
         if (tp_deg > 1) {
