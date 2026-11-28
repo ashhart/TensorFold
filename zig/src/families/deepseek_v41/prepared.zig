@@ -17,10 +17,14 @@ pub const Key = struct {
     o_groups: u32,
     blocks: []const u32,
     dspark: bool,
+    /// the checkpoint's weight format; EXL3 keys hash as before
+    format: @import("config.zig").Format = .exl3,
+    /// the release's resolved cuts (release_shard.zig over the mesh): a slice that moves at the same shape is a new key
+    cuts: ?@import("release_shard.zig").Cuts = null,
 };
 
 /// The builders' source, so a change to how images are made never reads an old folder.
-const sources = [_][]const u8{ @embedFile("named.zig"), @embedFile("plan.zig"), @embedFile("partition.zig"), @embedFile("stage.zig"), @embedFile("pack.zig"), @embedFile("projection.zig"), @embedFile("names.zig"), @import("core").exl3_layout.source_bytes, @import("prepare.zig").source_bytes };
+const sources = [_][]const u8{ @embedFile("named.zig"), @embedFile("plan.zig"), @embedFile("partition.zig"), @embedFile("stage.zig"), @embedFile("pack.zig"), @embedFile("projection.zig"), @embedFile("names.zig"), @embedFile("plan_release.zig"), @embedFile("stage_release.zig"), @embedFile("release_shard.zig"), @import("core").exl3_layout.source_bytes, @import("prepare.zig").source_bytes };
 
 pub const Stats = struct { hits: u32 = 0, misses: u32 = 0, written: u32 = 0, read_bytes: u64 = 0, read_ns: u64 = 0, write_ns: u64 = 0 };
 
@@ -58,6 +62,10 @@ pub const Cache = struct {
         const own = try @import("partition.zig").outputGroups(key.o_groups, key.rank, key.world);
         h.update(std.mem.asBytes(&[_]u32{ key.rank, key.world, key.o_groups, @intFromBool(key.dspark), @intCast(key.blocks.len), own.lo, own.len }));
         h.update(std.mem.sliceAsBytes(key.blocks));
+        if (key.format != .exl3) h.update(@tagName(key.format));
+        // the mesh's split is outside `sources` too, so a release key holds its resolved ranges
+        if (key.cuts) |c| for ([_]@import("partition.zig").Share{ c.groups, c.width, c.ids, c.vocab }) |r|
+            h.update(std.mem.asBytes(&[_]u32{ r.lo, r.len }));
         var d: [32]u8 = undefined;
         h.final(&d);
         const hex = std.fmt.bytesToHex(d, .lower);
@@ -239,14 +247,14 @@ fn readInto(gpa: Allocator, io: Io, file: Io.File, b: *named.Builder, verify: bo
         payload_end = end;
         if (name_end > first_payload) return error.BadEntry;
         if (end > total or e.offset % page != 0 or name_end > e.offset or e.name_len == 0 or
-            e.rank == 0 or e.rank > 4 or e.pad != 0 or e.kind > @backingInt(named.Kind.i16)) return error.BadEntry;
+            e.rank == 0 or e.rank > 4 or e.pad != 0 or e.kind > @backingInt(named.Kind.u8)) return error.BadEntry;
         var elements: u64 = 1;
         for (e.shape[0..e.rank]) |d| {
             if (d == 0) return error.BadEntry;
             elements = std.math.mul(u64, elements, d) catch return error.BadEntry;
         }
         for (e.shape[e.rank..]) |d| if (d != 1) return error.BadEntry;
-        const item_size: u64 = if (e.kind == @backingInt(named.Kind.f32)) 4 else 2;
+        const item_size: u64 = (@as(named.Kind, @fromBackingInt(@intCast(e.kind)))).size();
         if ((std.math.mul(u64, elements, item_size) catch return error.BadEntry) != e.len) return error.BadEntry;
         const name = try gpa.alloc(u8, e.name_len);
         errdefer gpa.free(name);
@@ -290,11 +298,13 @@ test "a layer's images round-trip through its prepared file, and another key mis
     defer c.deinit();
     var b: named.Builder = .{ .gpa = gpa, .io = io, .pack = &p };
     defer b.deinit();
-    const sizes = [_]usize{ 4096, 5000, 16, 2 };
+    // f32, bf16, f16, i16, then the release's u8 FP8 codes, E2M1 pairs and E8M0 scales (one byte an element)
+    const sizes = [_]usize{ 4096, 5000, 16, 2, 4096, 2304, 77 };
     for (sizes, 0..) |n, i| {
         const bytes = try gpa.alignedAlloc(u8, .@"16", n);
         for (bytes, 0..) |*x, j| x.* = @truncate(j *% 31 +% i);
-        try b.out.append(gpa, .{ .name = try std.fmt.allocPrint(gpa, "L1.t{d}.trellis", .{i}), .kind = @fromBackingInt(@intCast(i % 4)), .shape = .{ n / (if (i % 4 == 0) @as(usize, 4) else 2), 1, 1, 1 }, .rank = 1, .bytes = bytes });
+        const kind: named.Kind = if (i < 4) @fromBackingInt(@intCast(i)) else .u8;
+        try b.out.append(gpa, .{ .name = try std.fmt.allocPrint(gpa, "L1.t{d}.trellis", .{i}), .kind = kind, .shape = .{ n / kind.size(), 1, 1, 1 }, .rank = 1, .bytes = bytes });
     }
     var miss: named.Builder = .{ .gpa = gpa, .io = io, .pack = &p };
     defer miss.deinit();
@@ -462,4 +472,25 @@ test "Pack identity: a boot with the prepared cache reads the pack's bytes once,
     const want: [32]u8 = @splat(7);
     try std.testing.expectEqualSlices(u8, &want, &try packIdentity(io, &pack, &cache));
     try std.testing.expectError(error.FileNotFound, packIdentity(io, &pack, null));
+}
+
+test "prepared: a release key moves with its resolved cuts, even at the same shape" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var c: @import("config.zig").Config = .{};
+    c.format = .release_fp8;
+    const cuts = try @import("release_shard.zig").Cuts.of(&c, 1, 4);
+    var moved = cuts;
+    moved.width.lo += 64;
+    const digest: [32]u8 = @splat(7);
+    var roots: [3][]const u8 = undefined;
+    for ([_]?@import("release_shard.zig").Cuts{ cuts, moved, cuts }, &roots) |k, *r| {
+        const key: Key = .{ .rank = 1, .world = 4, .o_groups = 8, .blocks = &.{ 0, 1 }, .dspark = false, .format = .release_fp8, .cuts = k };
+        var cache = try Cache.open(gpa, io, "/nonexistent-prepared", digest, key, false, false);
+        r.* = try gpa.dupe(u8, cache.root);
+        cache.deinit();
+    }
+    defer for (roots) |r| gpa.free(r);
+    try std.testing.expect(!std.mem.eql(u8, roots[0], roots[1]));
+    try std.testing.expectEqualStrings(roots[0], roots[2]);
 }
