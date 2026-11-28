@@ -20,12 +20,6 @@ fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ head, "#define TF_SIMD_FRAGS 1\n", body });
 }
 
-/// The family's kernels carry a marker where the specialization goes; the limits pass compiles the real one.
-fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u8) ![]u8 {
-    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownLaunch;
-    return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
-}
-
 /// A Bolt op's source: a norm by its key beside Lightning's, else the engine's prefill op file its label names.
 fn boltSource(name: []const u8) ![]const u8 {
     const in = std.mem.indexOf;
@@ -53,6 +47,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
+    if (std.mem.startsWith(u8, d.name, "q27 stack qk ")) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     if (std.mem.startsWith(u8, d.name, "hy4 units "))
@@ -66,6 +61,11 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
+    if (std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ")) {
+        if (!assemble) return undefined;
+        const resolved = try @import("metal_q27_limits.zig").resolve(a, device, d.name, d.offline);
+        return .{ .decl = d, .function = fun, .here = resolved.here, .pre_m5 = resolved.pre_m5 };
+    }
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
@@ -278,6 +278,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try tf.lfm2_moe.source.prompt(device, a, true);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = "" };
     }
+    if (std.mem.startsWith(u8, d.name, "tree round picks ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.core_tree_round, .pre_m5 = sources.core_tree_round };
+    }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
@@ -432,7 +436,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
         // the 27B's launch source by its label: the copy, the steering kernel's specialization, MoE, or the glue
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " norm steer ")) try specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;") else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
+        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " norm steer ")) try @import("metal_q27_limits.zig").specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;") else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         if (!assemble) return undefined;
         text = sources.core_pair_rows;

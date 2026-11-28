@@ -39,6 +39,11 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
 }
 /// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
 pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
+/// The flat kernels or the general ones, for every round after this; TF_Q27_FLAT_GLUE=0 keeps the general ones.
+pub fn setFlatGlue(on: bool) void {
+    @import("core_delta").flat_glue = on;
+    @import("core").tree_round_gpu.chunked_picks = on;
+}
 pub const Runner = struct {
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,
@@ -111,6 +116,7 @@ pub const Runner = struct {
     }
 
     fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool, kv_step: ?u32) !Runner {
+        setFlatGlue(try @import("sys").environment.read(bool, "TF_Q27_FLAT_GLUE", @import("core_delta").flat_glue));
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         var geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
         const linear_index = try a.alloc(u32, m.config.layers);
@@ -528,7 +534,7 @@ pub const Runner = struct {
 
     fn metadata(r: *Runner) @import("gdn_pool_gpu.zig").Metadata {
         const f = &r.model.frame;
-        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps) };
+        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps), .flows = f.get(.flows) };
     }
 
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
@@ -571,23 +577,15 @@ pub const Runner = struct {
             try @import("loop.zig").encodeAttnProj(&r.model.kernels, r.model.glue, e, weights, f, rows, @intCast(r.model.config.qDim()), @intCast(r.model.config.kvDim()));
             break :blk true;
         } else false;
-        if (!attn_loop) {
-            // the tail's other rows' queries reach only rows its o projection skips: their q rows stay unwritten
-            const t0: u32 = if (block + 1 == r.model.config.layers) r.tail_from orelse 0 else 0;
-            var q_sums = forward.sums(f, .sums, rows);
-            q_sums.ref.offset += @as(usize, t0) * 4;
-            const q_in: Ref = .{ .buffer = f.get(.input).buffer, .offset = f.get(.input).offset + @as(usize, t0) * weights.q.k * 2 };
-            const q_out: Ref = .{ .buffer = f.get(.q_gate).buffer, .offset = f.get(.q_gate).offset + @as(usize, t0) * weights.q.n * 2 };
-            try r.model.kernels.quant(e, weights.q, q_in, q_sums, f.get(.dims), q_out, rows - t0);
-            try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
-            e.barrier();
-            const kv: u32 = @intCast(r.model.config.kvDim());
-            try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
-            try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
-            e.barrier();
+        // the tail's other rows' queries reach only rows its o projection skips: their q rows stay unwritten
+        const t0: u32 = if (block + 1 == r.model.config.layers) r.tail_from orelse 0 else 0;
+        if (!attn_loop) try @import("attention_input.zig").project(&r.model.kernels, e, weights, f, forward.sums(f, .sums, rows), rows, t0);
+        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .mixed = f.get(.mixed), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry, .shift = r.model.config.shift_norms, .rope = r.model.config.rope, .key = if (attn_loop) f.get(.key) else null, .value = if (attn_loop) f.get(.value) else null });
+        if (attn_loop) {
+            try r.attention.encodeContiguous(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
+        } else {
+            try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.mixed), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
         }
-        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry, .shift = r.model.config.shift_norms, .rope = r.model.config.rope });
-        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
     }
 
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {

@@ -10,6 +10,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const quant_run = b.addRunArtifact(quant_test);
     test_step.dependOn(&quant_run.step);
     b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
+    const mixed = b.createModule(.{ .root_source_file = b.path("zig/qwen27_mixed_host.zig"), .target = b.graph.host, .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }} });
+    mixed.addImport("core", mixed);
+    b.step("test-qwen27-mixed-host", "The production attention projection stage has no slice dispatch").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mixed, .filters = &.{"qwen27 mixed:"} })).step);
     const loop_cfg = b.createModule(.{ .root_source_file = b.path("zig/sensenova_loop_config_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     loop_cfg.addImport("core", loop_cfg);
     const loop_cfg_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_cfg, .filters = &.{"SenseNova loop config table:"} }));
@@ -116,6 +119,24 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
             .imports = &.{.{ .name = "lanes", .module = mods.lanes }},
         });
         fullCacheHost(b, mods.engine, api, mods.metal, mods.living);
+        b.step("test-sensenova-mtp-scratch-host", "SenseNova MTP scratch allocation sizes on the host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.engine, .filters = &.{"mtp scratch"} })).step);
+        const mac = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
+        const mac_mods = @import("metal_targets.zig").metalEngineModules(b, mac, .Debug, draft_ids);
+        mac_mods.metal.frameworks.clearRetainingCapacity();
+        mac_mods.metal.link_objects.clearRetainingCapacity();
+        const empty = b.addWriteFiles().add("qwen27-mtp-compile-only.metallib", "");
+        mac_mods.sources.addImport("nemotron_packed_metallib", @import("metal_targets.zig").embedded(b, empty, "nemotron_packed.metallib"));
+        const mac_api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = mac, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mac_mods.lanes }} });
+        const mac_host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = mac, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mac_mods.metal }, .{ .name = "tensorfold", .module = mac_mods.engine }, .{ .name = "engine_api", .module = mac_api }, .{ .name = "living", .module = mac_mods.living } } });
+        const mtp_object = b.addObject(.{ .name = "qwen27-sensenova-mtp-compile", .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/qwen27_speed_compile.zig"),
+            .target = mac,
+            .optimize = .debug,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "metal", .module = mac_mods.metal }, .{ .name = "tensorfold", .module = mac_mods.engine }, .{ .name = "engine_api", .module = mac_api }, .{ .name = "qwen27_served", .module = mac_host } },
+        }) });
+        _ = mtp_object.getEmittedBin();
+        b.step("check-qwen27-sensenova-mtp-host", "Compile the real SenseNova MTP transformer as a Darwin object without linking or shaders").dependOn(&mtp_object.step);
     }
 }
 
