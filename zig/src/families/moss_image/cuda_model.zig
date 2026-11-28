@@ -5,6 +5,7 @@ const cfg = @import("config.zig");
 const host = @import("host.zig");
 const wts = @import("cuda_weights.zig");
 const ks = @import("cuda_kernels.zig");
+const lora = @import("lora.zig");
 
 const H = cfg.hidden;
 const F = cfg.ffn;
@@ -115,6 +116,11 @@ pub const Model = struct {
     mods: u64 = 0,
     /// The timestep `mods` holds, if any.
     timestep: ?f32 = null,
+    /// Runtime LoRA overlays (lora.zig), made on the first request that names one; null runs the weights alone.
+    lora: ?*lora.Bank = null,
+    /// Every projection a LoRA may target, by checkpoint module name (dots, and kohya's underscores).
+    targets: std.StringHashMapUnmanaged(lora.Target) = .empty,
+    names: std.heap.ArenaAllocator = undefined,
 
     /// The transformer of `dir` for prompts of up to `max_text` rows and one image size, on sm_120 or sm_121 only.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, max_text: usize, width: usize, height: usize) !*Model {
@@ -150,13 +156,62 @@ pub const Model = struct {
         t.marks[0] = try cuda.Event.init(d, true);
         errdefer t.marks[0].deinit();
         t.marks[1] = try cuda.Event.init(d, true);
+        errdefer t.marks[1].deinit();
         var at: usize = t.scratch.ptr;
         const views = [_]*u64{ &t.x, &t.xn, &t.qr, &t.kr, &t.vr, &t.qkv, &t.o, &t.y, &t.ug, &t.s, &t.acc, &t.lat, &t.vel, &t.ctx, &t.mods };
         for (views, plan.parts) |view, n| {
             view.* = at;
             at += std.mem.alignForward(usize, n, 256);
         }
+        t.names = .init(gpa);
+        errdefer t.names.deinit();
+        try t.mapTargets();
         return t;
+    }
+
+    fn target(t: *Model, name: []const u8, w: u64, bias: u64, n: usize, k: usize) !void {
+        const a = t.names.allocator();
+        var buf: [112]u8 = undefined;
+        const stored = try t.w.ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}));
+        if (stored.dtype != .bf16 or stored.rank != 2 or stored.shape[0] != n or stored.shape[1] != k) return error.UnexpectedTensor;
+        const dots = try a.dupe(u8, name);
+        const v: lora.Target = .{ .module = dots, .w = w, .bias = bias, .n = n, .k = k, .bytes = stored.bytes };
+        try t.targets.put(a, dots, v);
+        const under = try a.dupe(u8, name);
+        std.mem.replaceScalar(u8, under, '.', '_');
+        try t.targets.put(a, under, v);
+    }
+
+    /// The module name of every projection `linear` and `linearBias` run, as the checkpoint spells it.
+    fn mapTargets(t: *Model) !void {
+        var buf: [96]u8 = undefined;
+        for (t.w.blocks, 0..) |b, i| {
+            const ps = .{ .{ "q", b.q, H, H }, .{ "k", b.k, H, H }, .{ "v", b.v, H, H }, .{ "o", b.o, H, H }, .{ "ffn_up_gate", b.up_gate, 2 * F, H }, .{ "ffn_down", b.down, H, F } };
+            inline for (ps) |p| try t.target(try std.fmt.bufPrint(&buf, "layers.{d}.proj.{s}", .{ i, p[0] }), p[1], 0, p[2], p[3]);
+        }
+        for (t.w.text, 0..) |b, i| {
+            const ps = .{ .{ "qkv", b.qkv, b.qkv_b, 3 * H, H }, .{ "proj", b.proj, b.proj_b, H, H }, .{ "ffn_up", b.up, b.up_b, F, H }, .{ "ffn_gate", b.gate, b.gate_b, F, H }, .{ "ffn_down", b.down, b.down_b, H, F } };
+            inline for (ps) |p| try t.target(try std.fmt.bufPrint(&buf, "text_embedder.blocks.{d}.{s}", .{ i, p[0] }), p[1], p[2], p[3], p[4]);
+        }
+        try t.target("text_embedder.proj", t.w.text_in, t.w.text_in_b, H, cfg.context);
+        try t.target("video_embedder", t.w.video_in, t.w.video_in_b, H, cfg.channels);
+        try t.target("final_linear_video", t.w.final_out, 0, cfg.channels, H);
+    }
+
+    /// The projection `module` on x [rows, k] into y [rows, n] bf16 as a forward runs it, the picked LoRAs included.
+    pub fn project(t: *Model, module: []const u8, x: u64, y: u64, rows: usize) !void {
+        const p = t.targets.get(module) orelse return error.UnknownProjection;
+        if (p.bias != 0) try t.linearBias(x, p.w, p.bias, y, rows, p.n, p.k) else try t.linear(x, p.w, y, rows, p.n, p.k);
+        try t.stream.synchronize();
+    }
+
+    /// The LoRAs (a folder's adapter names, each with its strength) every later forward runs; empty for none.
+    pub fn useLoras(t: *Model, io: std.Io, dir: []const u8, picks: []const lora.Pick) !void {
+        if (t.lora == null) {
+            if (picks.len == 0) return;
+            t.lora = try lora.Bank.init(t.gpa, io, t.d, dir, &t.targets);
+        }
+        try t.lora.?.select(picks, &t.targets);
     }
 
     /// A request's geometry inside the scratch `load` planned: rows and columns only, every size within `max_image`.
@@ -170,6 +225,8 @@ pub const Model = struct {
     }
 
     pub fn deinit(t: *Model) void {
+        if (t.lora) |b| b.deinit();
+        t.names.deinit();
         for (&t.marks) |*m| m.deinit();
         t.scratch.free();
         t.w.deinit();
@@ -191,14 +248,26 @@ pub const Model = struct {
         try t.stream.synchronize();
     }
 
-    /// y [rows][n] bf16 = x [rows][k] . w^T, fp32 sums rounded once.
+    /// y [rows][n] bf16 = x [rows][k] . w^T, fp32 sums rounded once; any LoRAs on w join the sums first (`overlaid`).
     fn linear(t: *Model, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize) !void {
+        if (try t.overlaid(x, w, rows, n, k)) |sums| return t.vk.cast(t.stream, sums, y, rows * n);
         try t.gemms.run(t.stream, x, w, y, rows, n, k, .bf16);
     }
 
     /// The same with bias b added to the fp32 sums before the one rounding.
     fn linearBias(t: *Model, x: u64, w: u64, b: u64, y: u64, rows: usize, n: usize, k: usize) !void {
+        if (try t.overlaid(x, w, rows, n, k)) |sums| return t.vk.bias(t.stream, sums, b, y, rows, n);
         try cuda.vit.linear(&t.gemms, &t.vk, t.stream, t.acc, x, w, b, y, rows, n, k);
+    }
+
+    /// x wᵀ plus the LoRAs on w as fp32 sums [rows, n], not yet rounded; null when none targets w (main's path).
+    fn overlaid(t: *Model, x: u64, w: u64, rows: usize, n: usize, k: usize) !?u64 {
+        const bank = t.lora orelse return null;
+        const list = bank.uses(w) orelse return null;
+        const sums = try bank.sumsFor(rows, n);
+        try t.gemms.run(t.stream, x, w, sums, rows, n, k, .f32);
+        try bank.add(t.stream, list, x, sums, rows, n, k);
+        return sums;
     }
 
     /// A prompt's rows (rows, 4096) bf16, the text encoder's last hidden states, through the refiner; with its tables.

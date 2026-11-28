@@ -115,6 +115,8 @@ pub const Host = struct {
     empty: []u16,
     /// The checkpoint's scheduler settings (scheduler/scheduler_config.json).
     scheduler: mi.schedule.Config,
+    /// Where a request's `loras` are read from: $TF_LORA_DIR, else the checkpoint's loras/ folder.
+    lora_dir: []u8 = &.{},
     startup: []u8 = &.{},
     info_: api.Info = .{},
     queue: Queue = .{},
@@ -290,6 +292,11 @@ pub const Host = struct {
         const r = j.request;
         const grid = try mi.config.grid(r.width, r.height);
         try h.model.fit(r.width, r.height);
+        // the request's LoRAs before its prompt: the refiner's projections take them too
+        const picks = try h.gpa.alloc(mi.lora.Pick, r.loras.len);
+        defer h.gpa.free(picks);
+        for (picks, r.loras) |*p, l| p.* = .{ .name = l.name, .scale = l.scale };
+        try h.model.useLoras(h.io, h.lora_dir, picks);
         const ids = try bracket(h.gpa, h.before, r.prompt, h.after);
         defer h.gpa.free(ids);
         const negative = if (r.negative.len > 0) try bracket(h.gpa, h.before, r.negative, h.after) else null;
@@ -346,6 +353,8 @@ pub const Host = struct {
 
     /// A stage's error: an out-of-memory fails this picture alone; any other takes the engine out of service.
     pub fn fail(h: *Host, slot: usize, e: anyerror) void {
+        // a LoRA the request named and the folder lacks or that fails a check fails that request alone
+        if (loraWhy(e)) |why| return h.finish(slot, .failed, why);
         if (e != error.OutOfMemory and e != error.OutOfDeviceMemory) {
             h.lock();
             h.broken = true;
@@ -377,11 +386,31 @@ pub const Host = struct {
         h.gpa.free(h.after);
         h.gpa.free(h.empty);
         if (h.startup.len > 0) h.gpa.free(h.startup);
+        if (h.lora_dir.len > 0) h.gpa.free(h.lora_dir);
         h.ctx.deinit();
         h.driver.close();
         h.gpa.destroy(h);
     }
 };
+
+fn loraWhy(e: anyerror) ?[]const u8 {
+    if (!mi.lora.isRefusal(e)) return null;
+    return switch (e) {
+        error.LoraNotFound => "a requested LoRA is not in the server's LoRA folder (the server log names the path)",
+        error.LoraModules, error.MismatchedTensorShape, error.UntargetedModule, error.TargetModuleNotAllowed, error.MissingTargetFactors => "a requested LoRA does not fit this model's transformer (the server log names the module)",
+        error.UnsupportedLoRAVariant, error.UnsupportedAdapterType, error.UnsupportedTargetModules, error.UnsupportedAdapterDType => "a requested LoRA is a kind this engine does not read (the server log says which)",
+        error.BadLoraName, error.BadLoraScale => "a requested LoRA's name or scale is not valid",
+        error.LoraScaleOverflow => "a requested LoRA's scale (alpha / rank, times the requested strength) is too large for fp32",
+        error.InexactAdapterFactor => "a requested LoRA has a value the GPU can't hold exactly (the server log names the module)",
+        else => "a requested LoRA file cannot be read as a LoRA (the server log says why)",
+    };
+}
+
+fn lorasOn(info: api.ImageInfo) api.ImageInfo {
+    var i = info;
+    i.loras = true;
+    return i;
+}
 
 /// The publisher's chat template around a request's ids, cut at the encoder's longest prompt as the pipeline cuts it.
 pub fn bracket(a: Allocator, before: []const u32, ids: []const u32, after: []const u32) ![]u32 {
@@ -451,6 +480,8 @@ fn openCheckpoint(gpa: Allocator, io: std.Io, dir: []const u8) !api.Opened {
     // the transformer's scratch is planned once for the largest geometry the API allows: a request fits inside it
     h.model = try mi.Model.load(gpa, io, &h.ctx, try std.fs.path.join(a, &.{ dir, "transformer" }), mi.encoder_config.max_rows, max_width, max_height);
     errdefer h.model.deinit();
+    h.lora_dir = try mi.lora.folder(gpa, dir);
+    errdefer gpa.free(h.lora_dir);
     h.decoder = try mi.Decoder.load(gpa, io, try std.fs.path.join(a, &.{ dir, "vae" }));
     errdefer h.decoder.deinit();
     h.tokenizer = try tok_mod.loadTokenizer(io, gpa, try std.fs.path.join(a, &.{ dir, "tokenizer", "tokenizer.json" }));
@@ -472,7 +503,7 @@ fn openCheckpoint(gpa: Allocator, io: std.Io, dir: []const u8) !api.Opened {
         .text_generation = false,
         .lanes = 1,
         .plain_only = true,
-        .image = spec.limits(),
+        .image = lorasOn(spec.limits()),
         .startup = h.startup,
     };
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});

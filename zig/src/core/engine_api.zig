@@ -64,6 +64,7 @@ pub const ImageResult = @import("image_api.zig").ImageResult;
 pub const ImageInfo = @import("image_api.zig").ImageInfo;
 pub const ImagePreview = @import("image_api.zig").ImagePreview;
 pub const ImageObserver = @import("image_api.zig").ImageObserver;
+pub const LoraPick = @import("image_api.zig").LoraPick;
 pub const ImageSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
 pub const Reason = enum { stop, length, cancelled, failed, silence };

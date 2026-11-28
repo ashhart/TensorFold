@@ -12,7 +12,11 @@ pub const ImageInfo = struct {
     max_prompt_tokens: u32,
     progress: bool = false, // the engine calls `reportStep` after each step, so `stream` is served
     previews: bool = false, // the engine also passes a preview when `wantsPreview`, so `preview_interval` is served
+    loras: bool = false, // the engine runs a request's `loras` as runtime overlays, so the field is served
 };
+
+/// One runtime LoRA a request names: an adapter in the engine's LoRA folder and the strength it runs at.
+pub const LoraPick = struct { name: []const u8, scale: f32 = 1 };
 
 /// A separate small PNG; borrowed only during the observer call, without changing the final image's state.
 pub const ImagePreview = struct {
@@ -46,6 +50,8 @@ pub const ImageRequest = struct {
     alloc: std.mem.Allocator,
     /// Null keeps progress and preview work off; the observer lives until the finished event.
     observer: ?ImageObserver = null,
+    /// Runtime LoRAs, in order; empty runs the checkpoint's weights alone.
+    loras: []const LoraPick = &.{},
 
     /// Whether `reportStep` for this step must carry a preview; false without an observer, so no preview is made.
     pub fn wantsPreview(r: *const ImageRequest, step: u32) bool {

@@ -1,4 +1,4 @@
-//! MOSS-Image's out-of-service log, checked out of process: a test cannot log at err without failing.
+//! MOSS-Image's out-of-service log, out of process (a test cannot log at err); a bad LoRA fails its request alone.
 const std = @import("std");
 const api = @import("engine_api");
 const host = @import("moss_image_host.zig");
@@ -19,6 +19,14 @@ fn capture(comptime _: std.log.Level, comptime _: @EnumLiteral(), comptime forma
 fn counted(ctx: *anyopaque, _: api.Id, event: *const api.Event) void {
     const n: *usize = @ptrCast(@alignCast(ctx));
     if (event.* == .finished) n.* += 1;
+}
+
+/// The last `finished` event's reason and message.
+const Last = struct { reason: ?api.Reason = null, message: []const u8 = "" };
+
+fn last(ctx: *anyopaque, _: api.Id, event: *const api.Event) void {
+    const l: *Last = @ptrCast(@alignCast(ctx));
+    if (event.* == .finished) l.* = .{ .reason = event.finished.reason, .message = event.finished.message };
 }
 
 pub fn main() !void {
@@ -43,6 +51,23 @@ pub fn main() !void {
         .empty = &.{},
         .scheduler = undefined,
     };
+    // each refusal core.runtime_lora or the folder gives fails that request alone: no err line, the engine still serves
+    const refusals = @typeInfo(@import("moss_image").lora.Refusal).error_set.error_names.?;
+    var seen: Last = .{};
+    const told: api.Sink = .{ .ctx = &seen, .event = &last };
+    inline for (refusals, 2..) |r, id| {
+        const at = h.queue.admit(id) orelse return error.NoSlot;
+        h.jobs[at] = .{ .id = id, .request = &request, .sink = told };
+        seen = .{};
+        host.Host.fail(&h, at, @field(anyerror, r));
+        if (h.broken) return error.StoppedOnALora;
+        if (seen.reason != .failed or seen.message.len == 0) return error.LoraReasonMissing;
+        if (std.mem.indexOf(u8, seen.message, "LoRA") == null) return error.LoraReasonUnnamed;
+        if (h.queue.held() != 0) return error.RefusedSlotHeld;
+    }
+    if (count != 0) return error.LoraRefusalLogged;
+    std.debug.print("moss lora refusals: {d} kinds, each one failed event naming the LoRA, the engine still serving\n", .{refusals.len});
+
     const slot = h.queue.admit(1) orelse return error.NoSlot;
     h.jobs[slot] = .{ .id = 1, .request = &request, .sink = sink };
     host.Host.fail(&h, slot, error.LatentRows);
