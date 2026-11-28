@@ -93,19 +93,15 @@ pub fn main(init: std.process.Init) !void {
     const nv = model.video * model.video_in;
     const na = model.audio * model.audio_in;
     const video = try case.copy(f32, gpa, try case.at("video", .f32, nv), nv);
-    const audio = try case.copy(f32, gpa, try case.at("audio", .f32, na), na);
+    var audio = try case.copy(f32, gpa, try case.at("audio", .f32, na), na);
     const video_start = try case.copy(f32, gpa, try case.at("video", .f32, nv), nv);
     const audio_start = try case.copy(f32, gpa, try case.at("audio", .f32, na), na);
     const expect_video = try case.copy(f32, gpa, try case.at("video_velocity", .f32, nv), nv);
     const expect_audio = try case.copy(f32, gpa, try case.at("audio_velocity", .f32, na), na);
     var video_step = try case.copy(f32, gpa, try case.at("video_step", .f32, 2 * steps), 2 * steps);
     var audio_step = try case.copy(f32, gpa, try case.at("audio_step", .f32, 2 * steps), 2 * steps);
-    if (revoice > 0) {
-        const made = try @import("h3_steps.zig").revoice(init, model, &case, revoice);
-        steps = made.video.len / 2;
-        video_step = made.video;
-        audio_step = made.audio;
-    } else if (native) {
+    var rv_audio: []f32 = &[_]f32{};
+    if (revoice == 0 and native) {
         const made = try @import("h3_steps.zig").reschedule(init, model, &case, args[1], if (count == 0) steps else count);
         steps = made.video.len / 2;
         video_step = made.video;
@@ -128,11 +124,24 @@ pub fn main(init: std.process.Init) !void {
             try write(gpa, args[4], ".first-video.f32", vv);
             try write(gpa, args[4], ".first-audio.f32", av);
         }
+        // a re-voice holds the finished picture: only the audio rows move down their schedule
         advance(video, vv, video_step[2 * step], video_step[2 * step + 1]);
         // reference audio rows are clean and never stepped
         const held = model.held_audio * model.audio_in;
         advance(audio[held..], av[held..], audio_step[2 * step], audio_step[2 * step + 1]);
         std.debug.print("step {d}/{d}: {d:.3} s wall, {d:.3} s on the GPU, {d:.2} s waited for speech, timing_valid={}\n", .{ step + 1, steps, took.wall, took.gpu, took.paused, took.timing_valid });
+    }
+    if (revoice > 0) {
+        // phase B: reschedule to the re-voice plan, then re-voice from the case noise
+        const made = try @import("h3_steps.zig").revoice(init, model, &case, revoice);
+        rv_audio = made.audio;
+        audio = audio_start;
+        const held = model.held_audio * model.audio_in;
+        for (0..revoice) |rv| {
+            const took = try model.forward(video, audio, rv, vv, av);
+            advance(audio[held..], av[held..], rv_audio[2 * rv], rv_audio[2 * rv + 1]);
+            std.debug.print("re-voice {d}/{d}: {d:.3} s wall, {d:.3} s on the GPU{c}n", .{ rv + 1, revoice, took.wall, took.gpu, 10 });
+        }
     }
     try write(gpa, args[4], ".video.f32", video);
     try write(gpa, args[4], ".audio.f32", audio);

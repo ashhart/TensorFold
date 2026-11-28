@@ -11,6 +11,7 @@ const ling_route = @import("metal_ling_route.zig");
 const ling_mla = @import("metal_ling_mla.zig");
 const tile_k = @import("metal_tile.zig");
 const h3_k = @import("metal_h3.zig");
+const h3_vae = @import("metal_h3_vae.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 const drama_nvfp4 = @import("metal_drama3_nvfp4.zig");
@@ -339,6 +340,9 @@ pub fn main(init: std.process.Init) !u8 {
     defer ricursive_set.deinit(a);
     try ricursive_set.collect(a, device, queue, tensor, &kernels, o.only);
     var h3: h3_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    var h3_vae_suite: h3_vae.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer h3_vae_suite.deinit();
+    try h3_vae_suite.collect(o.only);
     defer h3.deinit();
     try h3.collect(o.only);
     var h3_top: ?h3_topk.TopK = null;

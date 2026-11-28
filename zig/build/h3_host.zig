@@ -41,7 +41,13 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
         reads.setEnvironmentVariable("TF_LOAD_PREFETCH", count);
         read_step.dependOn(&reads.step);
     }
-    test_step.dependOn(read_step);
+
+    // the stereo WAV writer regression: planar planes interleaved
+    const vae_audio = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/vae_audio.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    const audio_mod = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_audio_decode.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "vae_audio", .module = vae_audio } } });
+    const stereo = b.addRunArtifact(b.addTest(.{ .root_module = audio_mod }));
+    b.step("test-h3-audio-stereo", "H3 stereo WAV interleaving keeps both planes").dependOn(&stereo.step);
+    test_step.dependOn(&stereo.step);
 }
 
 pub fn targets(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) void {
