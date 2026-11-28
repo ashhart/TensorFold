@@ -462,6 +462,12 @@ pub fn cutCalls(a: Allocator, text: []const u8, tools: []const Value) Allocator.
     var s: Streamer = try .init(a, tools);
     var deltas: std.ArrayList(Value) = .empty;
     try s.finishCut(text, &deltas);
+    // Canonical JSON recovery reparses earlier calls and preserves null refusal.
+    if (s.state == .glm and (s.glm.stage == .json_arguments or
+        s.glm.stage == .json_envelope or s.glm.stage == .json_tail))
+    {
+        return try tool_json_cut.cutCalls(a, text, tools);
+    }
     // GLM and JSON envelopes stream no call before they close
     if (!s.open()) return (try tool_glm_cut.cutCalls(a, text, tools)) orelse try tool_json_cut.cutCalls(a, text, tools);
     const Call = struct { id: []const u8 = "", name: []const u8 = "", args: std.ArrayList(u8) = .empty };
