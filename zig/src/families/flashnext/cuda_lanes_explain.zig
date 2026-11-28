@@ -6,7 +6,7 @@ pub fn open(err: anyerror) ?[]const u8 {
         error.FlashNextRanksOverTwo => "Flash Next on CUDA runs on one GPU or at --tp 2 (two ranks): serve with --tp 1 or --tp 2",
         error.FlashNextRanksNeedModelopt => "--tp 2 splits Flash Next's ModelOpt checkpoints only; serve this MLX checkpoint on one GPU, without --tp",
         error.FlashNextRanksOnCapturedGlue => "--tp 2 runs Flash Next's own glue, not a captured set: set TENSORFOLD_CUDA_KERNELS=native, or serve on one GPU",
-        error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.UnsupportedCheckpoint => explain(err),
+        error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.FlashNextCarveoutUnsupported, error.UnsupportedCheckpoint => explain(err),
         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue => explain(err),
         error.VisionWithoutTower => @import("engine_api").visionWords("this Flash Next checkpoint", err),
         else => null,
@@ -20,6 +20,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
         error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs one rank, our own glue and no --slide: unset it",
+        error.FlashNextCarveoutUnsupported => "TF_CUDA_CARVEOUT holds Flash Next's planes on one rank: unset it for --tp 2",
         error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
         error.BadDenseSplit => "TF_FLASHNEXT_SPLIT_DENSE takes 1 (split the BF16 dense projections at --tp 2, the default) or 0",
         error.DecodeGraphWithDenseSplit => "TF_FLASHNEXT_DECODE_GRAPH is not qualified with the dense split: unset it or set TF_FLASHNEXT_SPLIT_DENSE=0",
@@ -36,6 +37,7 @@ test "--tp refusals at load are worded, and a request's words stay out of a load
     for ([_]anyerror{ error.FlashNextRanksOverTwo, error.FlashNextRanksNeedModelopt, error.FlashNextRanksOnCapturedGlue }) |e|
         try t.expect(open(e) != null);
     try t.expectEqualStrings(explain(error.UnsupportedLearningFormat).?, open(error.UnsupportedLearningFormat).?);
+    try t.expectEqualStrings(explain(error.FlashNextCarveoutUnsupported).?, open(error.FlashNextCarveoutUnsupported) orelse return error.TestUnexpectedResult);
     // generic errors other load paths raise at one GPU too, and a request's out-of-memory, keep cuda.zig's own words
     for ([_]anyerror{ error.UnsupportedQuantization, error.BadRank, error.OutOfDeviceMemory, error.PromptTooLong }) |e|
         try t.expect(open(e) == null);

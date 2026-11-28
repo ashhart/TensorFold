@@ -49,40 +49,7 @@ pub fn argmax(raw: []const u8) u32 {
     }
     return @intCast(at);
 }
-/// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
-pub fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
-    const Zeroed = struct {
-        driver: *cuda.Driver,
-        stream: cuda.Stream,
-        len: usize,
-        pub fn drain(z: @This()) void {
-            cuda.completion.drain(z.driver, z.stream, "Flash Next sequence fills did not drain before rollback");
-        }
-        fn make(z: @This()) !cuda.DeviceBuffer {
-            return cuda.DeviceBuffer.alloc(z.driver, z.len);
-        }
-        fn fill(z: @This(), b: *cuda.DeviceBuffer) !void {
-            try b.fill8(0, z.stream.handle);
-        }
-    };
-    return made(cuda.DeviceBuffer, gpa, n, Zeroed{ .driver = driver, .stream = stream, .len = len });
-}
-/// `n` buffers from `src.make`, each through `src.fill`; on a failure every buffer made so far is freed, the last too.
-fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
-    const out = try gpa.alloc(B, n);
-    var held: usize = 0;
-    errdefer {
-        if (@hasDecl(@TypeOf(src), "drain")) src.drain();
-        for (out[0..held]) |*b| b.free();
-        gpa.free(out);
-    }
-    while (held < n) {
-        out[held] = try src.make();
-        held += 1; // counted before its fill, so a failed fill frees it with the rest
-        try src.fill(&out[held - 1]);
-    }
-    return out;
-}
+pub const zeros = @import("cuda_prompt_alloc.zig").zeros;
 pub const vocabulary: usize = vocab;
 /// Prompt plus reply tokens a sequence can hold: the model's window.
 pub const max_tokens: usize = weights.window;
@@ -94,6 +61,7 @@ pub const pooledBytes = sizes.pooledBytes;
 const Heads = @import("cuda_heads.zig").Heads;
 const round_graph = @import("cuda_round_graph.zig");
 const pages = @import("cuda_pages.zig");
+const carveout = @import("cuda_carve.zig");
 /// One loaded checkpoint: the embedding table, every layer, the mixer and head, and the batched pass's scratch.
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -131,6 +99,8 @@ pub const Engine = struct {
     taught_rows: u64 = 0,
     /// The routing and shared widths config.json selects (cuda_widths.zig); the scratch is sized and laid out by them.
     widths: @import("cuda_widths.zig").Widths = @import("cuda_widths.zig").default,
+    /// TF_CUDA_CARVEOUT: the carveout and the planes a contiguous cache keeps there (cuda_carve.zig); null: none.
+    carve: ?carveout.Plan = null,
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
         return initRank(gpa, io, driver, stream, model_dir, 1, 0);
     }
@@ -151,6 +121,7 @@ pub const Engine = struct {
         e.n_layers = 0;
         e.collective = null;
         e.image_factory = null;
+        e.carve = null;
         e.round_graph = .{};
         e.graphs = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
@@ -245,6 +216,7 @@ pub const Engine = struct {
         e.mixer.free();
         e.table.deinit();
         e.store.deinit();
+        if (e.carve) |p| carveout.close(e.gpa, p.carve);
         e.gpa.free(e.model_dir);
         e.gpa.destroy(e);
     }
@@ -325,12 +297,14 @@ pub const Engine = struct {
         // One rollback owns every published array, and drains before releasing any destination.
         errdefer seq.deinit(e.gpa);
         seq.logits = try e.gpa.alloc(u8, vocab * 2);
-        seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.convBytes(e.heads));
-        seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.stateBytes(e.heads));
-        seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads));
-        seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads));
-        seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.indexBytes(cap));
-        seq.pooled = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .pooled) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
+        seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.convBytes(e.heads), &.{});
+        seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.stateBytes(e.heads), &.{});
+        // TF_CUDA_CARVEOUT: a contiguous cache's first planes in the carveout while no other cache holds it
+        if (seq.paged == null) if (e.carve) |c| try c.take(&seq.carved, cap);
+        seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads), seq.carved.of(.key));
+        seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads), seq.carved.of(.value));
+        seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.indexBytes(cap), seq.carved.of(.index));
+        seq.pooled = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .pooled) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap), seq.carved.of(.pooled));
         seq.tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
         try seq.tail.fill8(0, e.stream.handle);
         return seq;
@@ -501,6 +475,8 @@ pub const Seq = struct {
     pooled: []cuda.DeviceBuffer,
     /// kc, vc, ikc and pooled as borrowed views of page 0 of these pages (null: each its own contiguous buffer).
     paged: ?pages.Paged = null,
+    /// The first of kc, vc, ikc and pooled when they are the carveout's planes, given back at deinit.
+    carved: carveout.Carved = .{},
     tail: cuda.DeviceBuffer,
     history: [2]i64,
     fed: usize,
@@ -528,6 +504,7 @@ pub const Seq = struct {
         freeBufs(s.vc);
         freeBufs(s.ikc);
         freeBufs(s.pooled);
+        s.carved.give(); // freeBufs leaves borrowed planes alone; the drain above has run
         gpa.free(s.conv);
         gpa.free(s.state);
         gpa.free(s.kc);
@@ -548,44 +525,13 @@ test {
     _ = @import("cuda_prompt_index_test.zig");
 }
 
-test "a failed fill frees the buffer it was filling and every one before it" {
-    const Fake = struct {
-        live: *usize,
-        pub fn free(b: *@This()) void {
-            b.live.* -= 1;
-        }
-    };
-    const Src = struct {
-        live: *usize,
-        fills: *usize,
-        fail_at: usize,
-        fn make(s: @This()) !Fake {
-            s.live.* += 1;
-            return .{ .live = s.live };
-        }
-        fn fill(s: @This(), _: *Fake) !void {
-            s.fills.* += 1;
-            if (s.fills.* == s.fail_at) return error.FillFailed;
-        }
-    };
-    for ([_]usize{ 1, 2, 4 }) |fail_at| {
-        var live: usize = 0;
-        var fills: usize = 0;
-        try std.testing.expectError(error.FillFailed, made(Fake, std.testing.allocator, 4, Src{ .live = &live, .fills = &fills, .fail_at = fail_at }));
-        try std.testing.expectEqual(@as(usize, 0), live);
-    }
-    var live: usize = 0;
-    var fills: usize = 0;
-    const all = try made(Fake, std.testing.allocator, 3, Src{ .live = &live, .fills = &fills, .fail_at = 0 });
-    defer std.testing.allocator.free(all);
-    try std.testing.expectEqual(@as(usize, 3), live);
-}
-
 pub const parseChunk = chunks.parseChunk;
 pub const chunkRows = chunks.chunkRows;
 
 test {
     _ = @import("cuda_sequence_completion_test.zig");
+    _ = @import("cuda_prompt_alloc.zig");
+    _ = @import("cuda_prompt_test.zig");
     _ = chunks;
     _ = sizes;
 }

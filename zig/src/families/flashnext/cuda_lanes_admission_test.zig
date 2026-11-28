@@ -27,6 +27,7 @@ fn Rig(comptime Cuda: type, comptime drop: anytype) type {
             r.engine.chunk = 16;
             r.engine.round_graph = .{};
             r.engine.heads = .full;
+            r.engine.carve = null;
             r.ids = .{1};
             r.head = undefined;
             r.head.ids = &r.ids;

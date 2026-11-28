@@ -446,7 +446,6 @@ pub fn closeStore(gpa: Allocator, saved: *api.prompt_cache.Store) void {
     gpa.destroy(saved);
     if (disk) |rows| rows.deinit();
 }
-
 test "kv safety: native planning refuses insufficient staging and allocates at or above the room" {
     try @import("cuda_kv_safety_test.zig").run(@This(), false);
 }
@@ -479,6 +478,7 @@ pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64,
 test {
     _ = @import("cuda_cache_capacity_test.zig");
     _ = @import("cuda_streams.zig");
+    _ = @import("cuda_kv_room.zig");
     _ = @import("cuda_keep_others_test.zig");
 }
 

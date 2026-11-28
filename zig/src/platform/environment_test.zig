@@ -10,10 +10,11 @@ const Env = struct {
     pub fn get(v: Env, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, v.name)) return v.raw;
         if (std.mem.eql(u8, name, "TF_CUDA_CARVEOUT")) return "1";
+        // the daemon's rows are read only while the daemon is the source
+        if (std.mem.eql(u8, name, "TF_CUDA_CARVEOUT_SOURCE") and std.mem.startsWith(u8, v.name, "TF_CUDA_CARVEOUT_")) return "daemon";
         return null;
     }
 };
-
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
@@ -33,9 +34,57 @@ test "environment: every strict reader refuses bad text before opening a model, 
         try t.expect(untouched == null);
     }
 }
-
 const valid = @import("environment_valid_cases.zig").valid;
-
+/// An environment whose carveout flag and source are set by the test, for the settings a source owns.
+const CarveEnv = struct {
+    name: []const u8,
+    raw: ?[]const u8,
+    carveout: []const u8,
+    source: ?[]const u8 = null,
+    pub fn get(v: CarveEnv, n: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, n, v.name)) return v.raw;
+        if (std.mem.eql(u8, n, "TF_CUDA_CARVEOUT")) return v.carveout;
+        if (std.mem.eql(u8, n, "TF_CUDA_CARVEOUT_SOURCE")) return v.source;
+        return null;
+    }
+};
+test "environment: the daemon's settings are skipped while the carveout is off or the card is the source, and refused by name otherwise" {
+    const names = [_][]const u8{
+        "TF_CUDA_CARVEOUT_SOURCE",
+        "TF_CUDA_CARVEOUT_SOCKET",
+        "TF_CUDA_CARVEOUT_KEY",
+        "TF_CUDA_CARVEOUT_KEY_FILE",
+    };
+    for (names) |name| {
+        const off = try e.refusal(a, CarveEnv{ .name = name, .raw = "typo\x1b", .carveout = "0", .source = "daemon" }, all);
+        try t.expectEqual(@as(?[]const u8, null), off);
+        const why = (try e.refusal(a, CarveEnv{ .name = name, .raw = "typo\x1b", .carveout = "1", .source = "daemon" }, all)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, name) != null);
+        // with the card as the source only the source's own row is read of these
+        const card = try e.refusal(a, CarveEnv{ .name = name, .raw = "typo\x1b", .carveout = "1" }, all);
+        if (std.mem.eql(u8, name, "TF_CUDA_CARVEOUT_SOURCE")) {
+            try t.expect(card != null);
+            a.free(card.?);
+        } else try t.expectEqual(@as(?[]const u8, null), card);
+    }
+}
+test "environment: the DRM card's setting is read only when the carveout is on and the card is its source" {
+    const bad: CarveEnv = .{ .name = "TF_DRM_CARD", .raw = "card\x1b", .carveout = "0" };
+    try t.expectEqual(@as(?[]const u8, null), try e.refusal(a, bad, all));
+    var lent = bad;
+    lent.carveout = "1";
+    lent.source = "daemon";
+    try t.expectEqual(@as(?[]const u8, null), try e.refusal(a, lent, all));
+    for ([_]?[]const u8{ null, "drm" }) |source| {
+        var card = bad;
+        card.carveout = "1";
+        card.source = source;
+        const why = (try e.refusal(a, card, all)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_DRM_CARD") != null);
+    }
+}
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
     for (valid) |c| {
         try t.expectEqual(@as(?u64, c.n), try e.parse(c.name, c.raw));
@@ -56,13 +105,13 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
         try t.expect(covered);
     }
 }
-
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
         .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },          .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
         .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },        .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
         .{ "TF_CUDA_SEGMENTS", "0" },                  .{ "TF_CUDA_SEGMENTS", "5" },
         .{ "TF_CUDA_CARVEOUT", "true" },               .{ "TF_CUDA_CARVEOUT", "01" },
+        .{ "TF_CUDA_CARVEOUT_SOURCE", "1" },           .{ "TF_CUDA_CARVEOUT_SOURCE", "drm " },
         .{ "TF_CUDA_CARVEOUT_MIB", "0" },              .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
         .{ "TF_ROCE_GID_INDEX", "2147483648" },        .{ "TF_PROMPT_ROWS", "16" },
         .{ "TF_PROMPT_ROWS", "129" },                  .{ "TF_PROMPT_ROWS", "2064" },
@@ -98,7 +147,6 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
 }
-
 test "environment: a path setting keeps its text exactly, reads blank as unset and refuses control characters" {
     const name = "TENSORFOLD_TOOL_ID_KEY_FILE";
     try t.expectEqualStrings("relative/k ey", (try e.path(name, "relative/k ey")).?);
@@ -113,6 +161,9 @@ test "environment: a path setting keeps its text exactly, reads blank as unset a
     try t.expect(std.mem.indexOf(u8, said, "PASTEDKEY") == null and std.mem.startsWith(u8, said, name ++ ": expected "));
     const refused = (try e.refusal(arena.allocator(), Env{ .name = name, .raw = pasted }, all)).?;
     try t.expect(std.mem.indexOf(u8, refused, "PASTEDKEY") == null);
+    // the daemon's key row holds the secret itself: the same refusal, with the carveout on and the daemon as the source
+    const secret = (try e.refusal(arena.allocator(), CarveEnv{ .name = "TF_CUDA_CARVEOUT_KEY", .raw = pasted, .carveout = "1", .source = "daemon" }, all)).?;
+    try t.expect(std.mem.indexOf(u8, secret, "PASTEDKEY") == null and std.mem.indexOf(u8, secret, "TF_CUDA_CARVEOUT_KEY") != null);
 }
 
 test "environment: explicit flags and disabled features retain their old precedence" {

@@ -6,10 +6,10 @@ zig/src/families/flashnext/cuda_batch.zig	3a70dd745d7c3c4391c06c977af48ee86d1020
 zig/src/families/flashnext/cuda_batch_state.zig	8013d2947620c97f73e350726e20612b1d7c2630173e844b57059f08898018a1	0	1.1.2 increments 235 (#1046), 236 (#1046), 237 (#1046), 238 (#1046), 239 (#1046), 240 (#1046), 242 (#1046), 244 (#1046); approved 20 Oct 2026
 zig/src/families/flashnext/cuda_config.zig	fd2b9e11dbf9265fb95abdc22f39154416b8b2f379489bb1a6df88901a3f8c41	0
 zig/src/families/flashnext/cuda_glue.zig	4d0c85bd8f62129eaf4d6b1eeff03191ad5e001f513f5ea9357440eaec1ce169	0	1.1.2 increments 235 (#1046), 237 (#1046), 239 (#1046); approved 20 Oct 2026
-zig/src/families/flashnext/cuda_lanes.zig	743cd65a68af23cb978d9b6caf0a595c2d185f583c43dd39ed22e688004e14c4	0	1.1.2 increments 158 (#1062), 162, 248 (#1046); approved 20 Oct 2026
-zig/src/families/flashnext/cuda_lanes_load.zig	e7c374d73c6f6ed8a017b95d1a08ddfc6df40768f18a4652dfb66fc88801e269	0	1.1.2 increments 242 (#1046), 248 (#1046); approved 20 Oct 2026
-zig/src/families/flashnext/cuda_launch.zig	ad4edfa5260fc7eb7d8ca57c1de0d18995002e910ad38885ff5cdcc58da72788	0	1.1.2 increments 235 (#1046), 237 (#1046), 243 (#1046), 245 (#1046), 250 (#1046); approved 20 Oct 2026
-zig/src/families/flashnext/cuda_prompt.zig	b425eac8d56a45d7f84c1da673cebaf832c96007dc302d83d4c6d7e577e5d27a	0	1.1.2 increments 242 (#1046), 248 (#1046); approved 20 Oct 2026
+zig/src/families/flashnext/cuda_lanes.zig	83c83c8a397f383603c6476a14ab13a0314e5b2f3dda7482d43f909fae97b733	0	1.1.2 increments 158 (#1062), 162, 248 (#1046); approved 20 Oct 2026; #2763: the loaded result reports first-window carved bytes
+zig/src/families/flashnext/cuda_lanes_load.zig	e86fad5b2a31d55f12b6f025895e29d363e7e2ae25227f496624b46d0039f310	0	1.1.2 increments 242 (#1046), 248 (#1046); approved 20 Oct 2026; #2763: carveout opens before weights and the first window counts carved planes
+zig/src/families/flashnext/cuda_launch.zig	7bf29a66e1445fb4b8b00130b8cd3407ef4cf65533c20b16548bc9aa8e54fd3d	0	1.1.2 increments 235 (#1046), 237 (#1046), 243 (#1046), 245 (#1046), 250 (#1046); approved 20 Oct 2026; #2763: carve and lane-parts host tests exported
+zig/src/families/flashnext/cuda_prompt.zig	c36867df75196238d9704985f52340c5e10270a774680852198b4c55d9814c42	0	1.1.2 increments 242 (#1046), 248 (#1046); approved 20 Oct 2026; #2763: contiguous per-stream caches borrow carved planes; allocation and rollback helpers split into cuda_prompt_alloc.zig for the source cap
 zig/src/families/flashnext/cuda_prompt_load.zig	da6d105625c5385e7927d05c6062cdcb32ae1603b4f2a63ece662e298c00286c	0
 zig/kernels/cuda/ck_lane.cu	913a0df7bef408ed561c657de74356b3fcb67e328552d6b2b18d4d77df1252d3	0	commits c0a58fd30; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/logprob_rows.cuh	ee5711c4cb8656b7aa887ab4aa2b73ec4e8e65fdb5dc5aca8ab21f5ef499a5d2	0	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
@@ -49,7 +49,7 @@ zig/src/cuda/tp_watch.zig	3525ef0340e35bf2f626587e63fb2be4e093a01d91631a65b94022
 zig/src/families/flashnext/cuda_attn.zig	eb351a8a3f30e0014c34393e8f63791b8fc611710a5bdca06aeecb2955a6c152	0	1.1.2 increments S1 checkpoint security; approved 20 Oct 2026
 zig/src/families/flashnext/cuda_collective.zig	d456cc58f3d81f38d88ce5bbe4aef90ff0590511907a01c4351d4c2626cadf0a	0	1.1.2 increments 155; approved 20 Oct 2026
 zig/src/families/flashnext/cuda_embed_main.zig	2b596788cccd420368fe803676e8ad45a4f0bf7a115a6cd8cbde9151cbf1e597	0	1.1.2 increments S1 checkpoint security; approved 20 Oct 2026
-zig/src/families/flashnext/cuda_lanes_restore_test.zig	cd9ece1d64c191b838aab7d24bf379d3940993e468def42e10d0bbd47810977a	0	1.1.2 increments 175 (#1034); approved 20 Oct 2026
+zig/src/families/flashnext/cuda_lanes_restore_test.zig	eb31e5ae9ef7319330785ad25d51890de6c7341c109dfaa4e5e77d6ec7f6b684	0	1.1.2 increments 175 (#1034); approved 20 Oct 2026; #2763: carve disabled in the restore host rig
 zig/src/families/flashnext/cuda_mix.zig	631ca986ab3a56cb55c51b1def31b0598a75cdfe4f85663019cfbc611301128c	0	1.1.2 increments S1 checkpoint security; approved 20 Oct 2026
 zig/src/families/flashnext/cuda_mtp.zig	df8e492728225ee871db6a2a9aab8ebed2772f517a7ddad60c3d2042dddd1c58	0	1.1.2 increments 158 (#1062), 162, 240 (#1046); approved 20 Oct 2026
 zig/src/families/flashnext/cuda_mtp_check.zig	a91bae9a4f774c71162e16d123ebac5fe69c61236a798c1559fc8be41ba5a245	0	1.1.2 increments 158 (#1062); approved 20 Oct 2026
