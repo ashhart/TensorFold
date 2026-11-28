@@ -85,7 +85,7 @@ pub const Model = struct {
         var p = pack.Pack.init(gpa);
         defer p.deinit();
         const emb = try ex.dense.Matrix.get(&f, "embed_tokens");
-        if (emb.record.format != .fp8_row or emb.record.in != c.hidden) return error.UnsupportedGlmEmbedding;
+        if (emb.record.format != .fp8_row or emb.record.in != c.hidden or emb.record.out != c.vocab) return error.UnsupportedGlmEmbedding;
         const part = c.vocabPart();
         var v: Vocab = .{ .k = undefined, .embed_fp8 = try p.vector(emb.data[0].bytes), .embed_scale = try p.vector(emb.data[1].bytes), .groups = undefined, .norm = try p.vector((f.get("norm.weight") orelse return error.MissingGlmTensor).bytes), .part = part };
         const head = try p.linear(try ex.dense.Matrix.get(&f, "lm_head"), .{ part[0], part[1] }, .{ 0, c.hidden });

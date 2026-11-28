@@ -118,7 +118,10 @@ pub const Backend = struct {
         if (e.ep != null and s.sampling != null and s.sampling.?.temperature > 0) return error.SampledPeerUnsupported;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
+        for (prompt) |t| if (t >= e.c.vocab) return error.TokenOutsideVocabulary; // before rank 1 hears of the prompt
+        for (s.think_close) |t| if (t >= e.c.vocab) return error.TokenOutsideVocabulary;
         if (prompt.len + s.max_new + st.max_rows + 1 > pool.capacity(b.sl)) return error.ContextFull;
+        if (s.recall) |reader| try reader.checkVocabulary(e.c.vocab);
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
@@ -363,7 +366,7 @@ pub const Backend = struct {
         if (position != b.sl.length(i) + 1) return error.PositionMismatch;
         const from = switch (feed) {
             .handle => |h| @as(u32, @intCast(h)),
-            .value => |v| b.sl.ringPut(v),
+            .value => |v| if (v < b.sl.e.c.vocab) b.sl.ringPut(v) else return error.TokenOutsideVocabulary,
         };
         // The stream's sampling arms the queued round's keyed draw (a positive temperature); greedy streams stay plain.
         return try b.sl.queueRound(i, from, s.sampling);

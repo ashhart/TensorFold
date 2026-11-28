@@ -205,6 +205,7 @@ pub fn chunkPair(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const 
     const n = tokens.len;
     if (n < 2 or n > 2 * PMAX) return error.ChunkSize;
     if (marks.len > MARKS or (marks.len > 0 and m.marks == null)) return error.Marks;
+    if (!Model.inVocab(tokens)) return error.TokenOutsideVocabulary; // both Macs refuse the same call: each preps half
     const k: usize = tp.rank;
     const a = m.state;
     const at = segments.start(n, 2, k);

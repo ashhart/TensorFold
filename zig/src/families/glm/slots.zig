@@ -206,6 +206,7 @@ pub const Slots = struct {
     pub fn begin(sl: *Slots, i: u32, prompt: []const u32, drafts: bool) !void {
         if (i >= sl.slots.len or sl.slots[i].used) return error.SlotOutOfStep;
         if (prompt.len == 0 or prompt.len + st.max_rows + 1 > pool_mod.capacity(sl)) return error.ContextFull;
+        for (prompt) |t| if (t >= sl.e.c.vocab) return error.TokenOutsideVocabulary; // the embed reads w[id] unchecked
         const least: u32 = @intCast(prompt.len + st.max_rows + 1);
         if (sl.pool != null and sl.slots[i].region == null) try pool_mod.reserve(sl, i, least, null);
         if (prompt.len + st.max_rows + 1 > sl.slots[i].s.cap) return error.ContextFull;

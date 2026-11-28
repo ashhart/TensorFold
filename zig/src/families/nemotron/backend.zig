@@ -261,10 +261,11 @@ pub const Metal = struct {
     }
 
     /// A host token into a fresh ring slot (no command in flight reads a fresh slot).
-    fn feedSlot(self: *Metal, feed: be.Feed) u64 {
+    fn feedSlot(self: *Metal, feed: be.Feed) !u64 {
         return switch (feed) {
             .handle => |h| h,
             .value => |v| blk: {
+                if (v >= self.m.config.vocab) return error.TokenOutsideVocabulary;
                 const h = self.take(1);
                 self.tokens.slice(u32, ring)[h % ring] = v;
                 break :blk h;
@@ -276,7 +277,7 @@ pub const Metal = struct {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         const c = try self.cacheOf(s);
         self.settle(c);
-        const in = self.feedSlot(feed);
+        const in = try self.feedSlot(feed);
         const out = self.take(1);
         if (c.len + 1 > c.kv[0].capacity) return error.ContextFull;
         try kv_pages.grow(c, c.len + 1);
@@ -437,7 +438,7 @@ pub const Metal = struct {
                 jobs[i].path = rows;
                 @memcpy(c.follow.slice(u32, rows.len), r.follow[0..rows.len]);
             } else {
-                jobs[i].token = self.feedSlot(r.first orelse return error.NoFirstToken);
+                jobs[i].token = try self.feedSlot(r.first orelse return error.NoFirstToken);
             }
         }
         const All = struct {

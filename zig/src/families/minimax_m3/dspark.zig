@@ -191,7 +191,7 @@ pub const Drafter = struct {
         errdefer gpa.destroy(d);
         d.* = .{ .gpa = gpa, .target = target, .config = config, .w = try load(&target.checkpoint, &config, target.config.vocab), .pipes = undefined };
         const c = &d.config;
-        if (c.hidden != target.config.hidden) return error.DSparkForAnotherTarget;
+        if (c.hidden != target.config.hidden or c.noise >= target.config.vocab) return error.DSparkForAnotherTarget;
         for (c.taps) |l| if (l >= target.config.layers) return error.DSparkForAnotherTarget;
         {
             const lib = try mtl.Library.fromSource(target.device, ks.minimax_m3_dspark, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });

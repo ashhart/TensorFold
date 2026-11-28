@@ -460,6 +460,11 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
     const uniform = try @import("engine_widths.zig").apply(arena, &cfg, index.object.get("weight_map").?.object, e.pr, m);
     const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
+    const ew = m.embed_w orelse [2]usize{ 6, 32 }; // the embedding's bits and group: its kernel reads row id of each
+    for ([_][]const u8{ "weight", "scales", "biases" }, [_]usize{ D * ew[0] / 8, D / ew[1] * 2, D / ew[1] * 2 }) |part, row| {
+        const name = try std.fmt.allocPrint(arena, "language_model.model.embed_tokens.{s}", .{part});
+        if ((try r.entry(name)).len < VOCAB * row) return error.InvalidAffineShape; // fewer than VOCAB rows
+    }
     e.pr2 = e.pr;
     if (r.window.sibling(tp_path != null)) {
         e.pr2 = try arena.create(Prompt);

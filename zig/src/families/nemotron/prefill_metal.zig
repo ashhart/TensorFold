@@ -85,7 +85,10 @@ const Ops = struct {
         const self = o.m;
         const ids = s.prompt();
         try backend.limits.check(ids.len, s.max_new, self.o.capacity);
+        for (ids) |id| if (id >= self.m.config.vocab) return error.TokenOutsideVocabulary;
+        for (s.think_close) |id| if (id >= self.m.config.vocab) return error.TokenOutsideVocabulary;
         if (s.isCancelled()) return error.Cancelled;
+        if (s.recall) |reader| try reader.checkVocabulary(self.m.config.vocab);
         const rows_needed = @min(self.o.capacity, ids.len + s.max_new + backend.max_lanes + 1); // the reply and a widest window past it
         try self.drain();
         if (self.caches.get(s)) |old| {

@@ -145,6 +145,7 @@ pub const Engine = struct {
     /// A fresh stream in slot `i` with its prompt.
     pub fn begin(e: *Engine, i: u32, prompt: []const u32) !void {
         if (i >= e.slots.len or prompt.len == 0 or prompt.len + max_depth + R + 1 > e.context) return error.ContextFull;
+        for (prompt) |t| if (t >= e.m.c.vocab) return error.TokenOutsideVocabulary; // the embed reads w[id] unchecked
         const s = &e.slots[i];
         s.used = true;
         s.len = 0;
