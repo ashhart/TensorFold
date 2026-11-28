@@ -334,6 +334,37 @@ test "CUDA kept: core's permit takes a state at the served window whole, within 
     }
 }
 
+test "CUDA kept: Flash Next's permit takes a state at its served window whole, within the RAM store's budget" {
+    const F = @import("flashnext").native;
+    const W = kept.Kept(F.kept_view);
+    var target: F.Cuda = undefined; // the permit reads the served window and whether a head drafts, nothing else
+    target.context = 1 << 18;
+    target.head = null;
+    try t.expectEqual(@as(u32, 1 << 18), W.longest(&target));
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    const vt: api.prompt_cache.Snapshots.VTable = .{ .bytes = Copies.bytes, .save = Copies.save, .restore = Copies.restore, .drop = Copies.drop, .rows = &W.image };
+    const copies: api.prompt_cache.Snapshots = .{ .ptr = &target, .vtable = &vt };
+    for ([_]u64{ 16 << 30, 4 << 30 }) |budget| {
+        var s = api.prompt_cache.Store.init(t.allocator, copies, rules, budget);
+        const options: rows.Options = .{ .root = root, .identity = 1, .cap = 1 << 34, .floor = 0, .daily = 1 << 34, .longest = W.longest(&target) };
+        const r = rows.attach(t.allocator, &s, options) catch |e| {
+            s.deinit();
+            return e;
+        };
+        defer r.deinit();
+        defer s.deinit();
+        var parts: std.ArrayList(rows.image.Part) = .empty;
+        defer parts.deinit(t.allocator);
+        try W.image.parts(&target, 1 << 18, &parts, t.allocator);
+        const whole = rows.image.imageBytes(parts.items);
+        try t.expect(whole > 1 << 30);
+        if (budget > whole) try t.expect(r.staging_bytes > whole) else try t.expectEqual(budget, r.staging_bytes);
+    }
+}
+
 test "CUDA kept: Gemma 4, Dory and Spark2.5 take the store, a family without a view still refuses" {
     const gemma = @import("gemma4_cuda");
     const dory = @import("dory");
