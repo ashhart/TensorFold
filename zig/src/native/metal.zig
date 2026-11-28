@@ -223,7 +223,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .batch_rows = @min(128, @max(64, 4 * served)), // four rows a lane, so 32 and 64 sessions keep their drafts
     });
     errdefer h.metal.deinit();
-    h.metal.usage_enabled = api.pocket_usage.enabled(o.slide, o.slide_forget);
+    h.metal.usage_enabled = api.pocket_usage.backendEnabled(o.slide, o.slide_forget, mem_ctrl.useLegacyPocket());
     if (paged) |p| try nemotron.kv_pages.attach(h.metal, p.layout, p.pages, positions, served);
     nemotron.slide.loadLiving(gpa, io, h.metal) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native engine cannot read the saved lessons in {s} ({s})", .{ o.dir, @errorName(e) });

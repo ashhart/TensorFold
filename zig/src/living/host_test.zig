@@ -325,3 +325,35 @@ test "Save recovery: partial throwing save preserves the accepted lesson and ret
 test "Trainer admission: an ungated dense SwiGLU lesson uses the identical judged save gate" {
     try run(@import("families.zig").qwen3_5);
 }
+
+test "fact usage: actual whole learner reuses a checked deleted interior when locate is enabled" {
+    const F = families.qwen3_5;
+    const H = Host(F);
+    const L = learner.Learner(H);
+    var seen: H.Seen = .{};
+    var l = L.init(std.testing.allocator, std.testing.io, &seen);
+    defer l.deinit();
+    try l.ready();
+    const hooks: @import("whole.zig").Hooks(H) = .{ .b = &seen, .gpa = std.testing.allocator, .io = std.testing.io };
+    try l.pockets.load(l.trainer.?, hooks);
+    l.pockets.locate.enabled = true;
+    const slot = l.pockets.moe.items[0];
+    l.pockets.used.items[slot] = 3;
+    for (0..3) |n| {
+        @memset(l.pockets.neuron(l.pockets.up.items, slot, n, 64), 0.25);
+        @memset(l.pockets.neuron(l.pockets.gate.items, slot, n, 64), 0.25);
+        try l.pockets.learned.append(std.testing.allocator, .{ .slot = slot, .neuron = @intCast(n), .key = .subject, .start = 0, .count = 0, .lesson = 0, .subject = 1 });
+    }
+    l.pockets.learned_before = 3;
+    try std.testing.expectEqual(@as(usize, 1), try @import("pocket_forget.zig").forget(&l.pockets, l.trainer.?, hooks, &.{.{ 0, 1 }}));
+    try std.testing.expectEqual(@as(usize, 3), l.pockets.used.items[slot]);
+    try std.testing.expect(std.mem.allEqual(f32, l.pockets.neuron(l.pockets.up.items, slot, 1, 64), 0));
+    try std.testing.expect(!std.mem.allEqual(f32, l.pockets.neuron(l.pockets.up.items, slot, 2, 64), 0));
+    const ids = [_]u32{ 1, 2, 3, 4 };
+    const train = [_]Example{.{ .ids = &ids, .start = 3, .decide = 2 }};
+    try l.begin(.{ .train = &train, .reuse_deleted = true });
+    try std.testing.expect(l.owned.reuse_deleted and l.pockets.reuse_deleted);
+    try std.testing.expectEqual(@as(?usize, 1), @import("pocket_vacancy.zig").next(&l.pockets, slot));
+    try std.testing.expect(@TypeOf(l.pockets).neurons > 3);
+    l.abort();
+}

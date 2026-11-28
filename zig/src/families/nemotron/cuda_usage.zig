@@ -1,4 +1,5 @@
 //! Read existing prompt pocket products, including cached prefixes; never run a probe or change a kernel.
+const builtin = @import("builtin");
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -10,19 +11,26 @@ const fill = @import("cuda_lanes_fill.zig");
 
 pub const Read = struct {
     trace: usage.Capture,
-    stage: cuda.HostBuffer,
+    stage: ?cuda.HostBuffer,
+    test_ctx: if (builtin.is_test) *anyopaque else void = if (builtin.is_test) undefined else {},
+    test_read: if (builtin.is_test) ?*const fn (*anyopaque, *Read, usize, u64, usize) anyerror!void else void = if (builtin.is_test) null else {},
 
     pub fn init(e: *Engine) !Read {
         var trace = try usage.Capture.init(e.gpa, e.c.layers, state.pass_rows);
         errdefer trace.deinit();
         return .{ .trace = trace, .stage = try cuda.HostBuffer.alloc(e.ctx.d, state.pass_rows * 64 * 4) };
     }
+    pub fn initTest(gpa: std.mem.Allocator, layers: usize, capacity: usize, ctx: *anyopaque, read_layer: *const fn (*anyopaque, *Read, usize, u64, usize) anyerror!void) !Read {
+        if (!builtin.is_test) unreachable;
+        return .{ .trace = try usage.Capture.init(gpa, layers, capacity), .stage = null, .test_ctx = ctx, .test_read = read_layer };
+    }
     pub fn deinit(r: *Read) void {
-        r.stage.free();
+        if (r.stage) |*stage| stage.free();
         r.trace.deinit();
     }
     pub fn read(r: *Read, o: anytype, layer: usize, ptr: u64, width: usize) !void {
-        const values = r.stage.slice(f32)[0 .. r.trace.rows * 64];
+        if (builtin.is_test) if (r.test_read) |callback| return callback(r.test_ctx, r, layer, ptr, width);
+        const values = r.stage.?.slice(f32)[0 .. r.trace.rows * 64];
         errdefer cuda.completion.drain(o.k.d, o.s, "pocket usage read did not drain");
         try o.download(std.mem.sliceAsBytes(values), ptr);
         try o.s.synchronize();
@@ -46,4 +54,15 @@ pub fn saved(e: *Engine, owner: ?*anyopaque, at: usize) !?usage.Masks {
     if (e.usage) |u| return try u.trace.through(at);
     const s: *const lanes.Stream = @ptrCast(@alignCast(owner orelse return null));
     return if (at == s.prompt_len) s.pocket_usage else null;
+}
+
+pub const StepHook = struct {
+    ctx: *anyopaque,
+    run: *const fn (*anyopaque, *Cuda, *lanes.Stream) anyerror!bool,
+};
+
+pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+    const b: *Cuda = @ptrCast(@alignCast(ptr));
+    if (builtin.is_test) if (b.test_step) |hook| return hook.run(hook.ctx, b, s);
+    return fill.step(ptr, s);
 }

@@ -59,6 +59,8 @@ pub const Cuda = struct {
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
     usage_enabled: bool = false,
+    usage_reads: std.AutoHashMapUnmanaged(*const lanes.Stream, @import("cuda_usage.zig").Read) = .empty,
+    test_step: if (@import("builtin").is_test) ?@import("cuda_usage.zig").StepHook else void = if (@import("builtin").is_test) null else {},
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         const slots = rowSlots(e.c);

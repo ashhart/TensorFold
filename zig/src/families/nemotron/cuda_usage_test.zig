@@ -94,3 +94,93 @@ test "pocket usage: actual native CUDA gating keeps slide-only on the ordinary p
         try t.expect(!native.usageEnabled(o, false, 1));
     };
 }
+
+test "pocket usage: usage readers retain final MoE blocks for wide no-MTP prompt chunks" {
+    const prompt = @import("cuda_prompt.zig");
+    const tail = @import("core").prompt_tail;
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    var r: Read = undefined;
+    e.taps = null;
+    e.prompt_rows = null;
+    e.usage = &r;
+    for ([_]usize{ 2049, 4096 }) |rows| {
+        const active = prompt.readers(&e, null, null, false);
+        try t.expect(active);
+        try t.expect(!tail.unread(.{ .logits = false, .readers = active }));
+        try t.expect(!tail.unread(.{ .logits = true, .readers = active }));
+        try t.expect(rows > 2048);
+    }
+    e.usage = null;
+    try t.expect(tail.unread(.{ .logits = false, .readers = prompt.readers(&e, null, null, false) }));
+}
+
+const Stepped = struct {
+    next: [2]usize = .{ 0, 0 },
+    prefixes: [2][2]?usage.Masks = @splat(@splat(null)),
+
+    fn index(s: *const @import("lanes").Stream) usize {
+        return if (s.id[0] == 'a') 0 else 1;
+    }
+    fn read(_: *anyopaque, r: *Read, layer: usize, ptr: u64, width: usize) !void {
+        const products: [*]const f32 = @ptrFromInt(ptr);
+        try r.trace.layer(layer, products[0 .. r.trace.rows * 64], width, 64);
+    }
+    fn run(ptr: *anyopaque, b: *@import("cuda_lanes.zig").Cuda, s: *@import("lanes").Stream) anyerror!bool {
+        const self: *Stepped = @ptrCast(@alignCast(ptr));
+        const i = index(s);
+        const chunk = self.next[i];
+        const at = chunk * 2;
+        if (b.e.usage) |r| {
+            try r.trace.start(at, 2);
+            var products: [2 * 64]f32 = @splat(0);
+            products[i * 2 + chunk] = 2;
+            const ops: @import("cuda_kernels.zig").Ops = undefined;
+            try r.read(ops, 3, @intFromPtr(&products), 4);
+            self.prefixes[i][chunk] = try @import("cuda_usage.zig").saved(b.e, s, at + 1);
+            r.trace.restore(at + 2, try r.trace.through(at + 2));
+        }
+        self.next[i] += 1;
+        return self.next[i] == 2;
+    }
+};
+
+test "pocket usage: two foreground stepped streams retain independent row unions and cache marks" {
+    const lanes = @import("lanes");
+    const cuda_lanes = @import("cuda_lanes.zig");
+    const cuda_usage = @import("cuda_usage.zig");
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.usage = null;
+    var fixture: Stepped = .{};
+    var b: cuda_lanes.Cuda = undefined;
+    b.gpa = t.allocator;
+    b.e = &e;
+    b.usage_enabled = true;
+    b.usage_reads = .empty;
+    defer b.usage_reads.deinit(t.allocator);
+    b.test_step = .{ .ctx = &fixture, .run = Stepped.run };
+    const ids_a = [_]u32{ 10, 11, 12, 13 };
+    const ids_b = [_]u32{ 20, 21, 22, 23 };
+    var a = try lanes.Stream.init(t.allocator, .{ .id = "a", .prompt = &ids_a, .max_new = 1 });
+    defer a.deinit(t.allocator);
+    var b_stream = try lanes.Stream.init(t.allocator, .{ .id = "b", .prompt = &ids_b, .max_new = 1 });
+    defer b_stream.deinit(t.allocator);
+    try t.expect(!try cuda_usage.prefillStep(&b, &a, 32));
+    try t.expect(!try cuda_usage.prefillStep(&b, &b_stream, 32));
+    try t.expect(try cuda_usage.prefillStep(&b, &a, 32));
+    try t.expect(try cuda_usage.prefillStep(&b, &b_stream, 32));
+    for ([_]*lanes.Stream{ &a, &b_stream }, 0..) |s, i| {
+        const all = s.pocket_usage orelse return error.MissingSteppedUsage;
+        try t.expect(all.complete);
+        try t.expect(all.has(3, i * 2) and all.has(3, i * 2 + 1));
+        try t.expect(!all.has(3, (1 - i) * 2) and !all.has(3, (1 - i) * 2 + 1));
+        for (fixture.prefixes[i], 0..) |saved, chunk| {
+            const prefix = saved orelse return error.MissingSteppedCacheMark;
+            try t.expect(prefix.complete);
+            try t.expect(prefix.has(3, i * 2 + chunk));
+        }
+    }
+    try t.expectEqualSlices(u32, &ids_a, a.prompt());
+    try t.expectEqualSlices(u32, &ids_b, b_stream.prompt());
+    try t.expectEqual(@as(usize, 0), b.usage_reads.count());
+    try t.expect(e.usage == null);
+}

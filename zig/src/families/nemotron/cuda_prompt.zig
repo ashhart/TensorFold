@@ -5,6 +5,10 @@ const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const Cancel = engine.Cancel;
 const Keep = engine.Keep;
+/// Every host reader requiring all trailing MoE blocks.
+pub fn readers(e: *const Engine, head: ?*Head, dump: ?*Dump, lessons: bool) bool {
+    return head != null or dump != null or e.taps != null or e.prompt_rows != null or lessons;
+}
 const Mask = engine.Mask;
 const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
@@ -146,8 +150,8 @@ pub const Pass = struct {
         defer e.armed.n = 0;
         f.captures = e.armed.marks();
         const lessons = p.lessons or e.decide != lesson_route.none;
-        const readers = p.head != null or p.dump != null or e.taps != null or e.prompt_rows != null or lessons;
-        f.unread = prompt_tail.unread(.{ .logits = end == prompt.len, .readers = readers });
+        const active_readers = readers(e, p.head, p.dump, lessons);
+        f.unread = prompt_tail.unread(.{ .logits = end == prompt.len, .readers = active_readers });
         f.route = .{};
         f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
         try e.copied.synchronize();

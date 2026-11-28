@@ -6,6 +6,11 @@ pub const max_layers = 256;
 pub fn enabled(learning: bool, forgetting: bool) bool {
     return learning and forgetting;
 }
+
+pub fn backendEnabled(learning: bool, forgetting: bool, legacy: bool) bool {
+    _ = legacy;
+    return enabled(learning, forgetting);
+}
 pub const Masks = struct {
     bits: [max_layers]u64 = @splat(0),
     complete: bool = true,

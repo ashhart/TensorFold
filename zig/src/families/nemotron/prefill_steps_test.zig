@@ -56,6 +56,7 @@ const Ops = struct {
     decide: ?usize = null,
     head: ?*std.ArrayList([2]usize) = null, // the MTP head's absorbed rows, [start, end) a chunk
     loads_on_empty: *bool, // every load found the queue landed (the shared prompt buffer free)
+    usage_enabled: bool = false,
 
     pub fn steps(o: Ops) *pass.Steps {
         return o.map;
@@ -67,7 +68,9 @@ const Ops = struct {
         return o.decide;
     }
     pub fn grow(_: Ops, _: *lanes.Stream, _: usize) !void {}
-    pub fn landed(_: Ops, _: *lanes.Stream, _: usize) !void {}
+    pub fn landed(o: Ops, _: *lanes.Stream, _: usize) !void {
+        if (o.usage_enabled) try o.queue.drain();
+    }
     pub fn body(o: Ops, s: *lanes.Stream, at: usize, rows: usize) struct { rows: usize } {
         o.log.append(gpa, .{ .chunk = .{ .id = s.id[0], .at = at, .rows = rows } }) catch @panic("out of memory");
         if (o.head) |h| h.append(gpa, .{ at, at + pass.absorbed(at, rows, s.prompt_len) }) catch @panic("out of memory");
@@ -127,6 +130,42 @@ test "Nemotron Metal steps: one call submits one chunk at today's cut, and the c
         try q.drain();
         try t.expectEqualSlices(u32, &.{ 3, 8, 2, 7, 8, 1 }, s.prefill_widths.items);
     }
+}
+
+test "Nemotron Metal steps: folded-default cold multi-chunk usage submits without observation drains" {
+    const folded = lanes.pocket_usage.backendEnabled(true, true, false);
+    const legacy = lanes.pocket_usage.backendEnabled(true, true, true);
+    try t.expect(!folded);
+    try t.expect(legacy);
+    const ids: [29]u32 = @splat(7);
+    var s = try lanes.Stream.init(gpa, .{ .id = "f", .prompt = &ids, .max_new = 1 });
+    defer s.deinit(gpa);
+    var q: Queue = .{};
+    defer q.deinit();
+    var log: std.ArrayList(Event) = .empty;
+    defer log.deinit(gpa);
+    var map: pass.Steps = .{};
+    defer map.at.deinit(gpa);
+    var empty = true;
+    const ops: Ops = .{ .log = &log, .map = &map, .queue = &q, .loads_on_empty = &empty, .usage_enabled = folded };
+    try t.expect(!try pass.step(&q, ops, &s));
+    const opened = q.drains;
+    var chunks: usize = 1;
+    while (!try pass.step(&q, ops, &s)) chunks += 1;
+    try t.expect(chunks > 2);
+    try t.expectEqual(opened, q.drains);
+    try t.expectEqual(@as(usize, 0), map.at.count());
+    var legacy_queue: Queue = .{};
+    defer legacy_queue.deinit();
+    var legacy_s = try lanes.Stream.init(gpa, .{ .id = "l", .prompt = &ids, .max_new = 1 });
+    defer legacy_s.deinit(gpa);
+    var legacy_map: pass.Steps = .{};
+    defer legacy_map.at.deinit(gpa);
+    const legacy_ops: Ops = .{ .log = &log, .map = &legacy_map, .queue = &legacy_queue, .loads_on_empty = &empty, .usage_enabled = legacy };
+    try t.expect(!try pass.step(&legacy_queue, legacy_ops, &legacy_s));
+    const legacy_opened = legacy_queue.drains;
+    try t.expect(!try pass.step(&legacy_queue, legacy_ops, &legacy_s));
+    try t.expect(legacy_queue.drains > legacy_opened);
 }
 
 test "Nemotron Metal steps: the MTP head absorbs every prompt row but the last, once, chunk by chunk" {

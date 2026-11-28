@@ -174,6 +174,18 @@ test "a learner without taps reads a prompt in a conversation only when its pass
     try std.testing.expectEqual(@as(usize, 1), tapped.unasked.len);
 }
 
+test "owned whole lessons preserve only the reuse flag beside their copied examples" {
+    const gpa = std.testing.allocator;
+    const ids = [_]u32{ 1, 2, 3 };
+    const train = [_]Example{.{ .ids = &ids, .start = 2, .decide = 1 }};
+    const owned = try ownLesson(gpa, .{ .train = &train, .reuse_deleted = true, .steps = 17, .save = true });
+    defer disownLesson(gpa, owned);
+    try std.testing.expect(owned.reuse_deleted);
+    try std.testing.expectEqual(@as(u32, max_steps), owned.steps);
+    try std.testing.expect(!owned.save);
+    try std.testing.expect(owned.train.ptr != train[0..].ptr and owned.train[0].ids.ptr != train[0].ids.ptr);
+}
+
 /// The learner exposes its host and pocket type, so capability checks stay beside example planning.
 pub fn ofLearner(l: anytype) bool {
     return readsConversations(@TypeOf(l.*).Host.Trainer, @TypeOf(l.pockets) != void and l.whole and l.method == .pocket);

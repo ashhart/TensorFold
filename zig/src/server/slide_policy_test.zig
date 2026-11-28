@@ -107,6 +107,9 @@ test "fact usage: pin input is explicit and malformed graph metadata cannot beco
     try t.expectError(error.BadId, route.id("/v1/slide/facts/1/2/pin"));
     try t.expect(try route.value((try json.parse(a, "{}")).ok));
     try t.expect(!try route.value((try json.parse(a, "{\"pinned\":false}")).ok));
+    for ([_][]const u8{ "null", "true", "[]", "\"pin\"", "{\"pinned\":null}" }) |raw| {
+        try t.expectError(error.BadPin, route.value((try json.parse(a, raw)).ok));
+    }
     var f: graph.Fact = .{ .id = 1, .text = "x", .source = "chat", .at = 0, .state = .learned };
     try t.expectError(error.BadUsage, usage.read(&f, (try json.parse(a, "{\"uses\":-1}")).ok));
     try t.expectError(error.BadPin, usage.read(&f, (try json.parse(a, "{\"pinned\":1}")).ok));
