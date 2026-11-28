@@ -398,18 +398,7 @@ pub const Projection = struct {
 
     /// tf_lane_sums of `rows` rows of x into this projection's scratch, and a barrier; callers order its reuse.
     pub fn encodeOwnSums(p: Projection, e: mtl.ComputeEncoder, x: Ref, rows: u32) !Sums {
-        const pipe = p.sums_pipe orelse return error.SumsNeedReg;
-        if (rows == 0 or rows > p.max_rows) return error.InvalidRows;
-        try checkRef(x, rows * p.k * 2, 2);
-        const stride: u32 = 16 * ((rows + 15) / 16);
-        e.setPipeline(pipe);
-        e.setBuffer(x.buf, x.off, 0);
-        e.setValue(@as(i32, @intCast(rows)), 1);
-        e.setBuffer(p.sums_buffer.?, 0, 2);
-        e.setValue(@as(i32, @intCast(stride)), 3);
-        e.dispatchThreads(.{ .width = stride * p.group_count }, .{ .width = 256 });
-        e.barrier();
-        return .{ .ref = .{ .buf = p.sums_buffer.? }, .stride = stride };
+        return qk.encodeOwnSums(p, e, x, rows);
     }
 
     fn encodeImpl(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, given: ?Sums, y: Ref, rows: u32) !void {

@@ -18,7 +18,7 @@ test "qwen27 mixed: grouped heads validate row pitches without changing the defa
     try std.testing.expectEqual(@as(u32, 64), try abi.headThreads(h));
     try std.testing.expectEqual(@as(u32, 1), h.heads);
     try std.testing.expectEqual(@as(u32, 0), h.row_stride);
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(abi.Head));
+    try std.testing.expectEqual(@as(usize, 36), @sizeOf(abi.Head));
     try std.testing.expectEqual(@as(usize, 20), @offsetOf(abi.Head, "eps"));
     h.heads = 4;
     h.row_stride = 2048;

@@ -106,8 +106,6 @@ pub const ScratchField = enum(usize) {
     x,
     qg,
     kv_raw,
-    k,
-    v,
     norm_q,
     query,
     norm_k,
@@ -123,7 +121,7 @@ pub const ScratchField = enum(usize) {
     gather,
 };
 
-pub const scratch_count: usize = 25;
+pub const scratch_count: usize = 23;
 
 pub fn lref(r: projection.Ref) linear_gpu.Ref {
     return .{ .buf = r.buffer, .off = r.offset };
@@ -145,9 +143,7 @@ pub fn scratchSizes(c: Config, rows: u32) [scratch_count]usize {
         r * h * 2,
         r * h * 2,
         r * 2 * qd * 2,
-        16,
-        r * kv * 2,
-        r * kv * 2,
+        r * 2 * kv * 2,
         r * qd * 2,
         r * qd * 2,
         r * kv * 2,
