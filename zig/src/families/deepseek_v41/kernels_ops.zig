@@ -23,6 +23,8 @@ pub const pfd = shapes.pfd;
 pub const Functions = struct {
     attn: [8]cuda.Function,
     attn_split: [2][8]cuda.Function, // [P 1, P 4][instance]
+    /// the partial-tile twins (heads not a multiple of 16); null in a fatbin built before them
+    attn_part: ?@import("kernels_attn_part.zig").Set = null,
     topk: cuda.Function,
     /// topk_b.cu's row-bounded twin (tf_dsv41_topk_b_v1.topk)
     topk_b: cuda.Function,
@@ -74,6 +76,7 @@ pub const Functions = struct {
             f.attn_split[pi][i] = try m_attn.function(name);
             if (!try fitShared(f.attn_split[pi][i], name, attn.splitSmem(p), optin)) return error.SharedMemoryTooSmall;
         };
+        f.attn_part = try @import("kernels_attn_part.zig").load(m_attn, optin);
         f.topk = try m_topk.function(topk.symbol);
         if (!try fitShared(f.topk, topk.symbol, topk.smem(topk.MAXEPT), optin)) return error.SharedMemoryTooSmall;
         f.topk_b = try m_topk_b.function(topk.symbol_b);
@@ -292,12 +295,13 @@ pub const Ops = struct {
         if (a.qrope != 0 and split == 0) return error.Unsupported; // "q's RoPE folds into the split kernel only"
         var args: cuda.Args = .{};
         args.add(a);
-        const hb: usize = @intCast(@divTrunc(a.H, attn.BMQ));
+        const hb: usize = @intCast(attn.tiles(a.H)); // a 24-head share: a partial last tile, scratch over scratchHeads(H)
         const R: usize = @intCast(a.R);
+        const set: @import("kernels_attn_part.zig").Set = if (@rem(a.H, attn.BMQ) == 0) .{ .one = o.f.attn, .split = o.f.attn_split } else o.f.attn_part orelse return error.Unsupported;
         switch (split) {
-            0 => try o.go(o.f.attn[i], .{ attn.NCH, hb, R }, attn.NT, attn.SMEM, null, &args),
-            1 => try o.go(o.f.attn_split[0][i], .{ attn.NCH, hb, R }, attn.NT, attn.splitSmem(1), null, &args),
-            4 => try o.go(o.f.attn_split[1][i], .{ attn.NCH * 4, hb, R }, attn.NT, attn.splitSmem(4), .{ .x = 4 }, &args),
+            0 => try o.go(set.one[i], .{ attn.NCH, hb, R }, attn.NT, attn.SMEM, null, &args),
+            1 => try o.go(set.split[0][i], .{ attn.NCH, hb, R }, attn.NT, attn.splitSmem(1), null, &args),
+            4 => try o.go(set.split[1][i], .{ attn.NCH * 4, hb, R }, attn.NT, attn.splitSmem(4), .{ .x = 4 }, &args),
             else => return error.Unsupported,
         }
     }

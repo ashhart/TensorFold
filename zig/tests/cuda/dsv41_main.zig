@@ -9,6 +9,7 @@ const replay_case = @import("deepseek_v41/replay.zig");
 const kvglue = @import("deepseek_v41/kv_glue.zig");
 const kvsplit = @import("deepseek_v41/kvsplit.zig");
 const exchanges = @import("deepseek_v41/exchanges.zig");
+const attn_heads = @import("deepseek_v41/attn_heads.zig");
 const mhcdec = @import("deepseek_v41/mhcdec.zig");
 const mhc_probe = @import("deepseek_v41/mhc_probe.zig");
 const mhc_alloc = @import("deepseek_v41/mhc_alloc_bench.zig");
@@ -28,6 +29,7 @@ const usage =
     \\  kvglue <dir>       fused KV RMS/SWA store against the reference Triton bytes
     \\  kvsplit            split KV's exchange copies against kv/split.zig's host reference (no fixture)
     \\  exchanges          embedding, Engram and mHC exchanges at worlds 1-4 as threads on this GPU (no fixture)
+    \\  attn-heads         decode attention at 24 heads (a partial head tile) against a 32-head launch (no fixture)
     \\  mhc-probe [windows]  the 16-row mHC boundary under cache states, buffer layouts and a cross-stream dependency
     \\  x3gm3-bench [rows,..] [reps]  x3gm v3 against v2 at the served prefill shapes: bits and time (synthetic data)
     \\  x3ld-epi [rows,..] [reps]  TF_DSV41_X3LD_EPI: fused x3ld + epilogues against the four launches (bits, time)
@@ -85,6 +87,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     }
     if (std.mem.eql(u8, cmd, "kvsplit")) return kvsplit.run(gpu, &k);
     if (std.mem.eql(u8, cmd, "exchanges")) return exchanges.run(gpu, &k);
+    if (std.mem.eql(u8, cmd, "attn-heads")) return attn_heads.run(gpu, &k);
     if (std.mem.eql(u8, cmd, "kvglue")) return kvglue.run(gpu, &k, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "mhc-probe")) return mhc_probe.run(gpu, &k, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "mhc-alloc")) return mhc_alloc.run(gpu, &k, if (rest.len > 0) rest[0] else null);

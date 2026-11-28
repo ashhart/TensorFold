@@ -324,7 +324,8 @@ pub fn attention(e: *Emitter, L: u32) !void {
             }
         }
     }
-    const rows_scr = n * 5 * H;
+    // the partials over whole 16-head tiles: a 24-head share's last tile is partial
+    const rows_scr = n * 5 * @import("dsv41_kernels").ops.attn.scratchHeads(H);
     try e.ext("tf_dsv41_attn_cuda_v1.attn", &.{
         try e.view(q.t.role, .bf16, &.{ n, H, hd }, &.{ H * hd, hd, 1 }, 0), cv,                                              cs,                                              tok,               cnt,                                                      swa[0],                                            swa[1],
         try e.buf("w.lo", .{}, .i32, &.{n}),                                 try e.empty(.i32),                               try e.pos(),                                     try e.empty(.i64), apg.pt,                                                   try e.weight("L{d}.attn.sink", .{L}, .f32, &.{H}), try e.ropeTable(),
