@@ -147,7 +147,7 @@ fn kernels(d: anytype, streams: usize, contexts: []const *draft.Ctx) !?u64 {
     return spanned;
 }
 
-/// The opt-in pre-b250 route sends any mixed hold through one full head; all-narrow holds never split.
+/// Mixed holds default to one full head; TF_QWEN_DRAFT_FULL_HEAD=0 restores splitting; all-narrow holds never split.
 pub fn mixedHeadPath(d: anytype, contexts: []const *draft.Ctx) bool {
     return mixedHeadEligible(d.e.head, contexts) and !d.full_head;
 }
