@@ -59,7 +59,7 @@ fn create(s: *Session, a: Allocator, body: Value) void {
     const ended = for ([_][]const u8{ "completed", "incomplete", "cancelled" }) |k| { // a cut reply is kept as written
         if (std.mem.eql(u8, status, k)) break true;
     } else false;
-    const kept = done.status == 200 and ended;
+    const kept = done.status == 200 and ended and !s.srv.config.confidential; // --confidential caches no turn
     if (kept) remember(s, a, lane, final.?, history.earlier, done.added) else if (done.status != 0) forget(s, body, lane);
     count(s, done.status, if (final) |f| f.strField("id") else null, lane, started);
 }
@@ -184,7 +184,8 @@ fn bodyDenial(s: *const Session, scopes: auth_scope.Scopes, body: Value) ?auth_s
     const confidential = s.srv.config.confidential;
     if (scopes.admin and !confidential) return null;
     if (body.get("previous_response_id")) |parent| if (parent != .null) {
-        if (parent != .string or s.cache.find(parent.string) == null) return if (confidential) .confidential_history else .response_history;
+        if (confidential) return .confidential_history; // before the cache is looked at: no parent is ever kept
+        if (parent != .string or s.cache.find(parent.string) == null) return .response_history;
     };
     const store = body.get("store") orelse return if (confidential) .confidential_storage else .response_storage;
     if (store != .bool or store.bool) return if (confidential) .confidential_storage else .response_storage;

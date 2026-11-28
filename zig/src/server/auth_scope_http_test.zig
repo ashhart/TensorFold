@@ -536,3 +536,30 @@ test "apply-template: both routes need an inference key and render without engin
     }
     try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire));
 }
+
+test "auth scopes HTTP: a --confidential WebSocket caches no turn and refuses every continuation, cached or not" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{ .confidential = true };
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ws = @import("responses_ws_client_test.zig");
+    var c: ws.Client = undefined;
+    try c.open(a, t.io, h.listener.port(), "admin-secret");
+    defer c.close();
+    const done = try c.turn(a, "{\"type\":\"response.create\",\"input\":\"private\",\"store\":false}");
+    try t.expectEqualStrings("response.completed", ws.last(done).strField("type").?);
+    try t.expectEqual(@as(usize, 0), h.srv.ws_cache_bytes.load(.acquire)); // nothing cached by the finished turn
+    const rid = ws.final(done).strField("id").?;
+    const next = try std.fmt.allocPrint(a, "{{\"type\":\"response.create\",\"input\":\"more\",\"store\":false,\"previous_response_id\":\"{s}\"}}", .{rid});
+    const refused = ws.last(try c.turn(a, next));
+    try t.expectEqualStrings("error", refused.strField("type").?);
+    try t.expectEqual(@as(i64, 403), refused.get("status").?.int64().?);
+    try t.expectEqualStrings("confidential", refused.get("error").?.strField("code").?);
+}
