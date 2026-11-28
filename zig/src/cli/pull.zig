@@ -17,8 +17,10 @@ pub const GiB: u64 = 1 << 30;
 const revision_json_bytes = 1 << 20;
 const tree_json_bytes = 16 << 20;
 const config_json_bytes = 1 << 20;
-/// Where files switch to shared pieces, and how big a piece is (tests use small ones).
-pub const Sizes = struct { threshold: u64 = ranged.threshold, piece: u64 = ranged.piece };
+/// Whether an ordinary inference pull or an explicit conversion admits the model type.
+pub const Admission = enum { inference, conversion };
+/// Where files switch to shared pieces, how big a piece is, and which config admission applies.
+pub const Sizes = struct { threshold: u64 = ranged.threshold, piece: u64 = ranged.piece, admission: Admission = .inference };
 
 /// A large LFS file on the shared queue, named by its sha256 once its bytes check out.
 const Big = struct { entry: Entry, blob: []const u8, file: ranged.File };
@@ -26,6 +28,11 @@ const Big = struct { entry: Entry, blob: []const u8, file: ranged.File };
 /// Downloads ``repo[@revision]`` into the cache and prints where it landed. Returns the exit code.
 pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Writer, env: ?*const std.process.Environ.Map, override: ?[]const u8, spec: []const u8) !u8 {
     return runWith(a, io, out, err_out, env, override, spec, .{});
+}
+
+/// Conversion keeps the ordinary download checks while admitting unregistered model types.
+pub fn runForConversion(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Writer, env: ?*const std.process.Environ.Map, override: ?[]const u8, spec: []const u8) !u8 {
+    return runWith(a, io, out, err_out, env, override, spec, .{ .admission = .conversion });
 }
 
 pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Writer, env: ?*const std.process.Environ.Map, override: ?[]const u8, spec: []const u8, sizes: Sizes) !u8 {
@@ -101,30 +108,14 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         error.HubDenied => return auth.refuse(err_out, repo),
         else => return e,
     };
-    const kind = configKind(a, config_bytes);
-    const model_type = kind.model_type;
-    if (kind.drafter) {
-        try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, try safeModelType(a, model_type, auth) });
-    } else if (hub.family(model_type)) |family| {
-        try out.print("{s}: {s} ({s})\n", .{ repo, if (auth.reflects(family.title)) credential.withheld else family.title, try safeModelType(a, family.model_type, auth) });
-    } else {
-        try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, try safeModelType(a, model_type, auth) });
-        return 1;
-    }
+    if (!try admitConfig(a, out, err_out, auth, repo, config_bytes, sizes.admission)) return 1;
 
     const repo_dir = try std.fs.path.join(a, &.{ root, try hub.repoDirName(a, repo) });
     const blobs_dir = try std.fs.path.join(a, &.{ repo_dir, "blobs" });
     const snapshot_dir = try std.fs.path.join(a, &.{ repo_dir, "snapshots", sha });
     const refs_dir = try std.fs.path.join(a, &.{ repo_dir, "refs" });
     // A failed same-revision repair must not create directories or leave its old completion marker behind.
-    const ref_path = try std.fs.path.join(a, &.{ refs_dir, "main" });
-    var ref_buf: [128]u8 = undefined;
-    const published: ?[]const u8 = w.readFile(io, ref_path, &ref_buf) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => return err,
-    };
-    if (published) |text| if (std.mem.eql(u8, std.mem.trim(u8, text, " \r\n"), sha))
-        try w.deleteFile(io, ref_path);
+    try revokeRefs(a, io, refs_dir, revision, sha);
     for ([_][]const u8{ blobs_dir, snapshot_dir, refs_dir }) |d| try w.createDirPath(io, d);
 
     var big: std.ArrayList(Big) = .empty;
@@ -167,9 +158,58 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         else => return e,
     };
     if (!fetched) return 1;
-    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ refs_dir, "main" }), .data = sha });
+    try publishRefs(a, io, refs_dir, revision, sha);
     try out.print("stored {s}@{s} at {s}\n", .{ repo, sha, snapshot_dir });
     return 0;
+}
+
+/// Checks config and inference admission before any weight or snapshot mutation.
+pub fn admitConfig(a: Allocator, out: *std.Io.Writer, err_out: *std.Io.Writer, auth: Auth, repo: []const u8, config_bytes: []const u8, admission: Admission) !bool {
+    const kind = configKind(a, config_bytes);
+    const model_type = kind.model_type;
+    if (!kind.valid and admission == .conversion) {
+        try err_out.print("{s}: config.json must be a JSON object; refusing\n", .{repo});
+        return false;
+    }
+    if (admission == .conversion) {
+        try out.print("{s}: conversion source ({s})\n", .{ repo, try safeModelType(a, model_type, auth) });
+    } else if (kind.drafter) {
+        try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, try safeModelType(a, model_type, auth) });
+    } else if (hub.family(model_type)) |family| {
+        try out.print("{s}: {s} ({s})\n", .{ repo, if (auth.reflects(family.title)) credential.withheld else family.title, try safeModelType(a, family.model_type, auth) });
+    } else {
+        try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, try safeModelType(a, model_type, auth) });
+        return false;
+    }
+
+    return true;
+}
+
+/// Withdraws both aliases before repairing their shared snapshot, reading them before any mutation.
+pub fn revokeRefs(a: Allocator, io: std.Io, refs: []const u8, revision: []const u8, sha: []const u8) !void {
+    if (!revisionOk(revision) or !hub.hexSha(sha)) return error.BadRevision;
+    const names = [_][]const u8{ "main", revision };
+    var paths: [2][]const u8 = undefined;
+    var remove: [2]bool = @splat(false);
+    for (names, 0..) |name, i| {
+        if (i == 1 and std.mem.eql(u8, name, "main")) continue;
+        paths[i] = try std.fs.path.join(a, &.{ refs, name });
+        var buf: [128]u8 = undefined;
+        const text = std.Io.Dir.cwd().readFile(io, paths[i], &buf) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        remove[i] = std.mem.eql(u8, std.mem.trim(u8, text, " \r\n"), sha);
+    }
+    for (remove, 0..) |yes, i| if (yes) try std.Io.Dir.cwd().deleteFile(io, paths[i]);
+}
+
+/// Publishes the requested revision only after every snapshot file has passed the ordinary download checks.
+pub fn publishRefs(a: Allocator, io: std.Io, refs: []const u8, revision: []const u8, sha: []const u8) !void {
+    if (!revisionOk(revision) or !hub.hexSha(sha)) return error.BadRevision;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ refs, revision }), .data = sha });
+    if (!std.mem.eql(u8, revision, "main"))
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ refs, "main" }), .data = sha });
 }
 
 /// The large files as pieces on one queue; each matches its sha256 before it becomes a blob, else it comes once more.
@@ -312,10 +352,10 @@ fn lfsDigest(oid: []const u8) ?[32]u8 {
 }
 
 /// config.json's model_type, copied from the raw bytes' parse, and whether it is a DFlash2 drafter (`serve --drafter`).
-fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, drafter: bool } {
-    var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return .{ .model_type = "unknown", .drafter = false };
+fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, drafter: bool, valid: bool = true } {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return .{ .model_type = "unknown", .drafter = false, .valid = false };
     defer parsed.deinit();
-    if (parsed.value != .object) return .{ .model_type = "unknown", .drafter = false };
+    if (parsed.value != .object) return .{ .model_type = "unknown", .drafter = false, .valid = false };
     const t = parsed.value.object.get("model_type");
     const model_type = if (t != null and t.? == .string) a.dupe(u8, t.?.string) catch "unknown" else "unknown";
     return .{ .model_type = model_type, .drafter = parsed.value.object.get("dflash_config") != null };

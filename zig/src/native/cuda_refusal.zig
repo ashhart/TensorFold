@@ -147,7 +147,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
     if (o.loops != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "loops"))) return "--loops sets a looped model's recurrent passes (Dory's): this CUDA family has none; serve without it";
-    if (o.prompt_cache_gib != null and @import("cuda_kv_pool.zig").keepsNoPrompts(F)) return no_prompts;
+    if ((o.prompt_cache_gib orelse 0) > 0 and @import("cuda_kv_pool.zig").keepsNoPrompts(F)) return no_prompts;
     return null;
 }
 
@@ -411,17 +411,20 @@ test "prompt precision: int8 is refused unless a CUDA family consumes the option
     try std.testing.expect(family(Bf16, .{ .dir = "d", .model_type = "m" }) == null);
 }
 
-test "--prompt-cache-gib is refused by name for a family that keeps no prompts, and opens LFM2-MoE as before" {
+test "CUDA prompt cache admission: a promptless family accepts null and zero and refuses a positive budget" {
     const Promptless = struct {
         pub const keeps_no_prompts = true;
     };
     const Declined = struct {
         pub const keeps_no_prompts = false;
     };
-    const asked: api.Open = .{ .dir = "d", .model_type = "m", .prompt_cache_gib = 0 };
-    try std.testing.expectEqualStrings(no_prompts, family(Promptless, asked).?);
-    try std.testing.expect(family(Promptless, .{ .dir = "d", .model_type = "m" }) == null);
-    try std.testing.expect(family(Declined, asked) == null);
+    for ([_]?f64{ null, 0, 4 }) |gib| {
+        const asked: api.Open = .{ .dir = "d", .model_type = "m", .prompt_cache_gib = gib };
+        if ((gib orelse 0) > 0) {
+            try std.testing.expectEqualStrings(no_prompts, family(Promptless, asked).?);
+        } else try std.testing.expect(family(Promptless, asked) == null);
+        try std.testing.expect(family(Declined, asked) == null);
+    }
     try std.testing.expect(family(@import("lfm2_moe_cuda").native, .{ .dir = "d", .model_type = "lfm2_moe", .prompt_cache_gib = 4 }) == null);
 }
 

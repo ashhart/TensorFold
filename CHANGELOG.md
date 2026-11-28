@@ -5,6 +5,14 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - CUDA and Metal: additive GLPv3 control vectors (`--glp FILE`, `--glp-alpha`) apply per-pass directions at DeepSeek-V4.1's `hc_fold_pre_engram` site and at Qwen3.8-27B's post-block residual site; with no vector loaded the launch list, kernels and saved-state identity are unchanged (#4273).
+- CLI: `tensorfold tfq3 MODEL` pulls, converts and inspects TFQ3 checkpoints for the dedicated families and any Safetensors architecture, encoding natively in Zig when the external `tfq3` GPU binary is not installed; serving paths are unchanged (#5018).
+
+- CUDA: drafted Qwen3.8-27B gains opt-in `TF_QWEN_DRAFT_FULL_HEAD=1`, which sends a draft hold with any wide stream through the full head in one pass; on one GB10 it wins back the 1.3.7 loss at 4 greedy streams (+3.1%) with identical tokens. Default off, as are the `TF_DFLASH_GRAPH` mixed-width graph keys and `TF_QWEN_GRAPH_STATS` counters added with it (#5481, refs #4439).
+
+- Server: `serve --confidential` disables prompt retention without requesting checkpoint slots and omits generated OCR text from error logs; CUDA families that keep no prompts accept a zero cache budget (#5426).
+
+
+
 - Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
 
 - Desktop: a ready attachment can start a local or remote conversation without typed text, and folder guidance clears after a successful selection or launch (#4836). Thanks @taylorarndt for the report.
@@ -32,8 +40,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
 
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
-
-
 
 - Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
 

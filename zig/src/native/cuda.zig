@@ -152,7 +152,8 @@ pub const Host = struct { // One loaded model behind the lane host: everything t
         return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant, .warm_images = h.inner.warm_images };
     }
 };
-const refusals = @import("cuda_refusal.zig");
+pub const refusals = @import("cuda_refusal.zig");
+pub const metal_spill = @import("metal_spill.zig");
 const open_family = @import("cuda_open.zig");
 const record = @import("cuda_record.zig");
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
