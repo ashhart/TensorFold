@@ -1,4 +1,7 @@
-//! One GPU: production padding/copy calls and the unchanged fused core against a direct 32-head launch.
+//! One GPU: production padding/copy calls and the unchanged fused core against a direct 32-head launch, for
+//! four-rank shares (16 heads) and three-rank shares (24 and 16). The direct launch holds 32 real heads: the rank's
+//! own first and nonzero queries and sinks in the rest, as a two-rank rank computes them, so the rank's bytes must
+//! not depend on what the padding holds.
 const std = @import("std");
 const cuda = @import("cuda");
 const calls = @import("block_calls.zig");
@@ -7,8 +10,9 @@ const bp = @import("block_prefill.zig");
 const heads = @import("prefill_heads.zig");
 const tc = @import("triton_call.zig");
 const Buffer = struct { dev: cuda.DeviceBuffer, host: []u8 };
-const Case = struct { total: i64, rows: i64, row0: i64 = 0 };
-const Receipt = struct { total: i64, rows: i64, row0: i64, sha256: [64]u8 };
+/// A rank of a world (its share: 16 heads at four ranks, 24 or 16 at three) and its rows.
+const Case = struct { heads: i64 = 16, world: u32 = 4, rank: u32 = 0, total: i64, rows: i64, row0: i64 = 0 };
+const Receipt = struct { heads: i64, world: u32, rank: u32, total: i64, rows: i64, row0: i64, sha256: [64]u8 };
 
 const Memory = struct {
     a: std.mem.Allocator,
@@ -75,10 +79,12 @@ fn one(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, set: 
     defer m.close();
     const cfg: @import("config.zig").Config = .{};
     var widths: block.Widths = .{};
-    var e: block.Emitter = .{ .a = a, .cfg = &cfg, .w = &widths, .o = .{ .world = 4 }, .n = shape.total, .start = 128 };
-    const q = try e.buf("L.q", .{}, .bf16, &.{ shape.total, 8192 });
+    var e: block.Emitter = .{ .a = a, .cfg = &cfg, .w = &widths, .o = .{ .world = shape.world, .rank = shape.rank }, .n = shape.total, .start = 128 };
+    if (try e.rankHeads() != shape.heads) return error.BadCase;
+    const groups: usize = @intCast(try e.rankGroups());
+    const q = try e.buf("L.q", .{}, .bf16, &.{ shape.total, shape.heads * 512 });
     const padded = try heads.query(&e, q, 512);
-    const out = try e.buf("L.o", .{}, .bf16, &.{ 2, shape.total, 4096 });
+    const out = try e.buf("L.o", .{}, .bf16, &.{ @intCast(groups), shape.total, 4096 });
     const kv = try e.buf("L.kv", .{}, .bf16, &.{ shape.total, 512 });
     e.row0 = shape.row0;
     e.n = shape.rows;
@@ -109,9 +115,16 @@ fn one(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, set: 
     const real_q = m.data("L.q");
     for (0..real_q.len / 2) |i| bf16(real_q, i, @as(f32, @floatFromInt(i % 29)) / 32 - 0.4);
     const total: usize = @intCast(shape.total);
-    for (0..total) |r| @memcpy(m.data("ref.q")[r * 32768 ..][0..16384], real_q[r * 16384 ..][0..16384]);
-    for (0..16) |h| word(m.data("L0.attn.sink"), h, @as(f32, @floatFromInt(h)) / 16 - 2);
-    @memcpy(m.data("ref.sink")[0..64], m.data("L0.attn.sink"));
+    const nh: usize = @intCast(shape.heads);
+    // the direct launch's query: the rank's heads first, then nonzero heads where the padding copy writes zeros
+    const ref_q = m.data("ref.q");
+    for (0..total) |r| {
+        @memcpy(ref_q[r * 32768 ..][0 .. nh * 1024], real_q[r * nh * 1024 ..][0 .. nh * 1024]);
+        for (nh * 512..32 * 512) |i| bf16(ref_q[r * 32768 ..], i, @as(f32, @floatFromInt((7 * i + r) % 31)) / 32 - 0.5);
+    }
+    for (0..nh) |h| word(m.data("L0.attn.sink"), h, @as(f32, @floatFromInt(h)) / 16 - 2);
+    @memcpy(m.data("ref.sink")[0 .. nh * 4], m.data("L0.attn.sink"));
+    for (nh..32) |h| word(m.data("ref.sink"), h, @as(f32, @floatFromInt(h)) / 8 - 1);
     const v = m.data("s.L0.swa.v");
     for (0..v.len / 576) |r| {
         @memset(v[r * 576 ..][0..448], 0x30);
@@ -144,7 +157,7 @@ fn one(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, set: 
     const reference = m.data("ref.out");
     const row0: usize = @intCast(shape.row0);
     const rows: usize = @intCast(shape.rows);
-    for (0..2) |g| for (0..total) |r| {
+    for (0..groups) |g| for (0..total) |r| {
         const at = (g * total + r) * 8192;
         const bytes = actual[at..][0..8192];
         if (r >= row0 and r < row0 + rows) {
@@ -154,7 +167,7 @@ fn one(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, set: 
     };
     var digest: [32]u8 = undefined;
     hash.final(&digest);
-    return .{ .total = shape.total, .rows = shape.rows, .row0 = shape.row0, .sha256 = std.fmt.bytesToHex(digest, .lower) };
+    return .{ .heads = shape.heads, .world = shape.world, .rank = shape.rank, .total = shape.total, .rows = shape.rows, .row0 = shape.row0, .sha256 = std.fmt.bytesToHex(digest, .lower) };
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -173,7 +186,16 @@ pub fn main(init: std.process.Init) !u8 {
     defer stream.deinit();
     var set = try cuda.aot.Set.load(init.gpa, init.io, &d, ctx.device, args[1]);
     defer set.deinit();
-    const shapes = [_]Case{ .{ .total = 1, .rows = 1 }, .{ .total = 16, .rows = 16 }, .{ .total = 17, .rows = 17 }, .{ .total = 33, .rows = 33 }, .{ .total = 129, .rows = 129 }, .{ .total = 50, .rows = 17, .row0 = 33 } };
+    const rows = [_]Case{ .{ .total = 1, .rows = 1 }, .{ .total = 16, .rows = 16 }, .{ .total = 17, .rows = 17 }, .{ .total = 33, .rows = 33 }, .{ .total = 129, .rows = 129 }, .{ .total = 50, .rows = 17, .row0 = 33 } };
+    // (heads, world, rank): four ranks' share, then three ranks' 24-head rank 0 and 16-head rank 2
+    const ranks = [_][3]u32{ .{ 16, 4, 0 }, .{ 24, 3, 0 }, .{ 16, 3, 2 } };
+    var shapes: [ranks.len * rows.len]Case = undefined;
+    for (ranks, 0..) |rk, j| for (rows, 0..) |row, i| {
+        shapes[j * rows.len + i] = row;
+        shapes[j * rows.len + i].heads = rk[0];
+        shapes[j * rows.len + i].world = rk[1];
+        shapes[j * rows.len + i].rank = rk[2];
+    };
     var receipts: [shapes.len]Receipt = undefined;
     for (shapes, &receipts) |shape, *receipt| receipt.* = try one(init.gpa, &d, stream, &set, shape);
     const text = try std.json.Stringify.valueAlloc(init.arena.allocator(), .{ .sm = try ctx.capability(), .equal = true, .cases = receipts }, .{});

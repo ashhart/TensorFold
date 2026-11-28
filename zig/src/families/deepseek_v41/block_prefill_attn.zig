@@ -219,8 +219,10 @@ pub fn attention(s: *Seg, L: u32) !void {
     }
     // the CSA2 steps a segment at a time, into the group-major core output
     const groups: i64 = try e.rankGroups();
-    if ((H != 16 and @mod(H, bmq) != 0) or @mod(H, groups) != 0) return error.Unsupported;
-    const core_q = if (H == 16) try pf_heads.query(e, q, hd) else q;
+    if ((!pf_heads.padded(H) and @mod(H, bmq) != 0) or @mod(H, groups) != 0) return error.Unsupported;
+    // a padded share's groups must tile the core's 32 heads whole
+    if (pf_heads.padded(H) and @mod(pf_heads.core_heads, @divExact(H, groups)) != 0) return error.Unsupported;
+    const core_q = if (pf_heads.padded(H)) try pf_heads.query(e, q, hd) else q;
     const hg = @divExact(H, groups);
     const o = try e.buf("L.o", .{}, .bf16, &.{ groups, n, hg * hd });
     if (s.multi) |segs| {
@@ -273,7 +275,8 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
     const n = e.n;
     const ratio: i64 = e.cfg.compressRatio(L);
     const real_heads: i64 = try e.rankHeads();
-    const H: i64 = if (real_heads == 16) 32 else real_heads;
+    const pad = pf_heads.padded(real_heads);
+    const H: i64 = if (pad) pf_heads.core_heads else real_heads;
     const hd: i64 = e.cfg.head_dim;
     const groups: i64 = try e.rankGroups();
     const hg = @divExact(real_heads, groups);
@@ -314,8 +317,10 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
         }
     }
     const real_sink = try e.weight("L{d}.attn.sink", .{L}, .f32, &.{real_heads});
-    const sink = if (real_heads == 16) try pf_heads.sink(e, real_sink) else real_sink;
-    const output = if (real_heads == 16) try e.buf("L.pf.o32", .{}, .bf16, &.{ 2 * groups, total, hg * hd }) else o;
+    const sink = if (pad) try pf_heads.sink(e, real_sink) else real_sink;
+    // a padded rank's 32 heads are whole groups of its own group width (attention() refuses a width that does not
+    // divide 32): its own groups lead, the zero heads follow
+    const output = if (pad) try e.buf("L.pf.o32", .{}, .bf16, &.{ @divExact(H, hg), total, hg * hd }) else o;
     const out_view = try e.view(output.t.role, .bf16, &.{ @divExact(H, hg), n, hg * hd }, &.{ total * hg * hd, hg * hd, 1 }, e.row0 * hg * hd * 2);
     try e.triton("_fused", .{ n, @divExact(H, bmq), 1 }, &.{
         .{ .name = "Q", .arg = try e.view(q.t.role, .bf16, &.{ n, H, hd }, &.{ H * hd, hd, 1 }, e.row0 * H * hd * 2) },
@@ -349,6 +354,6 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
         .{ .name = "HG", .arg = .{ .i = hg } },
         .{ .name = "OR", .arg = .{ .i = total } },
     });
-    if (real_heads == 16) try pf_heads.extract(e, out_view, try e.view(o.t.role, .bf16, &.{ groups, n, hg * hd }, &.{ total * hg * hd, hg * hd, 1 }, e.row0 * hg * hd * 2));
+    if (pad) try pf_heads.extract(e, out_view, try e.view(o.t.role, .bf16, &.{ groups, n, hg * hd }, &.{ total * hg * hd, hg * hd, 1 }, e.row0 * hg * hd * 2));
     if (s.staged) try e.glue("stage_out", &.{ slot[0], slot[1], .{ .i = ring0 }, rows[0], rows[1], .{ .i = s.ring }, .{ .i = @max(0, e.end() - W) }, .{ .i = e.end() } });
 }
