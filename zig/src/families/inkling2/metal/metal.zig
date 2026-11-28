@@ -9,3 +9,7 @@ pub const vision = @import("vision.zig");
 pub const dense = @import("dense.zig");
 pub const tree = @import("tree.zig");
 pub const draw = @import("draw.zig");
+pub const small_ops = @import("small_ops.zig");
+pub const small_state = @import("small_state.zig");
+pub const small_model = @import("small_model.zig");
+pub const small_forward = @import("small_forward.zig");

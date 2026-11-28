@@ -242,6 +242,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").runtime
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))
             @import("inkling2_metal").tree
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 small "))
+            @import("inkling2_metal").small_ops
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 loop "))
             @import("inkling2_metal").loop
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
