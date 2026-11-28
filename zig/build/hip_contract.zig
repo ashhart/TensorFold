@@ -53,8 +53,9 @@ pub fn steps(b: *std.Build, o: Options) void {
         .optimize = .Debug,
         .imports = &.{ .{ .name = "core", .module = o.host.import_table.get("core").? }, .{ .name = "inkling2_hip", .module = inkling2(b, b.graph.host, .Debug, o.host) } },
     }) }));
-    const ink_step = b.step("test-inkling2-hip-host", "Inkling 2's HIP attention plan and contract layouts without a device");
-    for ([_]*std.Build.Step{ &ink_plan.step, &ink_layout.step }) |st| {
+    const ink_refusals = b.addRunArtifact(b.addTest(.{ .root_module = refusals(b, o.lighton_host) }));
+    const ink_step = b.step("test-inkling2-hip-host", "Inkling 2's HIP attention plan, contract layouts and serve-flag refusals without a device");
+    for ([_]*std.Build.Step{ &ink_plan.step, &ink_layout.step, &ink_refusals.step }) |st| {
         ink_step.dependOn(st);
         o.test_step.dependOn(st);
     }
@@ -97,6 +98,24 @@ pub fn steps(b: *std.Build, o: Options) void {
 fn inkling2(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, hip_mod: *std.Build.Module) *std.Build.Module {
     const root = b.path("zig/src/families/inkling2/hip_attention.zig");
     return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize, .imports = &.{.{ .name = "hip", .module = hip_mod }} });
+}
+
+/// Inkling 2 Mini's HIP refusals through the host's hook, over the host build's `engine_api` and `hip_serve`.
+fn refusals(b: *std.Build, family_mod: *std.Build.Module) *std.Build.Module {
+    const api = family_mod.import_table.get("engine_api").?;
+    const serve = family_mod.import_table.get("hip_serve").?;
+    const families = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/hip_families.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "hip_serve", .module = serve } },
+    });
+    return b.createModule(.{
+        .root_source_file = b.path("zig/src/families/inkling2/hip_native_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "hip_families", .module = families } },
+    });
 }
 
 /// The controls' code object as the `hip_controls` module (empty without hipcc).

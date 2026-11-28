@@ -40,3 +40,18 @@ pub fn function(source: []const u8, name: []const u8) ![]const u8 {
     if (depth != 0) return error.HybridGeometrySourceChanged;
     return source[start..end];
 }
+
+fn declaration(source: []const u8, name: []const u8, marker: []const u8) ![]const u8 {
+    const body = try function(source, name);
+    const at = std.mem.indexOf(u8, body, marker) orelse return error.HybridGeometrySourceChanged;
+    const base = @intFromPtr(body.ptr) - @intFromPtr(source.ptr);
+    const boundary = std.mem.lastIndexOfAny(u8, source[0 .. base + at], "{};");
+    const start = if (boundary) |i| i + 1 else 0;
+    return source[start .. base + body.len];
+}
+
+/// Validate the whole original declaration, then emit today's canonical single-line reservation.
+pub fn reservedFunction(a: std.mem.Allocator, source: []const u8, name: []const u8, marker: []const u8, threads: usize) ![]const u8 {
+    const checked = try reserve(a, try declaration(source, name, marker), marker, threads);
+    return reserve(a, try function(checked, name), marker, threads);
+}

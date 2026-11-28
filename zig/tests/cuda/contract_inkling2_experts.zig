@@ -7,6 +7,7 @@ const g = @import("core").contract.gates;
 const rig_ = @import("contract_rig.zig");
 const ref = @import("contract_minimax_glue_ref.zig");
 const grouped = @import("contract_inkling2_experts_grouped.zig");
+const baseline = @import("contract_inkling2_experts_baseline.zig");
 const vision = @import("contract_inkling2_experts_vision.zig");
 const modelopt = @import("contract_inkling2_modelopt.zig");
 const Attention = @import("contract_inkling2_experts_attn.zig").Attention;
@@ -15,12 +16,15 @@ const Attention = @import("contract_inkling2_experts_attn.zig").Attention;
 pub const Set = struct {
     live: bool = false,
     ek: ink.experts.Kernels = undefined,
+    bk: baseline.BaselineKernels = undefined,
     vk: ink.vision.Kernels = undefined,
     mk: ink.modelopt.Kernels = undefined,
     fa: cuda.vit.Attention = undefined,
     vt: cuda.vit.Kernels = undefined,
     groups: [2]grouped.Group = undefined,
     projections: [4]grouped.Grouped = undefined,
+    baseline_groups: [2]baseline.Group = undefined,
+    baseline_projections: [4]baseline.Grouped = undefined,
     moe: [13]modelopt.ModelOpt = undefined,
     embeds: [2]ref.Gated(vision.Embed) = undefined,
     ropes: [2]ref.Gated(vision.Rope) = undefined,
@@ -30,6 +34,8 @@ pub const Set = struct {
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
         set.ek = try ink.experts.Kernels.load(gpu.d);
         errdefer set.ek.unload();
+        set.bk = try baseline.BaselineKernels.load(gpu.d);
+        errdefer set.bk.unload();
         set.vk = try ink.vision.Kernels.load(gpu.d);
         errdefer set.vk.unload();
         const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
@@ -43,6 +49,8 @@ pub const Set = struct {
         for (&set.groups, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.ek, .wrong_run = i == 1 };
         const forms = [4]@import("contract_inkling2_experts_ref.zig").Form{ .rows, .rows, .wide, .wide };
         for (&set.projections, forms, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = &set.ek, .form = f, .fault = if (i == 1) .short else if (i == 3) .swapped else .none };
+        for (&set.baseline_groups, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.bk, .wrong_run = i == 1 };
+        for (&set.baseline_projections, forms, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = &set.bk, .form = f, .fault = if (i == 1) .short else if (i == 3) .swapped else .none };
         const prompt = [13]bool{ false, true, false, true, false, true, false, false, false, true, false, false, false };
         for (&set.moe, 0..) |*x, i| x.* = .{
             .rig = rig,
@@ -67,6 +75,8 @@ pub const Set = struct {
         set.live = true;
         for (&set.groups) |*x| try list.append(a, x.kernel());
         for (&set.projections) |*x| try list.append(a, x.kernel());
+        for (&set.baseline_groups) |*x| try list.append(a, x.kernel());
+        for (&set.baseline_projections) |*x| try list.append(a, x.kernel());
         for (&set.moe) |*x| try list.append(a, x.kernel());
         for (&set.embeds) |*x| try list.append(a, x.kernel());
         for (&set.ropes) |*x| try list.append(a, x.kernel());
@@ -83,10 +93,13 @@ pub const Set = struct {
         for (&set.moe) |*x| x.deinit();
         for (&set.projections) |*x| x.deinit();
         for (&set.groups) |*x| x.deinit();
+        for (&set.baseline_projections) |*x| x.deinit();
+        for (&set.baseline_groups) |*x| x.deinit();
         set.vt.unload();
         set.fa.unload();
         set.mk.unload();
         set.vk.unload();
+        set.bk.unload();
         set.ek.unload();
         set.live = false;
     }
