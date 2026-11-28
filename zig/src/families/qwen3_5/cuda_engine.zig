@@ -188,6 +188,7 @@ pub const Engine = struct {
         errdefer gpa.free(e.dir);
         e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
         errdefer e.pockets.deinit();
+        e.hidden_trace = null;
         e.learning = null;
         e.mlp = null;
         e.taught = 0;
