@@ -1821,7 +1821,7 @@ key may always ask. Only these two routes carry the binding: `/v1/responses`, `/
 | `prompt_sha256` | The prompt's token ids after the template, hashed as `tensorfold.token_sha256` hashes the reply's |
 | `token_sha256` | The reply's token ids, equal to `tensorfold.token_sha256` |
 | `finish_reason` | The reply's |
-| `request` | The resolved request the engine read: `max_tokens` after the window's clamp; `sampling` (null when greedy, else the `seed` actually used, `temperature`, `top_k`, `top_p` and `min_p`); `presence_penalty`, `frequency_penalty`; `eos` and `stop`; `drafts`; `think_budget`, `think_close`, `think_end`, `answer_max`; `loop_guard`, `loop_stop`; `call` (a required tool call's gate); `structure` (the grammar's `kind`, `text_sha256`, `after`, `budget`); `logprobs`, `prompt_logprobs`, `decide` and `untaught` |
+| `request` | The resolved request the engine read: `max_tokens` after the window's clamp; `sampling` (null when greedy, else the `seed` actually used, `temperature`, `top_k`, `top_p` and `min_p`); `presence_penalty`, `frequency_penalty`; `eos` and `stop`; `logit_bias` (nonempty requests only: each entry's `token`, `value` and `ban`); `drafts`; `think_budget`, `think_close`, `think_end`, `answer_max`; `loop_guard`, `loop_stop`; `call` (a required tool call's gate); `structure` (the grammar's `kind`, `text_sha256`, `after`, `budget`); `logprobs`, `prompt_logprobs`, `decide` and `untaught` |
 | `request_sha256` | SHA-256 over `request`, walked in order as below |
 
 Every field is length-prefixed: its byte length as a little-endian u64, then its bytes. `request_sha256` hashes the field

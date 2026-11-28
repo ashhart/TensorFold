@@ -135,7 +135,8 @@ test "bias rows merge each cell once, preserve path penalties and leave another 
     const s = fakeStream(&.{ 9, 9, 5, 7, 5, 7 }, 2);
     try rows.window(a, &s, 5, 7);
     const p: lanes.Penalties = .{ .presence = 1, .frequency = 0.5 };
-    const bias = [_]lanes.logit_bias.Entry{ .{ .token = 3, .value = -100, .ban = true }, .{ .token = 5, .value = 3 } }; // sorted, as parsed
+    // sorted, as parsed
+    const bias = [_]lanes.logit_bias.Entry{ .{ .token = 3, .value = -100, .ban = true }, .{ .token = 5, .value = 3 } };
     try rows.rowBias(a, 4, p, &.{5}, &bias);
     try rows.rowBias(a, 5, p, &.{3}, &bias);
     try rows.row(a, 6, p, &.{});
