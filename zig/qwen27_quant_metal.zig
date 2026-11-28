@@ -32,6 +32,13 @@ pub const Record = struct {
     pipelines: usize = 0,
     released: usize = 0,
     live_bytes: usize = 0,
+    live_buffers: usize = 0,
+    buffers_created: usize = 0,
+    buffers_released: usize = 0,
+    no_copy_calls: usize = 0,
+    fail_no_copy: ?usize = null,
+    copy_allocator: ?std.mem.Allocator = null,
+    max_buffer: usize = std.math.maxInt(usize),
     fail_pipeline: bool = false,
     tensor_units: bool = true,
     virtual_ids: usize = 0,
@@ -59,17 +66,23 @@ pub const Buffer = struct {
     bytes: usize,
     owned: bool = false,
     id: usize = 0,
+    data: ?[]u8 = null,
     pub fn length(b: Buffer) usize {
         return b.bytes;
     }
-    pub fn contents(_: Buffer) [*]u8 {
-        @panic("recording buffer cannot be read");
+    pub fn contents(b: Buffer) [*]u8 {
+        return if (b.data) |bytes| bytes.ptr else @panic("recording buffer cannot be read");
     }
     pub fn slice(b: Buffer, comptime T: type, n: usize) []T {
         return @as([*]T, @ptrCast(@alignCast(b.contents())))[0..n];
     }
     pub fn deinit(b: Buffer) void {
-        if (b.owned) b.r.live_bytes -= b.bytes;
+        if (b.data) |bytes| b.r.copy_allocator.?.free(bytes);
+        if (b.owned) {
+            b.r.live_bytes -= b.bytes;
+            b.r.live_buffers -= 1;
+            b.r.buffers_released += 1;
+        }
     }
 };
 pub const Binding = struct { id: usize, offset: usize };
@@ -85,7 +98,27 @@ pub const Device = struct {
         return ""; // no chip the cutover table lists: its generation's cutover, as before the per-chip key
     }
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
+        var b = d.makeBuffer(bytes);
+        if (d.r.copy_allocator) |a| {
+            b.data = a.alloc(u8, bytes) catch |err| {
+                b.deinit();
+                return err;
+            };
+        }
+        return b;
+    }
+    pub fn bufferNoCopy(d: Device, _: *anyopaque, bytes: usize, _: usize) !Buffer {
+        d.r.no_copy_calls += 1;
+        if (d.r.fail_no_copy == d.r.no_copy_calls) return error.NoBuffer;
+        return d.makeBuffer(bytes);
+    }
+    pub fn maxBufferLength(d: Device) u64 {
+        return d.r.max_buffer;
+    }
+    fn makeBuffer(d: Device, bytes: usize) Buffer {
         d.r.live_bytes += bytes;
+        d.r.live_buffers += 1;
+        d.r.buffers_created += 1;
         return .{ .r = d.r, .bytes = bytes, .owned = true };
     }
     pub fn queue(_: Device) !Queue {

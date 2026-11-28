@@ -58,8 +58,8 @@ fn tiedHeadBytes(a: std.mem.Allocator, text: []const u8, c: Config) !usize {
     if (!c.tied_head) return 0;
     var formats = try q.affine.Formats.init(a, text);
     defer formats.deinit();
-    const s = (try formats.resolve("model.embed_tokens")) orelse return error.MissingAffineFormat;
-    return q.tied_head.bytes(c.vocab, c.hidden, s.bits, s.group_size);
+    if (try formats.resolve("model.embed_tokens")) |s| return q.tied_head.bytes(c.vocab, c.hidden, s.bits, s.group_size);
+    return c.vocab * c.hidden * 2;
 }
 
 /// Startup's charge for `dir` on this Mac, no drafter or images; `weights` bytes stand in for the loaded model.
@@ -81,4 +81,19 @@ pub fn budget(a: std.mem.Allocator, io: std.Io, dir: []const u8, weights: u64, c
     const r = try rows(f, dev.generation(), window);
     const slots = f.streams(r, fixed) catch |err| if (err == error.TooManyStreams) 0 else return err;
     return .{ .context = context, .streams = streams, .rows = r, .slots = slots, .total = held + try f.cost(r, if (slots == 0) streams else slots), .working_set = try memory.workingSet(dev.maxWorkingSet(), cap()) };
+}
+
+test "qwen27 startup: tied-head reserve follows the embedding's resolved format" {
+    const a = std.testing.allocator;
+    const config_json = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120,\"intermediate_size\":17408,\"num_hidden_layers\":64,\"vocab_size\":248320,\"num_attention_heads\":24,\"num_key_value_heads\":4,\"head_dim\":256,\"linear_num_key_heads\":16,\"linear_num_value_heads\":48,\"linear_key_head_dim\":128,\"linear_value_head_dim\":128,\"linear_conv_kernel_dim\":4,\"rms_norm_eps\":0.000001,\"partial_rotary_factor\":0.25,\"rope_theta\":10000000,\"full_attention_interval\":4,\"max_position_embeddings\":262144,\"eos_token_id\":248046}";
+    var problem: q.config.Problem = .{};
+    var c = try q.model.parseServed(a, config_json, null, &problem);
+    c.tied_head = false;
+    const bf16_bytes = 2_542_796_800;
+    try std.testing.expectEqual(@as(usize, 0), try tiedHeadBytes(a, "{}", c));
+    c.tied_head = true;
+    try std.testing.expectEqual(bf16_bytes, try tiedHeadBytes(a, "{}", c));
+    try std.testing.expectEqual(bf16_bytes, try tiedHeadBytes(a, "{\"quantization\":{\"quant_method\":\"mlx\",\"bits\":4,\"group_size\":64,\"model.embed_tokens\":false}}", c));
+    try std.testing.expectEqual(@as(usize, 715_161_600), try tiedHeadBytes(a, "{\"quantization\":{\"quant_method\":\"mlx\",\"bits\":4,\"group_size\":64}}", c));
+    try std.testing.expectEqual(q.tied_head.bytes(c.vocab, c.hidden, 8, 32), try tiedHeadBytes(a, "{\"quantization\":{\"quant_method\":\"mlx\",\"bits\":4,\"group_size\":64,\"model.embed_tokens\":{\"bits\":8,\"group_size\":32}}}", c));
 }

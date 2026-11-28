@@ -117,6 +117,23 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
         });
         fullCacheHost(b, mods.engine, api, mods.metal, mods.living);
     }
+    const tfq3_check_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tfq3_check.zig"), .target = b.graph.host }) }));
+    const tfq3_plan_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tfq3_plan_test.zig"), .target = b.graph.host }) }));
+    test_step.dependOn(&tfq3_check_run.step);
+    test_step.dependOn(&tfq3_plan_run.step);
+    const tfq3_host = b.step("test-qwen27-tfq3-host", "Qwen27 TFQ3 binary checks, decode plans and sign rows without a GPU");
+    tfq3_host.dependOn(&tfq3_check_run.step);
+    tfq3_host.dependOn(&tfq3_plan_run.step);
+    const tfq3_store_run = b.addRunArtifact(b.addTest(.{ .root_module = quant, .filters = &.{"qwen27 tfq3 store:"} }));
+    test_step.dependOn(&tfq3_store_run.step);
+    tfq3_host.dependOn(&tfq3_store_run.step);
+    const reserve_ids = b.addWriteFiles();
+    _ = reserve_ids.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
+    const reserve_drafts = b.createModule(.{ .root_source_file = reserve_ids.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
+    const reserve_mods = @import("metal_targets.zig").metalEngineModules(b, b.graph.host, .Debug, reserve_drafts);
+    const tied_reserve = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_reserve.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = reserve_mods.metal }, .{ .name = "tensorfold", .module = reserve_mods.engine } } });
+    const tied_reservation = b.step("test-qwen27-tied-reserve-host", "Tied-head BF16 and affine repack charges without a GPU");
+    tied_reservation.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tied_reserve, .filters = &.{"qwen27 startup: tied-head"} })).step);
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {

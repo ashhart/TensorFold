@@ -413,3 +413,22 @@ test "qwen27 quant: 5-bit and 6-bit g64 keep v1.3.4's K split on decode and prom
         }
     };
 }
+
+test "qwen27 quant: TFQ3 five-row split decode retains two decode chunks" {
+    const dispatch = @import("src/families/qwen27/tfq3_dispatch.zig");
+    var r: mtl.Record = .{};
+    var pipes = try dispatch.Pipes.initUnits(a, r.device(), false);
+    defer pipes.deinit();
+    const tf: projection.Tfq3 = .{
+        .words = .{ .buffer = r.virtual() },
+        .scales = .{ .buffer = r.virtual() },
+        .tables = .{ .buffer = r.virtual() },
+    };
+    r.count = 0;
+    try dispatch.encodeTfq3(&pipes, r.encoder(), tf, 3, 256, 1024, .{ .buffer = r.virtual() }, 1024, .{ .buffer = r.virtual() }, 256, 5);
+    try t.expectEqual(@as(usize, 6), r.count);
+}
+
+test {
+    _ = @import("src/qwen27_tfq3_store_test.zig");
+}

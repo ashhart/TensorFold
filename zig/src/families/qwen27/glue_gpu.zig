@@ -66,6 +66,18 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
+        if (p.bits == 16 and p.group == 0) {
+            if (width == 0 or rows == 0 or vocab == 0) return error.BadEmbedding;
+            const a = abi.EmbedBf16{ .width = @intCast(width), .rows = rows, .vocab = @intCast(vocab) };
+            e.setPipeline(k.embed_bf16);
+            e.setBuffer(ids.buffer, ids.offset, 0);
+            e.setBuffer(p.weight.buffer, p.weight.offset, 1);
+            e.setValue(a, 2);
+            e.setBuffer(out.buffer, out.offset, 3);
+            e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
+            try span.end();
+            return;
+        }
         const a = abi.Embed{ .width = @intCast(width), .rows = rows, .vocab = @intCast(vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
         try abi.checkEmbed(a);
         e.setPipeline(k.embed);
