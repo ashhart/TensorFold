@@ -7,6 +7,8 @@ import { Icon } from '../../lib/icons'
 import { api } from '../../lib/ipc'
 import type { Job, Room, RoomEventItem, RoomMergeResult, Ticket } from '../../lib/types'
 import {
+  finalBlockMessage,
+  isFinalBlockEvent,
   roomConflictBlockers,
   roomSupervisorPhase,
   ticketPhaseLabel,
@@ -48,10 +50,6 @@ function missingEvidenceTickets(tickets: Ticket[]): Ticket[] {
     const meaningful = (ticket.evidence ?? []).filter((entry) => !/^Reserved for (?:build|review) worker\b/i.test(entry.summary.trim()))
     return meaningful.length < required.length
   })
-}
-
-function isFinalBlockEvent(event: RoomEventItem): boolean {
-  return event.kind === 'check' && event.seat === 'moderator' && /^Final blocked:/i.test(event.text)
 }
 
 function roomPlanSnapshot({
@@ -180,7 +178,7 @@ export function RoomHandoffQueuePanel({ events }: { events: RoomEventItem[] }) {
   )
 }
 
-export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room }: { tickets: Ticket[]; leftToWork: Ticket[]; conflictBlockers: ReturnType<typeof roomConflictBlockers>; room: Room }) {
+export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room, events }: { tickets: Ticket[]; leftToWork: Ticket[]; conflictBlockers: ReturnType<typeof roomConflictBlockers>; room: Room; events: RoomEventItem[] }) {
   const tx = useAuthoredText()
   const [merging, setMerging] = useState(false)
   const [mergeResult, setMergeResult] = useState<RoomMergeResult | null>(null)
@@ -197,13 +195,21 @@ export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room
   if (!tickets.length && !room.finalText && !conflictBlockers.length) return null
   const missingEvidence = missingEvidenceTickets(tickets)
   const reviewTickets = tickets.filter((ticket) => ticket.status === 'review')
-  const complete = tickets.length > 0 && leftToWork.length === 0 && missingEvidence.length === 0 && reviewTickets.length === 0 && conflictBlockers.length === 0
+  // The moderator persists its gate verdict as an event and the store keeps events in chronological
+  // order, so the last verdict in the array wins. Timestamps tie (both are Date.now() in ms), order does not.
+  const lastVerdict = [...events].reverse().find((event) => isFinalBlockEvent(event) || event.kind === 'final')
+  // A room can complete without emitting a final event (the no-contribution path), so a block recorded
+  // before that completion must not keep the panel blocked forever.
+  const finalBlock = room.state !== 'complete' && lastVerdict && isFinalBlockEvent(lastVerdict) ? lastVerdict : undefined
+  const finalBlocked = !!finalBlock
+  const rowsReady = tickets.length > 0 && leftToWork.length === 0 && missingEvidence.length === 0 && reviewTickets.length === 0 && conflictBlockers.length === 0
+  const complete = rowsReady && !finalBlocked
   const merged = mergeResult?.status === 'merged' || mergeResult?.status === 'nothing'
   const rows = [
     { label: tx("Tickets"), value: tickets.length ? `${tickets.length - leftToWork.length}/${tickets.length} complete` : 'No tickets yet', ok: tickets.length > 0 && leftToWork.length === 0 },
     { label: tx("Evidence"), value: missingEvidence.length ? `${missingEvidence.length} missing required evidence` : 'Evidence requirements met', ok: missingEvidence.length === 0 },
     { label: tx("Review"), value: reviewTickets.length ? `${reviewTickets.length} waiting for review` : 'No review queue', ok: reviewTickets.length === 0 },
-    { label: tx("Blockers"), value: conflictBlockers.length ? `${conflictBlockers.length} conflict blocker${conflictBlockers.length === 1 ? '' : 's'}` : 'No conflict blockers', ok: conflictBlockers.length === 0 },
+    { label: tx("Blockers"), value: conflictBlockers.length ? `${conflictBlockers.length} conflict blocker${conflictBlockers.length === 1 ? '' : 's'}` : finalBlocked ? 'Final blocked by the moderator' : 'No conflict blockers', ok: conflictBlockers.length === 0 && !finalBlocked },
   ]
   return (
     <div className={clsx('rounded-xl border px-3.5 py-3 shadow-card', complete ? 'border-positive/30 bg-positive/8' : 'border-line bg-card')}>
@@ -217,8 +223,8 @@ export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room
         </div>
         <button
           onClick={() => void mergeWorktree()}
-          disabled={!complete || merging || merged}
-          title={complete ? tx("Merge the room worktree branches back into the project branch") : tx("Final gates must be green before merging")}
+          disabled={!rowsReady || merging || merged}
+          title={rowsReady ? tx("Merge the room worktree branches back into the project branch") : tx("Final gates must be green before merging")}
           className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-line px-2.5 text-[13px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-45"
         >
           <Icon name="branch" size={12} />
@@ -236,6 +242,11 @@ export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room
           </div>
         ))}
       </div>
+      {finalBlock && (
+        <div className="mt-2 rounded-lg border border-danger/30 bg-danger/8 px-2.5 py-1.5 text-[13px] leading-snug text-ink-2">
+          <span className="font-medium text-danger">{tx("Final gate blocked")}</span> {finalBlockMessage(finalBlock.text)}
+        </div>
+      )}
       {mergeResult && (
         <div className={clsx('mt-2 rounded-lg border px-2.5 py-1.5 text-[13px] leading-snug', mergeResult.ok ? 'border-positive/30 bg-positive/8 text-positive' : 'border-danger/30 bg-danger/8 text-ink-2')}>
           {mergeResult.ok && (

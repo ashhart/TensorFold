@@ -276,7 +276,7 @@ export function RoomView({ id }: { id: string }) {
               totalTickets={roomTasks.length}
             />
             <RoomHandoffStrip events={events} live={live} />
-            <RoomFinalGatePanel tickets={roomTasks} leftToWork={leftToWork} conflictBlockers={conflictBlockers} room={room} />
+            <RoomFinalGatePanel tickets={roomTasks} leftToWork={leftToWork} conflictBlockers={conflictBlockers} room={room} events={events} />
             {events.length === 0 && !live && !running && (
               <RoomCanvas
                 room={room}

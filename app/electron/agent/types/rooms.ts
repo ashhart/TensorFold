@@ -102,6 +102,9 @@ export interface RoomEventItem {
   parentSeat?: string // for delegate tool runs
   status?: string // for delegate tool runs
   path?: string // for file tools — the file the agent touched
+  // Paired projections redact `text`, but the final-readiness panel still needs the moderator's
+  // persisted verdict. This safe bit is the only verdict signal that survives that transport.
+  finalBlock?: boolean
   createdAt: number
 }
 

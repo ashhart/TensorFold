@@ -1,4 +1,4 @@
-import type { ArchiveSnapshot, Job, Project, Provider, RedactedProvider, RemoteControlDoctorSnapshot, RemoteControlEvent, RemoteControlSnapshot, RemoteControlWorkSnapshot, Room, Thread, Ticket } from '../../agent/types'
+import type { ArchiveSnapshot, Job, Project, Provider, RedactedProvider, RemoteControlDoctorSnapshot, RemoteControlEvent, RemoteControlSnapshot, RemoteControlWorkSnapshot, Room, RoomEventItem, Thread, Ticket } from '../../agent/types'
 import { store } from '../state'
 import { isActive } from './archive'
 import { liveTerminalActivity } from './terminal-live-state'
@@ -213,6 +213,16 @@ function redactThreadForPaired(thread: Thread): Thread {
   }
 }
 
+// The moderator records its final-gate verdict as a persisted check event. The renderer needs that
+// verdict, but paired projections cannot carry the event text, so this predicate feeds a safe bit.
+function isFinalBlockRoomEvent(event: Pick<RoomEventItem, 'kind' | 'seat' | 'text'>): boolean {
+  return event.kind === 'check' && event.seat === 'moderator' && /^Final blocked:/i.test(event.text)
+}
+
+function redactRoomEventForPaired(event: RoomEventItem): RoomEventItem {
+  return { ...event, text: '', args: undefined, path: undefined, finalBlock: isFinalBlockRoomEvent(event) || undefined }
+}
+
 function redactRoomForPaired(room: Room): Room {
   return {
     ...room,
@@ -223,7 +233,7 @@ function redactRoomForPaired(room: Room): Room {
     memory: [],
     memorySummary: '',
     problem: '',
-    events: (room.events ?? []).map((event) => ({ ...event, text: '', args: undefined, path: undefined })),
+    events: (room.events ?? []).map(redactRoomEventForPaired),
     finalText: '',
   }
 }
@@ -262,7 +272,7 @@ export function redactRemoteControlEventForPaired(event: Pick<RemoteControlEvent
   if (event.kind === 'thread') return { kind: event.kind, data: redactThreadForPaired(data as Thread) }
   if (event.kind === 'room') {
     if (typeof data.type === 'string' && typeof data.roomId === 'string') {
-      return { kind: event.kind, data: { roomId: data.roomId, type: data.type, state: data.state, seat: data.seat, item: data.item ? { id: data.item.id, kind: data.item.kind, seat: data.item.seat, status: data.item.status, text: '' } : undefined, chunk: data.chunk ? '' : undefined, text: data.text ? '' : undefined } }
+      return { kind: event.kind, data: { roomId: data.roomId, type: data.type, state: data.state, seat: data.seat, item: data.item ? { id: data.item.id, kind: data.item.kind, seat: data.item.seat, status: data.item.status, text: '', finalBlock: isFinalBlockRoomEvent(data.item) || undefined } : undefined, chunk: data.chunk ? '' : undefined, text: data.text ? '' : undefined } }
     }
     return { kind: event.kind, data: redactRoomForPaired(data as Room) }
   }
