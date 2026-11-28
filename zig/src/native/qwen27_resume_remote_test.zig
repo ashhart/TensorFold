@@ -10,7 +10,7 @@ var pulled_state: u8 = 0; // a pulled copy's stand-in: these rules never read it
 
 /// As qwen27_slots.takeStanding: the record taken by its plan; a pass that resumes there stands on its rows.
 fn open(st: *rules.Standing, s: *Stream, kept_at: u32) rules.Resume {
-    const plan = if (rules.plain(s)) st.plan(s.prompt(), s.decode_spans, kept_at) else .none;
+    const plan = if (rules.eligible(s) and rules.plain(s.cache_salt)) st.plan(s.prompt(), s.decode_spans, kept_at) else .none;
     st.take(t.allocator, plan);
     rules.inherit(&s.reuse, plan, st.remote); // the rule decides which plans take the rows' origin, as there
     return plan;

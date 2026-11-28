@@ -11,8 +11,8 @@ pub fn plain(salt: ?u64) bool {
 pub const Resume = union(enum) { none, here: u32, back: u32 };
 
 /// A stream the prompt cache would look up (a lanes.Stream): no images, no prompt logprobs, taught rows.
-pub fn plain(s: anytype) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null;
+pub fn eligible(s: anytype) bool {
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and !s.memory_active and s.embedding == null;
 }
 
 /// Whether `s`'s rows stand on another machine's prefix (#1594 step 2b): not once a refused copy ran here from 0.
@@ -84,7 +84,7 @@ pub const Standing = struct {
 
     /// What stream `s` leaves in slot 0 at `at` (`stands`: the slot and its drafter stand there, nothing failed).
     pub fn left(st: *Standing, gpa: std.mem.Allocator, s: anytype, at: u32, stands: bool) void {
-        if (!stands or !plain(s)) return st.deinit(gpa);
+        if (!stands or !eligible(s) or !plain(s.cache_salt)) return st.deinit(gpa);
         const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
         const l: Leaving = .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended, .remote = leftRemote(s) };
         st.leave(gpa, l, s.context.items, s.decode_spans);
@@ -92,7 +92,7 @@ pub const Standing = struct {
 
     /// Where `s`'s pass from `at` keeps slot 0's rewind point, by `rewindAt`: none for rows slot 0 would not keep.
     pub fn point(st: *const Standing, s: anytype, at: usize) u32 {
-        if (!plain(s) or !st.keeps(leftRemote(s))) return 0;
+        if (!eligible(s) or !plain(s.cache_salt) or !st.keeps(leftRemote(s))) return 0;
         return rewindAt(s.history_len, at, s.prompt().len);
     }
 

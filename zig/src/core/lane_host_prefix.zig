@@ -46,7 +46,8 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     const previous_salt = store.salt;
     store.salt = r.cacheSalt();
     defer store.salt = previous_salt;
-    const have: u32 = if (store.find(exports.resumable(r), r.chunks, spans)) |e| e.at else 0;
+    const key = exports.resumable(r);
+    const have: u32 = if (store.find(key, r.chunks, spans)) |e| e.at else 0;
     const least = have +| @max(store.rules.min_gap, 1); // a cut this far past what is kept already
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs

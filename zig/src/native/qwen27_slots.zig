@@ -10,6 +10,10 @@ const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
+pub const slotResumeEnv = @import("qwen27_slot_rules.zig").slotResumeEnv;
+pub const adaptiveBlockEnv = @import("qwen27_slot_rules.zig").adaptiveBlockEnv;
+const plain = @import("qwen27_slot_rules.zig").plain;
+const keepsEnd = @import("qwen27_slot_rules.zig").keepsEnd;
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
 pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
@@ -226,29 +230,9 @@ pub fn endFill(b: *Metal, s: *lanes.Stream) void {
     if (b.fills.remove(s)) closing(b, s);
 }
 
-/// Slot 0 resumes a later prompt from where its last stream left it unless TF_QWEN27_SLOT_RESUME=0 (read at start).
-pub fn slotResumeEnv() !bool {
-    return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
-}
-
-/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
-pub fn adaptiveBlockEnv() !bool {
-    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
-}
-
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
 fn slotResume(b: *const Metal) bool {
     return b.slot_resume and b.vision == null;
-}
-
-/// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
-fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and !s.memory_active and s.embedding == null and resume_rules.plain(s.cache_salt);
-}
-
-/// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
-fn keepsEnd(s: *const lanes.Stream) bool {
-    return std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(s.prompt().len)) != null;
 }
 
 /// Slot 0 and its drafter stand at `at`, with no failure or round pending.

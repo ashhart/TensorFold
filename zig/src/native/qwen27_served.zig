@@ -540,9 +540,6 @@ test {
         _ = @import("qwen27_served_test.zig");
         _ = @import("qwen27_startup_test.zig");
         _ = @import("qwen27_startup_line.zig");
+        _ = @import("qwen27_handoff_test.zig"); // "qwen27 hand-off:", run by test-qwen27-reply-cache-host
     }
-}
-
-test {
-    _ = @import("qwen27_handoff_test.zig"); // "qwen27 hand-off:", run by test-qwen27-reply-cache-host
 }

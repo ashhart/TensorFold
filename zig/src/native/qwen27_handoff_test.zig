@@ -245,9 +245,9 @@ test "qwen27 hand-off: a pass resuming slot 0's remote rows makes no unplanned c
 test "qwen27 hand-off: attach's TF_PREFILL_KEEP reaches slot 0 as it reaches the lane host" {
     var m: Mac = .{};
     m.init();
-    var host: struct { keep_remote: bool = false } = .{};
+    var host: struct { handoff: api.LaneHost.Remote.Bind = .{} } = .{};
     remote.keepRule(.{ .host = &host, .back = &m.back }, true);
-    try t.expect(host.keep_remote and m.back.standing.keep_remote);
+    try t.expect(host.handoff.keep_remote and m.back.standing.keep_remote);
     remote.keepRule(.{ .host = &host, .back = &m.back }, false);
-    try t.expect(!host.keep_remote and !m.back.standing.keep_remote);
+    try t.expect(!host.handoff.keep_remote and !m.back.standing.keep_remote);
 }
