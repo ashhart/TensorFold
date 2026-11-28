@@ -10,12 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Kolibri 1.1: the cache-cap comments now say K and V are rounded to NVFP4 as the reference does, not kept in bf16; comments only (#5445). Thanks to @jschmied.
 
-- GLM on CUDA: the DFlash2 draft selector skips candidate ids outside the vocabulary and treats an invalid anchor as token 0 instead of reading past the table; in-range drafts are unchanged (#5449). Thanks to @kelchm.
-
-- Kolibri 1.1: the cache-cap comments now say K and V are rounded to NVFP4 as the reference does, not kept in bf16; comments only (#5445). Thanks to @jschmied.
-
-
-
 - CUDA kernels: the MXFP4 experts' SiTU up (`tf_mxfp4_experts_up_situ` and `tf_mxfp4_experts_prompt_up_situ`, in the `experts_mxfp4` image): an expert's gate and up matrices read as stored, each sum rounded to bf16, then ERNIE 5.5's SiTU (beta tanh(g/beta) sigmoid(g) times linear beta tanh(u/linear beta), at 4 and 25) into bf16 rows, from a new `situ` epilogue in `experts.cuh`; under the kernel contract against float64; the four downs' SASS is unchanged and nothing serves through the up yet (#5385, part of #4926).
 - The New Project Folder row keeps **Browse** on one line while the folder input shrinks. (#4824) Thanks @jamesadcock for the report.
 
