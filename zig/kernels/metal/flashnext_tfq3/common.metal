@@ -149,6 +149,46 @@ inline void fn_route_row(
   }
 }
 
+// fn_pw_route_dedup's lists bit for bit, a thread a slot: first-seen experts in slot order, members in slot order
+[[max_total_threads_per_threadgroup(160)]]
+[[kernel]] void fn_pw_dedup_par(
+    const device uint* pick      [[buffer(0)]],
+    const constant int* rows_buf [[buffer(1)]],
+    device int* uids             [[buffer(2)]],
+    device int* umem             [[buffer(3)]],
+    device int* ucount           [[buffer(4)]],
+    constant FnPwDims& d         [[buffer(5)]],
+    ushort s                     [[thread_index_in_threadgroup]]
+) {
+  threadgroup uint pk[160];
+  threadgroup uchar opens[160];
+  const int R = metal::min(int(d.rows), rows_buf[0]);
+  const int S = metal::min(metal::max(R, 0) * 10, 160);
+  const int i = int(s);
+  if (i < S) pk[i] = pick[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  bool open = false;
+  if (i < S) {
+    open = true;
+    for (int t = 0; t < i; ++t) if (pk[t] == pk[i]) { open = false; break; }
+    opens[i] = open ? uchar(1) : uchar(0);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (open) {
+    int u = 0;
+    for (int t = 0; t < i; ++t) u += int(opens[t]);
+    uids[u] = int(pk[i]);
+    int m = 0;
+    for (int t = i; t < S && m < 16; ++t) if (pk[t] == pk[i]) umem[u * 16 + m++] = t;
+    for (; m < 16; ++m) umem[u * 16 + m] = -1;
+  }
+  if (i == 0) {
+    int nu = 0;
+    for (int t = 0; t < S; ++t) nu += int(opens[t]);
+    ucount[0] = nu;
+  }
+}
+
 [[kernel]] void fn_pw_fwht_x_fwd(
     const device bfloat* X       [[buffer(0)]],
     device half* X_rot           [[buffer(1)]],
@@ -162,7 +202,9 @@ inline void fn_route_row(
 ) {
   int R = metal::min(int(d.rows), rows_buf[0]);
   if (gid.x == 20u) {
-    if (gid.y == 0u && R > 0 && (d.flags & 2u) != 0u) fn_route_row(logits, pick, wts, lane);
+    // flags 2: row 0 alone (B=1); flags 4: every live row, in parallel, ahead of fn_pw_dedup_par (B=2..16)
+    const bool route = int(gid.y) < R && (((d.flags & 2u) != 0u && gid.y == 0u) || (d.flags & 4u) != 0u);
+    if (route) fn_route_row(logits + ulong(gid.y) * 513ul, pick + ulong(gid.y) * 10ul, wts + ulong(gid.y) * 10ul, lane);
     return;
   }
   uint row = gid.y;

@@ -178,6 +178,7 @@ pub fn loadMtp(
 
 pub const Pipe = enum(usize) {
     route_dedup,
+    dedup_par,
     fwht_x_fwd,
     fwht_glu_fwht,
     fwht_y_inv,
@@ -226,6 +227,7 @@ pub const Pipes = struct {
     ucount_buf: mtl.Buffer,
     owns_bufs: bool,
     hash: u64,
+    serial_route: bool = false, // FZ_TFQ3_SERIAL_ROUTE: B=2..16 windows through route_dedup, not fwht_x + dedup_par
 
     pub inline fn get(p: *const Pipes, k: Pipe) mtl.Pipeline {
         return p.list[@backingInt(k)];
@@ -283,6 +285,7 @@ pub const Pipes = struct {
             .ucount_buf = b_ucount,
             .owns_bufs = held == null,
             .hash = h.final(),
+            .serial_route = platform.c.getenv("FZ_TFQ3_SERIAL_ROUTE") != null,
         };
     }
 
