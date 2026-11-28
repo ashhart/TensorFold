@@ -71,14 +71,16 @@ function scenario(overrides: Record<string, unknown> = {}) {
   let cleared = 0, directoryChoices = 0, prevented = 0
   let currentNotice = (overrides.initialNotice ?? null) as Notice['notice']
   let selectedCwd = typeof overrides.cwd === 'string' ? overrides.cwd : ''
+  const currentAttachments = (overrides.attachments ?? [readyDocument]) as unknown[]
+  const store = {
+    setState: (value: Notice) => { notices.push(value); if ('notice' in value) currentNotice = value.notice },
+    getState: () => ({ notice: currentNotice, setNotice: (value: { kind: string; message: string }) => { notices.push({ notice: value }); currentNotice = value } }),
+  }
   const environment: Record<string, unknown> = {
     isPickerGuidance, PICKER_GUIDANCE_MESSAGE,
-    text: '', attachments: [readyDocument], quoteEditingRef: { current: false }, quoteEditing: false,
-    draft: { ready: true, capture: () => submittedDraft, clearAccepted: async () => { cleared++ } }, isAttachmentReady,
-    useStore: {
-      setState: (value: Notice) => { notices.push(value); if ('notice' in value) currentNotice = value.notice },
-      getState: () => ({ notice: currentNotice, setNotice: (value: { kind: string; message: string }) => { notices.push({ notice: value }); currentNotice = value } }),
-    },
+    text: '', attachments: currentAttachments, quoteEditingRef: { current: false }, quoteEditing: false,
+    draft: { ready: true, capture: () => ({ ...submittedDraft, attachments: currentAttachments }), clearAccepted: async () => { cleared++ } }, isAttachmentReady,
+    useStore: store,
     api: { pickDirectory: async () => { directoryChoices++; return overrides.pickerDirectory ?? null } },
     setCwd: (value: string) => { selectedCwd = value; environment.cwd = value },
     setHomeWorkspace: (value: null) => { environment.homeWorkspace = value },
@@ -108,13 +110,14 @@ function scenario(overrides: Record<string, unknown> = {}) {
   if (!Object.hasOwn(overrides, 'chooseDir')) environment.chooseDir = new Function('api', 'setCwd', 'setHomeWorkspace', 'useStore', 'isPickerGuidance', 'PICKER_GUIDANCE_MESSAGE', 'tx', chooseDirCode)(environment.api, environment.setCwd, environment.setHomeWorkspace, environment.useStore, isPickerGuidance, PICKER_GUIDANCE_MESSAGE, fixtureText)
   const handlers = production(['dispatch', 'expandSkills', 'submit', 'onKeyDown', 'pickFolder'], environment)
   const buttonDisabled = new Function(...Object.keys(environment), disabledCode)(...Object.values(environment)) === true
+  const chooseRemoteProjectDir = environment.chooseRemoteProjectDir as (dir: string) => void
+  const setFolder = environment.setFolder as (dir: string) => void
   return {
     handlers, sent, notices, directoryChoices: () => directoryChoices, cleared: () => cleared,
     buttonDisabled, currentNotice: () => currentNotice, selectedCwd: () => selectedCwd,
     keyDown: () => handlers.onKeyDown({ key: 'Enter', nativeEvent: {}, preventDefault: () => { prevented++ } }),
-    prevented: () => prevented,
-    chooseRemoteProjectDir: (dir: string) => environment.chooseRemoteProjectDir(dir), setFolder: (dir: string) => environment.setFolder(dir),
-    replaceNotice: (notice: Notice['notice']) => environment.useStore.setState({ notice }),
+    prevented: () => prevented, chooseRemoteProjectDir, setFolder,
+    replaceNotice: (notice: Notice['notice']) => store.setState({ notice }),
   }
 }
 
@@ -200,7 +203,8 @@ const noFolder = scenario({ mode: 'home', thread: undefined, initialNotice: { ki
 noFolder.setFolder('')
 assert.equal(noFolder.currentNotice()?.message, pickerMessage, 'No folder leaves picker guidance in place')
 
-const { promise: selectedDirectory, resolve: resolveDirectory } = Promise.withResolvers<string>()
+let resolveDirectory!: (directory: string) => void
+const selectedDirectory = new Promise<string>((resolve) => { resolveDirectory = resolve })
 const inFlight = scenario({
   mode: 'home', thread: undefined, pickerDirectory: selectedDirectory,
   initialNotice: { kind: 'info', persistent: true, message: pickerMessage },
