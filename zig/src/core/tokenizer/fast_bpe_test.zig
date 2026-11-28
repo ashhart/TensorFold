@@ -79,19 +79,23 @@ fn buildO200kTokenizerJson(a: std.mem.Allocator) ![]u8 {
     , .{ id, id + 1, pat_escaped, vocab.items, merges });
 }
 
-const MutexAllocator = struct {
-    locked: std.atomic.Value(bool) = .init(false),
+const ConcurrencyDetectingAllocator = struct {
+    in_use: std.atomic.Value(bool) = .init(false),
+    collisions: std.atomic.Value(usize) = .init(0),
+    calls: std.atomic.Value(usize) = .init(0),
     inner: std.mem.Allocator,
 
-    fn lock(self: *MutexAllocator) void {
-        while (self.locked.swap(true, .acquire)) std.atomic.spinLoopHint();
+    fn enter(self: *ConcurrencyDetectingAllocator) void {
+        _ = self.calls.fetchAdd(1, .monotonic);
+        if (self.in_use.swap(true, .acq_rel)) _ = self.collisions.fetchAdd(1, .acq_rel);
+        std.Thread.yield() catch {};
     }
 
-    fn unlock(self: *MutexAllocator) void {
-        self.locked.store(false, .release);
+    fn leave(self: *ConcurrencyDetectingAllocator) void {
+        self.in_use.store(false, .release);
     }
 
-    fn allocator(self: *MutexAllocator) std.mem.Allocator {
+    fn allocator(self: *ConcurrencyDetectingAllocator) std.mem.Allocator {
         return .{
             .ptr = self,
             .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
@@ -99,30 +103,30 @@ const MutexAllocator = struct {
     }
 
     fn alloc(ctx: *anyopaque, len: usize, align_val: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *MutexAllocator = @ptrCast(@alignCast(ctx));
-        self.lock();
-        defer self.unlock();
+        const self: *ConcurrencyDetectingAllocator = @ptrCast(@alignCast(ctx));
+        self.enter();
+        defer self.leave();
         return self.inner.rawAlloc(len, align_val, ret_addr);
     }
 
     fn resize(ctx: *anyopaque, buf: []u8, align_val: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        const self: *MutexAllocator = @ptrCast(@alignCast(ctx));
-        self.lock();
-        defer self.unlock();
+        const self: *ConcurrencyDetectingAllocator = @ptrCast(@alignCast(ctx));
+        self.enter();
+        defer self.leave();
         return self.inner.rawResize(buf, align_val, new_len, ret_addr);
     }
 
     fn remap(ctx: *anyopaque, buf: []u8, align_val: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        const self: *MutexAllocator = @ptrCast(@alignCast(ctx));
-        self.lock();
-        defer self.unlock();
+        const self: *ConcurrencyDetectingAllocator = @ptrCast(@alignCast(ctx));
+        self.enter();
+        defer self.leave();
         return self.inner.rawRemap(buf, align_val, new_len, ret_addr);
     }
 
     fn free(ctx: *anyopaque, buf: []u8, align_val: std.mem.Alignment, ret_addr: usize) void {
-        const self: *MutexAllocator = @ptrCast(@alignCast(ctx));
-        self.lock();
-        defer self.unlock();
+        const self: *ConcurrencyDetectingAllocator = @ptrCast(@alignCast(ctx));
+        self.enter();
+        defer self.leave();
         self.inner.rawFree(buf, align_val, ret_addr);
     }
 };
@@ -264,11 +268,9 @@ test "overrideSplit updates fast path availability cleanly" {
 
 fn oomTrial(a: std.mem.Allocator, tok: *const tokenizer.Tokenizer, input: []const u8, min_bytes: usize) !void {
     const cfg = fast_bpe_parallel.Config{ .parallel_min_bytes = min_bytes, .parallel_max_threads = 4 };
-    var mtx = MutexAllocator{ .inner = a };
-    const ma = mtx.allocator();
     var out: std.ArrayList(u32) = .empty;
-    defer out.deinit(ma);
-    try fast_bpe_parallel.encodeWithConfig(&tok.fast.?, &tok.model, &tok.vocab, ma, ma, input, &out, cfg);
+    defer out.deinit(a);
+    try fast_bpe_parallel.encodeWithConfig(&tok.fast.?, &tok.model, &tok.vocab, a, a, input, &out, cfg);
 
     const mid = input.len / 2;
     const segs = [_]fast_bpe_parallel.Segment{
@@ -277,8 +279,54 @@ fn oomTrial(a: std.mem.Allocator, tok: *const tokenizer.Tokenizer, input: []cons
         .{ .start = mid, .end = input.len, .id = null },
     };
     var out_segs: std.ArrayList(u32) = .empty;
-    defer out_segs.deinit(ma);
-    try fast_bpe_parallel.encodeSegmentsWithConfig(&tok.fast.?, &tok.model, &tok.vocab, ma, ma, input, &segs, &out_segs, cfg);
+    defer out_segs.deinit(a);
+    try fast_bpe_parallel.encodeSegmentsWithConfig(&tok.fast.?, &tok.model, &tok.vocab, a, a, input, &segs, &out_segs, cfg);
+}
+
+test "Tokenizer.encode serializes worker access on a non-thread-safe arena >= 128 KiB" {
+    const a = std.testing.allocator;
+    const json = try buildO200kTokenizerJson(a);
+    defer a.free(json);
+    var slow_tok = try parse(a, json);
+    defer slow_tok.deinit();
+    slow_tok.fast = null;
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var detector: ConcurrencyDetectingAllocator = .{ .inner = arena.allocator() };
+    var tok = try parse(detector.allocator(), json);
+    defer tok.deinit();
+    detector.calls.store(0, .monotonic);
+
+    var lines: std.ArrayList(u8) = .empty;
+    defer lines.deinit(a);
+    while (lines.items.len < 160 * 1024) try lines.appendSlice(a, "hello world pub fn return const 123456\n");
+    const got_lines = try tok.encode(a, lines.items);
+    defer a.free(got_lines);
+    const want_lines = try slow_tok.encode(a, lines.items);
+    defer a.free(want_lines);
+    try std.testing.expectEqualSlices(u32, want_lines, got_lines);
+
+    var single: std.ArrayList(u8) = .empty;
+    defer single.deinit(a);
+    while (single.items.len < 160 * 1024) try single.appendSlice(a, "hello world abc 123 ");
+    const got_single = try tok.encodePlain(a, single.items);
+    defer a.free(got_single);
+    const want_single = try slow_tok.encodePlain(a, single.items);
+    defer a.free(want_single);
+    try std.testing.expectEqualSlices(u32, want_single, got_single);
+
+    var chat: std.ArrayList(u8) = .empty;
+    defer chat.deinit(a);
+    while (chat.items.len < 160 * 1024) try chat.appendSlice(a, "<|sys|>hello world const return<|end|>");
+    const got_chat = try tok.encode(a, chat.items);
+    defer a.free(got_chat);
+    const want_chat = try slow_tok.encode(a, chat.items);
+    defer a.free(want_chat);
+    try std.testing.expectEqualSlices(u32, want_chat, got_chat);
+
+    try std.testing.expect(detector.calls.load(.acquire) > 0);
+    try std.testing.expectEqual(@as(usize, 0), detector.collisions.load(.acquire));
 }
 
 test "fast_bpe_parallel leaks zero memory on allocation failures in serial and parallel modes" {

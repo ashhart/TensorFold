@@ -56,6 +56,54 @@ fn chooseThreads(cfg: Config, len: usize) usize {
     return @min(max_t, len / min_b);
 }
 
+const LockedAllocator = struct {
+    locked: std.atomic.Value(bool) = .init(false),
+    inner: Allocator,
+
+    fn allocator(self: *LockedAllocator) Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
+        };
+    }
+
+    fn lock(self: *LockedAllocator) void {
+        while (self.locked.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+
+    fn unlock(self: *LockedAllocator) void {
+        self.locked.store(false, .release);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.lock();
+        defer self.unlock();
+        return self.inner.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.lock();
+        defer self.unlock();
+        return self.inner.rawResize(buf, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.lock();
+        defer self.unlock();
+        return self.inner.rawRemap(buf, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LockedAllocator = @ptrCast(@alignCast(ctx));
+        self.lock();
+        defer self.unlock();
+        self.inner.rawFree(buf, alignment, ret_addr);
+    }
+};
+
 fn runJobs(
     worker_a: Allocator,
     scratch_a: Allocator,
@@ -63,12 +111,17 @@ fn runJobs(
     comptime worker_fn: fn (*ChunkJob) void,
     out: *std.ArrayList(u32),
 ) Allocator.Error!void {
+    // Serialize worker allocations so callers may supply a non-thread-safe Tokenizer allocator (e.g. an arena).
+    var locked: LockedAllocator = .{ .inner = worker_a };
+    const safe_a = locked.allocator();
+    for (jobs) |*j| j.a = safe_a;
+
     const threads = try scratch_a.alloc(?std.Thread, jobs.len);
     defer scratch_a.free(threads);
     @memset(threads, null);
     defer {
         for (threads) |maybe_t| if (maybe_t) |th| th.join();
-        for (jobs) |*j| j.out.deinit(worker_a);
+        for (jobs) |*j| j.out.deinit(safe_a);
     }
     for (1..jobs.len) |i| {
         threads[i] = std.Thread.spawn(.{}, worker_fn, .{&jobs[i]}) catch null;
