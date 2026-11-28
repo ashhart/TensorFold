@@ -176,6 +176,7 @@ pub const Served = struct {
         s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = backend.name, .lanes = backend.slots, .context_window = @intCast(window), .prefill_step = backend.prefill_step, .vision = backend.vision, .decode_share = backend.decode_share });
         applyShare(&s.host, backend);
         if (backend.steps) std.log.info("dsv41 prompts: {d} rows a step between the other streams' rounds, prompts {d:.2} of wall time beside replies", .{ backend.prefill_step, s.host.share.p });
+        s.host.info_.logprobs = tgt.vtable.scored_prompt != null;
         s.host.info_.draft_sources = draftSources(dspark_on, s.cfg.max_copy > 0);
         // the lanes run on LaneHost's thread: a backend whose state is per thread binds it there
         s.host.on_thread = backend.on_thread;

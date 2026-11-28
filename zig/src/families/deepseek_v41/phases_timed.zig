@@ -14,7 +14,7 @@ pub const TimedTarget = struct {
     pending: usize = 0,
 
     pub fn target(t: *TimedTarget) iface.Target {
-        return .{ .ptr = t, .vtable = &vtable };
+        return .{ .ptr = t, .vtable = if (t.inner.vtable.scored_prompt != null) &scored_vtable else &vtable };
     }
 
     const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .images = images, .resumed = resumed, .first_mask = firstMask };
@@ -26,6 +26,19 @@ pub const TimedTarget = struct {
     fn firstMask(p: *anyopaque, slot: u32, bits: []const u32) void {
         const inner = self(p).inner;
         if (inner.vtable.first_mask) |f| f(inner.ptr, slot, bits);
+    }
+
+    const scored_vtable: iface.Target.VTable = blk: {
+        var v = vtable;
+        v.scored_prompt = scoredPrompt;
+        break :blk v;
+    };
+
+    fn scoredPrompt(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64, k: u8, row: *lanes.logprob.Row, finish_: bool) anyerror!u32 {
+        const t = self(p);
+        const tm = ph.start(t.p, .prefill);
+        defer tm.stop();
+        return t.inner.scoredPrompt(slot, ids, sampling, draw, k, row, finish_);
     }
 
     fn resumed(p: *anyopaque, slot: u32) u64 {
