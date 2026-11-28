@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: with `--glp` and MTP drafts both enabled, the control vector's last-layer direction is no longer applied a second time inside the MTP head; the head reads the steered target rows with its own final norm, and output is unchanged without `--glp` (#1835).
 - Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
+- CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
+
 - Nemotron 3.5 Super on CUDA at TP=2: the expert rank runs a window's shared expert on a side stream beside its routed experts, with the same plans and kernels, so tokens are unchanged (#4886).
 
 - Qwen 3.5/3.6/3.8 on CUDA with MTP drafts: cold prompt chunks that end before the MTP head's first tapped row skip the last layer's unread rows and the head, as chunks without taps already did; tokens unchanged (#4882).
