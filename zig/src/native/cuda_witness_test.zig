@@ -226,7 +226,7 @@ test "execution witness: a captured cubin, a resolved profile value or the devic
     const w = try opened(c.dir, kernels, 80);
     defer w.close();
     const base = try w.digest();
-    try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/cubins/h.cubin", .data = "other cubin" });
+    try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/cubins/h.cubin", .data = "other cubin!" });
     try t.expectError(error.FilesChanged, w.digest()); // the cubins the load read are not the ones on disk now
     const recaptured = try opened(c.dir, kernels, 80);
     defer recaptured.close();
