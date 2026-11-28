@@ -389,3 +389,33 @@ test "shard lines: a line longer than the buffer is cut and the lines after it s
     try t.expectEqualStrings("last", lines.items[4]);
     try t.expect(!cuts.items[4]);
 }
+
+test "shard filters: negative-only runs keep non-excluded items and keep the filtered summary marker" {
+    const names = [_][]const u8{ "lane a", "lane control", "norm b", "norm control" };
+    try t.expect(!shard.hasPositive(&.{}));
+    try t.expect(!shard.hasPositive(&.{"-control"}));
+    try t.expect(shard.hasPositive(&.{ "-control", "lane" }));
+    try t.expect(shard.wanted("lane a", &.{"-control"}));
+    try t.expect(!shard.wanted("lane control", &.{"-control"}));
+    try t.expect(shard.wanted("lane a", &.{ "lane", "-control" }));
+    try t.expect(!shard.wanted("norm b", &.{ "lane", "-control" }));
+
+    var list: std.ArrayList(Named) = .empty;
+    defer list.deinit(t.allocator);
+    for (names) |name| try list.append(t.allocator, .{ .spec = .{ .name = name } });
+    const neg = [_][]const u8{"-control"};
+    const kept = shard.keep(Named, &list, &neg, .{});
+    try t.expectEqual(@as(usize, 2), kept);
+    try t.expectEqualStrings("lane a", list.items[0].spec.name);
+    try t.expectEqualStrings("norm b", list.items[1].spec.name);
+
+    const reports = [_]shard.Report{
+        .{ .shard = .{ .index = 0, .count = 2 }, .listed = 2, .tally = .{ .kernels = 1, .passed = 1 }, .limits = 0, .suites = .{ .ran = 4, .of = 7 }, .records = .{ .ran = 1, .of = 2 }, .gates_ms = 2, .limits_ms = 1 },
+        .{ .shard = .{ .index = 1, .count = 2 }, .listed = 2, .tally = .{ .kernels = 1, .passed = 1 }, .limits = 0, .suites = .{ .ran = 3, .of = 7 }, .records = .{ .ran = 1, .of = 2 }, .gates_ms = 3, .limits_ms = 1 },
+    };
+    const sum = try shard.merge(&reports, neg.len > 0);
+    try t.expect(sum.filtered);
+    var buf: [256]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "{f}", .{sum});
+    try t.expect(std.mem.startsWith(u8, text, "(filtered) SUMMARY 2 kernels:"));
+}

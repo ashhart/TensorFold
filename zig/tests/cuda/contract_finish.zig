@@ -20,7 +20,7 @@ pub fn run(gpu: check.Gpu, opt: shard.Options, t: g.Tally, listed: usize, t0: i9
     const t2 = check.now(gpu.io);
     const gates_ms: u64 = @intCast(@divTrunc(t1 - t0, std.time.ns_per_ms));
     const limits_ms: u64 = @intCast(@divTrunc(t2 - t1, std.time.ns_per_ms));
-    const sum: shard.Summary = .{ .filtered = !full, .tally = t, .limits = lim, .gates_ms = gates_ms, .limits_ms = limits_ms };
+    const sum: shard.Summary = .{ .filtered = opt.words.len > 0, .tally = t, .limits = lim, .gates_ms = gates_ms, .limits_ms = limits_ms };
     if (opt.shard) |s| {
         const report: shard.Report = .{ .shard = s, .listed = listed, .tally = t, .limits = lim, .suites = suites, .records = records, .gates_ms = gates_ms, .limits_ms = limits_ms };
         std.debug.print("{f}\n", .{report});
