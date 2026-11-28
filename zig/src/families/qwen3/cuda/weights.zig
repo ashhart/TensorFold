@@ -41,7 +41,11 @@ pub const Model = struct {
         var ck = try Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
         ck.scope = names.scopeOf(&ck);
-        return fromCheckpoint(gpa, d, &ck, spec, names.headKey(spec.tied, ck.scope));
+        var m = try fromCheckpoint(gpa, d, &ck, spec, names.headKey(spec.tied, ck.scope));
+        errdefer m.deinit();
+        _ = try ck.stored(m.head); // the head's rows are read on the host later (names.readRows); its tensor still counts
+        try refuseLeftovers(&ck);
+        return m;
     }
 
     /// `spec`'s tensors from an open checkpoint under its scope (a model whose Qwen3 sits beside other parts).
@@ -60,6 +64,17 @@ pub const Model = struct {
         m.gpa.free(m.layers);
     }
 };
+
+/// A direct load's unbound names, refused without changing core's test logging for other loaders.
+fn refuseLeftovers(ck: *const Checkpoint) !void {
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return error.UnusedQwen3Tensors;
+}
 
 /// A BF16 matrix `key` of shape (n, k), uploaded as stored.
 fn projection(ck: *Checkpoint, st: *store.Store, name: []const u8, n: usize, k: usize) !u64 {
@@ -97,4 +112,71 @@ fn layer(ck: *Checkpoint, st: *store.Store, s: config.Spec, i: usize) !Layer {
 /// The stored name of layer `i`'s tensor `rest`, in `buf`.
 fn layerName(buf: *[128]u8, i: usize, rest: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "layers.{d}.{s}", .{ i, rest });
+}
+
+test "Qwen3 weights: every checkpoint tensor is bound once, and a stray one refuses" {
+    const t = std.testing;
+    const fixture = core.checkpoint_fixture;
+    const a = t.allocator;
+    const io = t.io;
+    const json =
+        \\{"model_type":"qwen3","num_hidden_layers":1,"hidden_size":4,"num_attention_heads":1,
+        \\"num_key_value_heads":1,"head_dim":4,"intermediate_size":8,"vocab_size":6,
+        \\"rms_norm_eps":1e-6,"rope_theta":10000,"max_position_embeddings":64,
+        \\"tie_word_embeddings":false,"hidden_act":"silu"}
+    ;
+    const mat: [16]u16 = @splat(0x3f80); // bf16 1.0s, the 4x4 tensors
+    const wide: [32]u16 = @splat(0x3f80); // the 4x8 and 8x4 tensors
+    const vec: [4]u16 = @splat(0x3f80);
+    const vocab_mat: [24]u16 = @splat(0x3f80); // embed_tokens and lm_head
+    const entries = [_]fixture.Entry{
+        .{ .name = "embed_tokens.weight", .dtype = "BF16", .shape = &.{ 6, 4 }, .bytes = std.mem.sliceAsBytes(&vocab_mat) },
+        .{ .name = "norm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&vec) },
+        .{ .name = "layers.0.input_layernorm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&vec) },
+        .{ .name = "layers.0.post_attention_layernorm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&vec) },
+        .{ .name = "layers.0.self_attn.q_norm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&vec) },
+        .{ .name = "layers.0.self_attn.k_norm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&vec) },
+        .{ .name = "layers.0.self_attn.q_proj.weight", .dtype = "BF16", .shape = &.{ 4, 4 }, .bytes = std.mem.sliceAsBytes(&mat) },
+        .{ .name = "layers.0.self_attn.k_proj.weight", .dtype = "BF16", .shape = &.{ 4, 4 }, .bytes = std.mem.sliceAsBytes(&mat) },
+        .{ .name = "layers.0.self_attn.v_proj.weight", .dtype = "BF16", .shape = &.{ 4, 4 }, .bytes = std.mem.sliceAsBytes(&mat) },
+        .{ .name = "layers.0.self_attn.o_proj.weight", .dtype = "BF16", .shape = &.{ 4, 4 }, .bytes = std.mem.sliceAsBytes(&mat) },
+        .{ .name = "layers.0.mlp.gate_proj.weight", .dtype = "BF16", .shape = &.{ 8, 4 }, .bytes = std.mem.sliceAsBytes(&wide) },
+        .{ .name = "layers.0.mlp.up_proj.weight", .dtype = "BF16", .shape = &.{ 8, 4 }, .bytes = std.mem.sliceAsBytes(&wide) },
+        .{ .name = "layers.0.mlp.down_proj.weight", .dtype = "BF16", .shape = &.{ 4, 8 }, .bytes = std.mem.sliceAsBytes(&wide) },
+        .{ .name = "lm_head.weight", .dtype = "BF16", .shape = &.{ 6, 4 }, .bytes = std.mem.sliceAsBytes(&vocab_mat) },
+        .{ .name = "model.stray.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&vec) },
+    };
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = json });
+    try fixture.write(a, io, tmp.dir, "model.safetensors", &entries);
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    const Mock = struct {
+        var next: u64 = 0x1000;
+        fn alloc(out: *u64, _: usize) callconv(.c) c_int {
+            out.* = next;
+            next += 256;
+            return 0;
+        }
+        fn free(_: u64) callconv(.c) c_int {
+            return 0;
+        }
+        fn copy(_: u64, _: ?*const anyopaque, _: usize) callconv(.c) c_int {
+            return 0;
+        }
+        fn sync(_: cuda.abi.Stream) callconv(.c) c_int {
+            return 0;
+        }
+    };
+    d.api.cuMemAlloc_v2 = Mock.alloc;
+    d.api.cuMemFree_v2 = Mock.free;
+    d.api.cuMemcpyHtoD_v2 = Mock.copy;
+    d.api.cuStreamSynchronize = Mock.sync;
+    try t.expectError(error.UnusedQwen3Tensors, Model.load(a, io, &d, dir));
+    try tmp.dir.deleteFile(io, "model.safetensors");
+    try fixture.write(a, io, tmp.dir, "model.safetensors", entries[0 .. entries.len - 1]);
+    var m = try Model.load(a, io, &d, dir);
+    m.deinit();
 }
