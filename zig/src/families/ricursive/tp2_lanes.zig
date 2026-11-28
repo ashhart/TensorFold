@@ -347,6 +347,7 @@ pub const Ripple = struct {
         if (h >= x.next or x.next - h > ring) return error.NoSuchToken;
         var out: [1]u32 = undefined;
         try x.m.stream.synchronize();
+        try x.m.group.check(); // a failed RoCE gather shows only here, after the synchronize
         try x.tok.download(@intCast((h % ring) * 4), std.mem.sliceAsBytes(&out));
         return out[0];
     }
@@ -381,6 +382,7 @@ pub const Ripple = struct {
         }
         var got: [round_rows]u32 = undefined;
         try x.m.stream.synchronize();
+        try x.m.group.check();
         try x.tok.download(ring * 4, std.mem.sliceAsBytes(got[0..total]));
         at = 0;
         for (windows, out) |w, o| {
