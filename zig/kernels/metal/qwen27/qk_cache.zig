@@ -2,7 +2,10 @@
 const std = @import("std");
 const edit = @import("../core/source_edit.zig").edit;
 const raw = @embedFile("glue.metal");
-const start = std.mem.indexOf(u8, raw, "kernel void q27_qk_norm_rope(").?;
+const start = blk: {
+    @setEvalBranchQuota(100_000);
+    break :blk std.mem.indexOf(u8, raw, "kernel void q27_qk_norm_rope(").?;
+};
 
 /// Flat or paged destinations; the enclosing attention library supplies the cache pointer type and helpers.
 pub fn source(comptime pages: bool) []const u8 {
