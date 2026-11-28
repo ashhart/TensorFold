@@ -20,4 +20,7 @@ pub fn steps(b: *std.Build, draft_ids: *std.Build.Module) void {
     mods.engine.addImport("engine_api", target_api);
     const compile = b.createModule(.{ .root_source_file = b.path("zig/flashnext_persistence_compile.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "engine_api", .module = target_api } } });
     b.step("compile-persistence-host", "Compile actual Metal persistence startup consumers as a Darwin object").dependOn(&b.addObject(.{ .name = "persistence-host-compile", .root_module = compile }).step);
+    const flint = b.createModule(.{ .root_source_file = b.path("zig/src/native/flint.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "engine_api", .module = target_api } } });
+    const flint_context = b.createModule(.{ .root_source_file = b.path("zig/flint_draft_context_host.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "flint", .module = flint }} });
+    b.step("compile-flint-draft-context-host", "Compile the served Flint DFlash context API as a Darwin object").dependOn(&b.addObject(.{ .name = "flint-draft-context-host", .root_module = flint_context }).step);
 }
