@@ -100,17 +100,16 @@ fn recordOf(v: Value) Record {
     const id = fields.get("id") orelse return .bare;
     if (eql(tag, "reply")) return if (id == .string and isReply(v)) .reply else .bare;
     // Keep unknown tags that use the same envelope as a request.
-    return if ((id == .string or id == .null) and fields.count() == 3 and fields.contains("body")) .request else .bare;
+    return if ((id == .string or id == .null) and fields.contains("body")) .request else .bare;
 }
 
 fn isReply(v: Value) bool {
     const fields = v.object;
     const status = fields.get("status") orelse return false;
     if (status != .integer) return false;
-    if (status.integer >= 400) return fields.count() == 4 and str(v, "error") != null;
+    if (status.integer >= 400) return str(v, "error") != null;
     const reason = fields.get("finish_reason") orelse return false;
-    const optional = @as(usize, @intFromBool(fields.contains("reasoning"))) + @intFromBool(fields.contains("error"));
-    return fields.count() == 9 + optional and (reason == .string or reason == .null) and
+    return (reason == .string or reason == .null) and
         (fields.get("stream") orelse .null) == .bool and str(v, "text") != null and
         (fields.get("usage") orelse .null) == .object and (fields.get("timings") orelse .null) == .object and
         (fields.get("truncated") orelse .null) == .bool;
@@ -397,11 +396,13 @@ pub fn optInt(out: *Writer, v: ?i64) !void {
 }
 
 pub fn str(v: Value, key: []const u8) ?[]const u8 {
+    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return if (f == .string) f.string else null;
 }
 
 pub fn int(v: Value, key: []const u8) ?i64 {
+    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return switch (f) {
         .integer => |n| n,
@@ -411,6 +412,7 @@ pub fn int(v: Value, key: []const u8) ?i64 {
 }
 
 pub fn num(v: Value, key: []const u8) ?f64 {
+    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return switch (f) {
         .integer => |n| @floatFromInt(n),
@@ -440,4 +442,5 @@ fn eql(x: []const u8, y: []const u8) bool {
 
 test {
     _ = @import("journal_log_test.zig");
+    _ = @import("journal_log_shape_test.zig");
 }
