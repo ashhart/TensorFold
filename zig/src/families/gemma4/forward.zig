@@ -118,7 +118,7 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     sumsOut(e, s, rows, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
-    const fused = rows == 1 and m.fuse;
+    const fused = cfg.fusedRows(m.fuse, m.fuse_rows, rows);
     for (0..geo.layers) |i| {
         try layer(m, e, s, segments, &chunks, i, cur, rows, .{}, fused);
         cur = 1 - cur;
@@ -180,10 +180,10 @@ fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cur:
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
 }
 
-/// A fused projection on one row: its prologue's inputs and outputs (gemma4/fused.metal); eps in f.x, a tap in i.x.
-fn projectFused(m: *Model, e: mtl.ComputeEncoder, l: weights.Linear, fuse: u8, x: mtl.Buffer, y: mtl.Buffer, a: [6]lane.Ref, o: [2]lane.Ref, tap: i32) !void {
-    const p = try m.projections.getFused(m.gpa, m.device, l, fuse);
-    try p.encodeFused(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .buf = y }, .{ .a = a, .o = o, .f = .{ cfg.eps, 0, 0, 0 }, .i = .{ tap, 0, 0, 0 } }, 1);
+/// A fused projection's prologue bindings: epsilon in f.x, tap stride in i.x.
+fn projectFused(m: *Model, e: mtl.ComputeEncoder, l: weights.Linear, fuse: u8, x: mtl.Buffer, y: mtl.Buffer, a: [6]lane.Ref, o: [2]lane.Ref, tap: i32, rows: usize) !void {
+    const p = try m.projections.getFused(m.gpa, m.device, l, fuse, rows > 1);
+    try p.encodeFused(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .buf = y }, .{ .a = a, .o = o, .f = .{ cfg.eps, 0, 0, 0 }, .i = .{ tap, 0, 0, 0 } }, @intCast(rows));
 }
 
 /// sqrt(hidden) as MLX multiplies by it: a weak-typed scalar, rounded to bf16 first.
@@ -193,7 +193,7 @@ pub fn embedScale(hidden: usize) f32 {
     return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
 }
 
-/// Layer i on a window's rows; `fused` (one row): dense tails as the next qkv's prologue, attention tails as gate/up's.
+/// Layer i on a window's rows; `fused`: dense tails as the next qkv's prologue, attention tails as gate/up's.
 pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, chunks: *const Chunks, i: usize, cur: usize, rows: usize, st: Stages, fused: bool) !void {
     const geo = m.config.geo;
     const global = cfg.global(i);
@@ -206,7 +206,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
     if (st.mm and fused and i > 0) {
         const pl = &m.weights.layers[i - 1];
         const tap = tapRef(m, s.taps, s.hn, i - 1);
-        try projectFused(m, e, l.qkv.runs[0], 1, s.y, s.qkv, .{ .{ .buf = s.hn }, .{ .buf = s.y }, pl.post_feedforward, pl.scalar, l.input_norm, l.input_norm }, .{ .{ .buf = s.h[cur] }, tap.ref }, tap.stride);
+        try projectFused(m, e, l.qkv.runs[0], 1, s.y, s.qkv, .{ .{ .buf = s.hn }, .{ .buf = s.y }, pl.post_feedforward, pl.scalar, l.input_norm, l.input_norm }, .{ .{ .buf = s.h[cur] }, tap.ref }, tap.stride, rows);
     } else if (st.mm) try projectStack(m, s, e, &l.qkv, s.normed[cur], s.qkv, rows);
     var at: usize = 0;
     for (segments) |seg| {
@@ -218,7 +218,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
         }
         const kv_off = at * nk * dh * 2; // this stream's keys and values [nk, n, dh] in s.k, s.v
         const q_off = at * geo.query_heads * dh * 2;
-        const prep = !(fused and !global); // a fused sliding layer's attention kernel preps its own heads
+        const prep = !(fused and rows == 1 and !global); // a fused sliding layer's attention kernel preps its own heads
         if (prep) {
             e.setPipeline(kd.qkv);
             e.setBuffer(s.qkv, at * width * 2, 0);
@@ -293,8 +293,8 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
         return;
     }
     if (fused and st.mm) {
-        try projectFused(m, e, l.gate_up.runs[0], 2, s.o, s.act, .{ .{ .buf = s.h[cur] }, .{ .buf = s.o }, l.post_attention, l.pre_feedforward, l.pre_feedforward, l.pre_feedforward }, .{ .{ .buf = s.hn }, .{ .buf = s.hn } }, 0);
-        try projectFused(m, e, l.down, 3, s.act, s.y, .{ .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act } }, .{ .{ .buf = s.y }, .{ .buf = s.y } }, 0);
+        try projectFused(m, e, l.gate_up.runs[0], 2, s.o, s.act, .{ .{ .buf = s.h[cur] }, .{ .buf = s.o }, l.post_attention, l.pre_feedforward, l.pre_feedforward, l.pre_feedforward }, .{ .{ .buf = s.hn }, .{ .buf = s.hn } }, 0, rows);
+        try projectFused(m, e, l.down, 3, s.act, s.y, .{ .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act } }, .{ .{ .buf = s.y }, .{ .buf = s.y } }, 0, rows);
         return;
     }
     e.setPipeline(kd.attn_tail);

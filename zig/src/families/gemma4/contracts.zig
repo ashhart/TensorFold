@@ -12,7 +12,10 @@ pub const Variant = struct {
     tap: bool = false,
     bits: u8 = 4,
     pub fn layout(v: Variant) fused.Layout {
-        return weights.fusedLayout(v.geo, .{ .w = undefined, .sb = undefined, .n = v.n, .k = v.k, .format = .{ .bits = v.bits, .group = 64 } }, v.kind);
+        return v.layoutFor(false);
+    }
+    pub fn layoutFor(v: Variant, multi: bool) fused.Layout {
+        return weights.fusedLayout(v.geo, .{ .w = undefined, .sb = undefined, .n = v.n, .k = v.k, .format = .{ .bits = v.bits, .group = 64 } }, v.kind, multi);
     }
     pub fn threadgroupBytes(v: Variant) usize {
         if (v.kind == 0) return 64 * 72 * 2;

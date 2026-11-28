@@ -72,6 +72,7 @@ pub const Model = struct {
     taps: u32 = 0,
     /// One-row windows take the fused pipelines (glue as prologues) when every linear is 4/64; the bench may not.
     fuse: bool = true,
+    fuse_rows: bool = false,
     /// The image input, once loadVision read it (serve --vision).
     vision: ?Tower = null,
 
@@ -91,6 +92,7 @@ pub const Model = struct {
         errdefer m.device.deinit();
         // the fused one-row path is the reg lane kernel: M5 only. Before it the row path serves the projections.
         m.fuse = @import("fused_lane.zig").available(m.device) and m.config.widths.allFast(m.config.geo.layers);
+        m.fuse_rows = try @import("sys").environment.read(bool, "TF_GEMMA4_FUSE_ROWS", false);
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = ckpt.Checkpoint.init(gpa);

@@ -1,4 +1,4 @@
-// Gemma 4's decode glue inside the core reg lane kernel (TF_FUSED), one row, f.x = eps: glue.metal's arithmetic.
+// Gemma 4's decode glue inside the core reg lane kernel (TF_FUSED), f.x = eps: glue.metal's arithmetic.
 #include <metal_stdlib>
 using namespace metal;
 constant constexpr int FT = 256; // the tails' threads, the glue kernels' T (their reductions' order)
@@ -14,19 +14,19 @@ inline float gf_reduce(float acc, threadgroup float* p, uint lane, uint sg) {
 }
 
 // gemma_row_sums over the row in threadgroup memory: each group's values added in order from zero.
-inline void gf_sums(const threadgroup bfloat* row, threadgroup float* xsum, uint tid) {
+inline void gf_sums(const threadgroup bfloat* row, threadgroup float* xsum, int stride, uint tid) {
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (int g = int(tid); g < FKG; g += FT) {
     float acc = 0.0f;
     for (int i = 0; i < TF_GROUP; i++) acc += float(row[g * TF_GROUP + i]);
-    xsum[g] = acc;
+    xsum[g * stride] = acc;
   }
 }
 
 #if TF_FUSE == 1
 static_assert(TF_THREADS == FT, "the dense tail reduces over 256 threads");
 // TF_FUSE 1, gemma_dense_tail (the qkv input): a0 H, a1 Y, a2 post-MLP norm, a3 scalar, a4 next norm; o0 HN, o1 tap
-inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat* xs, threadgroup float* xsum, threadgroup float* p, bool first, uint tid) {
+inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat* xs, threadgroup float* xsum, threadgroup float* p, bool first, int row, int stride, uint tid) {
   constexpr int PER = TF_K / FT;
   threadgroup float* p1 = p;
   threadgroup float* p2 = p + FT / 32;
@@ -34,7 +34,7 @@ inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat*
   float yv[PER], hin[PER], wp[PER], wn[PER];
   for (int i = 0; i < PER; i++) {
     const int c = int(tid) + i * FT;
-    yv[i] = float(fa.a1[c]); hin[i] = float(fa.a0[c]);
+    yv[i] = float(fa.a1[size_t(row) * TF_K + c]); hin[i] = float(fa.a0[size_t(row) * TF_K + c]);
     wp[i] = float(fa.a2[c]); wn[i] = float(fa.a4[c]);
   }
   const float sc = float(fa.a3[0]);
@@ -48,8 +48,8 @@ inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat*
     const float b = float(bfloat(wp[i] * float(bfloat(yv[i] * inv1))));
     const bfloat hs = bfloat(hin[i] + b);
     const bfloat hn = bfloat(float(hs) * sc);
-    if (first) fa.o0[c] = hn;
-    if (first && fa.i.x) fa.o1[c] = hn;
+    if (first) fa.o0[size_t(row) * TF_K + c] = hn;
+    if (first && fa.i.x) fa.o1[size_t(row) * fa.i.x + c] = hn;
     hv[i] = float(hn);
     ss2 = fma(hv[i], hv[i], ss2);
   }
@@ -58,14 +58,14 @@ inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat*
     const int c = int(tid) + i * FT;
     xs[c] = bfloat(wn[i] * float(bfloat(hv[i] * inv2)));
   }
-  gf_sums(xs, xsum, tid);
+  gf_sums(xs, xsum, stride, tid);
 }
 #endif
 
 #if TF_FUSE == 2
 static_assert(TF_THREADS == FT, "the attention tail reduces over 256 threads");
 // TF_FUSE 2, gemma_attn_tail (the gate/up input): a0 H, a1 O, a2 post-attention norm, a3 pre-MLP norm; o0 HN.
-inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat* xs, threadgroup float* xsum, threadgroup float* p, bool first, uint tid) {
+inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat* xs, threadgroup float* xsum, threadgroup float* p, bool first, int row, int stride, uint tid) {
   constexpr int PER = TF_K / FT;
   threadgroup float* p1 = p;
   threadgroup float* p2 = p + FT / 32;
@@ -73,7 +73,7 @@ inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat*
   float ov[PER], hin[PER], wa[PER], w1[PER];
   for (int i = 0; i < PER; i++) {
     const int c = int(tid) + i * FT;
-    ov[i] = float(fa.a1[c]); hin[i] = float(fa.a0[c]);
+    ov[i] = float(fa.a1[size_t(row) * TF_K + c]); hin[i] = float(fa.a0[size_t(row) * TF_K + c]);
     wa[i] = float(fa.a2[c]); w1[i] = float(fa.a3[c]);
   }
   float ss = 0.0f;
@@ -85,7 +85,7 @@ inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat*
     const int c = int(tid) + i * FT;
     const float a = float(bfloat(wa[i] * float(bfloat(ov[i] * inv1))));
     const bfloat hn = bfloat(hin[i] + a);
-    if (first) fa.o0[c] = hn;
+    if (first) fa.o0[size_t(row) * TF_K + c] = hn;
     hv[i] = float(hn);
     ss2 = fma(hv[i], hv[i], ss2);
   }
@@ -94,7 +94,7 @@ inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat*
     const int c = int(tid) + i * FT;
     xs[c] = bfloat(w1[i] * float(bfloat(hv[i] * inv2)));
   }
-  gf_sums(xs, xsum, tid);
+  gf_sums(xs, xsum, stride, tid);
 }
 
 // gemma_geglu over the gate/up stack's 16-row interleaved blocks: C[i] a gate column, C[i + 8] its up column; Y = act.
@@ -115,11 +115,11 @@ inline void tf_epilogue(tf_fused fa, thread const float* C, int M, int mb, int n
 
 #if TF_FUSE == 3
 // TF_FUSE 3 (the down input): gemma_geglu's group sums over the act row X, each group's values added in order.
-inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat* xs, threadgroup float* xsum, threadgroup float* p, bool first, uint tid) {
+inline void tf_prologue(tf_fused fa, const device bfloat* X, threadgroup bfloat* xs, threadgroup float* xsum, threadgroup float* p, bool first, int row, int stride, uint tid) {
   for (int g = int(tid); g < FKG; g += TF_THREADS) {
     float acc = 0.0f;
     for (int i = 0; i < TF_GROUP; i++) acc += float(X[g * TF_GROUP + i]);
-    xsum[g] = acc;
+    xsum[g * stride] = acc;
   }
 }
 #endif

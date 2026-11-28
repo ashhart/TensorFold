@@ -99,15 +99,22 @@ pub fn splitK(geo: cfg.Geometry, n: usize, k: usize) usize {
 pub fn layout(geo: cfg.Geometry, x: Linear) lane.Layout {
     return .{ .n = x.n, .k = x.k, .format = x.format, .sk = splitK(geo, x.n, x.k), .precompute_sums = x.reg(), .reg = x.reg(), .y_stride = x.y_stride };
 }
-
-/// The same kernel with a layer's glue as its prologue (gemma4/fused.metal's TF_FUSE kinds) for one-row windows.
-pub fn fusedLayout(geo: cfg.Geometry, x: Linear, fuse: u8) fused.Layout {
+/// The same kernel with a layer's glue as its prologue (gemma4/fused.metal's TF_FUSE kinds).
+pub fn fusedLayout(geo: cfg.Geometry, x: Linear, fuse: u8, multi: bool) fused.Layout {
     const l = layout(geo, x);
-    return .{ .projection = l, .source = ks.gemma4_fused, .defines = switch (fuse) {
+    var f: fused.Layout = .{ .projection = l, .source = ks.gemma4_fused, .defines = switch (fuse) {
         1 => "#define TF_FUSE 1\n",
         2 => "#define TF_FUSE 2\n",
         else => "#define TF_FUSE 3\n",
     }, .x_rows = if (fuse == 3) 0 else 1, .epilogue = fuse == 2, .threads = if (fuse == 3) 32 * l.sk else 256 };
+    if (multi) {
+        f.row_tile = 16;
+        while (true) : (f.row_tile /= 2) {
+            if (fuse != 3) f.x_rows = f.row_tile;
+            if (f.threadgroupBytes() <= 32768 or f.row_tile == 1) break;
+        }
+    }
+    return f;
 }
 
 pub const Weights = struct {
@@ -461,7 +468,7 @@ pub const Projections = struct {
     geo: cfg.Geometry,
     follow: ?mtl.ResidencySet.Follow = null,
     list: std.ArrayList(struct { x: Linear, p: lane.Projection }) = .empty,
-    fused_list: std.ArrayList(struct { x: Linear, fuse: u8, p: fused.Projection }) = .empty,
+    fused_list: std.ArrayList(struct { x: Linear, fuse: u8, multi: bool, p: fused.Projection }) = .empty,
     /// The row path's tiles (a chip without tensor units): the simdgroup matrices at any width.
     row_simd: ?rowp.simd_bits.Pipelines = null,
     fn same(a: Linear, b: Linear) bool {
@@ -475,11 +482,11 @@ pub const Projections = struct {
         if (ps.follow) |f| mtl.resident.fields.apply(&p, f, true);
         return p;
     }
-    pub fn getFused(ps: *Projections, gpa: std.mem.Allocator, device: mtl.Device, x: Linear, fuse: u8) !fused.Projection {
-        for (ps.fused_list.items) |v| if (same(v.x, x) and v.fuse == fuse) return v.p;
-        const p = try fused.Projection.init(gpa, device, fusedLayout(ps.geo, x, fuse));
+    pub fn getFused(ps: *Projections, gpa: std.mem.Allocator, device: mtl.Device, x: Linear, fuse: u8, multi: bool) !fused.Projection {
+        for (ps.fused_list.items) |v| if (same(v.x, x) and v.fuse == fuse and v.multi == multi) return v.p;
+        const p = try fused.Projection.init(gpa, device, fusedLayout(ps.geo, x, fuse, multi));
         errdefer p.deinit();
-        try ps.fused_list.append(gpa, .{ .x = x, .fuse = fuse, .p = p });
+        try ps.fused_list.append(gpa, .{ .x = x, .fuse = fuse, .multi = multi, .p = p });
         return p;
     }
     /// The row path's tiles, built once (a chip without tensor units).

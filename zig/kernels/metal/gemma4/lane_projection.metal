@@ -327,16 +327,24 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wt, const device uint4* sbv,
     device bfloat* O0 [[buffer(12)]], device bfloat* O1 [[buffer(13)]], constant float4& F [[buffer(14)]], constant int4& I [[buffer(15)]],
 #endif
     uint sgi [[simdgroup_index_in_threadgroup]], uint lanei [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
-  const int r0 = int(tg.y) * 16, rows = mdims[0] - r0;
-  if (rows <= 0) return;
-  X += (size_t)r0 * TF_K;
-  Y += (size_t)r0 * TF_YS;
-  XS += r0;
 #ifdef TF_FUSED
-  const int lane = int(lanei), ks = int(sgi) % TF_SK, M = min(rows, 16), stride = mdims[1];
+  const int r0 = int(tg.y) * TF_ROW_TILE, M = min(mdims[0] - r0, TF_ROW_TILE), stride = TF_ROW_TILE;
+#else
+  const int r0 = int(tg.y) * 16, M = min(mdims[0] - r0, 16), stride = mdims[1];
+  XS += r0;
+#endif
+  if (M <= 0) return;
+  X += (size_t)r0 * TF_K;
+#ifdef TF_EPILOGUE
+  Y += (size_t)r0 * (TF_N / 2);
+#else
+  Y += (size_t)r0 * TF_YS;
+#endif
+#ifdef TF_FUSED
+  const int lane = int(lanei), ks = int(sgi) % TF_SK;
   const int tile = tf_tile(int(tg.x) * TF_TPT + int(sgi) / TF_SK), n0 = tile * NT, tp = int(sgi) / TF_SK;
 #else
-  const int lane = int(lanei), ks = int(sgi), M = min(rows, 16), stride = mdims[1], tile = tf_tile(int(tg.x)), n0 = tile * NT, tp = 0;
+  const int lane = int(lanei), ks = int(sgi), tile = tf_tile(int(tg.x)), n0 = tile * NT, tp = 0;
 #endif
   const int nb = 4 * (lane & 1) + 8 * ((lane >> 3) & 1), mb = ((lane >> 1) & 3) + 4 * ((lane >> 4) & 1);
   const int first = TF_G0 + (ks * TF_GN) / TF_SK, last = TF_G0 + ((ks + 1) * TF_GN) / TF_SK;
@@ -349,11 +357,14 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wt, const device uint4* sbv,
   if (first < last) next = tf_reg_fetch_w(wt, sbv, first, n0 + nb, lane); // first weights fly while prologue runs
   const tf_fused fa = {A0, A1, A2, A3, A4, A5, O0, O1, F, I};
   threadgroup bfloat xs[TF_XROWS > 0 ? TF_XROWS * TF_K : 1];
-  threadgroup float xsum[KG + 16]; // one row's sums; the 16 past the end feed the discarded rows' lanes
+  threadgroup float xsum[KG * TF_ROW_TILE + 16]; // group-major, with padding for discarded rows
   threadgroup float pscratch[16]; // the prologue's reduction partials
   const uint tid = sgi * 32 + lanei;
-  if (tid < 16) xsum[KG + tid] = 0.0f;
-  tf_prologue(fa, X, xs, xsum, pscratch, tg.x == 0, tid); // args, X, row, sums, scratch, first group, thread
+  if (tid < 16) xsum[KG * TF_ROW_TILE + tid] = 0.0f;
+  if (M < TF_ROW_TILE) for (int g = int(tid); g < KG; g += TF_THREADS)
+    for (int m = M; m < TF_ROW_TILE; m++) xsum[g * TF_ROW_TILE + m] = 0.0f;
+  for (int m = 0; m < M; m++)
+    tf_prologue(fa, X + (size_t)m * TF_K, xs + (TF_XROWS > 0 ? m * TF_K : 0), xsum + m, pscratch, tg.x == 0, r0 + m, stride, tid);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   const threadgroup float* xsp = xsum;
 #if TF_XROWS > 0
@@ -414,12 +425,30 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wt, const device uint4* sbv,
       C[12 + j] = fma(s1, P[12 + j], fma(b1, cur.x1, C[12 + j]));
     }
   }
+#if defined(TF_FUSED) && TF_ROW_TILE > 1 && TF_ROW_TILE < 16
+  // Store split-K partials for live rows only, without changing the order of their reduction.
+  constexpr int PS = TF_ROW_TILE * 32;
+  threadgroup float part[TF_TPT * (TF_SK > 1 ? TF_SK - 1 : 1) * PS];
+  if (TF_SK > 1) {
+    int slot[16];
+    for (int i = 0; i < 16; i++) {
+      const int m = mb + 8 * ((i >> 2) & 1);
+      slot[i] = m < M ? m * 32 + nb + 16 * (i >> 3) + (i & 3) : -1;
+    }
+    if (ks > 0) for (int i = 0; i < 16; i++)
+      if (slot[i] >= 0) part[((tp * (TF_SK - 1) + ks - 1) * PS) + slot[i]] = C[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (ks == 0) for (int s2 = 1; s2 < TF_SK; s2++) for (int i = 0; i < 16; i++)
+      if (slot[i] >= 0) C[i] += part[((tp * (TF_SK - 1) + s2 - 1) * PS) + slot[i]];
+  }
+#else
   threadgroup float part[TF_TPT * (TF_SK > 1 ? TF_SK - 1 : 1) * 16 * 32];
   if (TF_SK > 1) {
     if (ks > 0) for (int i = 0; i < 16; i++) part[((tp * (TF_SK - 1) + ks - 1) * 16 + i) * 32 + lane] = C[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (ks == 0) for (int s2 = 1; s2 < TF_SK; s2++) for (int i = 0; i < 16; i++) C[i] += part[((tp * (TF_SK - 1) + s2 - 1) * 16 + i) * 32 + lane];
   }
+#endif
   if (ks != 0) return;
 #ifdef TF_EPILOGUE
   tf_epilogue(fa, C, M, mb, n0 + nb, tile, Y); // the family's store of the lane's 16 accumulators
