@@ -431,6 +431,13 @@ test "precisionsWithDir detects TFPW v3 shards alongside residual safetensors an
     try t.expectEqual(plan.Precision.tfq3, prec[0]);
     try t.expectEqual(plan.Precision.tfq3, prec[1]);
 
+    // Replacing pw_v3_tables.bin with pw_v4_e8p_tables.bin also resolves to .tfq3 (hybrid/TFQ4 TFPW).
+    try tmp.dir.deleteFile(t.io, "pw_v3_tables.bin");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "pw_v4_e8p_tables.bin", .data = "PWV4" });
+    try names.precisionsWithDir(t.allocator, t.io, empty, 2, dir, &prec);
+    try t.expectEqual(plan.Precision.tfq3, prec[0]);
+    try t.expectEqual(plan.Precision.tfq3, prec[1]);
+
     // A layer with num_experts == 0 is rejected as NoExperts.
     std.mem.writeInt(u32, hdr[12..16], 0, .little);
     try tmp.dir.writeFile(t.io, .{ .sub_path = "layer_01.tffpw", .data = &hdr });

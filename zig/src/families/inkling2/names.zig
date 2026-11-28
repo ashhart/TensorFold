@@ -210,11 +210,14 @@ pub fn precisions(entries: st.Header, layers: u32, out: []plan.Precision) !void 
     }
 }
 
-fn hasTablesFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
-    const path = std.fs.path.join(gpa, &.{ dir, "pw_v3_tables.bin" }) catch return false;
-    defer gpa.free(path);
-    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
-    return true;
+fn hasAnyTablesFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    for ([_][]const u8{ "pw_v3_tables.bin", "pw_v4_e8p_tables.bin" }) |fname| {
+        const path = std.fs.path.join(gpa, &.{ dir, fname }) catch continue;
+        defer gpa.free(path);
+        std.Io.Dir.cwd().access(io, path, .{}) catch continue;
+        return true;
+    }
+    return false;
 }
 
 fn hasLayerTfpw(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, layer: usize) bool {
@@ -251,7 +254,7 @@ pub fn precisionsWithDir(gpa: std.mem.Allocator, io: std.Io, entries: st.Header,
             return error.NoExperts;
         }
     }
-    if (any_tfq3 and !hasTablesFile(gpa, io, dir)) return error.MissingTfq3Tables;
+    if (any_tfq3 and !hasAnyTablesFile(gpa, io, dir)) return error.MissingTfq3Tables;
 }
 
 /// Every tensor of `from` added to `into`, for a checkpoint held in several files; a name in both is refused.

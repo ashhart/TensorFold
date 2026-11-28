@@ -91,6 +91,7 @@ pub const exl3_candidate = @import("exl3_candidate.zig");
 pub const exl3_grouped = @import("exl3_grouped.zig");
 pub const tfq3_format = @import("tfq3_format.zig");
 pub const tfq3 = @import("tfq3.zig");
+pub const tfq4 = @import("tfq4.zig");
 
 pub const arena = @import("arena.zig");
 pub const pack = @import("pack.zig");
@@ -155,6 +156,7 @@ test {
     _ = exl3_upload;
     _ = tfq3_format;
     _ = tfq3;
+    _ = tfq4;
     _ = @import("modelopt.zig");
     _ = @import("ck.zig");
     _ = @import("tp_watch.zig");

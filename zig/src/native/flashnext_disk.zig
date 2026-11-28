@@ -167,9 +167,9 @@ fn servingKey(legacy: u64, a: Allocator, io: std.Io, dir: []const u8, run: anyty
 }
 
 /// --learn-conversations or --spill-gib: the store under `l.root`, attached to the cache (Imprint's cut files unread).
-pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, optional: anytype, l: anytype) !?*rows.Rows {
+pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, optional: anytype, l: anytype, longest: u32) !?*rows.Rows {
     const id = optional orelse return null;
-    const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots });
+    const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots, .longest = longest });
     r.prefill_rate = id.rate;
     std.log.info("flash next: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, l.cap >> 20 });
     return r;
@@ -198,4 +198,60 @@ pub fn withFiles(legacy: u64, a: Allocator, io: std.Io, files: []const c_int) !u
 /// The loaded weight files and metadata, including a supplied reference outside the checkpoint.
 pub fn withInputs(legacy: u64, a: Allocator, io: std.Io, run: anytype) !u64 {
     return @import("persistence_policy.zig").mapped(try withFiles(legacy, a, io, run.files.items), a, run.maps.items);
+}
+
+const PermitProbe = struct {
+    fn charge(at: u32) u64 {
+        return @as(u64, at) * 8 + 28;
+    }
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return charge(at);
+    }
+    fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+        return error.NotAtMark;
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {
+        return error.CopyFailed;
+    }
+    fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    fn parts(_: *anyopaque, at: u32, out: *std.ArrayList(rows.image.Part), a: Allocator) anyerror!void {
+        try out.append(a, .{ .bytes = 16 });
+        try out.append(a, .{ .bytes = @as(u64, at) * 8, .row = 8 });
+        try out.append(a, .{ .bytes = 12 });
+    }
+    fn gather(_: *anyopaque, _: api.prompt_cache.Saved, _: []const rows.image.Range, _: []u8) anyerror!void {
+        return error.GatherFailed;
+    }
+    fn blank(_: *anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+        return error.NoSnapshotSlot;
+    }
+    fn scatter(_: *anyopaque, _: api.prompt_cache.Saved, _: []const rows.image.Range, _: []const u8) anyerror!void {
+        return error.CopyFailed;
+    }
+    fn snapshots(p: *PermitProbe) api.prompt_cache.Snapshots {
+        return .{ .ptr = p, .vtable = &.{ .bytes = PermitProbe.bytes, .save = PermitProbe.save, .restore = PermitProbe.restore, .drop = PermitProbe.drop, .rows = &.{ .parts = PermitProbe.parts, .gather = PermitProbe.gather, .blank = PermitProbe.blank, .scatter = PermitProbe.scatter } } };
+    }
+};
+
+test "Flash Next disk: the served window takes a state past the default permit whole" {
+    const longest: u32 = 1 << 28; // eight row bytes per token: over 2 GiB
+    var probe: PermitProbe = .{};
+    var store = api.prompt_cache.Store.init(std.testing.allocator, probe.snapshots(), .{}, 8 << 30);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const learn = .{ .root = root, .cap = @as(u64, 1) << 34, .floor = @as(u64, 0), .daily = @as(u64, 1) << 34, .spill = rows.Spill.finish, .slots = @as(u32, 4) };
+    const open_id: ?struct { id: u64, rate: f64 } = .{ .id = 7, .rate = 1 };
+    const r = (attach(std.testing.allocator, &store, open_id, learn, longest) catch |err| {
+        store.deinit();
+        return err;
+    }).?;
+    defer {
+        store.deinit();
+        r.deinit();
+    }
+    const whole = try rows.write.coldCharge(r, longest);
+    try std.testing.expect(whole > 1 << 30);
+    try std.testing.expectEqual(@max(1 << 30, @min(whole, store.budget)), r.staging_bytes);
 }

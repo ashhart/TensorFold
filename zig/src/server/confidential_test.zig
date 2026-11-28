@@ -20,6 +20,7 @@ test "confidential: off by default, and a plain start with HOME, PATH and HF_* s
     const a = arena.allocator();
     var env: std.process.Environ.Map = .init(a);
     try env.put("TENSORFOLD_REQUEST_LOG", "/tmp/log");
+    try env.put("LD_LIBRARY_PATH", "/tmp/loader");
     try t.expect(!(try parse(a, &.{"m"})).confidential);
     try t.expectEqual(@as(?[]const u8, null), try confidential.refusal(a, try parse(a, &.{"m"}), &env));
     var clean: std.process.Environ.Map = .init(a);
@@ -72,17 +73,48 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     try env.put("TENSORFOLD_REQUEST_LOG", "secret-value-2");
     try env.put("MCDMA_RPC_LIBRARY", "secret-value-3");
     try env.put("DYLD_INSERT_LIBRARIES", "secret-value-4");
+    try env.put("LD_LIBRARY_PATH", "secret-value-5");
     try env.put("HF_HUB_CACHE", "/tmp/hub");
     const why = (try confidential.refusal(a, try parse(a, &.{ "m", "--confidential" }), &env)).?;
-    try t.expect(std.mem.endsWith(u8, why, "unset DYLD_INSERT_LIBRARIES, MCDMA_RPC_LIBRARY, TENSORFOLD_REQUEST_LOG, TF_TIMING"));
+    try t.expect(std.mem.endsWith(u8, why, "unset DYLD_INSERT_LIBRARIES, LD_LIBRARY_PATH, MCDMA_RPC_LIBRARY, TENSORFOLD_REQUEST_LOG, TF_TIMING"));
     try t.expect(std.mem.indexOf(u8, why, "secret-value") == null);
-    for ([_][]const u8{ "FZ_X", "GLM_X", "XPU_DUMP", "TF_NCCL_LIB", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |name| {
+    for ([_][]const u8{
+        "FZ_X",            "GLM_X",      "XPU_DUMP", "TF_NCCL_LIB",    "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DYLD_INSERT_LIBRARIES",
+        "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_ORIGIN_PATH", "LD_HWCAP_MASK",     "LD_BIND_NOW",                "GLIBC_TUNABLES",
+    }) |name| for ([_][]const u8{ "v", "" }) |value| {
         var one: std.process.Environ.Map = .init(a);
-        try one.put(name, "v");
+        try one.put(name, value);
         const named = try confidential.settings(a, &one);
         try t.expectEqual(@as(usize, 1), named.len);
         try t.expectEqualStrings(name, named[0]);
-    }
+    };
+}
+
+test "confidential: accelerator plugin and kernel paths refuse empty values too" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = [_][]const u8{
+        "NCCL_TUNER_PLUGIN", "NCCL_PROFILER_PLUGIN",    "NCCL_NET_PLUGIN",         "NCCL_COLLNET_PLUGIN",       "NCCL_EXAMPLE_PLUGIN",          "NCCL_NET_LIBRARY",
+        "ZE_DRIVERS",        "ZE_LIBRARY_PATH",         "ROCBLAS_TENSILE_LIBRARY", "HIPBLASLT_TENSILE_LIBRARY", "HIPBLASLT_EXTOP_LIBRARY_PATH", "MIOPEN_DEVICE_LIB_PATH",
+        "MIOPEN_COMPILER",   "MIOPEN_CUSTOM_CACHE_DIR", "MIOPEN_KERNELS_PATH",     "MIOPEN_CACHE_DIR",          "MIOPEN_GCN_ASM_PATH",
+    };
+    for (names) |name| for ([_][]const u8{ "v", "" }) |value| {
+        var one: std.process.Environ.Map = .init(a);
+        try one.put(name, value);
+        const named = try confidential.settings(a, &one);
+        try t.expectEqual(@as(usize, 1), named.len);
+        try t.expectEqualStrings(name, named[0]);
+    };
+}
+
+test "confidential: tuning controls and MIOpen performance databases stay allowed" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var allowed: std.process.Environ.Map = .init(a);
+    for ([_][]const u8{ "NCCL_ALGO", "NCCL_PROTO", "NCCL_COMM_ID", "ZE_AFFINITY_MASK", "ROCBLAS_LAYER", "HIPBLASLT_LOG_LEVEL", "HIPBLASLT_TUNING_FILE", "MIOPEN_SYSTEM_DB_PATH", "MIOPEN_USER_DB_PATH" }) |name| try allowed.put(name, "v");
+    try t.expectEqual(@as(usize, 0), (try confidential.settings(a, &allowed)).len);
 }
 
 test "confidential: no core dumps, soft and hard, and on Linux not dumpable" {

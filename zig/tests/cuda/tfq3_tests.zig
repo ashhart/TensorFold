@@ -28,6 +28,7 @@ pub fn run(gpu: Gpu) !void {
         }
     }
     try @import("tfq3_moe_tests.zig").run(gpu, &kernels, stream, tables.ptr);
+    try @import("tfq4_tests.zig").run(gpu, &kernels, stream, tables.ptr);
     check.pass("CUDA TFQ3 contract: dense 3/4/5-bit, BF16/FP32, split-K/fused/BM64, mixed MoE, widths 1..512 and chunked 513/1024/1536/4218; five byte-identical repeats", .{});
 }
 

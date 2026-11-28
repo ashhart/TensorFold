@@ -13,9 +13,10 @@ fn bf16f(b: []const u8, i: usize) f32 {
     return @bitCast(@as(u32, std.mem.readInt(u16, b[2 * i ..][0..2], .little)) << 16);
 }
 
-/// Returns true if `dir` is a Flash Next TFQ3 checkpoint (`pw_v3_tables.bin` + `layer_00.tffpw`).
+/// Returns true if `dir` is a Flash Next TFQ3/TFQ4 checkpoint (`pw_v3` or `pw_v4_e8p` tables + `layer_00.tffpw`).
 pub fn isTfq3(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
-    return cuda.tfq3_format.hasTables(gpa, io, dir) and cuda.tfq3_format.hasRecords(gpa, io, dir, "layer_00.tffpw", cuda.tfq3_format.magic_tfpw);
+    const has_tbl = cuda.tfq3_format.hasTables(gpa, io, dir) or cuda.tfq3_format.hasTfq4Tables(gpa, io, dir);
+    return has_tbl and cuda.tfq3_format.hasRecords(gpa, io, dir, "layer_00.tffpw", cuda.tfq3_format.magic_tfpw);
 }
 
 pub fn expectedLayer(root: []const u8) !?u32 {
@@ -27,7 +28,7 @@ pub fn expectedLayer(root: []const u8) !?u32 {
 
 /// Resolves the `.tffpw` file for decoder or MTP layer `root`, or null if absent.
 pub fn layerFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, root: []const u8) ?[]u8 {
-    if (!cuda.tfq3_format.hasTables(gpa, io, dir)) return null;
+    if (!cuda.tfq3_format.hasTables(gpa, io, dir) and !cuda.tfq3_format.hasTfq4Tables(gpa, io, dir)) return null;
     var name_buf: [32]u8 = undefined;
     const fname: []const u8 = if (std.mem.startsWith(u8, root, "language_model.model.layers.")) blk: {
         const idx = std.fmt.parseInt(u32, root["language_model.model.layers.".len..], 10) catch return null;
@@ -221,11 +222,20 @@ pub fn sharedGeometry(gate_rows: usize) !SharedGeometry {
     };
 }
 
-/// Loads a TFQ3 `.tffpw` routed-expert layer and its native shared expert into `mixed.Owned`.
+/// Loads a TFQ3/TFQ4 hybrid `.tffpw` routed-expert layer and its native shared expert into `mixed.Owned`.
 pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_root: []const u8, tffpw_path: []const u8, expected_layer: ?u32) !mixed.Owned {
-    var tables = try cuda.tfq3.uploadTables(gpa, store.io, d, store.dir);
-    errdefer tables.free();
-    var moe_layer = try cuda.tfq3.uploadTfpwLayer(store.io, d, tffpw_path, tables.ptr, wt.experts_n, wt.dims, wt.moe_w, expected_layer);
+    var tables: ?cuda.DeviceBuffer = null;
+    if (cuda.tfq3_format.hasTables(gpa, store.io, store.dir)) {
+        tables = try cuda.tfq3.uploadTables(gpa, store.io, d, store.dir);
+    }
+    errdefer if (tables) |*t| t.free();
+    var tables4 = try cuda.tfq4.uploadTablesOptional(gpa, store.io, d, store.dir);
+    errdefer if (tables4) |*t4| t4.free();
+    if (tables == null and tables4 == null) return error.MissingTfq3Tables;
+    const t3_ptr: u64 = if (tables) |t| t.ptr else 0;
+    const t4_ptr: u64 = if (tables4) |t4| t4.lutPtr() else 0;
+    const t4_kind: u32 = if (tables4) |t4| t4.table_kind else 0;
+    var moe_layer = try cuda.tfq3.uploadTfpwLayerHybrid(store.io, d, tffpw_path, t3_ptr, t4_ptr, t4_kind, wt.experts_n, wt.dims, wt.moe_w, expected_layer);
     errdefer moe_layer.deinit();
     var shared: [3]wt.Q4 = @splat(wt.Q4.empty(d));
     errdefer for (&shared) |*p| p.free();
@@ -241,6 +251,7 @@ pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_
         .experts = .{ .up = zero, .down = zero, .up_scale = zero, .down_scale = zero, .width = wt.moe_w, .dims = wt.dims, .count = wt.experts_n },
         .tfq3 = moe_layer,
         .tfq3_tables = tables,
+        .tfq4_tables = tables4,
         .shared = shared,
         .rank = 0,
         .shared_width = geometry.width,

@@ -1,4 +1,4 @@
-//! `tensorfold log`: reads the request journal's kept files oldest first; it never writes, locks or truncates them.
+//! `tensorfold log`: reads the journal's or request log's kept files oldest first; never writes, locks or truncates.
 const std = @import("std");
 const show = @import("journal_show.zig");
 const Allocator = std.mem.Allocator;
@@ -9,7 +9,8 @@ pub const usage =
     \\usage: tensorfold log [list] [PATH] [--last N] [--route chat|completions] [--model M] [--json]
     \\       tensorfold log show ID [PATH] [--json]
     \\       tensorfold log follow [PATH] [--json]
-    \\PATH defaults to $TENSORFOLD_REQUEST_JOURNAL; PATH.3, PATH.2, PATH.1 and PATH are read, oldest first.
+    \\PATH defaults to $TENSORFOLD_REQUEST_JOURNAL, or $TENSORFOLD_REQUEST_LOG when that is unset.
+    \\PATH.3, PATH.2, PATH.1 and PATH are read, oldest first, whatever the file's shape.
     \\
 ;
 
@@ -74,7 +75,46 @@ pub const Entry = struct {
     prepared: ?Value = null,
     finish: ?Value = null,
     quarantined: bool = false,
+    bare_body: bool = false,
+
+    pub fn body(e: Entry) ?Value {
+        const s = e.start orelse return null;
+        return if (e.bare_body) s else s.object.get("body");
+    }
+
+    pub fn startedAt(e: Entry) ?i64 {
+        if (e.bare_body) return null;
+        return if (e.start) |s| int(s, "at") else null;
+    }
 };
+
+const Record = enum { bare, journal, request, reply };
+
+fn recordOf(v: Value) Record {
+    const fields = v.object;
+    // A chat or completion body can carry arbitrary client fields alongside its input.
+    if (fields.contains("messages") or fields.contains("prompt")) return .bare;
+    if ((fields.get("version") orelse .null) == .integer and (fields.get("at") orelse .null) == .integer and
+        str(v, "kind") != null) return .journal;
+    const tag = str(v, "type") orelse return .bare;
+    const id = fields.get("id") orelse return .bare;
+    if (eql(tag, "reply")) return if (id == .string and isReply(v)) .reply else .bare;
+    // Keep unknown tags that use the same envelope as a request.
+    return if ((id == .string or id == .null) and fields.count() == 3 and fields.contains("body")) .request else .bare;
+}
+
+fn isReply(v: Value) bool {
+    const fields = v.object;
+    const status = fields.get("status") orelse return false;
+    if (status != .integer) return false;
+    if (status.integer >= 400) return fields.count() == 4 and str(v, "error") != null;
+    const reason = fields.get("finish_reason") orelse return false;
+    const optional = @as(usize, @intFromBool(fields.contains("reasoning"))) + @intFromBool(fields.contains("error"));
+    return fields.count() == 9 + optional and (reason == .string or reason == .null) and
+        (fields.get("stream") orelse .null) == .bool and str(v, "text") != null and
+        (fields.get("usage") orelse .null) == .object and (fields.get("timings") orelse .null) == .object and
+        (fields.get("truncated") orelse .null) == .bool;
+}
 
 /// Every request the kept files name, oldest first; a torn last line is left for the next read.
 pub const Log = struct {
@@ -82,6 +122,8 @@ pub const Log = struct {
     entries: std.ArrayList(Entry) = .empty,
     index: std.StringHashMapUnmanaged(usize) = .empty,
     skipped: usize = 0,
+    /// The number of request-log lines that have been assigned an id by the reader.
+    numbered: usize = 0,
 
     /// One complete line as (request index, was its finish); an unreadable record is passed over and counted.
     pub fn add(l: *Log, text: []const u8) !?struct { usize, bool } {
@@ -94,16 +136,46 @@ pub const Log = struct {
             l.skipped += 1;
             return null;
         }
-        const kind = str(v, "kind") orelse return null;
-        const id = str(v, "id") orelse return null;
+        const record = recordOf(v);
+        const id = switch (record) {
+            .bare => try l.numberedId(),
+            .journal => str(v, "id") orelse return null,
+            .request => str(v, "id") orelse try l.numberedId(),
+            .reply => str(v, "id").?,
+        };
         const at = l.index.get(id) orelse blk: {
             try l.entries.append(l.a, .{ .id = id });
             try l.index.put(l.a, id, l.entries.items.len - 1);
             break :blk l.entries.items.len - 1;
         };
         const e = &l.entries.items[at];
-        if (eql(kind, "start")) e.start = v else if (eql(kind, "prepared")) e.prepared = v else if (eql(kind, "finish")) e.finish = v else if (eql(kind, "quarantine")) e.quarantined = true;
-        return .{ at, eql(kind, "finish") };
+        switch (record) {
+            .bare => {
+                e.start = v;
+                e.bare_body = true;
+                return .{ at, true };
+            },
+            .request => e.start = v,
+            .reply => {
+                e.finish = .{ .object = liftedFinish(l.a, v) };
+                return .{ at, true };
+            },
+            .journal => {
+                const kind = str(v, "kind").?;
+                if (eql(kind, "finish")) {
+                    e.finish = v;
+                    return .{ at, true };
+                }
+                if (eql(kind, "prepared")) e.prepared = v else if (eql(kind, "quarantine")) e.quarantined = true else e.start = v;
+            },
+        }
+        return .{ at, false };
+    }
+
+    /// Number request-log lines without a server id in the order they are read.
+    fn numberedId(l: *Log) ![]const u8 {
+        l.numbered += 1;
+        return std.fmt.allocPrint(l.a, "{d}", .{l.numbered});
     }
 
     /// The complete lines of `bytes`; returns how many bytes they span (the rest is a line still being written).
@@ -117,12 +189,22 @@ pub const Log = struct {
     }
 };
 
-/// The journal path: the argument, else $TENSORFOLD_REQUEST_JOURNAL.
+/// The path to read: the argument, else $TENSORFOLD_REQUEST_JOURNAL, else $TENSORFOLD_REQUEST_LOG.
 pub fn journalPath(o: Options, env: ?*const std.process.Environ.Map) ?[]const u8 {
     if (o.path) |p| return p;
     const m = env orelse return null;
-    const v = m.get("TENSORFOLD_REQUEST_JOURNAL") orelse return null;
-    return if (v.len == 0) null else v;
+    if (m.get("TENSORFOLD_REQUEST_JOURNAL")) |v| if (v.len != 0) return v;
+    const r = m.get("TENSORFOLD_REQUEST_LOG") orelse return null;
+    return if (r.len == 0) null else r;
+}
+
+/// Whether the chosen `PATH` came from `$TENSORFOLD_REQUEST_LOG`, whose writer keeps two files, not four.
+fn fromRequestLog(o: Options, env: ?*const std.process.Environ.Map) bool {
+    if (o.path) |_| return false;
+    const m = env orelse return false;
+    if (m.get("TENSORFOLD_REQUEST_JOURNAL")) |v| if (v.len != 0) return false;
+    const r = m.get("TENSORFOLD_REQUEST_LOG") orelse return false;
+    return r.len != 0;
 }
 
 const suffixes = [_][]const u8{ ".3", ".2", ".1", "" };
@@ -157,7 +239,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *Writer, err: *Writer, env: ?*cons
     };
     var l: Log = .{ .a = a };
     if (try load(a, io, path, &l) == 0 and o.command != .follow) {
-        try err.print("tensorfold log: no journal at {s} (nor {s}.1 to {s}.3)\n", .{ path, path, path });
+        if (fromRequestLog(o, env)) // its writer keeps the current file and one archive, no `.2` or `.3`
+            try err.print("tensorfold log: no journal at {s} (nor {s}.1)\n", .{ path, path })
+        else
+            try err.print("tensorfold log: no journal at {s} (nor {s}.1 to {s}.3)\n", .{ path, path, path });
         return 1;
     }
     switch (o.command) {
@@ -190,7 +275,7 @@ fn list(l: *Log, out: *Writer, o: Options) !void {
 
 /// The list line: start time (UTC), reply id, route, model, status and outcome, tokens, first token and decode rate.
 pub fn line(out: *Writer, e: Entry) !void {
-    try stamp(out, if (e.start) |s| int(s, "at") else if (e.finish) |f| int(f, "at") else null);
+    try stamp(out, if (e.start != null) e.startedAt() else if (e.finish) |f| int(f, "at") else null);
     try out.print("  {s}  {s}  {s}  ", .{ e.id, routeOf(e), modelOf(e) });
     if (e.finish) |f| {
         try out.print("{d} {s}", .{ int(f, "status") orelse 0, str(f, "outcome") orelse "finished" });
@@ -284,7 +369,14 @@ pub fn stamp(out: *Writer, at: ?i64) !void {
 }
 
 pub fn pathOf(e: Entry) []const u8 {
-    return if (e.start) |s| str(s, "path") orelse "-" else "-";
+    const s = e.start orelse return "-";
+    if (!e.bare_body) if (str(s, "path")) |p| return p;
+    const body = e.body() orelse return "-";
+    if (body != .object) return "-";
+    // the request log keeps no path, so the body's shape names the route: a prompt list is a completion
+    if (body.object.get("messages") != null) return "chat";
+    if (body.object.get("prompt") != null) return "completions";
+    return "-";
 }
 
 pub fn routeOf(e: Entry) []const u8 {
@@ -296,22 +388,20 @@ pub fn routeOf(e: Entry) []const u8 {
 
 pub fn modelOf(e: Entry) []const u8 {
     const s = e.start orelse return "-";
-    const body = s.object.get("body") orelse return "-";
+    const body = e.body() orelse s;
     return if (body == .object) str(body, "model") orelse "-" else "-";
 }
 
-fn optInt(out: *Writer, v: ?i64) !void {
+pub fn optInt(out: *Writer, v: ?i64) !void {
     if (v) |n| try out.print("{d}", .{n}) else try out.writeAll("-");
 }
 
 pub fn str(v: Value, key: []const u8) ?[]const u8 {
-    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return if (f == .string) f.string else null;
 }
 
 pub fn int(v: Value, key: []const u8) ?i64 {
-    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return switch (f) {
         .integer => |n| n,
@@ -321,13 +411,27 @@ pub fn int(v: Value, key: []const u8) ?i64 {
 }
 
 pub fn num(v: Value, key: []const u8) ?f64 {
-    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return switch (f) {
         .integer => |n| @floatFromInt(n),
         .float => |x| x,
         else => null,
     };
+}
+
+/// The measures `line` and `show` read, which a request-log reply record nests under `usage` and `timings`.
+const lifted = [_][]const u8{ "prompt_tokens", "cached_tokens", "completion_tokens", "queue_ms", "ttft_ms", "decode_tps" };
+
+/// A reply record with its nested measures put beside the rest of its fields, so one reader prints both sources.
+fn liftedFinish(a: Allocator, v: Value) std.json.ObjectMap {
+    // the copy is what the entry keeps, as `put` may move the entries array: `v` is not read after this
+    var fields = v.object;
+    for ([_][]const u8{ "usage", "timings" }) |group| {
+        const nested = fields.get(group) orelse continue;
+        if (nested != .object) continue;
+        for (lifted) |k| if (fields.get(k) == null) if (nested.object.get(k)) |x| fields.put(a, k, x) catch return fields;
+    }
+    return fields;
 }
 
 fn eql(x: []const u8, y: []const u8) bool {
