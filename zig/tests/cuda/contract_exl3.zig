@@ -134,14 +134,20 @@ fn other(w: exl3.Weight) exl3.Weight {
     return x;
 }
 
+/// A family's group launch in place of matmulGroup (contract_inkling2_group5.zig): its members by n, fit and launch.
+pub const Ext = struct { members: *const fn (usize) []const usize, fits: *const fn ([]const exl3.Weight, usize) bool, run: *const fn (*Case, []const exl3.Weight, []const u64) anyerror!void };
+
 pub const Case = struct {
     rig: rig_.Rig,
     lin: *exl3.Linear,
     kind: Kind,
+    ext: ?*const Ext = null,
+    /// The members' output type, bf16 or f32 (an ext's cases also give each member its own input rows).
+    dt: exl3.DType = .bf16,
     halves: u32 = 8,
     control: bool = false,
     shape: c.Shape = undefined,
-    mats: [3]Mat = .{ .{ .k = 0, .n = 0 }, .{ .k = 0, .n = 0 }, .{ .k = 0, .n = 0 } },
+    mats: [5]Mat = @splat(.{ .k = 0, .n = 0 }),
     nm: usize = 1,
     x: []u16 = &.{},
     xd: u64 = 0,
@@ -151,7 +157,7 @@ pub const Case = struct {
     xh_base: u64 = 0,
     z: u64 = 0,
     counters: u64 = 0,
-    wbuf: [3]exl3.Weight = undefined,
+    wbuf: [5]exl3.Weight = undefined,
     msg: [160]u8 = undefined,
 
     pub fn deinit(self: *Case) void {
@@ -175,13 +181,13 @@ pub const Case = struct {
         return .{ .spec = spec(self.kind, self.halves, self.control), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
     }
 
-    const vt = g.hooks(Case);
+    pub const vt = g.hooks(Case);
 
     fn random16(rng: std.Random, out: []u16) void {
         for (out) |*v| v.* = @bitCast(@as(f16, @floatCast(rng.float(f32) * 2 - 1)));
     }
 
-    /// Random trellis words and scales, x bf16 in [-1, 1); non-finite: x[1][3] NaN, x[2][5] +Inf, x[2][9] -Inf.
+    /// Random weights, x bf16 in [-1, 1); non-finite in member i's x: [1][3+i] NaN, [2][5+i] +Inf, [2][9+i] -Inf.
     pub fn prepare(self: *Case, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         const grouped = self.kind == .group or self.kind == .rot_group;
         if (shape.rows == 0 or shape.rows > (if (grouped) @as(usize, 16) else 128) or shape.k % 128 != 0 or shape.n % 128 != 0) return false;
@@ -191,7 +197,7 @@ pub const Case = struct {
         const a = self.rig.gpu.gpa;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        const widths: []const usize = if (grouped) members(shape.n) else &.{shape.n};
+        const widths: []const usize = if (!grouped) &.{shape.n} else if (self.ext) |e| e.members(shape.n) else members(shape.n);
         self.nm = widths.len;
         const width = fmt.Width{ .halves = @intCast(self.halves) };
         var zb: usize = 0;
@@ -216,33 +222,52 @@ pub const Case = struct {
             zb += @max(exl3.Linear.zBytes(m.w, 128), exl3.Linear.zBytes(other(m.w), 128));
             cb += exl3.Linear.counterBytes(m.w);
         }
-        if (grouped and !exl3.groupable(self.weights(), shape.rows)) return false;
-        self.x = try a.alloc(u16, shape.rows * shape.k);
+        if (grouped and !(if (self.ext) |e| e.fits(self.weights(), shape.rows) else exl3.groupable(self.weights(), shape.rows))) return false;
+        const copies = if (self.ext != null) self.nm else 1;
+        self.x = try a.alloc(u16, copies * shape.rows * shape.k);
         for (self.x) |*v| v.* = c.toBf16(rng.float(f32) * 2 - 1);
         switch (fill) {
             .random => {},
             .nonfinite => if (shape.rows > 2) {
-                self.x[shape.k + 3] = 0x7fc0;
-                self.x[2 * shape.k + 5] = 0x7f80;
-                self.x[2 * shape.k + 9] = 0xff80;
+                for (0..copies) |i| {
+                    const xi = self.x[self.xOff(i)..];
+                    xi[shape.k + 3 + i] = 0x7fc0;
+                    xi[2 * shape.k + 5 + i] = 0x7f80;
+                    xi[2 * shape.k + 9 + i] = 0xff80;
+                }
             },
             .stress => if (self.kind == .rot_group) {
                 for (self.x) |*v| v.* = c.toBf16(c.fromBf16(v.*) * 64);
             } else { // one input a block, rotated to 4096: K equal terms, past fp16's range
                 @memset(self.x, 0);
-                for (0..shape.rows) |r| for (0..shape.k / 128) |b| {
+                for (0..copies * shape.rows) |r| for (0..shape.k / 128) |b| {
                     self.x[r * shape.k + b * 128] = c.toBf16(46336);
                 };
             },
         }
         self.xd = try self.rig.input(std.mem.sliceAsBytes(self.x));
-        self.out = try self.rig.output(self.outElems() * 2);
-        self.base = try self.rig.scratch(self.ysElems() * 2); // (linear_body's y; rot_group's group's y too)
+        self.out = try self.rig.output(self.outBytes());
+        self.base = try self.rig.scratch(self.ysElems() * self.size()); // (linear_body's y; rot_group's group's y too)
         self.xh = try self.rig.scratch(self.nm * shape.rows * shape.k * 2);
         self.xh_base = try self.rig.scratch(self.nm * shape.rows * shape.k * 2);
         self.z = try self.rig.scratch(@max(zb, 16));
         self.counters = try self.rig.scratch(@max(cb, 16));
         return true;
+    }
+
+    /// Member i's input rows: its own copy with an ext, else the one x every member reads.
+    fn xOff(self: *const Case, i: usize) usize {
+        return if (self.ext != null) i * self.shape.rows * self.shape.k else 0;
+    }
+    pub fn xAt(self: *const Case, i: usize) u64 {
+        return self.xd + self.xOff(i) * 2;
+    }
+
+    fn size(self: *const Case) usize {
+        return if (self.dt == .f32) 4 else 2;
+    }
+    fn outBytes(self: *const Case) usize {
+        return if (self.kind == .rot_group) self.outElems() * 2 else self.ysElems() * self.size();
     }
 
     fn weights(self: *Case) []const exl3.Weight {
@@ -260,12 +285,12 @@ pub const Case = struct {
         return self.shape.rows * n;
     }
 
-    fn ys(self: *const Case, at: u64) [3]u64 {
-        var y: [3]u64 = .{ 0, 0, 0 };
+    pub fn ys(self: *const Case, at: u64) [5]u64 {
+        var y: [5]u64 = @splat(0);
         var off: u64 = 0;
         for (self.mats[0..self.nm], 0..) |m, i| {
             y[i] = at + off;
-            off += self.shape.rows * m.n * 2;
+            off += self.shape.rows * m.n * self.size();
         }
         return y;
     }
@@ -283,14 +308,14 @@ pub const Case = struct {
             },
             .group, .rot_group => {
                 var ws = self.weights();
-                var bad: [3]exl3.Weight = undefined;
+                var bad: [5]exl3.Weight = undefined;
                 if (self.control) {
                     @memcpy(bad[0..self.nm], ws);
                     if (self.kind == .group) bad[1].svh = bad[0].svh else bad[1].suh = bad[0].suh;
                     ws = bad[0..self.nm];
                 }
                 const y = self.ys(if (self.kind == .group) self.out else self.base);
-                try self.lin.matmulGroup(self.rig.s, ws, self.xd, .bf16, m, y[0..self.nm], .bf16, if (self.kind == .rot_group) self.out else self.xh, self.z, self.counters);
+                if (self.ext) |e| try e.run(self, ws, y[0..self.nm]) else try self.lin.matmulGroup(self.rig.s, ws, self.xd, .bf16, m, y[0..self.nm], .bf16, if (self.kind == .rot_group) self.out else self.xh, self.z, self.counters);
             },
         }
         try self.rig.s.synchronize();
@@ -310,11 +335,10 @@ pub const Case = struct {
         const y = self.ys(self.base);
         for (self.mats[0..self.nm], 0..) |mat, i| {
             const xh = self.xh_base + i * m * self.shape.k * 2;
-            try self.lin.matmul(self.rig.s, mat.w, self.xd, .bf16, m, y[i], .bf16, xh, self.z, self.counters);
+            try self.lin.matmul(self.rig.s, mat.w, self.xAt(i), .bf16, m, y[i], self.dt, xh, self.z, self.counters);
         }
         try self.rig.s.synchronize();
-        if (self.kind == .rot_group) return self.rig.bytes(self.xh_base, self.outElems() * 2);
-        return self.rig.bytes(self.base, self.outElems() * 2);
+        return self.rig.bytes(if (self.kind == .rot_group) self.xh_base else self.base, self.outBytes());
     }
 
     /// Gate 1: linear_body's bytes, with some output non-finite to prove the planted values reach it.
@@ -325,7 +349,7 @@ pub const Case = struct {
         const want = try self.replaced();
         const s = spec(self.kind, self.halves, self.control);
         if (std.mem.indexOfDiff(u8, got, want)) |at| return try std.fmt.bufPrint(&self.msg, "byte {d} of {d} differs from {s}'s", .{ at, got.len, s.replaces.? });
-        for (0..self.count()) |i| if (c.classOf(c.read(s.out, got, i)) != .finite) return null;
+        for (0..self.count()) |i| if (c.classOf(c.read(if (self.dt == .f32) .f32 else s.out, got, i)) != .finite) return null;
         return try std.fmt.bufPrint(&self.msg, "no output is non-finite: the planted values prove nothing", .{});
     }
 
@@ -345,7 +369,7 @@ pub const Case = struct {
         var v: [128]f64 = undefined;
         var t: [128]f64 = undefined;
         for (0..self.shape.rows) |r| for (0..k / 128) |b| {
-            for (&v, 0..) |*e, q| e.* = c.fromBf16(self.x[r * k + b * 128 + q]) * @as(f64, @floatCast(@as(f16, @bitCast(self.mats[i].suh[b * 128 + q]))));
+            for (&v, 0..) |*e, q| e.* = c.fromBf16(self.x[self.xOff(i) + r * k + b * 128 + q]) * @as(f64, @floatCast(@as(f16, @bitCast(self.mats[i].suh[b * 128 + q]))));
             for (0..128) |j| {
                 var abs: f64 = 0;
                 for (&t, 0..) |*e, q| {

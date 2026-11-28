@@ -472,6 +472,42 @@ extern "C" __global__ void __launch_bounds__(256) tf_exl3_group_8_2_8(tf_exl3::G
     const int b = blockIdx.x, i = group_member(g, b);
     tf_exl3::linear_body<8, 2, 8>(g.l[i], b - (i ? g.ends[i - 1] : 0));
 }
+// A visit's projections (Inkling 2: q, gate, r, k, v): up to five layers of one K, each its own input rows and scales.
+struct RotGroup5Args {
+    const void* x[5];
+    const half* suh[5];
+    half* xh[5];
+    int x_dtype;
+    int m, k;
+};
+template <typename T>
+__device__ __forceinline__ T pick5(const T (&p)[5], int i) {
+    return i == 0 ? p[0] : i == 1 ? p[1] : i == 2 ? p[2] : i == 3 ? p[3] : p[4];
+}
+extern "C" __global__ void __launch_bounds__(128) tf_exl3_rot_group5(RotGroup5Args a) {
+    const int z = blockIdx.z;
+    rot_in_body(pick5(a.x, z), a.x_dtype, pick5(a.suh, z), pick5(a.xh, z), a.k);
+}
+struct GroupArgs5 {
+    LinearArgs l[5];
+    int ends[5];
+};
+// Member i of a five-way group: linear_body on its own blocks, exactly as its own launch would.
+template <int K2, int WK>
+__device__ __forceinline__ void group5_body(const GroupArgs5& g) {
+    const int b = blockIdx.x;
+    const int i = b < g.ends[0] ? 0 : b < g.ends[1] ? 1 : b < g.ends[2] ? 2 : b < g.ends[3] ? 3 : 4;
+    linear_body<K2, 2, WK>(g.l[i], b - (i ? g.ends[i - 1] : 0));
+}
+#define TF_EXL3_GROUP5(NAME, K2, WK) \
+    extern "C" __global__ void __launch_bounds__((WK) * 32) NAME(tf_exl3::GroupArgs5 g) { group5_body<K2, WK>(g); }
+TF_EXL3_GROUP5(tf_exl3_group5_8_2_4, 8, 4)
+TF_EXL3_GROUP5(tf_exl3_group5_8_2_8, 8, 8)
+TF_EXL3_GROUP5(tf_exl3_group5_10_2_4, 10, 4)
+TF_EXL3_GROUP5(tf_exl3_group5_10_2_8, 10, 8)
+TF_EXL3_GROUP5(tf_exl3_group5_12_2_4, 12, 4)
+TF_EXL3_GROUP5(tf_exl3_group5_12_2_8, 12, 8)
+#undef TF_EXL3_GROUP5
 #undef TF_EXL3_CODEBOOK
 #undef TF_EXL3_WIDTHS
 }  // namespace tf_exl3
