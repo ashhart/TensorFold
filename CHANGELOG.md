@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `logit_bias` is applied on Qwen3.8-27B and Qwen3.5-MoE on CUDA, Qwen3.5-2B on Metal and Nemotron Parse on HIP: before each draw, greedy or sampled, a listed token's logit gains its value (-100 to 100, at most 300 entries) and exactly -100 bans the token, and drafted replies equal undrafted ones; other engines now refuse a non-empty `logit_bias` with 400 instead of ignoring it, and each `/v1/models` entry's capabilities report `logit_bias` (#3146, closes #3110).
+
 - Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
 
 - Desktop: a ready attachment can start a local or remote conversation without typed text, and folder guidance clears after a successful selection or launch (#4836). Thanks @taylorarndt for the report.
