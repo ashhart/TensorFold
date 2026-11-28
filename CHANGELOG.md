@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5/3.6/3.8 on CUDA with MTP drafts: cold prompt chunks that end before the MTP head's first tapped row skip the last layer's unread rows and the head, as chunks without taps already did; tokens unchanged (#4882).
+
 - Tests: the CUDA kernel-contract runner takes opt-in `--jobs N` and `--shard I/N`; four jobs run the served suites in 1:11:50 against 3:17:59 one at a time, with identical summaries (#3093). Thanks to @BlivionIaG.
 
 - Tests: the lane host explore test's replay holds under load: once every request sent has ended, the test thread sends the next only once a whole engine turn has run after the one that ended the last (turns counted through the host's activity scope), so each send meets no prompt visit and lands at the same point on every run (#5386, fixes #5367).
