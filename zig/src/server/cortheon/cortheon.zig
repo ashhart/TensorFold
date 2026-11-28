@@ -163,7 +163,7 @@ pub fn begin(srv: *Server, a: Allocator, raw: Value, id: []const u8, is_chat: bo
 /// Whether Cortheon takes the request (``begin``'s choice, with nothing started).
 pub fn engages(srv: *const Server, a: Allocator, raw: Value, is_chat: bool, input: *const chat.Input) bool {
     if (srv.cortheon == null) return false;
-    if (!is_chat or input.prompt != null or input.messages != .array or input.messages.array.len == 0) return false;
+    if (!is_chat or input.prompt != null or input.prefill or input.messages != .array or input.messages.array.len == 0) return false;
     if (raw.get("cortheon")) |v| if (v == .bool and !v.bool) return false;
     const choice = raw.get("tool_choice");
     if (tool_specs.choiceDisables(choice) or (tool_specs.choiceRequiresCall(a, choice) catch true)) return false;
