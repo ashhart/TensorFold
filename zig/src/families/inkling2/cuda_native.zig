@@ -273,3 +273,8 @@ test "the forward refuses a token id at the vocabulary before any launch" {
 test "Mini CUDA weights: shared traversal preserves the complete file-backed loader" {
     std.mem.doNotOptimizeAway(&@import("loop_weights.zig").loadWith);
 }
+
+test "Mini DSpark serving: native target and drafter entrypoints compile together" {
+    std.mem.doNotOptimizeAway(&open);
+    std.mem.doNotOptimizeAway(&openDrafter);
+}
