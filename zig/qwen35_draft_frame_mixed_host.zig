@@ -297,4 +297,12 @@ test "Qwen CUDA contracts: mixed-width eligibility covers A4 and EXL3, not homog
     narrow.wide = true;
     wide.wide = true;
     try std.testing.expect(!q.draft.frame.mixedHeadEligible(e.head, &refs));
+    const Route = struct { e: *q.engine.Engine, full_head: bool };
+    var route: Route = .{ .e = &e, .full_head = false };
+    narrow.wide = false;
+    try std.testing.expect(q.draft.frame.mixedHeadPath(&route, &refs));
+    route.full_head = true;
+    try std.testing.expect(!q.draft.frame.mixedHeadPath(&route, &refs));
+    wide.wide = false;
+    try std.testing.expect(!q.draft.frame.mixedHeadPath(&route, &refs));
 }

@@ -93,6 +93,7 @@ const Record = struct {
     var last_norm_input: u64 = 0;
     pub var token_bias: u32 = 0;
     var block: usize = 8;
+    pub var staged_words: usize = 0;
     var head_projections: [8]HeadProjection = undefined;
     var head_projection_count: usize = 0;
     fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
@@ -130,13 +131,17 @@ const Record = struct {
     fn download(dst: ?*anyopaque, _: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         const data = @as([*]u8, @ptrCast(dst.?))[0..bytes];
         @memset(data, 0);
-        if (downloads == 0) {
+        const at = @intFromPtr(data.ptr);
+        const word_download = if (staged_words == 0) downloads == 0 else at >= staged_words and at < staged_words + q.draft.frame.max_rows * 43 * 4;
+        if (word_download) {
             const words = std.mem.bytesAsSlice(u32, data);
-            for (0..words.len / 43) |row| {
-                words[row * 43 + 2] = @intCast(17 + Record.token_bias + row / (block - 1));
-                words[row * 43 + 3] = @intCast(128 + Record.token_bias + row / (block - 1));
-                words[row * 43 + 22] = @bitCast(@as(f32, 1) + @as(f32, @floatFromInt(Record.token_bias)));
-                words[row * 43 + 23] = @bitCast(@as(f32, @floatFromInt(Record.token_bias)));
+            const base = if (staged_words == 0) 0 else (@intFromPtr(data.ptr) - staged_words) / 4;
+            for (0..words.len / 43) |local| {
+                const row = base / 43 + local;
+                words[local * 43 + 2] = @intCast(17 + Record.token_bias + row / (block - 1));
+                words[local * 43 + 3] = @intCast(128 + Record.token_bias + row / (block - 1));
+                words[local * 43 + 22] = @bitCast(@as(f32, 1) + @as(f32, @floatFromInt(Record.token_bias)));
+                words[local * 43 + 23] = @bitCast(@as(f32, @floatFromInt(Record.token_bias)));
             }
         }
         downloads += 1;
@@ -205,6 +210,8 @@ fn actualFrame(block: usize) !void {
     e.draws.topk_merge_fn = function(&driver, 12);
     var d: q.draft.Draft = undefined;
     d.projection_role = .proposal;
+    d.full_head = false;
+    d.graphs = .{};
     d.frame_streams = 128;
     d.scratch_one = 0;
     d.target_taps = 0;
@@ -242,6 +249,7 @@ fn actualFrame(block: usize) !void {
     d.w.successor = &book;
     var storage: [F.stagedLen(2)]u8 align(16) = undefined;
     d.staged = .{ .d = &driver, .bytes = &storage };
+    Record.staged_words = @intFromPtr(&storage) + F.words_at;
     const measured = try d.layout(false);
     d.scratch = .{ .d = &driver, .ptr = 0x100000, .len = measured };
     try std.testing.expectEqual(measured, try d.layout(true));
@@ -325,6 +333,37 @@ fn actualFrame(block: usize) !void {
     try std.testing.expectEqual(per, full_rows);
     try std.testing.expectEqual(per, narrow_rows);
     try std.testing.expectEqual(per, tail_rows);
+    const bytes = 2 * per * 43 * 4;
+    var split_words: [2 * 15 * 43 * 4]u8 = undefined;
+    @memcpy(split_words[0..bytes], storage[F.words_at..][0..bytes]);
+    var split_held: [2][15]u32 = @splat(@splat(0));
+    var split_n: [2]usize = undefined;
+    for (contexts[0..2], 0..) |ctx, i| {
+        split_n[i] = ctx.held_n;
+        @memcpy(split_held[i][0..ctx.held_n], ctx.held[0..ctx.held_n]);
+    }
+    try std.testing.expectEqual(@as(usize, 3), Record.downloads);
+    d.full_head = true;
+    Record.downloads = 0;
+    Record.head_projection_count = 0;
+    narrow_rows = 0;
+    tail_rows = 0;
+    full_rows = 0;
+    try d.drafter().hold(holds[0..2]);
+    for (Record.head_projections[0..Record.head_projection_count]) |projection| switch (projection.columns) {
+        98304 => narrow_rows += @intCast(projection.rows),
+        320 => tail_rows += @intCast(projection.rows),
+        248320 => full_rows += @intCast(projection.rows),
+        else => unreachable,
+    };
+    try std.testing.expectEqual(@as(usize, 2), Record.downloads);
+    try std.testing.expectEqual(2 * per, full_rows);
+    try std.testing.expectEqual(@as(usize, 0), narrow_rows + tail_rows);
+    try std.testing.expectEqualSlices(u8, split_words[0..bytes], storage[F.words_at..][0..bytes]);
+    for (contexts[0..2], 0..) |ctx, i| {
+        try std.testing.expectEqual(split_n[i], ctx.held_n);
+        try std.testing.expectEqualSlices(u32, split_held[i][0..ctx.held_n], ctx.held[0..ctx.held_n]);
+    }
     if (block == 16) try traceRounds(&d, contexts[0..2], holds[0..2]);
 }
 
