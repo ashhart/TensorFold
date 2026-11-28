@@ -1,5 +1,4 @@
 //! GLM-5.3-Flash's per-rank CUDA memory: forward Buffers (shared by sequences) and a sequence's State, an arena each.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const exl3 = @import("cuda_exl3.zig");
@@ -15,7 +14,6 @@ const pair_layout = @import("cuda_pair_layout.zig");
 const glue = @import("cuda_glue.zig");
 const mlp = @import("cuda_mlp.zig");
 const kda_block = @import("cuda_kda_block.zig");
-
 /// A prompt chunk's rows (decode.PREFILL_ROWS).
 pub const prefill_rows = 2048;
 /// A decode window's rows (Engine's max_rows).
@@ -28,12 +26,10 @@ pub const dense_reach = 2560;
 pub const index_ring = 2 * prefill_rows;
 /// A solo prompt pass's rows (TF_GLM_CHUNK_SOLO): a whole ring, which a rebase at a grid point leaves it.
 pub const solo_rows = index_ring;
-
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
 const Arena = struct {
     buf: cuda.DeviceBuffer,
     used: usize = 0,
-
     fn take(a: *Arena, bytes: usize) u64 {
         const at = std.mem.alignForward(usize, a.used, 256);
         a.used = at + bytes;
@@ -41,7 +37,6 @@ const Arena = struct {
         return a.buf.ptr + at;
     }
 };
-
 /// Allocates `sizes` (bytes) in one zeroed device buffer and hands out each field's address in order.
 fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
     var total: usize = 0;
@@ -52,13 +47,11 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
     for (sizes, out) |n, *p| p.* = a.take(n);
     return a;
 }
-
 /// Rows a KV page holds: one dense latent chunk (latent.chunk), and the keys of its 128 pools.
 pub const page_rows = @import("cuda_cache_shape.zig").page_rows;
 
 /// Where a paged sequence's caches are: the pool's pages at `kv`, `page_bytes` apart, through a table of `pages`.
 pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64, pk: u64 = 0, pk_page: u64 = 0 }; // pk: TF_GLM_KV_HOST
-
 /// The DSA (MLA) layers among the loaded ones; the MTP layer's caches come after theirs.
 pub fn mlaLayers(w: *const weights.Weights) usize {
     var nd: usize = 0;
@@ -125,14 +118,34 @@ fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
     const row = c.latentRow(); // kv_a: the latent, then its roped key columns
     const qh = c.nope + c.rope; // a q head
+    var dense = c.exl3; // EXL3's dense layers, or any the checkpoint stores bf16
+    for (w.layers) |l| dense = dense or (l.ffn == .dense and l.ffn.dense.w == .bf16);
     return .{
         .{ kw, c.hidden },                  .{ n, c.kda_dim },                    .{ c.hidden, n },
         .{ c.q_lora + row, c.hidden },      .{ s.mla.len() * qh, c.q_lora },      .{ c.i_dim + c.i_heads, c.hidden },
         .{ c.i_heads * c.i_dim, c.q_lora }, .{ c.hidden, s.mla.len() * c.v_dim }, .{ 2 * s.shared.len(), c.hidden },
         .{ c.hidden, 2 * c.hidden }, // the MTP head's eh_proj
-        if (c.exl3) .{ 2 * s.dense.len(), c.hidden } else .{ c.hidden, 2 * c.hidden }, // bf16 dense layers: [gate | up]
-        if (c.exl3) .{ c.hidden, s.dense.len() } else .{ c.hidden, 2 * c.hidden }, // and down
+        if (dense) .{ 2 * s.dense.len(), c.hidden } else .{ c.hidden, 2 * c.hidden }, // bf16 dense layers: [gate | up]
+        if (dense) .{ c.hidden, s.dense.len() } else .{ c.hidden, 2 * c.hidden }, // and down
     };
+}
+
+test "a dense layer held bf16 plans its [gate | up] partials in a checkpoint that is not EXL3" {
+    var c = @import("config.zig").Config{};
+    c.dense_inter = 3008; // [gate | up] 6016 wide takes four K slices: more partials than any other shape here
+    var l: weights.Layer = undefined;
+    l.ffn = .{ .dense = undefined };
+    l.ffn.dense.w = .{ .bf16 = .{ .gu = 1, .down = 1 } };
+    var layers = [_]weights.Layer{l};
+    const share = try @import("cuda_shard.zig").Share.of(&c, 0, 1);
+    var w: weights.Weights = .{ .gpa = std.testing.allocator, .config = c, .share = share };
+    var planned: [2]usize = .{ 4, 4 }; // with no dense layer loaded, then with the bf16 one
+    for (&planned, [_][]weights.Layer{ &.{}, &layers }) |*p, held| {
+        w.layers = held;
+        for (b16Shapes(&w)) |shape| p.* = @max(p.*, b16.partBytes(127, shape[0], shape[1]));
+    }
+    const need = b16.partBytes(127, 2 * c.dense_inter, c.hidden);
+    try std.testing.expect(planned[0] < need and need <= planned[1]);
 }
 
 test "GLM TP3: existing scratch covers raw projections through the 127-row split-K boundary" {
