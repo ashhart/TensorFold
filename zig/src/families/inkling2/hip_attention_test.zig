@@ -205,14 +205,18 @@ fn miniText() !config.Text {
     return (try config.parse(t.allocator, @embedFile("fixtures/mini_config.json"), &why)).text;
 }
 
+fn tinyMiniText() !config.Text {
+    var why: config.Why = .{};
+    return (try config.parse(t.allocator, @embedFile("fixtures/tiny_mini_config.json"), &why)).text;
+}
+
 test "inkling2 hip: each layer's extent from the config, Mini's 1,024 and tiny-mini's 128 local and 256 global" {
     var text = try miniText();
     var why: config.Why = .{};
     for ([_]u32{ 0, 4, 5, 11, 23 }) |i| try t.expectEqual(@as(u32, 1024), try k.layerExtent(&text, i, &why));
-    text.window = 128;
-    text.rel_extent = 256;
-    for ([_]u32{ 0, 4, 6, 22 }) |i| try t.expectEqual(@as(u32, 128), try k.layerExtent(&text, i, &why));
-    for ([_]u32{ 5, 11, 17 }) |i| try t.expectEqual(@as(u32, 256), try k.layerExtent(&text, i, &why));
+    const tiny = try tinyMiniText();
+    for ([_]u32{ 0, 4, 6, 16 }) |i| try t.expectEqual(@as(u32, 128), try k.layerExtent(&tiny, i, &why));
+    for ([_]u32{ 5, 11, 17 }) |i| try t.expectEqual(@as(u32, 256), try k.layerExtent(&tiny, i, &why));
 }
 
 test "inkling2 hip: a layer extent with no table kernel is refused by name, naming it and the 1024, 256 and 128 built" {
@@ -247,12 +251,8 @@ test "inkling2 hip: relTable refuses every extent but 1024, 256 and 128, launchi
 }
 
 test "inkling2 hip: every layer of tiny-mini's text config takes 128 or 256; an extent with no table names layer, extent and the three built" {
-    var text = try miniText();
-    text.layers = 18;
-    text.local = .{ .q = 4, .kv = 2, .dim = 128 };
-    text.global = text.local;
-    text.window = 128;
-    text.rel_extent = 256;
+    var text = try tinyMiniText();
+    try t.expectEqual(@as(u32, 18), text.layers);
     for (0..18) |li| {
         const i: u32 = @intCast(li);
         var why: config.Why = .{};
