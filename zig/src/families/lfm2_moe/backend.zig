@@ -7,9 +7,31 @@ const c = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const snapshot = @import("snapshot.zig");
+const topk = @import("draw_topk.zig");
+const draw_timing = @import("draw_timing.zig");
 const steps = @import("prefill_steps.zig");
 const Model = @import("model.zig").Model;
 const be = lanes.backend;
+const tap_mod = @import("backend_tap.zig");
+
+/// Where a drafter holds a stream's drafts on the device, for verify windows that take them there (Window.held).
+pub const HeldSource = struct {
+    ptr: *anyopaque,
+    get: *const fn (ptr: *anyopaque, s: *lanes.Stream) ?Device,
+    host: *const fn (ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void, // where `get` gives none
+};
+pub const Device = struct { src: mtl.Buffer, off: usize, stride: u32, wait: fwd.Wait };
+
+/// Where a drafter owns a stream's tapped rows on the device, for forwards to capture into (Metal.stage_source).
+pub const StageSource = struct {
+    ptr: *anyopaque,
+    /// Readies the stream's stage for rows [start, start + rows) of a forward (null: none kept for them).
+    bind: *const fn (ptr: *anyopaque, s: *lanes.Stream, start: u64, rows: usize) anyerror!?Stage,
+    /// The stream's stage buffer now (null: released).
+    buffer: *const fn (ptr: *anyopaque, s: *lanes.Stream) ?mtl.Buffer,
+};
+/// Row `start`'s place in the stage, and the hold still reading the stage that the forward waits for.
+pub const Stage = struct { place: fwd.Place, wait: ?fwd.Wait };
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
@@ -24,8 +46,15 @@ pub const Metal = struct {
     /// Forward ms by window width, timed at load: the lane core weighs drafts against them.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
+    /// Shared-row increments past the qualified window, anchored at that window's measured cost.
+    shared: [st.batch_rows - st.window_rows]lanes.config.Cost = undefined,
+    shared_timed: usize = 0,
     /// Forwards run so far: a stream's tapped rows in the scratch are current while their gen matches.
     gen: u64 = 0,
+    /// A drafter whose drafts verify windows read on the device (null: windows carry host tokens only).
+    held_source: ?HeldSource = null,
+    /// A drafter whose staged rows all serving forwards capture into (install before preparing taps).
+    stage_source: ?StageSource = null,
     /// Streams whose prompt passes are in progress: each one's next row (prefill_step) and a mark kept late.
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, steps.Fill) = .empty,
 
@@ -42,8 +71,13 @@ pub const Metal = struct {
             else => return err,
         };
         out.width = st.window_rows;
-        out.timed = try out.time();
         return out;
+    }
+
+    /// Price before preparing tap destinations, after committing the admitted working set.
+    pub fn measure(self: *Metal, flush: ?mtl.keepalive.Target.Flush) !void {
+        if (self.width == 1) return;
+        self.timed = try self.time(flush);
     }
 
     pub fn deinit(self: *Metal) void {
@@ -60,13 +94,17 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return factsFor(self.width, self.options.streams, self.costs[0..self.timed]);
+        var out = factsFor(self.width, self.options.streams, self.costs[0..self.timed]);
+        out.shared_costs = self.shared[0..self.shared_timed];
+        return out;
     }
 
     /// Each window width's forward ms on a 256-token history (the fastest of three, after the GPU's clocks ramp up).
-    fn time(self: *Metal) !usize {
+    fn time(self: *Metal, flush: ?mtl.keepalive.Target.Flush) !usize {
         var cache = try st.Cache.init(self.gpa, self.model.device, &self.model.config.attention, 512);
         defer cache.deinit();
+        cache.memory.setResident(self.residency);
+        if (flush) |f| f.run(f.ctx);
         var ids: [256]u32 = undefined;
         for (&ids, 0..) |*id, i| id.* = @intCast((i * 7919 + 13) % c.vocab);
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = 256 }}, &ids, false, .last);
@@ -90,6 +128,34 @@ pub const Metal = struct {
             cost.* = .{ .width = @intCast(w), .ms = best };
         }
         std.log.info("LFM2 window ms by width: 1 {d:.1}, 2 {d:.1}, 4 {d:.1}, 8 {d:.1}, 16 {d:.1}", .{ self.costs[0].ms, self.costs[1].ms, self.costs[3].ms, self.costs[7].ms, self.costs[15].ms });
+        // Two qualified windows measure shared-row increments against the same shared shape at 16 rows.
+        var other = try st.Cache.init(self.gpa, self.model.device, &self.model.config.attention, 512);
+        defer other.deinit();
+        other.memory.setResident(self.residency);
+        if (flush) |f| f.run(f.ctx);
+        try fwd.run(self.model, &self.scratch, &.{.{ .cache = &other, .rows = 256 }}, &ids, false, .last);
+        var shared_base: f64 = 0;
+        for (st.window_rows..st.batch_rows + 1) |rows| {
+            const first = @min(st.window_rows, rows - 1);
+            var best: f64 = std.math.floatMax(f64);
+            for (0..4) |trial| {
+                var t0: platform.c.timespec = undefined;
+                var t1: platform.c.timespec = undefined;
+                _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t0);
+                try fwd.run(self.model, &self.scratch, &.{ .{ .cache = &cache, .rows = first }, .{ .cache = &other, .rows = rows - first } }, ids[0..rows], true, .all);
+                _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t1);
+                const ms = @as(f64, @floatFromInt(t1.sec - t0.sec)) * 1e3 + @as(f64, @floatFromInt(t1.nsec - t0.nsec)) / 1e6;
+                cache.len = base;
+                other.len = base;
+                if (trial > 0) best = @min(best, ms);
+            }
+            if (rows == st.window_rows) {
+                shared_base = best;
+            } else self.shared[rows - st.window_rows - 1] = .{ .width = @intCast(rows), .ms = self.costs[st.window_rows - 1].ms + best - shared_base };
+        }
+        self.shared_timed = self.shared.len;
+        std.log.info("LFM2 shared calibration: window16 {d:.2} ms, shared16 {d:.2} ms", .{ self.costs[st.window_rows - 1].ms, shared_base });
+        std.log.info("LFM2 shared marginal prices by rows: 17 {d:.1}, 24 {d:.1}, 32 {d:.1}", .{ self.shared[0].ms, self.shared[7].ms, self.shared[15].ms });
         return self.costs.len;
     }
 
@@ -97,11 +163,11 @@ pub const Metal = struct {
         return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
     }
 
-    fn cast(ptr: *anyopaque) *Metal {
+    pub fn cast(ptr: *anyopaque) *Metal {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn cacheOf(self: *Metal, stream: *lanes.Stream) !*st.Cache {
+    pub fn cacheOf(self: *Metal, stream: *lanes.Stream) !*st.Cache {
         return self.caches.get(stream) orelse error.UnknownLfmStream;
     }
 
@@ -114,10 +180,17 @@ pub const Metal = struct {
     }
 
     /// One forward on the scratch; a stream's tapped rows from earlier forwards are stale after it.
-    fn run(self: *Metal, segments: []const fwd.Segment, tokens: []const u32, record: bool, head: fwd.Head) !void {
+    fn run(self: *Metal, segments: []const fwd.Segment, tokens: []const u32, record: bool, head: fwd.Head, wait: ?fwd.Wait) !void {
         self.gen += 1;
-        try fwd.run(self.model, &self.scratch, segments, tokens, record, head);
+        try fwd.runHeld(self.model, &self.scratch, segments, tokens, record, head, &.{}, wait);
     }
+
+    // Tapped rows and the drafter's view of them live in backend_tap.zig; these keep the backend's call shape.
+    pub const tapFor = tap_mod.tapFor;
+    pub const tapped = tap_mod.tapped;
+    pub const tapBytes = tap_mod.tapBytes;
+    pub const featuresFn = tap_mod.featuresFn;
+    pub const keepLastTap = tap_mod.keepLastTap;
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         return cast(ptr).prefillWith(stream, null);
@@ -131,52 +204,17 @@ pub const Metal = struct {
         return self.prefillWith(stream, sink);
     }
 
-    /// A tapped row's bytes: every tap's hidden row, bf16.
-    fn tapBytes(self: *const Metal) usize {
-        return if (self.scratch.taps) |t| t.count * c.hidden * 2 else 0;
-    }
-
     /// The drafter's layers: every forward from now on keeps their outputs for each row.
     fn prepareFn(ptr: *anyopaque, layers: []const u32) !void {
         const self = cast(ptr);
         if (layers.len == 0 or layers.len > st.max_taps) return error.BadLfmTaps;
         for (layers) |l| if (l >= c.layers) return error.BadLfmTaps;
         if (self.scratch.taps) |t| return if (std.mem.eql(u32, t.layers[0..t.count], layers)) {} else error.BadLfmTaps;
-        var t: st.Taps = .{ .count = @intCast(layers.len), .buf = undefined };
+        const table_at = if (self.stage_source == null) self.scratch.rows * layers.len * c.hidden * 2 else 0;
+        const buf = try self.scratch.memory.alloc(table_at + self.scratch.rows * @sizeOf(u64));
+        var t: st.Taps = .{ .count = @intCast(layers.len), .buf = buf, .gpu_base = buf.gpuAddress(), .table_at = table_at };
         @memcpy(t.layers[0..layers.len], layers);
-        t.buf = try self.scratch.memory.alloc(self.scratch.rows * layers.len * c.hidden * 2);
         self.scratch.taps = t;
-    }
-
-    /// Cache rows [start, start + count) of the stream's latest tapped rows, on the device.
-    fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, layers: []const u32, start: u64, count: u32) !be.Features {
-        const self = cast(ptr);
-        const t = self.scratch.taps orelse return error.UnpreparedLfmTaps;
-        if (layers.len != t.count) return error.UnpreparedLfmTaps;
-        const cache = try self.cacheOf(stream);
-        const width = self.tapBytes();
-        // a stepped pass's latest chunk: its rows stay in the scratch until the next forward (#3021)
-        if (cache.chunk_tap) |k| if (!within(cache.tap, start, count) and steps.holds(.{ .start = k.start, .rows = k.rows, .gen = k.gen }, self.gen, start, count))
-            return .{ .buffer = @intFromPtr(t.buf.id), .offset = (k.row + @as(usize, @intCast(start - k.start))) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
-        const held = cache.tap orelse return error.LfmTapsNotHeld;
-        if (!within(held, start, count)) return error.LfmTapsNotHeld;
-        const buf = if (held.gen == 0) cache.last_tap.? else if (held.gen == self.gen) t.buf else return error.StaleLfmTaps;
-        const row = held.row + @as(usize, @intCast(start - held.start));
-        return .{ .buffer = @intFromPtr(buf.id), .offset = row * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
-    }
-
-    fn within(tap: ?st.TapRows, start: u64, count: u32) bool {
-        const h = tap orelse return false;
-        return count != 0 and start >= h.start and start + count <= h.start + h.rows;
-    }
-
-    /// The prompt's last row's taps, copied beside the stream's caches for its first draft (gen 0: kept there).
-    fn keepLastTap(self: *Metal, cache: *st.Cache, row: usize, position: usize) !void {
-        const width = self.tapBytes();
-        if (width == 0) return;
-        if (cache.last_tap == null) cache.last_tap = try cache.memory.alloc(width);
-        @memcpy(cache.last_tap.?.contents()[0..width], (self.scratch.taps.?.buf.contents() + row * width)[0..width]);
-        cache.tap = .{ .start = position, .row = 0, .rows = 1, .gen = 0 };
     }
 
     /// One chunk's work for `steps.step`: the forward, the drafter's rows (a sink, or `later` via featuresFn), marks.
@@ -189,14 +227,23 @@ pub const Metal = struct {
         pub fn run(r: Run, stream: *lanes.Stream, at: usize, end: usize) !void {
             const self = r.m;
             const ids = stream.prompt();
-            try self.run(&.{.{ .cache = r.cache, .rows = end - at }}, ids[at..end], false, .last);
+            var wait: ?fwd.Wait = null;
+            const tap = try self.tapFor(stream, at, end - at, &wait);
+            if (r.sink != null and tap == .none) return error.LfmTapsNotHeld;
+            try self.run(&.{.{ .cache = r.cache, .rows = end - at, .tap = tap }}, ids[at..end], false, .last, wait);
+            if (r.sink != null or tap == .stage) r.cache.tap = self.tapped(r.cache, end - at, tap, 0);
             if (r.sink) |k| {
-                const width = self.tapBytes();
-                const f: be.Features = .{ .buffer = @intFromPtr(self.scratch.taps.?.buf.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+                const f = try featuresFn(self, stream, self.scratch.taps.?.layers[0..self.scratch.taps.?.count], at, @intCast(end - at));
                 try k.take(k.ptr, stream, f, at);
             }
-            if (r.later) r.cache.chunk_tap = .{ .start = at, .row = 0, .rows = end - at, .gen = self.gen };
-            if ((r.sink != null or r.later) and end == ids.len) try self.keepLastTap(r.cache, end - 1 - at, end - 1);
+            // a stepped pass's wrapper absorbs this chunk after the call: keep all its rows
+            if (r.later) r.cache.chunk_tap = .{ .start = at, .row = 0, .rows = end - at, .gen = self.gen, .stage = if (tap == .stage) tap.stage.off else null };
+            if ((r.sink != null or r.later) and end == ids.len) {
+                if (tap == .stage) {
+                    // The lane owns this anchor across other streams' forwards; no scratch copy.
+                    r.cache.tap = .{ .start = end - 1, .row = 0, .rows = 1, .gen = 0, .stage = tap.stage.off + (end - at - 1) * self.tapBytes() };
+                } else try self.keepLastTap(r.cache, end - 1 - at, end - 1);
+            }
             lanes.prefill_widths.completed(self.gpa, stream, end - at);
         }
 
@@ -290,8 +337,10 @@ pub const Metal = struct {
             .value => |v| v,
             .handle => |h| @intCast(h),
         };
-        try self.run(&.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
-        if (self.scratch.taps != null) cache.tap = .{ .start = cache.len - 1, .row = 0, .rows = 1, .gen = self.gen };
+        var wait: ?fwd.Wait = null;
+        const tap = try self.tapFor(stream, cache.len, 1, &wait);
+        try self.run(&.{.{ .cache = cache, .rows = 1, .tap = tap }}, &.{token}, false, .all, wait);
+        cache.tap = self.tapped(cache, 1, tap, 0);
         return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
     }
 
@@ -302,46 +351,53 @@ pub const Metal = struct {
 
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
+        draw_timing.reset(windows);
+        errdefer draw_timing.reset(windows);
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var ids: [st.batch_rows]u32 = undefined;
+        var held: [st.batch_rows]fwd.Held = undefined;
+        var count: usize = 0;
+        var wait: ?fwd.Wait = null;
         var total: usize = 0;
         if (windows.len > segments.len or windows.len != out.len) return error.InvalidLfmWindows;
         for (windows, 0..) |w, i| {
             const rows = w.rows();
-            if (w.parents != null or w.held != 0 or rows > st.window_rows or total + rows > st.batch_rows or w.positions.len != rows) return error.UnsupportedLfmWindow;
+            if (w.held != 0) { // the drafter's picks, copied into the window's rows on the GPU
+                const source = self.held_source orelse return error.UnsupportedLfmWindow;
+                if (total + rows > st.batch_rows) return error.UnsupportedLfmWindow;
+                if (source.get(source.ptr, w.stream)) |dev| {
+                    held[count] = .{ .row = total + 1, .src = dev.src, .off = dev.off, .stride = dev.stride, .count = w.held };
+                    count += 1;
+                    wait = if (wait) |x| (if (x.value >= dev.wait.value) x else dev.wait) else dev.wait;
+                    @memset(ids[total + 1 ..][0..w.held], 0);
+                } else try source.host(source.ptr, w.stream, ids[total + 1 ..][0..w.held]);
+            }
+            if (w.parents != null or rows > st.window_rows or total + rows > st.batch_rows or w.positions.len != rows) return error.UnsupportedLfmWindow;
             if (w.masks.len != 0 and w.masks.len != rows * mask_words) return error.InvalidLfmMasks;
             const cache = try self.cacheOf(w.stream);
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidLfmPosition;
-            segments[i] = .{ .cache = cache, .rows = rows };
+            segments[i] = .{ .cache = cache, .rows = rows, .tap = try self.tapFor(w.stream, cache.len, rows, &wait) };
             ids[total] = w.pending;
-            @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
+            @memcpy(ids[total + 1 + w.held ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
-        try self.run(segments[0..windows.len], ids[0..total], true, .all);
-        if (self.scratch.taps != null) for (segments[0..windows.len]) |seg| {
-            const last = seg.cache.last.?;
-            seg.cache.tap = .{ .start = last.start, .row = last.base, .rows = last.rows, .gen = self.gen };
-        };
+        self.gen += 1;
+        try fwd.runHeld(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all, held[0..count], wait);
+        for (segments[0..windows.len]) |seg| {
+            const last = &seg.cache.last.?;
+            last.committed = &self.scratch;
+            seg.cache.tap = self.tapped(seg.cache, last.rows, seg.tap, last.base);
+        }
         const logits = self.scratch.logits.slice(u16, total * c.vocab);
         const best = self.scratch.best.slice(u32, 2 * total);
         var base: usize = 0;
         for (windows, out) |w, o| {
-            if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidLfmOutputs;
-            for (o.sampled, w.positions, 0..) |*t, p, r| {
-                const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
-                // A greedy row takes the GPU's pick, the host's draw on the same logits; a nonfinite row errors there.
-                const greedy = if (w.stream.sampling) |s| s.temperature <= 0 else true;
-                if (greedy and mask.len == 0 and best[2 * (base + r) + 1] == 0) {
-                    t.* = best[2 * (base + r)];
-                    continue;
-                }
-                t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
-            }
-            @memcpy(o.drafts, w.tokens);
+            if (o.sampled.len != w.rows() or o.drafts.len != w.rows() - 1) return error.InvalidLfmOutputs;
+            try draw_timing.drawWindow(drawRow, self.gpa, w, o.sampled, logits[base * c.vocab ..][0 .. w.rows() * c.vocab], best[2 * base ..][0 .. 2 * w.rows()], draw_timing.Monotonic{});
+            @memcpy(o.drafts, self.scratch.ids.slice(u32, base + w.rows())[base + 1 ..][0 .. w.rows() - 1]);
             base += w.rows();
         }
     }
-
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
         for (windows, paths) |w, path| try (try self.cacheOf(w.stream)).keep(&self.scratch, path);
@@ -389,8 +445,19 @@ pub fn value(word: u16) f64 {
     return @as(f32, @bitCast(@as(u32, word) << 16));
 }
 
+/// The GPU has checked every logit; its flag is authoritative even when a mask hides the bad token.
+inline fn drawRow(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32, picked: [2]u32) !u32 {
+    if (picked[1] != 0) return error.NonfiniteLfmLogits;
+    if (mask.len > 0) return draw(gpa, logits, settings, position, mask);
+    const sampling = settings orelse return picked[0];
+    if (sampling.temperature <= 0) return picked[0];
+    if (try topk.draw(logits, sampling, position, mask)) |token| return token;
+    return sampleFinite(gpa, logits, sampling, position, mask, logits.len);
+}
+
 /// The unchanged top-k candidates for the shared fp64 keyed sampler; a `mask` keeps its allowed ones (-inf's draw).
 pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
+    if (settings) |s| if (try topk.draw(logits, s, position, mask)) |token| return token;
     var best: ?usize = null;
     var allowed: usize = 0;
     for (logits, 0..) |word, id| {
@@ -403,6 +470,11 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
     if (best == null) return error.NoAllowedLfmToken;
     const sampling = settings orelse return @intCast(best.?);
     if (sampling.temperature <= 0) return @intCast(best.?);
+    return sampleFinite(gpa, logits, sampling, position, mask, allowed);
+}
+
+/// Finite logits and a nonempty allowed set; both checked by `draw` or the GPU row's pick.
+fn sampleFinite(gpa: std.mem.Allocator, logits: []const u16, sampling: lanes.Sampling, position: u64, mask: []const u32, allowed: usize) !u32 {
     const k = if (sampling.top_k == 0) allowed else @min(allowed, sampling.top_k);
     const values = try gpa.alloc(f64, k);
     defer gpa.free(values);
@@ -447,6 +519,7 @@ fn factsFor(width: u32, streams: u32, costs: []const lanes.config.Cost) lanes.Mo
 
 test {
     _ = @import("segments.zig"); // a shared round's table, with the family's tests
+    try @import("draw_timing_test.zig").check(drawRow);
 }
 
 test "after a failed wider-lanes check every forward is one stream's one row, so no window or by-expert twin runs" {
@@ -460,58 +533,23 @@ test "after a failed wider-lanes check every forward is one stream's one row, so
 }
 
 test "candidate selection preserves full-vocabulary keyed draws and tie order" {
-    const gpa = std.testing.allocator;
-    const words = try gpa.alloc(u16, c.vocab);
-    defer gpa.free(words);
-    const values = try gpa.alloc(f64, c.vocab);
-    defer gpa.free(values);
-    const ids = try gpa.alloc(u64, c.vocab);
-    defer gpa.free(ids);
-    for (words, values, ids, 0..) |*w, *v, *id, i| {
-        const x: f32 = @as(f32, @floatFromInt((i * 37) % 257)) / 8.0 - 16.0;
-        w.* = @intCast(@as(u32, @bitCast(x)) >> 16);
-        v.* = value(w.*);
-        id.* = i;
-    }
-    for ([_]u32{ 0, 1, 20, 257, c.vocab }) |k| {
-        for ([_]u64{ 0, 128, 65536 }) |position| {
-            const s: lanes.Sampling = .{ .seed = 1234, .top_k = k, .temperature = 0.7, .top_p = 0.95, .min_p = 0.1 };
-            const want = try lanes.sampling.choose(gpa, values, ids, position, s);
-            try std.testing.expectEqual(want, try draw(gpa, words, s, position, &.{}));
-        }
-    }
-    try std.testing.expectEqual(try draw(gpa, words, null, 0, &.{}), try draw(gpa, words, .{ .seed = 7, .temperature = 0 }, 99, &.{}));
-    words[0] = 0x7fc0;
-    try std.testing.expectError(error.NonfiniteLfmLogits, draw(gpa, words, null, 0, &.{}));
+    try @import("draw_timing_test.zig").checkCandidates(drawRow, value);
 }
 
 test "a masked draw is the full-vocabulary draw with the other tokens at -inf" {
-    const gpa = std.testing.allocator;
-    const words = try gpa.alloc(u16, c.vocab);
-    defer gpa.free(words);
-    const values = try gpa.alloc(f64, c.vocab);
-    defer gpa.free(values);
-    const ids = try gpa.alloc(u64, c.vocab);
-    defer gpa.free(ids);
-    var mask: [mask_words]u32 = @splat(0);
-    for (words, values, ids, 0..) |*w, *v, *id, i| {
-        const x: f32 = @as(f32, @floatFromInt((i * 37) % 257)) / 8.0 - 16.0;
-        w.* = @intCast(@as(u32, @bitCast(x)) >> 16);
-        const on = i % 7 == 3 or i % 1000 == 1;
-        if (on) mask[i / 32] |= @as(u32, 1) << @intCast(i % 32);
-        v.* = if (on) value(w.*) else -std.math.inf(f64);
-        id.* = i;
-    }
-    for ([_]u32{ 0, 1, 20, 257, c.vocab }) |k| {
-        for ([_]u64{ 0, 128, 65536 }) |position| {
-            const s: lanes.Sampling = .{ .seed = 99, .top_k = k, .temperature = 0.8, .top_p = 0.9, .min_p = 0.05 };
-            const want = try lanes.sampling.choose(gpa, values, ids, position, s);
-            try std.testing.expectEqual(want, try draw(gpa, words, s, position, &mask));
-        }
-    }
-    try std.testing.expectEqual(try lanes.sampling.choose(gpa, values, ids, 0, .{ .seed = 1, .temperature = 0 }), try draw(gpa, words, null, 0, &mask));
-    @memset(&mask, 0);
-    try std.testing.expectError(error.NoAllowedLfmToken, draw(gpa, words, null, 0, &mask));
+    try @import("draw_timing_test.zig").checkMasked(value);
+}
+
+test "measured shared rows price the batch without widening a stream's qualified window" {
+    var backend_: Metal = .{ .gpa = std.testing.allocator, .model = undefined, .options = .{ .capacity = 512 }, .scratch = undefined, .width = st.window_rows, .timed = 1, .shared_timed = 1 };
+    backend_.costs[0] = .{ .width = 1, .ms = 2 };
+    backend_.shared[0] = .{ .width = 17, .ms = 9 };
+    var cfg = try lanes.Config.init(std.testing.allocator, backend_.facts(), st.window_rows, st.window_rows - 1);
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, st.window_rows), cfg.family_width);
+    try std.testing.expectEqual(@as(?f64, 2), cfg.family_costs.get(1));
+    try std.testing.expectEqual(@as(?f64, null), cfg.family_costs.get(17));
+    try std.testing.expectEqual(@as(?f64, 9), cfg.shared_costs.get(17));
 }
 
 test "zero grant: an attached LFM2 drafter retains committed taps and resumes after a long shared skip" {

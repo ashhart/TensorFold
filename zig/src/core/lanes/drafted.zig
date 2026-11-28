@@ -7,20 +7,24 @@ const Stream = @import("stream.zig").Stream;
 const Held = @import("stream.zig").Held;
 const dr = @import("drafter.zig");
 
-/// What the wrapper knows of a drafting stream.
+/// An admitted request; only an opened head owns drafter context.
 const Lane = struct {
+    opened: bool = false,
     rows: bool = false, // the drafter has absorbed the row before the next draft (it can draft)
     filler: u32 = 0, // drafts the next verify takes as fillers instead (a prompt restored whole: no row to draft from)
     tree_first: ?u32 = null, // the first token of the grown tree read back this round, until a verify carries it
     offered: u32 = 0, // the grown tree's nodes the last verify carried, told to the drafter with its kept rows
     stepped: ?u64 = null, // a prompt pass going a step at a time: the prompt rows the drafter has been given
+    head_held: bool = false, // a real hold, not restored-prompt fillers, supplied the current head
 };
 
 pub const Drafted = struct {
     gpa: Allocator,
     target: be.Backend,
     drafter: dr.Drafter,
-    lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty, // streams the drafter has opened
+    lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty, // all admissions, including target-only
+    heads: usize = 0,
+    translated: bool = false, // the last verify replaced device drafts with host tokens
     // scratch kept between rounds, so a steady round allocates nothing
     windows: std.ArrayList(be.Window) = .empty, // the last verify's windows, held drafts swapped for host tokens
     tokens: std.ArrayList(u32) = .empty, // their drafts, back to back
@@ -32,6 +36,7 @@ pub const Drafted = struct {
     /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
     held_on_target: bool = false,
     first_rows: bool = false,
+    prepares: bool = false, // the drafter owns context; facts() sets it before backend() picks the prepared tables
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -50,7 +55,7 @@ pub const Drafted = struct {
         x.firsts.deinit(x.gpa);
     }
 
-    const legacy_vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .probabilities = probabilities, .tree = tree, .release = release };
+    const legacy_vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .probabilities = probabilities, .tree = tree, .observe_head = observeHead, .release = release };
     const planned_vtable: be.Backend.VTable = blk: {
         var v = legacy_vtable;
         v.proposal_draft = draft;
@@ -70,9 +75,10 @@ pub const Drafted = struct {
         v.reports_fill = true;
         break :blk v;
     };
+    /// The target's policy through the wrapper; it never calls the drafter, which a target-only test may leave inert.
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .keep_full_lone = x.target.keep_full_lone, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .warm_images = x.target.warm_images, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.first_rows) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .draft_timing = x.drafter.hold_timing, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .keep_full_lone = x.target.keep_full_lone, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .warm_images = x.target.warm_images, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.prepares, x.first_rows) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -81,27 +87,44 @@ pub const Drafted = struct {
         break :blk tables;
     };
 
+    const prepared: [8]be.Backend.VTable = blk: {
+        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned } ++ cancellable;
+        for (&tables) |*v| v.prepare_draft = prepareDraft;
+        break :blk tables;
+    };
+
     const row_tables: [8]be.Backend.VTable = blk: {
-        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned, cancellable[0], cancellable[1], cancellable[2], cancellable[3] };
+        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned } ++ cancellable;
         for (&tables) |*v| v.first_row = firstRow;
         break :blk tables;
     };
 
-    fn vtableFor(planned: bool, steps: bool, cancels: bool, rows: bool) *const be.Backend.VTable {
-        if (rows) return &row_tables[@as(usize, @intFromBool(cancels)) * 4 + @as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
+    const row_prepared: [8]be.Backend.VTable = blk: {
+        var tables = prepared;
+        for (&tables) |*v| v.first_row = firstRow;
+        break :blk tables;
+    };
+
+    fn vtableFor(planned: bool, steps: bool, cancels: bool, prepares: bool, rows: bool) *const be.Backend.VTable {
+        const at = @as(usize, @intFromBool(cancels)) * 4 +
+            @as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned);
+        if (prepares) return if (rows) &row_prepared[at] else &prepared[at];
+        if (rows) return &row_tables[at];
         if (cancels) return &cancellable[@as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
         if (steps) return if (planned) &stepped_planned else &stepped_legacy;
         return if (planned) &planned_vtable else &legacy_vtable;
     }
 
     fn cancelPrefill(ptr: *anyopaque, s: *Stream) anyerror!void {
-        const target = self(ptr).target;
-        try target.vtable.cancel_prefill.?(target.ptr, s);
+        const x = self(ptr);
+        errdefer x.dropStream(s);
+        try x.target.vtable.cancel_prefill.?(x.target.ptr, s);
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, guard, batching and copy match; chains late.
-    pub fn facts(x: *const Drafted, target: Model) Model {
+    pub fn facts(x: *Drafted, target: Model) Model {
         const d = x.drafter.facts();
+        x.prepares = d.hold_context_costs.len > 0; // the prepared tables stage this context before a draft
         var m = target;
         m.mtp = true;
         m.speculate = true;
@@ -117,6 +140,9 @@ pub const Drafted = struct {
         m.head_trees = d.trees;
         m.copy_first = d.copy_first;
         m.hold_costs = d.hold_costs;
+        m.hold_context_costs = d.hold_context_costs;
+        m.hold_rows = d.hold_rows;
+        m.hold_block_rows = d.hold_block_rows;
         if (d.chances and x.drafter.vtable.chances != null) {
             // a chain's drafts priced by the drafter's own chances; the next hold as deep as the grant and its slack
             m.draft_probabilities = d.confidence_floor == null;
@@ -145,33 +171,61 @@ pub const Drafted = struct {
 
     fn clearProposals(ptr: *anyopaque, s: *Stream) void {
         const x = self(ptr);
-        if (x.lanes.getPtr(s)) |lane| {
+        if (x.openedLane(s)) |lane| {
             lane.filler = 0;
             lane.tree_first = null;
+            x.drafter.vtable.clear_proposals.?(x.drafter.ptr, s);
         }
-        x.drafter.vtable.clear_proposals.?(x.drafter.ptr, s);
     }
 
     fn self(ptr: *anyopaque) *Drafted {
         return @ptrCast(@alignCast(ptr));
     }
 
+    fn openedLane(x: *Drafted, s: *Stream) ?*Lane {
+        const lane = x.lanes.getPtr(s) orelse return null;
+        return if (lane.opened) lane else null;
+    }
+
+    /// Admission owns the route across prompt chunks and same-backend handovers, until actual release.
+    fn enroll(x: *Drafted, s: *Stream) !void {
+        if (x.lanes.contains(s)) return;
+        try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+        // Disabled drafts never own head context; enabled legacy providers keep their feature-prefill path.
+        s.head_context = if (!s.drafts)
+            false
+        else if (x.drafter.vtable.enroll != null)
+            x.drafter.enroll(s, .{ .streams = @max(x.lanes.count() + 1, s.prefill_cohort), .heads = x.heads + 1 })
+        else
+            null;
+        if (s.head_context == false) s.head_prior = &.{};
+        x.lanes.putAssumeCapacity(s, .{});
+        x.heads += @intFromBool(s.head_context != false);
+    }
+
+    fn observeHead(ptr: *anyopaque, s: *Stream, proposed: u32, accepted: u32) void {
+        const x = self(ptr);
+        const lane = x.openedLane(s) orelse return;
+        if (!lane.head_held) return;
+        lane.head_held = false;
+        if (x.target.vtable.observe_head) |observe| observe(x.target.ptr, s, proposed, accepted);
+        if (x.drafter.vtable.observe_head) |observe| observe(x.drafter.ptr, s, proposed, accepted);
+    }
+
     /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
-        if (s.drafts) if (x.target.vtable.prefill_features) |streamed| { // chunk by chunk: no whole prompt's taps held
-            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
-            try x.drafter.open(s);
-            x.lanes.putAssumeCapacity(s, .{});
-            errdefer x.dropStream(s);
-            return streamed(x.target.ptr, s, x.drafter.taps(), .{ .ptr = x, .take = take });
-        };
-        try x.target.prefill(s);
-        if (!s.drafts) return;
+        try x.enroll(s);
         errdefer x.dropStream(s);
-        try x.lanes.ensureUnusedCapacity(x.gpa, 1); // before open: a stream opened is always one the wrapper releases
-        try x.drafter.open(s);
-        x.lanes.putAssumeCapacity(s, .{});
+        if (s.head_context != false) {
+            // The target's prompt pass captures taps into the drafter's stage, so the lane must exist first.
+            try x.drafter.open(s);
+            x.lanes.getPtr(s).?.opened = true;
+            if (x.target.vtable.prefill_features) |streamed| // chunk by chunk: no whole prompt's taps held
+                return streamed(x.target.ptr, s, x.drafter.taps(), .{ .ptr = x, .take = take });
+        }
+        try x.target.prefill(s);
+        if (s.head_context == false) return;
         const ids = s.prompt();
         const from: usize = s.cached;
         if (ids.len < from + 2) return;
@@ -184,14 +238,15 @@ pub const Drafted = struct {
     fn prefillStep(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
         const x = self(ptr);
         const step = x.target.vtable.prefill_step.?;
-        if (!s.drafts) return step(x.target.ptr, s, max_rows);
+        try x.enroll(s);
         errdefer x.dropStream(s);
-        const done = try step(x.target.ptr, s, max_rows);
-        if (!x.lanes.contains(s)) { // the target's lane is open now: the drafter that keeps its stream's rows finds it
-            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+        if (s.head_context == false) return step(x.target.ptr, s, max_rows);
+        // The first step's target forward captures into the drafter's stage, so the lane must exist first.
+        if (!x.lanes.getPtr(s).?.opened) {
             try x.drafter.open(s);
-            x.lanes.putAssumeCapacity(s, .{});
+            x.lanes.getPtr(s).?.opened = true;
         }
+        const done = try step(x.target.ptr, s, max_rows);
         const lane = x.lanes.getPtr(s).?;
         const from = lane.stepped orelse s.cached; // a resumed pass starts at its kept state
         const to: u64 = if (done) s.prompt().len else s.fill_at.load(.monotonic);
@@ -236,10 +291,9 @@ pub const Drafted = struct {
     /// Held drafts reach the target as host tokens, all streams read back in one call (fillers: the pending token).
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
-        x.windows.clearRetainingCapacity();
-        try x.windows.appendSlice(x.gpa, windows);
+        x.translated = false;
         // a window carrying the stream's grown tree (allocation may keep only its first nodes): how many it offers
-        for (windows) |w| if (x.lanes.getPtr(w.stream)) |lane| {
+        if (x.heads > 0) for (windows) |w| if (x.openedLane(w.stream)) |lane| {
             const head = lane.tree_first orelse continue;
             lane.offered = if (w.held == 0 and w.tokens.len > 0 and w.tokens[0] == head) @intCast(w.tokens.len) else 0;
             lane.tree_first = null;
@@ -249,16 +303,19 @@ pub const Drafted = struct {
         for (windows) |w| {
             if (w.held > 0 and w.tokens.len != 0) return error.MixedDrafts;
             total += w.held;
-            if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
+            if (through and w.held > 0 and (x.openedLane(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
-        if (total == 0 or through) return x.target.verify(x.windows.items, out);
+        if (total == 0 or through) return x.target.verify(windows, out);
+        x.windows.clearRetainingCapacity();
+        try x.windows.appendSlice(x.gpa, windows);
+        x.translated = true;
         try x.tokens.resize(x.gpa, total);
         x.streams.clearRetainingCapacity();
         x.outs.clearRetainingCapacity();
         var at: usize = 0;
         for (windows, x.windows.items) |w, *v| {
             if (w.held == 0) continue;
-            const lane = x.lanes.getPtr(w.stream) orelse return error.NotDrafting;
+            const lane = x.openedLane(w.stream) orelse return error.NotDrafting;
             const slot = x.tokens.items[at..][0..w.held];
             at += w.held;
             v.tokens = slot;
@@ -278,7 +335,7 @@ pub const Drafted = struct {
     /// One stream's held drafts as host tokens for a grammar to walk (fillers: the pending token, kept for the verify).
     fn held(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
         const x = self(ptr);
-        const lane = x.lanes.getPtr(s) orelse return error.NotDrafting;
+        const lane = x.openedLane(s) orelse return error.NotDrafting;
         if (lane.filler > 0) {
             @memset(out, s.pending.?);
             return;
@@ -289,20 +346,30 @@ pub const Drafted = struct {
     /// The target keeps from the windows it verified (host tokens): the round loop's, position for position.
     fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const x = self(ptr);
+        if (!x.translated) return x.target.keep(windows, paths);
         if (windows.len != x.windows.items.len) return error.WindowMismatch;
         for (windows, x.windows.items) |w, v| if (w.stream != v.stream) return error.WindowMismatch;
         return x.target.keep(x.windows.items, paths);
     }
 
-    /// One absorb for every request's kept rows, then one hold for every request that wants drafts and can draft.
-    fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
+    /// Stage each unprepared request once and absorb its rows, retaining pending tokens for the subsequent hold.
+    fn prepareDraft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
+        try x.stage(requests);
+        if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
+    }
+
+    /// Each unprepared request's rows to absorb, and its pending token in `firsts`.
+    fn stage(x: *Drafted, requests: []const be.DraftRequest) !void {
         x.absorbs.clearRetainingCapacity();
-        x.holds.clearRetainingCapacity();
         try x.firsts.resize(x.gpa, requests.len);
         for (requests, x.firsts.items) |r, *tok| {
+            if (r.prepared) {
+                if (r.rows) |rows| tok.* = r.follow[rows.len - 1];
+                continue;
+            }
             if (r.lanes != null and !x.drafter.facts().trees) return error.TreesNotBuilt;
-            const lane = x.lanes.getPtr(r.stream) orelse return error.NotDrafting;
+            const lane = x.openedLane(r.stream) orelse return error.NotDrafting;
             lane.filler = 0; // a new request supersedes fillers a copy round left unused
             var pending: u32 = undefined;
             if (r.rows) |rows| {
@@ -330,6 +397,19 @@ pub const Drafted = struct {
                     lane.rows = true;
                 }
             }
+            tok.* = pending;
+        }
+    }
+
+    /// Prepared requests staged before funding; others stage, then absorb and hold (fused if the drafter can).
+    fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
+        const x = self(ptr);
+        try x.stage(requests);
+        x.holds.clearRetainingCapacity();
+        for (requests, x.firsts.items) |r, pending| {
+            if (r.lanes != null and !x.drafter.facts().trees) return error.TreesNotBuilt;
+            const lane = x.openedLane(r.stream) orelse return error.NotDrafting;
+            lane.head_held = false;
             if (r.depth == 0) continue;
             if (!lane.rows) { // nothing to draft from yet: fillers this round, the drafter from the next
                 lane.filler = r.depth;
@@ -337,28 +417,27 @@ pub const Drafted = struct {
             }
             try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .plan = r.plan, .lanes = r.lanes, .tokens = r.stream.context.items, .sampling = r.stream.sampling });
         }
-        if (x.drafter.vtable.draft_round) |f| {
-            if ((x.drafter.proposal_head == null or x.drafter.proposal_head.?.mode == .legacy) and
-                (x.absorbs.items.len > 0 or x.holds.items.len > 0))
-            {
-                return f(x.drafter.ptr, x.absorbs.items, x.holds.items);
-            }
+        const fused = x.drafter.vtable.draft_round != null and (x.drafter.proposal_head == null or x.drafter.proposal_head.?.mode == .legacy);
+        if (fused and (x.absorbs.items.len > 0 or x.holds.items.len > 0)) {
+            try x.drafter.vtable.draft_round.?(x.drafter.ptr, x.absorbs.items, x.holds.items);
+        } else {
+            if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
+            if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
         }
-        if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
-        if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
+        for (x.holds.items) |h| x.openedLane(h.stream).?.head_held = true;
     }
 
     /// A drafter-grown tree's node chances (false: none, so the rule's per-depth rates price it).
     fn probabilities(ptr: *anyopaque, s: *Stream, out: []f64) anyerror!bool {
         const x = self(ptr);
-        if (!x.lanes.contains(s)) return false;
+        if (x.openedLane(s) == null) return false;
         return x.drafter.chances(s, out);
     }
 
     /// A drafter-grown tree as host tokens and parents; null: the drafter holds a chain or nothing grown.
     fn tree(ptr: *anyopaque, s: *Stream, gpa: Allocator) anyerror!?Held {
         const x = self(ptr);
-        const lane = x.lanes.getPtr(s) orelse return null;
+        const lane = x.openedLane(s) orelse return null;
         if (lane.filler > 0) return null;
         const grown = try x.drafter.tree(s, gpa) orelse return null;
         lane.tree_first = if (grown.tokens) |t| (if (t.len > 0) t[0] else null) else null;
@@ -367,15 +446,23 @@ pub const Drafted = struct {
 
     /// A stream another driver decoded on the drafter's own state (a lone driver): the next draft absorbs and holds.
     pub fn adopt(x: *Drafted, s: *Stream) !void {
-        if (!x.lanes.contains(s)) {
-            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+        try x.enroll(s);
+        if (s.head_context == false) return;
+        const lane = x.lanes.getPtr(s).?;
+        if (!lane.opened) {
             try x.drafter.open(s);
+            lane.opened = true;
         }
-        x.lanes.putAssumeCapacity(s, .{ .rows = true });
+        lane.* = .{ .opened = true, .rows = true };
     }
 
     fn dropStream(x: *Drafted, s: *Stream) void {
-        if (x.lanes.remove(s)) x.drafter.release(s);
+        if (x.lanes.fetchRemove(s)) |entry| {
+            x.heads -= @intFromBool(s.head_context != false);
+            if (entry.value.opened) x.drafter.release(s);
+            s.head_context = null;
+            s.head_prior = &.{};
+        }
         x.target.release(s);
     }
 

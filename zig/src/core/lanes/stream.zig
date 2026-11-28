@@ -25,6 +25,7 @@ pub const Reason = enum {
 };
 
 pub const Mode = enum { pipe, drain, verify, exit };
+
 pub const loop_max_period: usize = 8;
 pub const loop_min_run: usize = 256;
 pub const loop_warm_in: usize = 64;
@@ -166,6 +167,9 @@ pub const Stream = struct {
     sampling: ?Sampling,
     penalties: Penalties = .{},
     drafts: bool,
+    head_context: ?bool = null, // null: legacy; false: request-stable target-only external-head route
+    head_prior: []const f64 = &.{}, // provider-owned conditional rates, cloned when the rule first needs them
+    prefill_cohort: usize = 0, // host's admitted/queued lane bound before prefill (0: unknown)
     proposer: ?Proposer,
     recall: ?*Reader,
     stop_check: ?StopCheck,
@@ -257,7 +261,25 @@ pub const Stream = struct {
     grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
     draft_chances_cut: ?usize = null, // first chance a cut left unknown (null: measured); a chances hook marks it
+    hold_context_rows: u32 = 0, // raw context still owed to the active drafter, maintained by that provider
+    verify_row_ms: ?f64 = null, // backend's live host-draw ms per row (null: unsupported or not observed)
+    verify_host_ms: f64 = 0, // completed host draws in this verify, consumed once by the round
     copy_width: ?u32 = null,
+    copy_tokens: std.ArrayList(u32) = .empty, // owned across round-arena resets and queries sharing a proposer's buffer
+    reserved_copy: ?struct {
+        context: []const u32, // identity and length; commit invalidates before appending to history
+        cache_len: u64,
+        pending: ?u32,
+        rounds: u64,
+        room: i64,
+        width: ?u32,
+        alone: bool,
+        proposer: ?Proposer,
+        recall: ?*Reader,
+        recalled: bool,
+        trusted: bool,
+    } = null,
+
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
         var s: Stream = .{
             .id = spec.id,
@@ -321,9 +343,12 @@ pub const Stream = struct {
         s.dropRoundState(gpa);
     }
 
-    /// Forget the round loop's state (Python `_release_stream_state`).
+    /// Forget round-local state; same-backend detach keeps enrollment and the provider's complete context.
     pub fn dropRoundState(s: *Stream, gpa: Allocator) void {
         if (s.depth) |*d| d.deinit(gpa);
+        s.reserved_copy = null;
+        s.copy_tokens.deinit(gpa);
+        s.copy_tokens = .empty;
         s.dropHeld(gpa);
         s.depth = null;
         s.mode = null;
@@ -335,6 +360,8 @@ pub const Stream = struct {
         s.draft_chances.deinit(gpa);
         s.draft_chances = .empty;
         s.draft_chances_cut = null;
+        s.verify_row_ms = null;
+        s.verify_host_ms = 0;
         s.copy_width = null;
         s.proposal_depth = null;
     }
@@ -347,6 +374,10 @@ pub const Stream = struct {
         s.next = null;
         if (s.lanes) |l| l.deinit(gpa);
         s.lanes = null;
+    }
+
+    pub fn headDrafts(s: *const Stream) bool {
+        return s.drafts and s.head_context != false;
     }
 
     pub fn prompt(s: *const Stream) []const u32 {
@@ -429,6 +460,7 @@ pub const Stream = struct {
     /// Begin the thinking budget's close: its first token now, the rest forced after it.
     pub fn startClose(s: *Stream, gpa: Allocator) !u32 {
         try s.force.ensureTotalCapacity(gpa, s.think_close.len - 1);
+        s.reserved_copy = null;
         s.think_open = false;
         s.force.clearRetainingCapacity();
         s.force.appendSliceAssumeCapacity(s.think_close[1..]);
@@ -479,6 +511,7 @@ pub const Stream = struct {
             }
             try s.long_loop.reserve(gpa, s.emitted().len + end);
         }
+        s.reserved_copy = null;
         var landed: usize = 0;
         for (tokens, 0..) |t, i| {
             if (s.finished) break;
@@ -538,6 +571,7 @@ pub const Stream = struct {
 
     pub fn popForce(s: *Stream) ?u32 {
         if (s.force.items.len == 0) return null;
+        s.reserved_copy = null;
         return s.force.orderedRemove(0);
     }
 };
@@ -545,4 +579,5 @@ pub const Stream = struct {
 test {
     _ = @import("commit_storage_test.zig");
     _ = @import("stream_test.zig");
+    _ = @import("stream_limits_test.zig");
 }

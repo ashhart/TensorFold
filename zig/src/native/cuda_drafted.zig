@@ -92,8 +92,8 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
     };
     drafted_initialized = true;
     s.source = .{ .kind = opened.drafter.kind, .name = o.drafter_name orelse dir };
-    s.backend = h.drafted.backend();
     s.facts = h.drafted.facts(loaded.facts);
+    s.backend = h.drafted.backend();
     s.stream_bytes = try h.drafted.streamBytes(loaded.stream_bytes);
     s.held = h;
     transferred = true;

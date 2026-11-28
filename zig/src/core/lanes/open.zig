@@ -91,7 +91,7 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
         s.pending = null;
         return;
     }
-    if (e.backend.first_before_draft and e.cfg.family_mtp and s.drafts) return @import("open_first.zig").opened(e, s, reach, hook);
+    if (e.backend.first_before_draft and e.cfg.family_mtp and s.headDrafts()) return @import("open_first.zig").opened(e, s, reach, hook);
     if (s.isCancelled()) { // cancelled in its last chunk: no first token
         e.backend.release(s);
         return error.Cancelled;
@@ -105,7 +105,7 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
     var feed: Feed = .{ .handle = drawn };
     if (try e.forcedNext(s)) |t| feed = .{ .value = t };
     var asked: ?u32 = null;
-    if (e.cfg.family_mtp and s.drafts) {
+    if (e.cfg.family_mtp and s.headDrafts()) {
         // the head reads the prompt's last row and the first token, and drafts the one after it
         const wanted = try firstDepth(e, s, reach);
         const requests = try @import("root_copy.zig").prepare(e, &.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = wanted }});
@@ -142,9 +142,10 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
     try e.live.append(e.gpa, s);
 }
 
-/// The first drafts' depth for `reach`.
+/// Priced heads wait for the first funded grant; prompt context is still owned at open.
 pub fn firstDepth(e: *Engine, s: *Stream, reach: Reach) !u32 {
-    var who = win.who(s);
+    var who = win.who(s, e.cfg.k.hold_costs.len > 0);
+    if (who.granted == null and @import("hold_price.zig").pricesPasses(e)) return 0;
     const d = if (reach == .head and e.cfg.node_probabilities) try e.rule.headDepth(&who, null, win.probe(e)) else try e.rule.depth(who);
     return @intCast(if (e.cfg.shared_mtp_cap > 0 and e.live.items.len > 0) @min(d, e.cfg.shared_mtp_cap) else d); // joins a shared round
 }

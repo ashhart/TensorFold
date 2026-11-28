@@ -26,15 +26,24 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
         sampled_before = sampled_before or s.sampling != null;
     };
     const measured = independent and e.rule.sharedPrice(entries.len, sampled_before) != null;
-    if (!measured) e.clock.start();
-    try e.late.flush(e, ask);
-    // An unmeasured plain price retains the original clock boundary.
-    if (measured) e.clock.start();
+    var hold_round = false;
+    if (e.cfg.k.hold_costs.len > 0) for (entries) |s| {
+        hold_round = hold_round or s.head_context != false;
+    };
+    if (hold_round) {
+        @import("hold_price.zig").startRound(e);
+        try e.late.flush(e, ask);
+    } else {
+        if (!measured) e.clock.start();
+        try e.late.flush(e, ask);
+        // An unmeasured plain price retains the original clock boundary.
+        if (measured) e.clock.start();
+    }
     const a = e.arena.allocator();
     const plans = try a.alloc(Plan, entries.len);
     for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
     const sampled = win.anySampled(plans);
-    const calibration = independent and try @import("shared_price.zig").calibrate(e, plans);
+    const calibration = !hold_round and independent and try @import("shared_price.zig").calibrate(e, plans);
     if (calibration) {
         for (plans) |*p| try @import("window_cut.zig").prefix(a, p, 0);
     } else try win.allocate(e, plans);
@@ -47,6 +56,10 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
         o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1), .rows = if (p.stream.logprobs != null) try a.alloc(LogRow, w.rows()) else &.{} };
         total += w.rows();
     }
+    for (windows) |w| w.stream.verify_host_ms = 0;
+    defer for (windows) |w| {
+        w.stream.verify_host_ms = 0;
+    };
     try e.backend.verify(windows, out);
     const outcomes = try a.alloc(Outcome, plans.len);
     const paths = try a.alloc([]const u32, plans.len);
@@ -59,16 +72,30 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
     }
     var heads: std.ArrayList(usize) = .empty;
     for (plans, 0..) |p, i| {
-        if (e.cfg.family_mtp and p.stream.drafts) try heads.append(a, i);
+        if (e.cfg.family_mtp and p.stream.headDrafts()) try heads.append(a, i);
     }
+    const requests: []be.DraftRequest = if (heads.items.len > 0 and
+        (e.cfg.draft_streams or e.backend.vtable.prepare_draft != null))
+        try a.alloc(be.DraftRequest, heads.items.len)
+    else
+        &.{};
+    for (requests, 0..) |*r, at| {
+        const i = heads.items[at];
+        const s = plans[i].stream;
+        r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = 0 };
+    }
+    if (requests.len > 0) if (e.backend.vtable.prepare_draft) |prepare| {
+        try prepare(e.backend.ptr, requests);
+        for (requests) |*r| r.prepared = true;
+    };
     const whos = try a.alloc(depth.Who, heads.items.len);
-    for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
+    for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream, e.cfg.k.hold_costs.len > 0);
     const budgets = try a.alloc(i64, heads.items.len);
     if (calibration)
         @memset(budgets, 0)
-    else if (e.cfg.allocate_shared_drafts)
+    else if ((heads.items.len > 0 or e.cfg.k.hold_costs.len == 0) and e.cfg.allocate_shared_drafts)
         try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets)
-    else if (independent)
+    else if (heads.items.len > 0 or e.cfg.k.hold_costs.len == 0) if (independent)
         try e.rule.budgetsFor(whos, win.probe(e), sampled, budgets, plans.len)
     else
         try e.rule.budgets(whos, win.probe(e), sampled, budgets);
@@ -76,13 +103,15 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
     for (ids, heads.items) |*id, i| id.* = str(plans[i].stream.id);
     try trail.event(e, &.{ f("ev", str("budgets")), f("streams", .{ .list = ids }), f("depths", .{ .i64s = budgets }) });
     if (heads.items.len > 0 and e.cfg.draft_streams) {
-        // every stream's head in one batch (the backend drafts a depth for all of them at once)
-        const requests = try a.alloc(be.DraftRequest, heads.items.len);
-        for (requests, heads.items, budgets) |*r, i, d| {
-            const s = plans[i].stream;
-            r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = @intCast(d) };
-        }
+        // Every head shares one hold, after all kept context has been staged and priced.
+        for (requests, budgets) |*r, d| r.depth = @intCast(d);
         try ask(e, requests);
+    } else if (requests.len > 0) {
+        for (requests, budgets, 0..) |*r, d, i| {
+            var who = win.who(r.stream, e.cfg.k.hold_costs.len > 0);
+            r.depth = @intCast(try e.rule.headDepth(&who, d, win.probe(e)));
+            try ask(e, requests[i..][0..1]);
+        }
     } else {
         for (heads.items, budgets) |i, d| try e.draftLate(plans[i].stream, plans[i].position, outcomes[i].follow, outcomes[i].path, d);
     }
@@ -93,20 +122,36 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
     };
     try e.backend.keep(windows, paths);
     if (e.cfg.timed) {
-        // the drafts budgets priced past each stream's first are no part of the round's overhead
-        var steps: i64 = 0;
-        for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
-        const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
+        // Actual timing includes every head step; the modeled path also removes the steps past a hold's grid.
+        const extra = if (e.backend.draft_timing == null)
+            @import("hold_price.zig").extraStepMs(budgets, e.cfg.draft_step_ms, e.cfg.draft_step_ms != 0 and e.cfg.draft_streams and depth.pricedBatched())
+        else
+            0;
+        const ms = e.clock.elapsedMs(.overhead) - extra;
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
         // the log covers both grant paths; only the plain guard's price observes them
-        const head_ms = e.rule.pricedHeadMs(budgets);
+        const head_ms = if (hold_round) @import("hold_price.zig").observedHeadMs(e.backend, &e.rule, budgets) else e.rule.pricedHeadMs(budgets);
         if (try price_log.enabled(e)) try price_log.round(e, plans, windows, .{ .trial = calibration, .sampled = sampled, .ms = ms, .head_ms = head_ms, .heads = heads.items, .depths = budgets });
-        if (independent) {
-            var plain = total == plans.len;
-            for (budgets) |d| plain = plain and d == 0;
-            try e.rule.observeSharedPrice(@intCast(plans.len), total, ms, sampled, head_ms, plain, calibration);
+        if (hold_round) {
+            try e.rule.observeOverhead(@intCast(plans.len), total, ms - takeVerifyHostMs(windows), sampled, head_ms);
+        } else {
+            if (independent) {
+                var plain = total == plans.len;
+                for (budgets) |d| plain = plain and d == 0;
+                try e.rule.observeSharedPrice(@intCast(plans.len), total, ms, sampled, head_ms, plain, calibration);
+            }
+            try e.rule.observeOverhead(@intCast(plans.len), total, ms - takeVerifyHostMs(windows), sampled, e.rule.headMs(budgets));
         }
-        try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
     }
     if (e.backend.round_observer != null) e.backend.observed(paths);
+}
+
+/// Drain completed spans once; unquoted routes retain their old residual-overhead price.
+fn takeVerifyHostMs(windows: []const be.Window) f64 {
+    var ms: f64 = 0;
+    for (windows) |w| {
+        if (w.stream.verify_row_ms != null and w.stream.grammar == null) ms += w.stream.verify_host_ms;
+        w.stream.verify_host_ms = 0;
+    }
+    return ms;
 }

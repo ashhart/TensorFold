@@ -93,3 +93,38 @@ test "a tree shaped as a chain takes the grammar's own drafts as chain rows, and
         try std.testing.expectEqual(@as(usize, 0), g.at);
     }
 }
+
+test "held drafts and grafts keep row order through grammar trimming" {
+    var cfg = try et.model();
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var backend = target.backend();
+    var vtable = backend.vtable.*;
+    vtable.held = struct {
+        fn read(_: *anyopaque, _: *sm.Stream, out: []u32) !void {
+            try std.testing.expectEqual(@as(usize, 2), out.len);
+            @memcpy(out, &[_]u32{ 5, 7 });
+        }
+    }.read;
+    backend.vtable = &vtable;
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, backend, clock.clock());
+    defer engine.deinit();
+    for ([_]u32{ 9, 4 }) |graft| {
+        var g: Spell = .{ .want = &.{ 5, 7, 9 } };
+        var k: grammar.Constraint = .init(g.rules(), (fake.vocab + 31) / 32, null);
+        var s = try sm.Stream.init(gpa, .{ .id = "held", .prompt = &.{ 1, 2 }, .max_new = 8, .drafts = false, .grammar = &k });
+        defer s.deinit(gpa);
+        s.pending = 3;
+        const tokens = [_]u32{graft};
+        var p: win.Plan = .{ .stream = &s, .position = 2, .kind = .head, .held = 2, .tokens = &tokens };
+        try win.constrain(&engine, &p);
+        try std.testing.expectEqual(@as(u32, 0), p.held);
+        const expected: []const u32 = &.{ 5, 7, 9 };
+        try std.testing.expectEqual(@as(u32, if (graft == 9) 0 else 3), p.grammar_from);
+        try std.testing.expectEqualSlices(u32, expected, p.tokens);
+        const w = try win.build(&engine, p, false);
+        try std.testing.expectEqualSlices(u32, expected, w.tokens);
+    }
+}

@@ -21,7 +21,7 @@ pub fn rows(e: *Engine, s: *Stream, copy: win.Copy, take: bool) !usize {
     if (n == 0 or !enabled(e, s)) return n;
     try seed(e, s);
     const rate = win.copiedRate(e, s, copy.recalled);
-    const kept: usize = @intCast(try e.rule.copyRows(win.who(s), &.{rate}, @intCast(n), take));
+    const kept: usize = @intCast(try e.rule.copyRows(win.who(s, e.cfg.k.hold_costs.len > 0), &.{rate}, @intCast(n), take));
     if (take) try trail.event(e, &.{ f("ev", trail.str("copy-price")), f("stream", trail.str(s.id)), f("rows", trail.int(n)), f("keep", trail.int(kept)), f("rate", ev.bits(rate)) });
     return kept;
 }
@@ -42,8 +42,8 @@ pub fn time(e: *Engine, s: *Stream, kind: win.Kind, window_rows: usize, verified
     const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
     try trail.event(e, &.{ f("ev", trail.str(if (own) "plain-cost" else "copy-cost")), f("stream", trail.str(s.id)), f("drafts", trail.int(window_rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
     const drafts: i64 = @intCast(window_rows - 1);
-    if (own) return copy_price.observeOwn(&e.rule, drafts, ms, first, win.who(s));
-    return copy_price.observeCopy(&e.rule, drafts, ms, first, win.who(s));
+    if (own) return copy_price.observeOwn(&e.rule, drafts, ms, first, win.who(s, e.cfg.k.hold_costs.len > 0));
+    return copy_price.observeCopy(&e.rule, drafts, ms, first, win.who(s, e.cfg.k.hold_costs.len > 0));
 }
 
 /// Copy rounds a stream times before its prices replace the kept ones: a reply of a few tokens times one at most.
@@ -53,7 +53,7 @@ const kept_rounds = 2;
 fn seed(e: *Engine, s: *Stream) !void {
     if (s.prices_seeded) return;
     s.prices_seeded = true;
-    _ = try e.rule.rates(win.who(s));
+    _ = try e.rule.rates(win.who(s, e.cfg.k.hold_costs.len > 0));
     const band = lone_costs.band(s.context.items.len);
     s.depth.?.copy_band = band;
     try lone_costs.seedCopies(e.gpa, slot(e, s, band).*, s);

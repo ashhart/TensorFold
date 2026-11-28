@@ -4,6 +4,7 @@ const Config = @import("config.zig").Config;
 const Engine = @import("engine.zig").Engine;
 const sm = @import("stream.zig");
 const fake = @import("fake.zig");
+const be = @import("backend.zig");
 const Drafted = @import("drafted.zig").Drafted;
 const SuffixLookup = @import("proposer.zig").SuffixLookup;
 const dt = @import("drafted_test.zig");
@@ -63,8 +64,8 @@ test "a stepping target's prompt goes in a step at a time through the wrapper: t
         try std.testing.expectEqual(@as(usize, 2), steps); // three steps: two not done, then the open
     }
     try std.testing.expectEqual(@as(u32, 2), head.opens);
-    // each opened after the target's first step: its lane (a pool lane's run, which the drafter borrows) exists
-    try std.testing.expectEqual(@as(u32, 2), opened_on_lane);
+    // the drafter opens before the target's first step, so its lane exists when the first taps are captured
+    try std.testing.expectEqual(@as(u32, 0), opened_on_lane);
     while (engine.activeCount() > 0) try engine.step();
     for (whole.tokens, &streams) |want, *s| try std.testing.expectEqualSlices(u32, want, s.emitted());
 }
@@ -151,4 +152,293 @@ test "a drafted backend forwards optional prompt cancellation and its failure be
         try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
         try std.testing.expectEqual(@as(u32, 0), head.releases);
     };
+}
+
+const PrefillMode = enum { whole, streamed, chunked };
+
+/// Count actual feature reads and streamed passes while the fake target advances its prompt and reply.
+const PrefillTarget = struct {
+    inner: fake.Fake = .{ .gpa = gpa, .prefill_chunks = 4 },
+    feature_reads: usize = 0,
+    streamed_passes: usize = 0,
+    releases: usize = 0,
+
+    fn of(ptr: *anyopaque) *PrefillTarget {
+        return @fieldParentPtr("inner", @as(*fake.Fake, @ptrCast(@alignCast(ptr))));
+    }
+
+    fn features(ptr: *anyopaque, s: *sm.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        const x = of(ptr);
+        x.feature_reads += 1;
+        return x.inner.backend().features(s, taps, start, count);
+    }
+
+    fn streamed(ptr: *anyopaque, s: *sm.Stream, taps: []const u32, sink: be.FeatureSink) anyerror!void {
+        const x = of(ptr);
+        x.streamed_passes += 1;
+        const target = x.inner.stepped();
+        var from: u64 = s.cached;
+        while (true) {
+            const done = try target.vtable.prefill_step.?(target.ptr, s, 0);
+            const to: u64 = s.fill_at.load(.monotonic);
+            if (to > from) try sink.take(sink.ptr, s, try features(ptr, s, taps, from, @intCast(to - from)), from);
+            from = to;
+            if (done) return;
+        }
+    }
+
+    fn released(ptr: *anyopaque, _: *sm.Stream) void {
+        const x: *PrefillTarget = @ptrCast(@alignCast(ptr));
+        x.releases += 1;
+    }
+};
+
+fn legacyPrefill(mode: PrefillMode) !void {
+    const want = try run(&.{.{ .prompt = &long, .max_new = 24, .drafts = false }}, .plain, false);
+    defer freeOut(want);
+    for ([_]bool{ false, true }) |enabled| {
+        var target: PrefillTarget = .{};
+        defer target.inner.deinit();
+        target.inner.release_hook = PrefillTarget.released;
+        target.inner.release_hook_ctx = &target;
+        var strict: dt.Strict = .{ .inner = target.inner.backend() };
+        defer strict.deinit();
+        var backend = switch (mode) {
+            .whole => strict.backend(),
+            .streamed => target.inner.backend(),
+            .chunked => target.inner.stepped(),
+        };
+        var table = backend.vtable.*;
+        if (mode != .whole) table.features = PrefillTarget.features;
+        if (mode == .streamed) table.prefill_features = PrefillTarget.streamed;
+        backend.vtable = &table;
+        var head: FakeDrafter = .{};
+        defer head.deinit();
+        var wrapped = try Drafted.init(gpa, backend, head.drafter());
+        defer wrapped.deinit();
+        var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
+        defer cfg.deinit(gpa);
+        cfg.timed = false;
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+        defer engine.deinit();
+        var s = try sm.Stream.init(gpa, .{
+            .id = "legacy-prefill",
+            .prompt = &long,
+            .max_new = 24,
+            .eos = &.{96},
+            .drafts = enabled,
+        });
+        defer s.deinit(gpa);
+        defer if (!s.finished) engine.discard(&s);
+        if (mode == .chunked) {
+            for (0..4) |chunk| {
+                try std.testing.expectEqual(chunk == 3, try engine.fillStream(&s, chunk == 0));
+                try std.testing.expectEqual(@as(u64, long.len * (chunk + 1) / 4), s.fill_at.load(.monotonic));
+                try std.testing.expectEqual(@as(u32, @intFromBool(enabled)), head.opens);
+                if (!enabled) {
+                    try std.testing.expectEqual(@as(u32, 0), head.absorbs);
+                    try std.testing.expectEqual(@as(usize, 0), target.feature_reads);
+                }
+            }
+        } else {
+            try engine.addStream(&s);
+        }
+        try std.testing.expectEqual(@as(usize, 4), target.inner.prefill_count);
+        try std.testing.expectEqual(@as(u64, long.len), s.fill_at.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, 1), s.emitted().len);
+        try std.testing.expectEqualSlices(u32, want.tokens[0][0..1], s.emitted());
+        try std.testing.expectEqual(@as(usize, 1), target.inner.lanes.count());
+        try std.testing.expectEqual(@as(usize, 1), wrapped.lanes.count());
+        try std.testing.expectEqual(@as(usize, @intFromBool(enabled)), wrapped.heads);
+        try std.testing.expectEqual(@as(u32, @intFromBool(enabled)), head.opens);
+        try std.testing.expectEqual(@as(usize, @intFromBool(enabled)), head.lanes.count());
+        try std.testing.expectEqual(@as(usize, @intFromBool(enabled and mode == .streamed)), target.streamed_passes);
+        try std.testing.expectEqual(@as(usize, @intFromBool(enabled and mode == .whole)), strict.snaps.count());
+        if (enabled) {
+            try std.testing.expect(s.head_context == null);
+            try std.testing.expect(head.absorbs > 0 and head.rows >= long.len - 1);
+            if (mode != .whole) try std.testing.expect(target.feature_reads > 0);
+        } else {
+            try std.testing.expect(s.head_context == false);
+            try std.testing.expectEqual(@as(u32, 0), head.absorbs);
+            try std.testing.expectEqual(@as(u64, 0), head.rows);
+            try std.testing.expectEqual(@as(usize, 0), target.feature_reads);
+        }
+        while (engine.activeCount() > 0) try engine.step();
+        try std.testing.expect(s.finished);
+        try std.testing.expectEqualSlices(u32, want.tokens[0], s.emitted());
+        if (!enabled) {
+            try std.testing.expectEqual(@as(u32, 0), head.opens);
+            try std.testing.expectEqual(@as(u32, 0), head.absorbs);
+            try std.testing.expectEqual(@as(u32, 0), head.holds);
+            try std.testing.expectEqual(@as(usize, 0), target.feature_reads);
+        }
+        try std.testing.expectEqual(@as(usize, 1), target.releases);
+        try std.testing.expectEqual(@as(u32, @intFromBool(enabled)), head.releases);
+        try std.testing.expectEqual(@as(usize, 0), target.inner.lanes.count());
+        try std.testing.expectEqual(@as(usize, 0), strict.snaps.count());
+        try std.testing.expectEqual(@as(usize, 0), head.lanes.count());
+        try std.testing.expectEqual(@as(usize, 0), wrapped.lanes.count());
+        try std.testing.expectEqual(@as(usize, 0), wrapped.heads);
+        try std.testing.expect(s.head_context == null and s.head_prior.len == 0);
+    }
+}
+
+test "drafts off skips legacy drafter context and prompt feature capture for whole prefill" {
+    try legacyPrefill(.whole);
+}
+
+test "drafts off bypasses legacy streamed-feature prefill while the target completes" {
+    try legacyPrefill(.streamed);
+}
+
+test "drafts off keeps every legacy prompt chunk target-only while the target completes" {
+    try legacyPrefill(.chunked);
+}
+
+/// A stepping target capturing taps like Metal's bind: without the drafter lane the first step fails.
+const TapTarget = struct {
+    inner: fake.Fake = .{ .gpa = gpa, .prefill_chunks = 4 },
+    head: *FakeDrafter = undefined,
+    table: be.Backend.VTable = undefined,
+    prepared: bool = false,
+    require_open: bool = true,
+    fail_step: usize = 0,
+    steps: usize = 0,
+    rejects: usize = 0,
+
+    fn of(ptr: *anyopaque) *TapTarget {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn prepare(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const x = of(ptr);
+        if (taps.len == 0) return error.NoTaps;
+        x.prepared = true;
+    }
+
+    fn prefill(ptr: *anyopaque, s: *sm.Stream) anyerror!void {
+        const x = of(ptr);
+        if (x.prepared and x.require_open and s.headDrafts() and !x.head.lanes.contains(s)) {
+            x.rejects += 1;
+            return error.LfmTapsNotHeld;
+        }
+        return x.inner.backend().prefill(s);
+    }
+
+    fn step(ptr: *anyopaque, s: *sm.Stream, max_rows: u32) anyerror!bool {
+        const x = of(ptr);
+        x.steps += 1;
+        if (x.prepared and x.require_open and s.headDrafts() and !x.head.lanes.contains(s)) {
+            x.rejects += 1;
+            return error.LfmTapsNotHeld;
+        }
+        const b = x.inner.stepped();
+        const done = try b.vtable.prefill_step.?(b.ptr, s, max_rows);
+        if (x.fail_step == x.steps) return error.InjectedStepFailure;
+        return done;
+    }
+
+    fn init(x: *TapTarget) be.Backend {
+        x.table = x.inner.stepped().vtable.*;
+        x.table.prepare_features = prepare;
+        x.table.prefill = prefill;
+        x.table.prefill_step = step;
+        return .{ .ptr = x, .vtable = &x.table };
+    }
+};
+
+fn countRelease(ptr: *anyopaque, _: *sm.Stream) void {
+    const n: *usize = @ptrCast(@alignCast(ptr));
+    n.* += 1;
+}
+
+test "drafted prefill taps: the drafter lane opens before the stepping target's first prompt step" {
+    const want = try run(&.{.{ .prompt = &long, .max_new = 24 }}, .wrapped, false);
+    defer freeOut(want);
+    var target: TapTarget = .{};
+    defer target.inner.deinit();
+    var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5 } };
+    defer head.deinit();
+    target.head = &head;
+    var wrapped = try Drafted.init(gpa, target.init(), head.drafter());
+    defer wrapped.deinit();
+    try std.testing.expect(target.prepared);
+    var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
+    defer cfg.deinit(gpa);
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+    defer engine.deinit();
+    var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &long, .max_new = 24, .eos = &.{96} });
+    defer s.deinit(gpa);
+    var steps: usize = 0;
+    while (!try engine.fillStream(&s, steps == 0)) steps += 1;
+    try std.testing.expect(target.steps > 0);
+    try std.testing.expectEqual(@as(usize, 0), target.rejects);
+    try std.testing.expectEqual(@as(u32, 1), head.opens);
+    while (engine.activeCount() > 0) try engine.step();
+    try std.testing.expectEqualSlices(u32, want.tokens[0], s.emitted());
+}
+
+test "drafted prefill taps: a failed first step releases the opened drafter and the next request fills" {
+    const want = try run(&.{.{ .prompt = &long, .max_new = 24 }}, .wrapped, false);
+    defer freeOut(want);
+    var target: TapTarget = .{ .fail_step = 1 };
+    defer target.inner.deinit();
+    var releases: usize = 0;
+    target.inner.release_hook = countRelease;
+    target.inner.release_hook_ctx = &releases;
+    var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5 } };
+    defer head.deinit();
+    target.head = &head;
+    var wrapped = try Drafted.init(gpa, target.init(), head.drafter());
+    defer wrapped.deinit();
+    var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
+    defer cfg.deinit(gpa);
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+    defer engine.deinit();
+    var s = try sm.Stream.init(gpa, .{ .id = "failed", .prompt = &long, .max_new = 24, .eos = &.{96} });
+    defer s.deinit(gpa);
+    try std.testing.expectError(error.InjectedStepFailure, engine.fillStream(&s, true));
+    try std.testing.expectEqual(@as(usize, 1), target.steps);
+    try std.testing.expectEqual(@as(u32, 1), head.opens);
+    try std.testing.expectEqual(@as(u32, 1), head.releases);
+    try std.testing.expectEqual(@as(usize, 1), releases);
+    try std.testing.expectEqual(@as(usize, 0), target.inner.lanes.count());
+    try std.testing.expectEqual(@as(usize, 0), head.lanes.count());
+    try std.testing.expectEqual(@as(usize, 0), wrapped.lanes.count());
+    target.fail_step = 0;
+    var next = try sm.Stream.init(gpa, .{ .id = "next", .prompt = &long, .max_new = 24, .eos = &.{96} });
+    defer next.deinit(gpa);
+    try engine.addStream(&next);
+    while (engine.activeCount() > 0) try engine.step();
+    try std.testing.expect(next.finished);
+    try std.testing.expectEqualSlices(u32, want.tokens[0], next.emitted());
+}
+
+test "drafted prefill taps: the drafter lane opens before a whole prompt pass" {
+    const want = try run(&.{.{ .prompt = &long, .max_new = 24 }}, .wrapped, false);
+    defer freeOut(want);
+    var target: TapTarget = .{};
+    defer target.inner.deinit();
+    var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5 } };
+    defer head.deinit();
+    target.head = &head;
+    var wrapped = try Drafted.init(gpa, target.init(), head.drafter());
+    defer wrapped.deinit();
+    var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
+    defer cfg.deinit(gpa);
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+    defer engine.deinit();
+    var s = try sm.Stream.init(gpa, .{ .id = "whole", .prompt = &long, .max_new = 24, .eos = &.{96} });
+    defer s.deinit(gpa);
+    try engine.addStream(&s);
+    try std.testing.expectEqual(@as(usize, 0), target.rejects);
+    try std.testing.expectEqual(@as(u32, 1), head.opens);
+    while (engine.activeCount() > 0) try engine.step();
+    try std.testing.expect(s.finished);
+    try std.testing.expectEqualSlices(u32, want.tokens[0], s.emitted());
 }

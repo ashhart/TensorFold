@@ -1,7 +1,8 @@
-//! Price next-round head rows before proposing, retaining the last full node prices through zero-grant rounds.
+//! Price next-round head rows; costed holds own copy decisions, and all routes retain full node prices.
 const std = @import("std");
 const win = @import("windows.zig");
 const alloc = @import("allocate.zig");
+const verify_cost = @import("verify_cost.zig");
 const Engine = @import("engine.zig").Engine;
 const depth = @import("depth.zig");
 
@@ -10,6 +11,7 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
     const fixed = try a.alloc(u32, plans.len);
     const probs = try a.alloc([]const f64, plans.len);
     const neural = try a.alloc(bool, plans.len);
+    const row_ms = try verify_cost.snapshot(a, plans, true);
     const sampled = win.anySampled(plans);
     const limits = try costLimits(e, plans, heads, sampled, out);
     var live: usize = 0;
@@ -18,19 +20,24 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         fx.* = @intFromBool(!s.finished and !s.paused);
         pr.* = &.{};
         head.* = false;
-        if (s.finished or s.paused) continue;
+        if (s.finished or s.paused) {
+            s.reserved_copy = null;
+            continue;
+        }
         live += 1;
         if (s.force.items.len > 0) {
+            s.reserved_copy = null;
             fx.* += if (s.drafts) @as(u32, @intCast(@min(e.cfg.base_width - 1, s.force.items.len))) else 0;
             continue;
         }
-        const copy = try win.copyProposal(e, s);
+        const copy = try win.reserveCopy(e, s);
         if (copy.tokens.len > 0) {
-            const rate = if (e.cfg.own_copy_rates) win.copiedRate(e, s, copy.recalled) else e.cfg.copy_rate;
+            const trusted = e.cfg.matched_copy_rates and !copy.recalled and (copy.trusted orelse win.trustedCopy(s));
+            const rate = win.pricedCopiedRate(e, s, copy.recalled, trusted);
             pr.* = try alloc.chainProbabilities(a, &.{rate}, copy.tokens.len);
             continue;
         }
-        if (!s.drafts) continue;
+        if (!s.headDrafts()) continue;
         const cap = if (e.backend.vtable.draft_capacity) |f| f(e.backend.ptr, s) else e.cfg.most_drafts;
         const shared = if (e.cfg.shared_drafts > 0) e.cfg.shared_drafts else e.cfg.most_drafts; // Model.shared_drafts
         const chain = if (e.cfg.shared_mtp_cap > 0) e.cfg.shared_mtp_cap else e.cfg.most_drafts; // Model.shared_mtp_cap
@@ -43,7 +50,7 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         if (known > 0 and (limits == null or e.cfg.granted_depth)) {
             const prices = try a.alloc(f64, most);
             @memcpy(prices[0..known], cached[0..known]);
-            const rates = try e.rule.rates(win.who(s));
+            const rates = try e.rule.rates(win.who(s, e.cfg.k.hold_costs.len > 0));
             var chance = cached[known - 1];
             for (known..most) |j| {
                 chance *= rates[@min(j, rates.len - 1)];
@@ -51,22 +58,48 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
             }
             pr.* = prices;
         } else {
-            pr.* = try alloc.chainProbabilities(a, try e.rule.rates(win.who(s)), most);
+            pr.* = try alloc.chainProbabilities(a, try e.rule.rates(win.who(s, e.cfg.k.hold_costs.len > 0)), most);
         }
     }
     if (live == 0) {
         @memset(out, 0);
         return;
     }
-    const paired = e.rule.sharedPrice(live, sampled);
-    const counts = if (paired) |p|
-        try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, if (e.rule.k.fixed_draft_block) p.plain else p.fixed, e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .block_ms = if (e.rule.k.fixed_draft_block) p.fixed + p.head - p.plain else 0, .step_ms = if (e.rule.k.fixed_draft_block) 0 else e.cfg.mtp_step_ms, .extra_step_ms = if (e.rule.k.fixed_draft_block) 0 else e.cfg.draft_step_ms, .batched = e.cfg.draft_streams and alloc.pricedBatched(), .heads = neural, .row_ms = p.row, .least_rows = e.rule.row_cost.leastRows(live, sampled) })
+    // Copies add verify rows, not head work; granted depths already pay in payReserved.
+    const rich = e.cfg.k.hold_costs.len > 0 and !e.cfg.granted_depth;
+    const context_rows: []u32 = if (rich and e.cfg.k.hold_context_costs.len > 0) try a.alloc(u32, plans.len) else &.{};
+    for (context_rows, 0..) |*rows, i| rows.* = plans[i].stream.hold_context_rows;
+    const extra_row_ms = e.rule.row_cost.extraMs(live, sampled);
+    const least_rows = e.rule.row_cost.leastRows(live, sampled);
+    const paired = if (rich) null else e.rule.sharedPrice(live, sampled);
+    const head_cost: alloc.HeadCost = if (rich)
+        .{ .hold_costs = e.cfg.k.hold_costs, .hold_context_costs = e.cfg.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = e.cfg.k.hold_rows, .hold_block_rows = e.cfg.k.hold_block_rows, .batched = e.cfg.draft_streams and depth.pricedBatched(), .charged = neural, .host_row_ms = row_ms, .row_ms = extra_row_ms, .least_rows = least_rows }
+    else if (paired) |p|
+        .{ .plain_ms = p.plain, .block_ms = if (e.rule.k.fixed_draft_block) p.fixed + p.head - p.plain else 0, .step_ms = if (e.rule.k.fixed_draft_block) 0 else e.cfg.mtp_step_ms, .extra_step_ms = if (e.rule.k.fixed_draft_block) 0 else e.cfg.draft_step_ms, .batched = e.cfg.draft_streams and alloc.pricedBatched(), .heads = neural, .row_ms = p.row, .least_rows = least_rows }
     else
-        try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .row_ms = e.rule.row_cost.extraMs(live, sampled), .least_rows = e.rule.row_cost.leastRows(live, sampled) });
+        .{ .host_row_ms = row_ms, .row_ms = extra_row_ms, .least_rows = least_rows };
+    const overhead = if (rich) e.rule.fixedMs(@intCast(live), sampled) else if (paired) |p| (if (e.rule.k.fixed_draft_block) p.plain else p.fixed) else e.rule.overheadMs(@intCast(live), sampled);
+    const counts = try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, overhead, e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), head_cost);
     for (heads, out) |i, *budget| {
         budget.* = if (neural[i]) counts[i] else 0;
     }
-    if (limits) |l| if (e.cfg.granted_depth) try payReserved(e, l.who, probs, heads, sampled, out);
+    if (limits) |l| if (e.cfg.granted_depth) {
+        var base = @import("hold_price.zig").Base.pending(live);
+        // Without an independent plain price a mixed reservation keeps the head streams' own fixed price.
+        if (paired == null) base.fixed_streams = l.who.len;
+        for (fixed, probs, neural, counts, 0..) |rows, chances, head, count, i| {
+            const ms = if (row_ms.len > 0) row_ms[i] else 0;
+            if (rows == 0) continue;
+            base.host_ms += @as(f64, @floatFromInt(rows)) * ms;
+            base.rows += rows - 1;
+            base.tokens += @floatFromInt(rows - 1);
+            if (head) continue;
+            base.rows += count;
+            base.host_ms += @as(f64, @floatFromInt(count)) * ms;
+            for (chances[0..@min(count, chances.len)]) |chance| base.tokens += chance;
+        }
+        try payReserved(e, l.who, probs, heads, sampled, out, base);
+    };
 }
 
 // Copy lookups may advance a proposer's backoff; the reservation loop, not this depth cap, asks it once.
@@ -84,10 +117,10 @@ fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled
     if (!e.cfg.granted_depth and !e.cfg.limit_shared_drafts) return null;
     const a = e.arena.allocator();
     const who = try a.alloc(depth.Who, heads.len);
-    for (heads, who) |i, *w| w.* = win.who(plans[i].stream);
+    for (heads, who) |i, *w| w.* = win.who(plans[i].stream, e.cfg.k.hold_costs.len > 0);
     const probe: depth.Probe = .{ .ptr = e, .copy = noCopy };
     if (e.cfg.granted_depth) {
-        for (who, out) |*w, *d| d.* = try e.rule.headDepth(w, null, probe); // each stream's grant plus slack, once
+        for (who, out) |*w, *d| d.* = try e.rule.reserveDepth(w, null, probe); // each stream's grant plus slack, once
     } else if (e.cfg.plain_guard) {
         try e.rule.budgetsFor(who, probe, sampled, out, plans.len);
     } else try e.rule.budgets(who, probe, sampled, out);
@@ -98,22 +131,19 @@ fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled
 }
 
 /// Price only reserved holds; a historical zero-grant probe survives only if it received fresh rows.
-fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: []const usize, sampled: bool, out: []i64) !void {
+fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: []const usize, sampled: bool, out: []i64, base: @import("hold_price.zig").Base) !void {
     depth.Rule.capPass(out, e.rule.batch_rows);
     if (e.rule.k.hold_costs.len == 0) return;
     for (who, heads, out) |*w, i, d| {
-        const last = w.granted orelse continue;
-        if (last == 0 or d <= 0) continue;
-        const kept: u32 = @intCast(@min(@as(i64, last), d)); // a grant prices no row that was not reserved
-        w.granted = kept;
+        if (d <= 0) continue;
+        w.prices = probs[i][0..@min(@as(usize, @intCast(d)), probs[i].len)];
+        if (w.granted == @as(?u32, 0)) continue; // only a freshly funded historical-zero probe survives
+        w.granted = @intCast(d); // price every row reserved now, not only the previous verified grant
         var gain: f64 = 0;
-        for (probs[i][0..@min(kept, probs[i].len)]) |chance| gain += chance;
+        for (w.prices) |chance| gain += chance;
         w.gain = gain;
     }
-    if (e.cfg.plain_guard)
-        try e.rule.payHoldsFor(who, sampled, out, probs.len)
-    else
-        try e.rule.payHolds(who, sampled, out);
+    try e.rule.payHoldsBase(who, sampled, out, base);
 }
 
 test "shared draft prices: a short cached tree can grow when allocation returns more rows" {
@@ -209,7 +239,7 @@ test "shared draft prices: a cut chance tail prices by the rule's rates, not as 
     try cut.draft_chances.appendSlice(a, &.{ 0.9, 0.4, 0, 0, 0 });
     cut.draft_chances_cut = 2; // the chain cut left the last three chances unknown
     try zero.draft_chances.appendSlice(a, &.{ 0.9, 0.4, 0, 0, 0 }); // main's rule: that tail priced as measured zeros
-    const rates = try e.rule.rates(win.who(&grown));
+    const rates = try e.rule.rates(win.who(&grown, false));
     var continuation = [_]f64{ 0.9, 0.4, 0, 0, 0 };
     for (continuation[2..], 2..) |*c, j| c.* = continuation[j - 1] * rates[@min(j, rates.len - 1)];
     try grown.draft_chances.appendSlice(a, &continuation);

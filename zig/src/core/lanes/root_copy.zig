@@ -8,7 +8,7 @@ pub fn prepare(e: *Engine, requests: []const be.DraftRequest) ![]const be.DraftR
     var out: ?[]be.DraftRequest = null;
     for (requests, 0..) |r, i| {
         const s = r.stream;
-        if (r.depth == 0 or s.finished or !s.drafts or s.root_copy_miss or s.force.items.len > 0) continue;
+        if (r.depth == 0 or s.finished or !s.headDrafts() or s.root_copy_miss or s.force.items.len > 0) continue;
         const copies = if (r.rows == null and s.pending == null) blk: {
             const p = s.proposer orelse continue;
             if (!e.cfg.lone_copies and e.alone) continue;

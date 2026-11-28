@@ -17,9 +17,9 @@ fn trials(costs: []const f64, waits: []const u64) !void {
     e.alone = true;
     var s = try lanes.Stream.init(a, .{ .id = "backoff", .prompt = &.{3}, .max_new = 8192 });
     defer s.deinit(a);
-    @memset(try e.rule.rates(win.who(&s)), 1);
-    try e.rule.observeCost(0, 20, false, win.who(&s));
-    try e.rule.observeCost(15, 20, false, win.who(&s));
+    @memset(try e.rule.rates(win.who(&s, e.rule.k.hold_costs.len > 0)), 1);
+    try e.rule.observeCost(0, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(15, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
     const tokens: [63]u32 = @splat(7);
     for (costs, waits, 0..) |ms, wait, i| {
         s.rounds = s.cost_probe_after;
@@ -27,7 +27,7 @@ fn trials(costs: []const f64, waits: []const u64) !void {
         var p = [_]win.Plan{.{ .stream = &s, .position = 1, .kind = .head, .tokens = tokens[0 .. rows - 1] }};
         try win.allocate(&e, &p);
         try std.testing.expectEqual(@as(?u32, @intCast(rows)), p[0].cost_probe_rows);
-        try e.rule.observeCost(@intCast(rows - 1), ms, false, win.who(&s));
+        try e.rule.observeCost(@intCast(rows - 1), ms, false, win.who(&s, e.rule.k.hold_costs.len > 0));
         s.rounds += 1;
         own.observe(&s, p[0].cost_probe_rows, rows, ms);
         try std.testing.expectEqual(s.rounds + wait, s.cost_probe_after);
@@ -57,9 +57,9 @@ fn recovered(losses: usize, ordinary_first: bool) !void {
     e.alone = true;
     var s = try lanes.Stream.init(a, .{ .id = "same-width-recovery", .prompt = &.{3}, .max_new = 8192 });
     defer s.deinit(a);
-    @memset(try e.rule.rates(win.who(&s)), 1);
-    try e.rule.observeCost(0, 20, false, win.who(&s));
-    try e.rule.observeCost(15, 20, false, win.who(&s));
+    @memset(try e.rule.rates(win.who(&s, e.rule.k.hold_costs.len > 0)), 1);
+    try e.rule.observeCost(0, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(15, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
     const tokens: [31]u32 = @splat(7);
     var attempts: usize = 0;
     var retried = false;
@@ -70,7 +70,7 @@ fn recovered(losses: usize, ordinary_first: bool) !void {
         const rows = p[0].count() + 1;
         const ms: f64 = if (rows < 32) 20 else if (attempts < losses) 80 else 35;
         attempts += @intFromBool(rows == 32);
-        try e.rule.observeCost(@intCast(rows - 1), ms, false, win.who(&s));
+        try e.rule.observeCost(@intCast(rows - 1), ms, false, win.who(&s, e.rule.k.hold_costs.len > 0));
         s.rounds += 1;
         const recovery = p[0].cost_probe_rows == 32 and attempts == losses + 1;
         if (recovery) try std.testing.expect(s.depth.?.ms.?.get(31).? > ms);

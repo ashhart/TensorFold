@@ -20,10 +20,10 @@ const Counted = struct {
 
 test "qwen27 grants: native shared proposals do not spend nodes beyond the verified grants" {
     var model: tf.qwen27.model.Model = undefined;
-    model.config = std.mem.zeroInit(@TypeOf(model.config), .{});
+    model.config = std.mem.zeroInit(@TypeOf(model.config), .{ .experts = 0 });
     var runner: tf.qwen27.decode_round.Runner = undefined;
-    runner.slots = 4;
     runner.model = &model;
+    runner.slots = 4;
     var b: native.Metal = undefined;
     b.runner = &runner;
     b.draft = @import("draft_sources_check.zig").present(@TypeOf(b.draft.?));

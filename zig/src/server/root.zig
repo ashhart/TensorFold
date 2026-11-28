@@ -107,6 +107,7 @@ test {
     _ = @import("unix_socket_cli_test.zig");
     _ = @import("listen_fd_test.zig");
     _ = @import("effort_cli_audit_test.zig");
+    _ = @import("cli_gpu_test.zig");
     _ = @import("live.zig");
     _ = @import("listener.zig");
     _ = @import("hub.zig");

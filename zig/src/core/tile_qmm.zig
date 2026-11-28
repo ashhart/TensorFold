@@ -174,9 +174,25 @@ pub fn encodeTwin(
     y_off: usize,
     rows: usize,
 ) !void {
+    // the window kernel only for matrices of window_n outputs or more
+    return encodeTwinFrom(e, p, m, x, x_off, y, y_off, rows, if (m.n >= window_n) window_rows else twin_rows + 1);
+}
+
+/// encodeTwin with the window kernel from `from` rows on (the scalar twin below them), for a caller's measured cut.
+pub fn encodeTwinFrom(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    m: Matrix,
+    x: mtl.Buffer,
+    x_off: usize,
+    y: mtl.Buffer,
+    y_off: usize,
+    rows: usize,
+    from: usize,
+) !void {
     const i = try width(m);
     if (rows == 0 or rows > twin_rows) return error.NoRows;
-    const window = rows >= window_rows and m.n >= window_n;
+    const window = rows >= from;
     e.setPipeline(if (window) p.rows[i] else if (rows > 1) p.twin_few[i] else p.twin[i]);
     bind(e, m, .{ .k = @intCast(m.k), .n = @intCast(m.n), .r = @intCast(rows) }, x, x_off, y, y_off);
     if (window) return e.dispatchGroups(.{ .width = m.n / window_columns }, .{ .width = 64 });
