@@ -63,8 +63,8 @@ const Echo = struct {
         _ = e.calls.fetchAdd(1, .monotonic);
         _ = e.peak.fetchMax(e.active.fetchAdd(1, .acq_rel) + 1, .acq_rel);
         defer _ = e.active.fetchSub(1, .acq_rel);
-        if (e.hold_ms > 0) std.Io.sleep(t.io, .fromMilliseconds(e.hold_ms), .awake) catch {};
         const p = request.prompt;
+        if (request.return_progress) sink.event(sink.ctx, id, &.{ .progress = .{ .done = @intCast(p.len), .total = @intCast(p.len), .cached = 0 } });
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{ p[0], p[p.len - 1] } });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
@@ -203,6 +203,59 @@ test "a streamed prompt list: one head, every prompt's chunks by index, one usag
         const solo = try alone(a, &echo, p, two);
         try t.expectEqualStrings(solo.get("choices").?.array[0].strField("text").?, x.items);
         try t.expectEqualStrings(solo.get("tensorfold").?.strField("token_sha").?, sha);
+    }
+}
+
+test "prompt progress: streamed n choices and prompt lists keep counts, ordered finishes and one usage" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { prompt: []const u8, choice: []const u8, counts: []const i64, prompt_tokens: i64 }{
+        .{ .prompt = "\"ab\"", .choice = ",\"n\":2", .counts = &.{ 2, 2 }, .prompt_tokens = 2 },
+        .{ .prompt = list, .choice = "", .counts = &.{ 1, 2, 3 }, .prompt_tokens = 6 },
+    };
+    for (cases) |case| {
+        var echo: Echo = .{};
+        var got: Capture = .{ .a = a };
+        const extra = two ++ ",\"stream\":true,\"return_progress\":true,\"stream_options\":{\"include_usage\":true}";
+        try complete(a, &echo, case.prompt, try std.mem.concat(a, u8, &.{ extra, case.choice }), &got);
+        var counts: std.ArrayList(i64) = .empty;
+        var finishes: std.ArrayList(i64) = .empty;
+        var usages: usize = 0;
+        try t.expectEqualStrings("[DONE]", got.events.items[got.events.items.len - 1]);
+        for (got.events.items[0 .. got.events.items.len - 1]) |text| {
+            const e = (try json.parse(a, text)).ok;
+            const choices = e.get("choices").?.array;
+            if (choices.len == 0) {
+                if (e.get("usage")) |u| {
+                    usages += 1;
+                    try t.expectEqual(case.prompt_tokens, int(u.get("prompt_tokens")));
+                    try t.expectEqual(@as(i64, @intCast(2 * case.counts.len)), int(u.get("completion_tokens")));
+                    continue;
+                }
+                const p = e.get("tensorfold").?.get("progress").?;
+                try t.expectEqual(@as(usize, 0), finishes.items.len);
+                try counts.append(a, int(p.get("done")));
+                continue;
+            }
+            const choice = choices[0];
+            if (choice.get("finish_reason").? == .null) continue;
+            try finishes.append(a, int(choice.get("index")));
+        }
+        try t.expectEqual(case.counts.len, counts.items.len);
+        for (case.counts) |wanted| {
+            var actual: usize = 0;
+            var expected: usize = 0;
+            for (counts.items) |count| if (count == wanted) {
+                actual += 1;
+            };
+            for (case.counts) |count| if (count == wanted) {
+                expected += 1;
+            };
+            try t.expectEqual(expected, actual);
+        }
+        for (case.counts, 0..) |_, i| try t.expectEqual(@as(i64, @intCast(i)), finishes.items[i]);
+        try t.expectEqual(@as(usize, 1), usages);
     }
 }
 

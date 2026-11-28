@@ -90,10 +90,11 @@ pub const Choice = struct {
         const p = payload orelse return; // one [DONE], after every choice
         const s = &f.slots[c.i];
         const list = if (p.get("choices")) |l| (if (l == .array) l.array else null) else null;
+        const progress = if (p.get("tensorfold")) |r| r.get("progress") != null else false;
         if (p == .object) if (p.object.fetchOrderedRemove("usage")) |kv| {
             s.usage = kv.value;
         };
-        if (list != null and list.?.len == 0) return; // the separate usage chunk: one for the request, at the end
+        if (list != null and list.?.len == 0 and !progress) return; // the separate usage chunk: one for the request, at the end
         if (s.final != null) {
             s.after = p;
             return;
@@ -106,6 +107,7 @@ pub const Choice = struct {
         }
         if (f.failed) return error.Closed;
         const l = list orelse return f.out.vt.event(f.out.ctx, p);
+        if (l.len == 0) return f.out.vt.event(f.out.ctx, p);
         if (l[0] != .object) return f.out.vt.event(f.out.ctx, p);
         const a = s.arena.allocator(); // the choice's own thread built `p` in it
         l[0].object.put(a, "index", json.intValue(a, c.i) catch return error.Closed) catch return error.Closed;
