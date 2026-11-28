@@ -120,7 +120,7 @@ pub const Manager = struct {
         defer m.mutex.unlock(srv.io);
         // stored before the job leaves `jobs`, so a poll always finds one of the two
         if (!j.deleted) if (j.ending(cx.a, got)) |final| srv.store.put(srv.io, cx, final, j.t.added, j.key) catch |e|
-            log.line("background response {s} was not stored: {s}", .{ j.id, @errorName(e) });
+            log.line("background response {f} was not stored: {s}", .{ log.Safe{ .text = j.id }, @errorName(e) });
         j.held.release();
         for (m.jobs.items, 0..) |x, i| if (x == j) {
             _ = m.jobs.swapRemove(i);

@@ -279,8 +279,7 @@ fn reply(srv: *Server, c: *Conn, cx: *Cx, received: i96, plan: *const Plan, data
 
 /// The API's error shape at the refusal's status, logged first; a capacity refusal also carries Retry-After.
 fn send(c: *Conn, a: Allocator, cx: *Cx, id: []const u8) void {
-    var buf: [1400]u8 = undefined;
-    log.line("{s}", .{log.refused(&buf, id, cx.message)});
+    log.refusedLine(id, cx.message);
     const err = openai.errorBody(a, cx, null) catch return;
     const wrapped = openai.wrapError(a, err) catch return;
     if (cx.kind == .capacity) return routes.sendDraining(c, json.stringify(a, wrapped, .{}) catch return);

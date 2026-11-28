@@ -5,7 +5,7 @@ const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
 
 /// TensorFold's settings and the loader's injection variables; HOME, PATH, TMPDIR and HF_* stay allowed.
-const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_", "GLIBC_TUNABLES" } ++ gpu;
+const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "GEMMA_", "MCDMA_", "XPU_", "DYLD_", "LD_", "GLIBC_TUNABLES" } ++ gpu;
 
 /// The GPU drivers' device-memory dumps, profiler injection, and Metal capture, validation and device wrappers.
 const gpu = [_][]const u8{
@@ -94,11 +94,12 @@ pub fn harden() !void {
 const deny_attach: c_int = 31;
 extern "c" fn ptrace(request: c_int, pid: c_int, addr: ?[*]u8, data: c_int) c_int;
 
-/// LD_PRELOAD/LD_AUDIT/DYLD_INSERT_LIBRARIES precede main; refusal stops serving but cannot prevent or undo injection.
+/// Pre-main loader injection cannot be undone; refusal, hardening and output confinement follow.
 pub fn enforce(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map) !?[]const u8 {
     if (!args.confidential) return null;
     const empty: std.process.Environ.Map = .init(a);
     if (try refusal(a, args, env orelse &empty)) |why| return why;
     harden() catch return "--confidential could not turn core dumps and debugger reads off";
+    @import("confidential_output.zig").confine();
     return null;
 }

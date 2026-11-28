@@ -48,8 +48,7 @@ fn outOfMemory(a: Allocator) PrepareResult {
 /// The chat route's error reply for ``cx``, logged as its refusal when it is the client's.
 fn refusal(a: Allocator, id: []const u8, cx: *const Cx, status: u16) PrepareResult {
     if (cx.kind != .server and id.len > 0) {
-        var buf: [1400]u8 = undefined;
-        log.line("{s}", .{log.refused(&buf, id, cx.message)});
+        log.refusedLine(id, cx.message);
     }
     const body = openai.errorBody(a, cx, "messages") catch return .{ .refused = .{ .status = 500, .payload = .null } };
     return .{ .refused = .{ .status = status, .payload = openai.wrapError(a, body) catch .null } };

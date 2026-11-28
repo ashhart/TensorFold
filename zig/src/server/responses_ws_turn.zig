@@ -215,7 +215,7 @@ fn count(s: *Session, status: u16, id: ?[]const u8, lane: ?[]const u8, started: 
     if (status == 0) return;
     if (s.conn.auth_enabled) s.srv.metrics.httpRequest(s.srv.io, s.conn.key_label orelse "unauthenticated", status);
     const shown = if (lane) |l| (if (l.len == 0) "default" else l) else "-";
-    log.line("{s} \"WS response.create\" {d} id={s} lane={s} {d} ms{s}", .{ s.conn.peer, status, id orelse "-", shown, s.now() - started, log.keySuffix(s.conn) });
+    log.line("{s} \"WS response.create\" {d} id={f} lane={s} {d} ms{s}", .{ s.conn.peer, status, log.Safe{ .text = id orelse "-" }, shown, s.now() - started, log.keySuffix(s.conn) });
 }
 
 /// ``previous_response_id`` read from the connection cache first, then the server store only with ``store: true``.

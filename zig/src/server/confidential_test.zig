@@ -223,3 +223,17 @@ test "confidential: the shared path refuses before a bad key file or a bad setti
     try t.expectEqual(@as(u8, 1), @import("serve.zig").run(t.allocator, t.io, .{ .port = 0 }, setup));
     try t.expectEqual(@as(u8, 2), @import("serve.zig").run(t.allocator, t.io, .{ .confidential = true, .port = 0 }, setup));
 }
+
+test "confidential: GEMMA_DRAFT_TRACE, which logs content by presence, is refused set to 1 or empty" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "1", "" }) |v| {
+        var env: std.process.Environ.Map = .init(a);
+        try env.put("GEMMA_DRAFT_TRACE", v);
+        // the control: without the flag it is the engine's own setting
+        try t.expectEqual(@as(?[]const u8, null), try confidential.refusal(a, .{}, &env));
+        const why = (try confidential.refusal(a, .{ .confidential = true }, &env)).?;
+        try t.expect(std.mem.endsWith(u8, why, "unset GEMMA_DRAFT_TRACE"));
+    }
+}

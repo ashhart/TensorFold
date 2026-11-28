@@ -55,7 +55,7 @@ pub fn get(srv: *Server, conn: *Conn, a: Allocator, rid: []const u8) void {
     const v = found orelse return notStored(conn, a, rid);
     if (json.truthyField(v, "background") and background.streamAsked(conn.path))
         return refuse(conn, a, "streaming a background response is not supported: GET it without stream=true and poll its status", 400, "stream");
-    routes.sendValue(conn, a, 200, v);
+    routes.sendValue(conn, a, 200, @import("confidential_output.zig").storedFailure(a, v, conn) catch return);
 }
 
 pub fn notStored(conn: *Conn, a: Allocator, rid: []const u8) void {

@@ -337,7 +337,7 @@ fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, p
             take.jump = speech_register.jump(cx.a, id, take.pcm, sp.sample_rate, policy.register);
             if ((take.jump orelse 0) == 0) break;
             metadata.register_tripped = true;
-            log.line("speech {s} register jump={d:.2}st", .{ id, take.jump.? });
+            log.line("speech {f} register jump={d:.2}st", .{ log.Safe{ .text = id }, take.jump.? });
             if (metadata.register_redrawn) break;
             held = take;
         }
@@ -363,7 +363,7 @@ fn redraw(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, p
         }
         if (streaming.why(&box, result.samples, next.pcm.len)) |message| return unused(id, k, fallback, message);
         take = .{ .pcm = next.pcm[0..result.samples], .reason = box.reason, .silence_mid = result.silence_mid };
-        log.line("speech {s} redraw {d} finish={s}", .{ id, k, @tagName(take.reason) });
+        log.line("speech {f} redraw {d} finish={s}", .{ log.Safe{ .text = id }, k, @tagName(take.reason) });
     }
     const sent = keep(take, held, srv.config.silence_guard);
     if (held != null and sent.pcm.ptr == held.?.pcm.ptr)
@@ -393,7 +393,7 @@ fn submitRedraw(srv: *Server, c: *Conn, id: api.Id, request: *const api.SpeechRe
 
 /// Logs why redraw `k` gave no take; `take` stays the reply.
 fn unused(id: []const u8, k: usize, take: Take, why_not: []const u8) Take {
-    log.line("speech {s} redraw {d} not used: {s}", .{ id, k, why_not });
+    log.line("speech {f} redraw {d} not used: {s}", .{ log.Safe{ .text = id }, k, why_not });
     return take;
 }
 
@@ -415,7 +415,7 @@ fn reply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, pl
         c.close = true; // a head already started or a client gone: nothing more can be sent on this connection
         return;
     };
-    log.line("speech {s} prompt={d} samples={d} format={s} finish={s} seconds={d:.2}", .{ id, plan.prompt.len, take.pcm.len, @tagName(plan.format), @tagName(take.reason), clock.seconds(clock.nowNs(srv.io) - received) });
+    log.line("speech {f} prompt={d} samples={d} format={s} finish={s} seconds={d:.2}", .{ log.Safe{ .text = id }, plan.prompt.len, take.pcm.len, @tagName(plan.format), @tagName(take.reason), clock.seconds(clock.nowNs(srv.io) - received) });
 }
 
 fn refuse(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata, e: errors.Refused) void {
@@ -434,8 +434,7 @@ pub fn fail(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata, kind: errors.
 
 /// OpenAI's error object, logged first: the access line shows only the status.
 fn send(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata) void {
-    var buf: [1400]u8 = undefined;
-    log.line("{s}", .{log.refused(&buf, id, cx.message)});
+    log.refusedLine(id, cx.message);
     const body = openai.errorBody(cx.a, cx, null) catch return;
     const text = json.stringify(cx.a, openai.wrapError(cx.a, body) catch return, .{}) catch return;
     c.startResponse(cx.status(), null) catch return;
@@ -464,6 +463,7 @@ fn sendAudio(c: *Conn, format: Format, header: ?[wav_header_len]u8, data: []cons
     try metadata.addWhole(c);
     if (c.close) try c.addHeader("Connection", "close");
     defer c.out.clearRetainingCapacity();
+    @import("confidential_output.zig").flushAccess(c); // this head skips `finish`, which would write it
     if (!std.mem.eql(u8, c.version, "HTTP/0.9")) try c.out.appendSlice(c.gpa, "\r\n");
     if (header) |h| try c.out.appendSlice(c.gpa, &h);
     try c.writeAll(c.out.items);

@@ -24,6 +24,8 @@ pub const Engine = struct {
     bump: ?*witness.State = null,
     /// How many times the server began the hook's own hashing.
     begins: std.atomic.Value(u32) = .init(0),
+    /// A reply that fails after its token, with this message (the engine's own words, which may quote the request).
+    fail_message: ?[]const u8 = null,
 
     pub fn engine(e: *Engine) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -46,6 +48,7 @@ pub const Engine = struct {
         if (cast(ptr).bump) |s| s.bump(info(ptr));
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{'x'} });
+        if (cast(ptr).fail_message) |m| return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .failed, .message = m } });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}

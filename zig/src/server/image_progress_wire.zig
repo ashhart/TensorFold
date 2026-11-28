@@ -65,8 +65,7 @@ pub const Writer = struct {
             cx.kind = .server;
             cx.message = "out of memory";
         }
-        var buf: [1400]u8 = undefined;
-        log.line("{s}", .{log.refused(&buf, id, cx.message)});
+        log.refusedLine(id, cx.message);
         var arena: std.heap.ArenaAllocator = .init(w.conn.gpa);
         defer arena.deinit();
         const a = arena.allocator();

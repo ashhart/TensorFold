@@ -18,8 +18,7 @@ const fail = speech.fail;
 pub fn left(srv: *Server, c: *Conn, id: []const u8, prompt_len: usize, received: i96) void {
     c.close = true;
     srv.metrics.disconnected(srv.io);
-    var buf: [1024]u8 = undefined;
-    log.line("{s}", .{log.ended(&buf, id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received))});
+    log.endedLine(id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received));
 }
 
 /// Why a finished synthesis has no complete audio, or null; an empty reply is no fault, length and silence clip it.
@@ -50,12 +49,12 @@ pub fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.Spee
             return;
         };
         c.response_complete = true;
-        log.line("speech {s} prompt={d} samples=0 format=pcm stream=true finish={s} seconds={d:.2}", .{ id, plan.prompt.len, @tagName(box.reason), clock.seconds(clock.nowNs(srv.io) - received) });
+        log.line("speech {f} prompt={d} samples=0 format=pcm stream=true finish={s} seconds={d:.2}", .{ log.Safe{ .text = id }, plan.prompt.len, @tagName(box.reason), clock.seconds(clock.nowNs(srv.io) - received) });
         return;
     }
     if (problem) |message| {
         c.close = true; // no terminating chunk: the client's HTTP/1.1 parser reports an incomplete body
-        log.line("speech {s} stream ended incomplete after samples={d}: {s}", .{ id, sent.samples, message });
+        log.line("speech {f} stream ended incomplete after samples={d}: {s}", .{ log.Safe{ .text = id }, sent.samples, message });
         return;
     }
     c.writeAll(if (box.reason == .silence) silence_chunk else if (box.reason == .length) length_chunk else last_chunk) catch {

@@ -219,8 +219,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
 
 /// Why a request got an error reply, logged before it: its access line shows only the status.
 fn logRefused(id: []const u8, message: []const u8) void {
-    var buf: [1400]u8 = undefined;
-    log.line("{s}", .{log.refused(&buf, id, message)});
+    log.refusedLine(id, message);
 }
 
 pub const Run = struct {

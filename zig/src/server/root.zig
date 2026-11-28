@@ -417,4 +417,6 @@ test {
     _ = @import("witness_race_test.zig");
     _ = @import("witness_reply_test.zig");
     _ = @import("confidential_test.zig");
+    _ = @import("confidential_output_test.zig");
+    _ = @import("confidential_frames_test.zig");
 }
