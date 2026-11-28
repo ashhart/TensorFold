@@ -18,7 +18,7 @@ def launch(args):
     env = os.environ.copy()
     env.pop('TF_GLM_PREFILL_TRACE', None)
     env['TF_GLM_PROF'] = '0'
-    env['TF_GLM_LAYERS'] = '0'
+    env.pop('TF_GLM_LAYERS', None)
     if args.prefix:
         require(not any(ord(c) < 32 or ord(c) == 127 for c in args.prefix), 'control character in prefix')
         env['TF_GLM_PREFILL_TRACE'] = args.prefix
@@ -27,7 +27,7 @@ def launch(args):
            '--master', args.master, '--master-port', str(args.master_port), '--port', str(args.port),
            '--context', '33792', '--parallel', '1', '--prompt-cache-gib', '0', *extra]
     if args.dry_run:
-        print(shlex.join(['env', '-u', 'TF_GLM_PREFILL_TRACE', 'TF_GLM_PROF=0', 'TF_GLM_LAYERS=0',
+        print(shlex.join(['env', '-u', 'TF_GLM_PREFILL_TRACE', '-u', 'TF_GLM_LAYERS', 'TF_GLM_PROF=0',
                           *(['TF_GLM_PREFILL_TRACE=' + args.prefix] if args.prefix else []), *cmd]))
     else:
         os.execvpe(cmd[0], cmd, env)
