@@ -642,6 +642,8 @@ reports the setting's own value, does not count as logging.
 | `TF_KV_SHARE` | release, tool, test | other |
 | `TF_LANE_TRACE` | release, tool, test | writes |
 | `TF_LFM3_METAL_WARM_TURNS` | release, tool, test | other |
+| `TF_LING_RANK` | release, tool, test | other |
+| `TF_LING_WORLD` | release, tool, test | other |
 | `TF_LOAD_DIRECT` | release, tool, test | other |
 | `TF_LOAD_PREFETCH` | release, tool, test | other |
 | `TF_METAL4` | tool, test | other |
