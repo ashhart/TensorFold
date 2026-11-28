@@ -1,1 +1,0 @@
-- Server: `--confidential` also refuses `--vision`, and once it starts every library loads only from the engine's folder, `/usr/lib` and `/System/Library` on macOS, or by a listed CUDA runtime name, never from Homebrew, `/usr/local` or an environment path (#5344, refs #5176). Thanks to @kotevcode.
