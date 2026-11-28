@@ -189,11 +189,13 @@ Reading this metadata does not qualify a vision encoder, checkpoint or device.
 5-bit 2D-FWHT vector quantization) directory that loads unmodified on both Apple Silicon Metal and NVIDIA CUDA.
 
 - `MODEL` may be a local checkpoint folder or a Hugging Face repo id (`owner/name[@revision]`); when a repo id is not
-  yet in the local Hugging Face cache, `tensorfold tfq3` pulls it through `tensorfold pull` unless `--no-pull` is set.
+  yet in the local Hugging Face cache, conversion pulls it with the ordinary authentication and integrity checks,
+  admitting model types without an inference family. `--no-pull` prevents downloads.
 - Known families (`qwen3_5`, `qwen4_exp`, `glm5_next`) dispatch to their dedicated GPU converters when `tfq3`
   (`https://github.com/ashhart/TFQ`) is installed; any other Safetensors architecture, or invocations passing
   `--bits 3|4|5`, `--target-gib GB`, `--fit auto|GB`, `--quantize-vision`, `--quantize-drafter`, or `--quantize-embed`,
-  routes to the model-agnostic converter with automatic 128-multiple zero-padding and mixed-bit budget allocation.
-- When the external `tfq3` GPU binary is not installed (or `--native` is passed), `tensorfold tfq3` falls back to a
-  built-in pure-Zig TFQ3 encoder (`PWV3 v3` + `TFPN v3` + `residual.safetensors`) with zero external installs, and
-  `tensorfold tfq3 inspect DIR` validates `pw_v3_tables.bin` and every 16 KiB–aligned `.tffpw` shard natively.
+  routes to the external model-agnostic converter with mixed-bit budget allocation.
+- When the external `tfq3` GPU binary is not installed (or `--native` is passed), conversion is refused because
+  the experimental native dense layout has no production loader. The direct Zig encoder
+  API rejects quantized tensors whose rows or columns are not multiples of 128; it does not zero-pad them.
+  `tensorfold tfq3 inspect DIR` still validates `pw_v3_tables.bin` and every 16 KiB–aligned `.tffpw` shard natively.
