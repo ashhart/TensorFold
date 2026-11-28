@@ -168,73 +168,17 @@ pub fn pack(l: Layout, w: []const u32, scales: []const u16, biases: []const u16,
 
 /// reg_layout for one 32-column x 64-code block, in the tensor op's right-input register order (lane_order.metal).
 pub fn regBlock(tiled: *const [256]u32, out: *[256]u32) void {
-    for (out, 0..) |*o, t| {
-        const lane = (t >> 2) & 31;
-        const w = 4 * (t >> 7) + (t & 3);
-        const at = (((lane >> 1) & 3) + 4 * ((lane >> 4) & 1) + 8 * (w >> 1)) * 8 + ((lane >> 3) & 1) + 4 * (w & 1);
-        const shift: u5 = @intCast(16 * (lane & 1));
-        const a = (tiled[at] >> shift) & 0xffff;
-        const c = (tiled[at + 2] >> shift) & 0xffff;
-        o.* = (a & 0xf) | ((a >> 4) & 0xf0) | ((c & 0xf) << 8) | ((c << 4) & 0xf000) | (((a >> 4) & 0xf) << 16) | (((a >> 8) & 0xf0) << 16) | (((c >> 4) & 0xf) << 24) | (((c >> 8) & 0xf0) << 24);
-    }
+    @import("lane_reg_blocks.zig").block(tiled, out);
 }
 
 /// Split-plane (4+1) reg_layout for one 32x64 5-bit block: words 0..255 low nibbles, 256..319 high bits.
 pub fn regBlock5(tiled: *const [320]u32, out: *[320]u32) void {
-    regSplitBlock(5, tiled, out);
+    @import("lane_reg_blocks.zig").split(5, tiled, out);
 }
 
 /// Split-plane (4+2) reg_layout for one 32x64 6-bit block: words 0..255 low nibbles, 256..383 high pairs.
 pub fn regBlock6(tiled: *const [384]u32, out: *[384]u32) void {
-    regSplitBlock(6, tiled, out);
-}
-
-fn regSplitBlock(comptime bits: u8, tiled: []const u32, out: []u32) void {
-    const hi_bits = bits - 4;
-    const row_words = 2 * bits;
-    for (0..256) |t| {
-        const lane = (t >> 2) & 31;
-        const col = regCoordCol(lane, 4 * (t >> 7) + (t & 3));
-        var lo4: u32 = 0;
-        for (0..8) |j| lo4 |= (extractTileCode(tiled, row_words, col, regCoordK(lane, 4 * (t >> 7) + (t & 3), j), bits) & 15) << @intCast(4 * j);
-        out[t] = lo4;
-    }
-    const slots = 4 / hi_bits;
-    const mask = (@as(u32, 1) << hi_bits) - 1;
-    for (0..64 * hi_bits) |t| {
-        const hl = t >> hi_bits;
-        const p = t & ((1 << hi_bits) - 1);
-        var hi_w: u32 = 0;
-        for (0..slots) |s| {
-            const hw = slots * p + s;
-            const hcol = regCoordCol(hl, hw);
-            for (0..4) |j| {
-                const c0 = (extractTileCode(tiled, row_words, hcol, regCoordK(hl, hw, j), bits) >> 4) & mask;
-                const c1 = (extractTileCode(tiled, row_words, hcol, regCoordK(hl, hw, j + 4), bits) >> 4) & mask;
-                const sh: u5 = @intCast(s * 4 * hi_bits + j * hi_bits);
-                hi_w |= (c0 << sh) | (c1 << (@as(u5, 16) + sh));
-            }
-        }
-        out[256 + t] = hi_w;
-    }
-}
-
-fn regCoordCol(lane: usize, w: usize) usize {
-    return ((lane >> 1) & 3) + 4 * ((lane >> 4) & 1) + 8 * (w >> 1);
-}
-
-fn regCoordK(lane: usize, w: usize, j: usize) usize {
-    const k0 = 4 * (lane & 1) + 8 * ((lane >> 3) & 1) + 32 * (w & 1);
-    return k0 + (j & 1) * 2 + ((j >> 1) & 1) * 16 + (j >> 2);
-}
-
-fn extractTileCode(tiled: []const u32, row_words: usize, col: usize, k: usize, comptime bits: u8) u32 {
-    const bit = k * bits;
-    const idx = col * row_words + (bit >> 5);
-    const sh: u5 = @intCast(bit & 31);
-    var v = tiled[idx] >> sh;
-    if (@as(usize, sh) + bits > 32) v |= tiled[idx + 1] << @intCast(32 - @as(usize, sh));
-    return v & ((@as(u32, 1) << @intCast(bits)) - 1);
+    @import("lane_reg_blocks.zig").split(6, tiled, out);
 }
 
 pub const Order = struct { w: Ref, n: usize, k: usize, bits: u8 = 4 };
