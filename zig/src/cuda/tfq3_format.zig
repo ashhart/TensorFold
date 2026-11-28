@@ -38,9 +38,7 @@ comptime {
     if (@sizeOf(TfpnTensorMeta) != 128) @compileError("TfpnTensorMeta must be 128 bytes");
 }
 
-pub fn validBits(bits: u32) bool {
-    return bits == 3 or bits == 4 or bits == 5;
-}
+pub const validBits = format.validBits;
 
 pub fn validTfpwBits(bits: u32) bool {
     return format.validTfpwBits(bits);
@@ -114,7 +112,7 @@ pub fn validateTfpnNamed(bytes: []const u8, bad_name: ?*[]const u8) !DenseShard 
     }
     for (metas) |*m| {
         if (!validBits(m.b_bits) or m.r == 0 or m.c == 0 or (m.r % 128) != 0 or (m.c % 128) != 0) return error.InvalidTfq3Shard;
-        if (m.b_bits == 4 and m.word_off % 4 != 0) {
+        if (format.uint4Misaligned(m.b_bits, m.word_off)) {
             if (bad_name) |name| name.* = m.nameSlice();
             return error.MisalignedTfq3Tensor;
         }
@@ -170,7 +168,8 @@ pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32
     var needs_e8p1024 = false;
     for (metas) |m| {
         if (!validTfpwBits(m.b_bits)) return error.InvalidTfq3Shard;
-        if (m.b_bits == 4 and (m.gate_word_off % 4 != 0 or m.up_word_off % 4 != 0 or m.down_word_off % 4 != 0)) return error.MisalignedTfq3Tensor;
+        const b = m.b_bits; // all three alignments before any bounds
+        if (format.uint4Misaligned(b, m.gate_word_off) or format.uint4Misaligned(b, m.up_word_off) or format.uint4Misaligned(b, m.down_word_off)) return error.MisalignedTfq3Tensor;
         if (tfq4.isTfq4Bits(m.b_bits)) {
             has_tfq4 = true;
             if (m.b_bits == 225) needs_e8p1024 = true;
@@ -435,4 +434,42 @@ test "CUDA TFQ3: validateTfpw accepts hybrid 2/225/3/4/5-bit experts and sets TF
     bad.b_bits = 226;
     @memcpy(buf[@sizeOf(TfpwHeader)..][0..@sizeOf(TfpwExpertMeta)], std.mem.asBytes(&bad));
     try std.testing.expectError(error.InvalidTfq3Shard, validateTfpw(buf, bits_all.len, 128, 128, 1));
+}
+
+test "CUDA TFQ3: a TFPW expert's three 4-bit alignments are checked before any of its bounds" {
+    const at = @as(usize, @intCast(section_align));
+    const buf = try std.testing.allocator.alloc(u8, 4 * at); // weights at 32 KiB: 3 x 2048 words
+    defer std.testing.allocator.free(buf);
+    @memset(buf, 0);
+    const gw = tensorWords(128, 128, 4);
+    var h = std.mem.zeroes(TfpwHeader);
+    h.magic = magic_tfpw;
+    h.version = format_version;
+    h.num_experts = 1;
+    h.num_tensors = 3;
+    h.hidden_size = 128;
+    h.moe_inter = 128;
+    h.stream_words = 3 * gw;
+    h.scale_halfs = 3;
+    h.off_meta = @sizeOf(TfpwHeader);
+    h.off_scales = section_align;
+    h.off_weights = 2 * section_align;
+    @memcpy(buf[0..@sizeOf(TfpwHeader)], std.mem.asBytes(&h));
+    var em = std.mem.zeroes(TfpwExpertMeta);
+    em.b_bits = 4;
+    em.up_word_off = gw;
+    em.down_word_off = 2 * gw;
+    em.up_sc_off = 1;
+    em.down_sc_off = 2;
+    const meta = buf[@sizeOf(TfpwHeader)..][0..@sizeOf(TfpwExpertMeta)];
+    @memcpy(meta, std.mem.asBytes(&em));
+    _ = try validateTfpw(buf, 1, 128, 128, null);
+    // gate on a uint4 but past the words, up off one: Flash Next's per-projection order refuses this as truncated
+    em.gate_word_off = 3 * gw;
+    em.up_word_off = gw + 1;
+    @memcpy(meta, std.mem.asBytes(&em));
+    try std.testing.expectError(error.MisalignedTfq3Tensor, validateTfpw(buf, 1, 128, 128, null));
+    em.up_word_off = gw;
+    @memcpy(meta, std.mem.asBytes(&em));
+    try std.testing.expectError(error.InvalidTfq3Shard, validateTfpw(buf, 1, 128, 128, null));
 }

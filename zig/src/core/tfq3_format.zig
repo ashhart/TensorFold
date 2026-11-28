@@ -1,4 +1,4 @@
-//! TFQ3's on-disk records and wire constants, one copy for every backend; each backend keeps its checks and loaders.
+//! TFQ3's on-disk records, wire constants and shared arithmetic, one copy; each backend keeps its checks and loaders.
 const std = @import("std");
 pub const tfq4 = @import("tfq4_format.zig");
 
@@ -63,6 +63,36 @@ pub const NonMoeHeader = extern struct {
     pad1: u64,
 };
 
+/// A byte range of a file: [off, off + len).
+pub const Span = struct { off: usize, len: usize };
+
+/// Words of an R x C matrix at `bits`: floor(R * C * bits / 32), checked R * C first; null when a product overflows.
+pub fn checkedMatWords(r: usize, c: usize, bits: usize) ?usize {
+    const rc = std.math.mul(usize, r, c) catch return null;
+    const all = std.math.mul(usize, rc, bits) catch return null;
+    return all / 32;
+}
+
+/// A width the routed kernels decode: 3, 4 or 5 bits (each backend's dense rule may admit fewer).
+pub fn validBits(bits: u32) bool {
+    return bits == 3 or bits == 4 or bits == 5;
+}
+
+/// A 4-bit matrix whose words start off 16 bytes: the kernels read 4-bit words four at a time as uint4.
+pub fn uint4Misaligned(bits: u32, word_off: u64) bool {
+    return bits == 4 and word_off % 4 != 0;
+}
+
+/// Whether two non-empty spans share a byte or one starts inside the first `head` bytes; each end must fit usize.
+pub fn overlaps(head: usize, spans: []const Span) bool {
+    for (spans, 0..) |a, i| {
+        if (a.len == 0) continue;
+        if (a.off < head) return true;
+        for (spans[i + 1 ..]) |b| if (b.len > 0 and a.off < b.off + b.len and b.off < a.off + a.len) return true;
+    }
+    return false;
+}
+
 comptime {
     std.debug.assert(@sizeOf(LayerHeader) == 144);
     std.debug.assert(@sizeOf(ExpertMeta) == 64);
@@ -82,4 +112,5 @@ pub fn matWords(r: u32, c: u32, bits: u32) tfq4.Error!u64 {
 test {
     _ = @import("tfq3_format_test.zig");
     _ = tfq4;
+    _ = @import("tfq3_arith_test.zig");
 }
