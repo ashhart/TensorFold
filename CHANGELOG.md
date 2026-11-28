@@ -7,6 +7,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
 
 - Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
+- CUDA kernels: the MXFP4 experts' SiTU up (`tf_mxfp4_experts_up_situ` and `tf_mxfp4_experts_prompt_up_situ`, in the `experts_mxfp4` image): an expert's gate and up matrices read as stored, each sum rounded to bf16, then ERNIE 5.5's SiTU (beta tanh(g/beta) sigmoid(g) times linear beta tanh(u/linear beta), at 4 and 25) into bf16 rows, from a new `situ` epilogue in `experts.cuh`; under the kernel contract against float64; the four downs' SASS is unchanged and nothing serves through the up yet (#5385, part of #4926).
+- The New Project Folder row keeps **Browse** on one line while the folder input shrinks. (#4824) Thanks @jamesadcock for the report.
+
 - Inkling 2 CUDA gains grouped-expert and vision kernels, shared core attention/gamma operations, explicit orientation handling and exact arithmetic comparisons (#4127). Thanks to @ajensenwaud.
 
 - Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.
