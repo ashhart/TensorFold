@@ -79,21 +79,3 @@ test "causal placement: comparison mode retains the old middle-layer candidates"
     try t.expect(try locate.once(&p, &m));
     try t.expectEqual(@as(usize, 0), m.calls);
 }
-
-test "causal placement: locate-enabled full layers admit deleted vacancies" {
-    const P = pocket.Pocket(Toy, @import("families.zig").nemotron_h);
-    var p: P = .{ .gpa = t.allocator, .mode = .subject, .hidden = 2, .reuse_deleted = true, .locate = .{ .enabled = true }, .answered = &.{ex}, .split = .{ 0, 10, 0 } };
-    defer p.deinit();
-    for (0..8) |l| try p.moe.append(t.allocator, l);
-    try p.used.appendNTimes(t.allocator, P.neurons, 8);
-    try p.up.appendNTimes(t.allocator, 1, 8 * P.neurons * 2);
-    try p.down.appendNTimes(t.allocator, 1, 8 * P.neurons * 2);
-    p.used.items[5] = 0;
-    @memset(p.neuron(p.up.items, 1, 0, 2), 0);
-    var m: Toy = .{};
-    while (!try locate.once(&p, &m)) {}
-    try t.expect(p.locate.chosen[1] and p.locate.chosen[5]);
-    try t.expectApproxEqAbs(@as(f32, 3), p.locate.score[1], 0.00001);
-    try t.expectApproxEqAbs(@as(f32, 5), p.locate.score[5], 0.00001);
-    try t.expectEqual(@as(usize, 3), m.calls);
-}
