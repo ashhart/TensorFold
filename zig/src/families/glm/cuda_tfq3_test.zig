@@ -97,6 +97,17 @@ test "CUDA TFQ3: isTfq3 and hasNonMoe detect nonmoe-only, layer-tfpw-only, and r
         try std.testing.expect(tfq3.isTfq3(gpa, io, dir));
         try std.testing.expect(!tfq3.hasNonMoe(gpa, io, dir));
     }
+
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(dir);
+        try tmp.dir.writeFile(io, .{ .sub_path = "layer_03.tffpw", .data = &tfpw_hdr });
+        try tmp.dir.writeFile(io, .{ .sub_path = "pw_v4_e8p_tables.bin", .data = "PWV4" });
+        try std.testing.expect(tfq3.isTfq3(gpa, io, dir));
+        try std.testing.expect(!tfq3.hasNonMoe(gpa, io, dir));
+    }
 }
 
 test "CUDA TFQ3: e4m3ToF32 and 128x128 block-FP8 dequantization accuracy" {

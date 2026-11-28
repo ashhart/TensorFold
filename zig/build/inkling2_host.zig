@@ -56,6 +56,9 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
         const media_run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/inkling2_media_checks.zig") }));
         media_run.has_side_effects = true;
         b.step("test-inkling2-media-metal", "Inkling 2 Mini image tower on this GPU: kernels, tower fixtures and the original checkpoint").dependOn(&media_run.step);
+        const tfq4_run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/inkling2_tfq4_metal_checks.zig") }));
+        tfq4_run.has_side_effects = true;
+        b.step("test-inkling2-tfq4-metal", "Inkling 2 Mini Metal TFQ4 dense (kind 0/2/3, 2b/225b) & hybrid TFPW MoE GPU parity").dependOn(&tfq4_run.step);
     }
     const native = b.addObject(.{ .name = "inkling2-native", .root_module = module(b, target, .Debug, "zig/inkling2_native_compile.zig") });
     _ = native.getEmittedBin();

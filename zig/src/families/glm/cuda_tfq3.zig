@@ -65,29 +65,37 @@ pub fn hasNonMoe(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
         cuda.tfq3_format.hasRecords(gpa, io, dir, "nonmoe.tffpw", cuda.tfq3_format.magic_tfpn);
 }
 
-/// Returns true if `dir` is a GLM TFQ3 checkpoint (`pw_v3_tables.bin` plus `nonmoe.tffpw` or any `layer_*.tffpw`).
+/// Returns true if `dir` is a GLM TFQ3/TFQ4 checkpoint (`pw_v3_tables.bin` or `pw_v4_e8p_tables.bin` plus shards).
 pub fn isTfq3(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
-    return cuda.tfq3_format.hasTables(gpa, io, dir) and
+    const has_tbl = cuda.tfq3_format.hasTables(gpa, io, dir) or cuda.tfq3_format.hasTfq4Tables(gpa, io, dir);
+    return has_tbl and
         (cuda.tfq3_format.hasRecords(gpa, io, dir, "nonmoe.tffpw", cuda.tfq3_format.magic_tfpn) or
             cuda.tfq3_format.hasAnyTfpw(gpa, io, dir));
 }
 
-/// Device buffers owning `pw_v3_tables.bin`, optional `nonmoe.tffpw`, and `layer_XX.tffpw` shards.
+/// Device buffers owning optional `pw_v3_tables.bin`/`pw_v4_e8p_tables.bin`, `nonmoe.tffpw`, and `layer_XX.tffpw`.
 pub const Store = struct {
     tables: cuda.DeviceBuffer,
+    tables4: ?cuda.tfq4.UploadedTables = null,
     nonmoe: ?cuda.tfq3.TfpnStore = null,
     layers: std.ArrayList(cuda.tfq3.OwnedMoeLayer) = .empty,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8) !*Store {
         const s = try gpa.create(Store);
         errdefer gpa.destroy(s);
-        var tables = try cuda.tfq3.uploadTables(gpa, io, d, dir);
+        var tables: cuda.DeviceBuffer = .{ .d = d, .ptr = 0, .len = 0 };
+        if (cuda.tfq3_format.hasTables(gpa, io, dir)) {
+            tables = try cuda.tfq3.uploadTables(gpa, io, d, dir);
+        }
         errdefer tables.free();
+        var tables4 = try cuda.tfq4.uploadTablesOptional(gpa, io, d, dir);
+        errdefer if (tables4) |*t4| t4.free();
+        if (tables.ptr == 0 and tables4 == null) return error.MissingTfq3Tables;
         var nonmoe: ?cuda.tfq3.TfpnStore = null;
-        if (hasNonMoe(gpa, io, dir)) {
+        if (tables.ptr != 0 and hasNonMoe(gpa, io, dir)) {
             nonmoe = try cuda.tfq3.TfpnStore.loadFileWithTables(gpa, io, d, dir, "nonmoe.tffpw", tables.ptr);
         }
-        s.* = .{ .tables = tables, .nonmoe = nonmoe };
+        s.* = .{ .tables = tables, .tables4 = tables4, .nonmoe = nonmoe };
         return s;
     }
 
@@ -103,7 +111,9 @@ pub const Store = struct {
         const fname = try std.fmt.bufPrint(&name_buf, "layer_{d:0>2}.tffpw", .{i});
         const path = try std.fs.path.join(gpa, &.{ dir, fname });
         defer gpa.free(path);
-        var owned = try cuda.tfq3.uploadTfpwLayer(io, d, path, s.tables.ptr, experts, hidden, inter, i);
+        const t4_ptr: u64 = if (s.tables4) |t4| t4.lutPtr() else 0;
+        const t4_kind: u32 = if (s.tables4) |t4| t4.table_kind else 0;
+        var owned = try cuda.tfq3.uploadTfpwLayerHybrid(io, d, path, s.tables.ptr, t4_ptr, t4_kind, experts, hidden, inter, i);
         errdefer owned.deinit();
         try s.layers.append(gpa, owned);
         return owned.layer;
@@ -113,6 +123,7 @@ pub const Store = struct {
         for (s.layers.items) |*l| l.deinit();
         s.layers.deinit(gpa);
         if (s.nonmoe) |*nm| nm.deinit();
+        if (s.tables4) |*t4| t4.free();
         s.tables.free();
         gpa.destroy(s);
     }

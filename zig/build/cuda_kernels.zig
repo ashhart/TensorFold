@@ -196,6 +196,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "tfq3", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 },
     // TFQ3 routed MoE 3/4/5-bit HeatAlloc kernels.
     .{ .name = "tfq3_moe", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 },
+    // TFQ4 dense 2/2.25-bit 8D E8P and hybrid 2/2.25/3/4/5-bit TFPW MoE kernels.
+    .{ .name = "tfq4", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 },
     .{ .name = "glm_vision", .flags = &.{"-O3"} }, // ours: GLM's image tower steps around cuBLASLt (norms, rotary, softmax, merger)
     .{ .name = "glm_mm", .flags = &.{"-O3"} }, // ours: GLM's bf16 linears on tensor cores, weights tiled at load, row-stable
     .{ .name = "glm_dflash", .flags = &.{"-O3"} }, // the DFlash2 block drafter

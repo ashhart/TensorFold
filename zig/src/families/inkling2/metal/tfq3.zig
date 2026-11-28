@@ -1,13 +1,15 @@
-//! Inkling 2 Mini TFQ3 (3/4/5-bit 2D-AffineCoset/half4 + 2D FWHT-128) zero-copy loader and Metal pipelines.
+//! Inkling 2 Mini TFQ3/TFQ4 (2/225/3/4/5-bit 2D FWHT-128) zero-copy loader and Metal pipelines.
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
 const mtl = @import("metal");
-const sources = @import("kernel_sources");
 const format = @import("tfq3_format");
 const state = @import("state.zig");
 
+pub const Pipelines = @import("tfq3_pipelines.zig").Pipelines;
+
 pub const Ref = @import("inkling2_metal_ref").Ref;
+pub const tfq4 = format.tfq4;
 
 pub const magic_layer = format.magic_layer;
 pub const magic_tables = format.magic_tables;
@@ -30,17 +32,33 @@ pub const Args = extern struct {
     topk: u32,
     gate_cap: f32,
     up_cap: f32,
+    table4_kind: u32 = 0,
+};
+
+pub const Dense4Args = extern struct {
+    rows: u32,
+    n: u32,
+    k: u32,
+    ldo: u32,
+    bits: u32,
+    table_kind: u32,
+    row_off: u32 = 0,
+    sr_split: u32 = 0,
+    out_f32: u32 = 0,
     pad: u32 = 0,
 };
 
 comptime {
     std.debug.assert(@sizeOf(Args) == 32);
+    std.debug.assert(@sizeOf(Dense4Args) == 40);
 }
 
 pub const Error = error{
     InvalidTfq3Tables,
+    InvalidTfq4Tables,
     InvalidTfq3Shard,
     MissingTfq3Tables,
+    MissingTfq4Tables,
     Tfq3Truncated,
     Tfq3Overflow,
     Tfq3Misaligned,
@@ -66,6 +84,15 @@ pub const LayerLayout = struct {
     scales: Span,
     weights: Span,
     has_5b: bool,
+    has_tfq3: bool,
+    has_tfq4: bool,
+    needs_e8p1024: bool,
+};
+
+pub const LoadedTables4 = struct {
+    buf: mtl.Buffer,
+    table_kind: u32,
+    k_codes: u32,
 };
 
 pub const MappedShard = struct {
@@ -86,7 +113,10 @@ pub const Layer = struct {
     num_experts: u32,
     hidden: u32,
     inter: u32,
-    tables: mtl.Buffer,
+    tables: ?mtl.Buffer = null,
+    tables4: ?mtl.Buffer = null,
+    table4_kind: u32 = 0,
+    has_tfq4: bool = false,
     meta: mtl.Buffer,
     scales: mtl.Buffer,
     weights: mtl.Buffer,
@@ -112,7 +142,10 @@ pub fn mappedLen(file_len: usize) Error!usize {
 }
 
 pub fn matWords(r: usize, c: usize, bits: usize) Error!usize {
-    return try mul(try mul(r, c), bits) / 32;
+    if (bits == 2) return try mul(r, c / 16);
+    if (bits == 225) return try mul(try mul(r, c / 128), 9);
+    if (bits >= 3 and bits <= 5) return try mul(try mul(r, c), bits) / 32;
+    return error.Tfq3Bits;
 }
 
 pub fn matScales(r: usize, c: usize) Error!usize {
@@ -151,7 +184,12 @@ pub fn validateTables(bytes: []const u8) Error!void {
     }
 }
 
-/// Validates a `TFPW` v3 MoE layer file against `want`, alignment, bounds, expert descriptors, and XXH64.
+/// Validates a `pw_v4_e8p_tables.bin` (`PWV4` v4, table_kind 0..3) payload and returns its header info.
+pub fn validateTables4(bytes: []const u8) Error!tfq4.PwV4TablesInfo {
+    return tfq4.validatePwV4Tables(bytes) catch error.InvalidTfq4Tables;
+}
+
+/// Validates a `TFPW` v3 MoE layer file (bits in {2, 225, 3, 4, 5}) against `want`, alignment, bounds, and XXH64.
 pub fn validateLayer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
     if (bytes.len < @sizeOf(LayerHeader)) return error.Tfq3Truncated;
     const h: LayerHeader = std.mem.bytesToValue(LayerHeader, bytes[0..@sizeOf(LayerHeader)]);
@@ -187,11 +225,17 @@ pub fn validateLayer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
     const sc_gu = try matScales(h.moe_inter, h.hidden_size);
     const sc_dn = try matScales(h.hidden_size, h.moe_inter);
     var has_5b = false;
+    var has_tfq3 = false;
+    var has_tfq4 = false;
+    var needs_e8p1024 = false;
     for (0..h.num_experts) |e| {
         const m_off = meta.off + e * @sizeOf(ExpertMeta);
         const m: ExpertMeta = std.mem.bytesToValue(ExpertMeta, bytes[m_off..][0..@sizeOf(ExpertMeta)]);
-        if (m.b_bits < 3 or m.b_bits > 5) return error.Tfq3Bits;
+        if (!format.validTfpwBits(m.b_bits)) return error.Tfq3Bits;
         has_5b = has_5b or (m.b_bits == 5);
+        has_tfq3 = has_tfq3 or (m.b_bits >= 3 and m.b_bits <= 5);
+        has_tfq4 = has_tfq4 or (m.b_bits == 2 or m.b_bits == 225);
+        needs_e8p1024 = needs_e8p1024 or (m.b_bits == 225);
         const gu_w = try matWords(h.moe_inter, h.hidden_size, m.b_bits);
         const dn_w = try matWords(h.hidden_size, h.moe_inter, m.b_bits);
         const word_offs = [3]u64{ m.gate_word_off, m.up_word_off, m.down_word_off };
@@ -210,6 +254,9 @@ pub fn validateLayer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
         .scales = scales,
         .weights = weights,
         .has_5b = has_5b,
+        .has_tfq3 = has_tfq3,
+        .has_tfq4 = has_tfq4,
+        .needs_e8p1024 = needs_e8p1024,
     };
 }
 
@@ -236,6 +283,19 @@ pub fn hasTables(dir: []const u8) bool {
     if (!readPrefix(buf[0..s.len :0], &hdr)) return false;
     return std.mem.readInt(u32, hdr[0..4], .little) == magic_tables and
         std.mem.readInt(u32, hdr[4..8], .little) == format_version;
+}
+
+/// Returns true if `dir/pw_v4_e8p_tables.bin` exists and starts with a valid `PWV4` v4 header.
+pub fn hasTables4(dir: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/pw_v4_e8p_tables.bin", .{dir}) catch return false;
+    buf[s.len] = 0;
+    var hdr: [20]u8 = undefined;
+    if (!readPrefix(buf[0..s.len :0], &hdr)) return false;
+    return std.mem.readInt(u32, hdr[0..4], .little) == tfq4.magic_tables and
+        std.mem.readInt(u32, hdr[4..8], .little) == tfq4.format_version and
+        std.mem.readInt(u32, hdr[12..16], .little) == tfq4.dim and
+        std.mem.readInt(u32, hdr[16..20], .little) <= tfq4.table_kind_max;
 }
 
 /// Returns true if `dir/layer_{layer:0>2}.tffpw` exists with a `TFPW` v3 header and `num_experts != 0`.
@@ -313,6 +373,28 @@ pub fn loadTables(
     return b;
 }
 
+/// Zero-copy maps and validates `dir/pw_v4_e8p_tables.bin` if present, or returns null when absent.
+pub fn loadTables4Optional(
+    gpa: std.mem.Allocator,
+    device: mtl.Device,
+    buffers: *std.ArrayList(mtl.Buffer),
+    maps: *std.ArrayList(MappedShard),
+    total_bytes: *usize,
+    dir: []const u8,
+) !?LoadedTables4 {
+    if (!hasTables4(dir)) return null;
+    const m = (try mapFile(dir, "pw_v4_e8p_tables.bin", tfq4.tables_256_bytes)) orelse return null;
+    errdefer unmapBytes(m.bytes);
+    const h = try validateTables4(m.file());
+    const all = try span(m.len, 0, m.len, true);
+    try buffers.ensureUnusedCapacity(gpa, 1);
+    try maps.ensureUnusedCapacity(gpa, 1);
+    const b = try view(device, m, all);
+    keep(buffers, maps, m, &.{b});
+    total_bytes.* += m.len;
+    return .{ .buf = b, .table_kind = h.table_kind, .k_codes = h.k_codes };
+}
+
 /// Zero-copy maps `dir/layer_{want.layer:0>2}.tffpw` (`bufferNoCopy` scales/weights; unaligned meta copied).
 pub fn loadLayer(
     gpa: std.mem.Allocator,
@@ -322,13 +404,19 @@ pub fn loadLayer(
     total_bytes: *usize,
     dir: []const u8,
     want: LayerWant,
-    tables: mtl.Buffer,
+    tables: ?mtl.Buffer,
+    tables4: ?LoadedTables4,
 ) !Layer {
     var name: [32]u8 = undefined;
     const file = try std.fmt.bufPrint(&name, "layer_{d:0>2}.tffpw", .{want.layer});
     const m = (try mapFile(dir, file, @sizeOf(LayerHeader))) orelse return error.OpenFailed;
     errdefer unmapBytes(m.bytes);
     const at = try validateLayer(m.file(), want);
+    if (at.has_tfq3 and tables == null) return error.MissingTfq3Tables;
+    if (at.has_tfq4) {
+        const t4 = tables4 orelse return error.MissingTfq4Tables;
+        if (at.needs_e8p1024 and !tfq4.tableKindSupportsBits(t4.table_kind, 225)) return error.InvalidTfq4Tables;
+    }
     try buffers.ensureUnusedCapacity(gpa, 3);
     try maps.ensureUnusedCapacity(gpa, 1);
     const meta_copied = at.meta.off % section_align != 0;
@@ -350,229 +438,13 @@ pub fn loadLayer(
         .hidden = at.header.hidden_size,
         .inter = at.header.moe_inter,
         .tables = tables,
+        .tables4 = if (tables4) |t4| t4.buf else null,
+        .table4_kind = if (tables4) |t4| t4.table_kind else 0,
+        .has_tfq4 = at.has_tfq4,
         .meta = b_meta,
         .scales = b_sc,
         .weights = b_wt,
         .has_5b = at.has_5b,
         .bytes = m.len + extra_meta,
     };
-}
-
-pub const Pipelines = struct {
-    fwht_x: mtl.Pipeline,
-    moe_gu: mtl.Pipeline,
-    moe_down: mtl.Pipeline,
-    xrot: mtl.Buffer,
-
-    pub fn load(device: mtl.Device) !Pipelines {
-        const lib = try mtl.Library.fromSource(device, sources.inkling2_tfq3, mtl.CompileOptions.mlx());
-        defer lib.deinit();
-        const fwht_x = try mtl.Pipeline.init(device, lib, "tf_ink2_tfq3_fwht_x", false);
-        errdefer fwht_x.deinit();
-        if (fwht_x.maxThreads() < 32) return error.Inkling2Threads;
-        const moe_gu = try mtl.Pipeline.init(device, lib, "tf_ink2_tfq3_moe_gu_softcap", false);
-        errdefer moe_gu.deinit();
-        if (moe_gu.maxThreads() < 256) return error.Inkling2Threads;
-        const moe_down = try mtl.Pipeline.init(device, lib, "tf_ink2_tfq3_moe_down", false);
-        errdefer moe_down.deinit();
-        if (moe_down.maxThreads() < 256) return error.Inkling2Threads;
-        const xrot = try device.buffer(xrot_bytes, mtl.ResourceOptions.private);
-        return .{
-            .fwht_x = fwht_x,
-            .moe_gu = moe_gu,
-            .moe_down = moe_down,
-            .xrot = xrot,
-        };
-    }
-
-    pub fn deinit(p: *Pipelines) void {
-        p.xrot.deinit();
-        p.moe_down.deinit();
-        p.moe_gu.deinit();
-        p.fwht_x.deinit();
-        p.* = undefined;
-    }
-
-    /// Dispatches forward FWHT-128, softcapped SwiGLU gate+up, and down into BF16 `down_out[rows * 8, 2304]`.
-    pub fn dispatch(
-        p: *const Pipelines,
-        e: mtl.ComputeEncoder,
-        layer: Layer,
-        mlp_normed: Ref,
-        route_ids: Ref,
-        act_rot_gu: Ref,
-        down_out: Ref,
-        rows: usize,
-    ) !void {
-        if (rows == 0 or rows > state.max_rows) return error.Inkling2RowsExceeded;
-        if (layer.hidden != state.hidden or layer.inter != state.intermediate) return error.Tfq3Geometry;
-        const a: Args = .{
-            .rows = @intCast(rows),
-            .hidden = layer.hidden,
-            .inter = layer.inter,
-            .experts = layer.num_experts,
-            .topk = state.experts_per_token,
-            .gate_cap = 4.0,
-            .up_cap = 25.0,
-        };
-        const slots: usize = rows * state.experts_per_token;
-
-        e.setPipeline(p.fwht_x);
-        e.setBuffer(mlp_normed.buf, mlp_normed.off, 0);
-        e.setBuffer(p.xrot, 0, 1);
-        e.setValue(a, 2);
-        e.dispatchGroups(mtl.Size.of(layer.hidden / 128, rows, 1), mtl.Size.of(32, 1, 1));
-
-        e.setPipeline(p.moe_gu);
-        e.setBuffer(layer.weights, 0, 0);
-        e.setBuffer(layer.scales, 0, 1);
-        e.setBuffer(layer.meta, 0, 2);
-        e.setBuffer(layer.tables, 0, 3);
-        e.setBuffer(p.xrot, 0, 4);
-        e.setBuffer(route_ids.buf, route_ids.off, 5);
-        e.setBuffer(act_rot_gu.buf, act_rot_gu.off, 6);
-        e.setValue(a, 7);
-        e.dispatchGroups(mtl.Size.of(layer.inter / 128, slots, 1), mtl.Size.of(256, 1, 1));
-
-        e.setPipeline(p.moe_down);
-        e.setBuffer(layer.weights, 0, 0);
-        e.setBuffer(layer.scales, 0, 1);
-        e.setBuffer(layer.meta, 0, 2);
-        e.setBuffer(layer.tables, 0, 3);
-        e.setBuffer(act_rot_gu.buf, act_rot_gu.off, 4);
-        e.setBuffer(route_ids.buf, route_ids.off, 5);
-        e.setBuffer(down_out.buf, down_out.off, 6);
-        e.setValue(a, 7);
-        e.dispatchGroups(mtl.Size.of(layer.hidden / 128, slots, 1), mtl.Size.of(256, 1, 1));
-    }
-};
-
-fn buildTestTfpw(
-    gpa: std.mem.Allocator,
-    layer_idx: u32,
-    hidden: u32,
-    inter: u32,
-    bits: []const u32,
-    with_checksum: bool,
-) ![]u8 {
-    const sc_gu = try matScales(inter, hidden);
-    const sc_dn = try matScales(hidden, inter);
-    var total_words: u64 = 0;
-    var total_scales: u64 = 0;
-    for (bits) |b| {
-        const gu_w = try matWords(inter, hidden, b);
-        const dn_w = try matWords(hidden, inter, b);
-        total_words += gu_w * 2 + dn_w;
-        total_scales += sc_gu * 2 + sc_dn;
-    }
-    const meta_off: u64 = @sizeOf(LayerHeader);
-    const meta_bytes: u64 = @as(u64, bits.len) * @sizeOf(ExpertMeta);
-    const sc_off: u64 = std.mem.alignForward(u64, meta_off + meta_bytes, section_align);
-    const sc_bytes: u64 = total_scales * 2;
-    const w_off: u64 = std.mem.alignForward(u64, sc_off + sc_bytes, section_align);
-    const w_bytes: u64 = total_words * 4;
-    const file_len: usize = @intCast(std.mem.alignForward(u64, w_off + w_bytes, section_align));
-
-    const buf = try gpa.alloc(u8, file_len);
-    @memset(buf, 0);
-    var w_cur: u64 = 0;
-    var s_cur: u32 = 0;
-    for (bits, 0..) |b, e| {
-        const gu_w = try matWords(inter, hidden, b);
-        const dn_w = try matWords(hidden, inter, b);
-        var em = std.mem.zeroes(ExpertMeta);
-        em.b_bits = b;
-        em.gate_word_off = w_cur;
-        w_cur += gu_w;
-        em.up_word_off = w_cur;
-        w_cur += gu_w;
-        em.down_word_off = w_cur;
-        w_cur += dn_w;
-        em.gate_sc_off = s_cur;
-        s_cur += @intCast(sc_gu);
-        em.up_sc_off = s_cur;
-        s_cur += @intCast(sc_gu);
-        em.down_sc_off = s_cur;
-        s_cur += @intCast(sc_dn);
-        @memcpy(buf[@intCast(meta_off + e * @sizeOf(ExpertMeta))..][0..@sizeOf(ExpertMeta)], std.mem.asBytes(&em));
-    }
-    var hdr = LayerHeader{
-        .magic = magic_layer,
-        .version = format_version,
-        .layer_idx = layer_idx,
-        .num_experts = @intCast(bits.len),
-        .num_tensors = @intCast(bits.len * 3),
-        .hidden_size = hidden,
-        .moe_inter = inter,
-        .reserved0 = if (with_checksum) 1 else 0,
-        .raw_fp8_bytes = 0,
-        .stream_words = total_words,
-        .scale_halfs = total_scales,
-        .off_meta = meta_off,
-        .off_scales = sc_off,
-        .off_weights = w_off,
-        .reserved1 = .{ 0, 0, 0, 0 },
-        .meta_tag = @splat(0),
-    };
-    if (with_checksum) {
-        hdr.reserved1[0] = std.hash.XxHash64.hash(0, buf[@intCast(meta_off)..][0..@intCast(meta_bytes)]);
-        hdr.reserved1[1] = std.hash.XxHash64.hash(0, buf[@intCast(sc_off)..][0..@intCast(sc_bytes)]);
-        hdr.reserved1[2] = std.hash.XxHash64.hash(0, buf[@intCast(w_off)..][0..@intCast(w_bytes)]);
-    }
-    @memcpy(buf[0..@sizeOf(LayerHeader)], std.mem.asBytes(&hdr));
-    return buf;
-}
-
-test "Inkling-2 Metal TFQ3 validates PWV3 tables and rejects truncated or non-finite data" {
-    var tbl: [tables_file_bytes]u8 = @splat(0);
-    std.mem.writeInt(u32, tbl[0..4], magic_tables, .little);
-    std.mem.writeInt(u32, tbl[4..8], format_version, .little);
-    try validateTables(&tbl);
-    try std.testing.expectError(error.InvalidTfq3Tables, validateTables(tbl[0..1024]));
-    std.mem.writeInt(u16, tbl[64..66], 0x7c00, .little); // +inf half
-    try std.testing.expectError(error.InvalidTfq3Tables, validateTables(&tbl));
-    std.mem.writeInt(u16, tbl[64..66], 0, .little);
-    std.mem.writeInt(u32, tbl[8..12], 0x7fc00000, .little); // NaN float
-    try std.testing.expectError(error.InvalidTfq3Tables, validateTables(&tbl));
-}
-
-test "Inkling-2 Metal TFQ3 validates TFPW v3 header, XXH64 checksums, mixed bits, and 4-bit alignment" {
-    const gpa = std.testing.allocator;
-    // Mixed 3b/4b/5b with Inkling-2 Mini dimensions (H=2304, I=1152) and XXH64 enabled.
-    const checked = try buildTestTfpw(gpa, 7, 2304, 1152, &.{ 3, 4, 5 }, true);
-    defer gpa.free(checked);
-    const want: LayerWant = .{ .layer = 7, .experts = 3, .hidden = 2304, .inter = 1152 };
-    const parsed = try validateLayer(checked, want);
-    try std.testing.expect(parsed.has_5b);
-    try std.testing.expectEqual(@as(usize, @sizeOf(LayerHeader)), parsed.meta.off);
-    try std.testing.expectEqual(@as(usize, 0), parsed.scales.off % section_align);
-    try std.testing.expectEqual(@as(usize, 0), parsed.weights.off % section_align);
-
-    // 1-bit flip in meta, scales, and weights each fail with Tfq3ChecksumMismatch.
-    for ([_]usize{ parsed.meta.off, parsed.scales.off, parsed.weights.off }) |flip_at| {
-        checked[flip_at] ^= 0x01;
-        try std.testing.expectError(error.Tfq3ChecksumMismatch, validateLayer(checked, want));
-        checked[flip_at] ^= 0x01;
-    }
-
-    // Wrong layer index or shape fails with Tfq3LayerMismatch.
-    try std.testing.expectError(error.Tfq3LayerMismatch, validateLayer(checked, .{ .layer = 8, .experts = 3, .hidden = 2304, .inter = 1152 }));
-    try std.testing.expectError(error.Tfq3LayerMismatch, validateLayer(checked, .{ .layer = 7, .experts = 128, .hidden = 2304, .inter = 1152 }));
-
-    // Legacy reserved0 == 0 accepted, has_5b == false when only 3b/4b present, misaligned 4b word_off refused.
-    const legacy = try buildTestTfpw(gpa, 0, 128, 128, &.{ 3, 4 }, false);
-    defer gpa.free(legacy);
-    const lwant: LayerWant = .{ .layer = 0, .experts = 2, .hidden = 128, .inter = 128 };
-    const lparsed = try validateLayer(legacy, lwant);
-    try std.testing.expect(!lparsed.has_5b);
-
-    var em = std.mem.bytesToValue(ExpertMeta, legacy[lparsed.meta.off + @sizeOf(ExpertMeta) ..][0..@sizeOf(ExpertMeta)]);
-    em.gate_word_off += 1; // breaks 4-bit uint4 alignment
-    @memcpy(legacy[lparsed.meta.off + @sizeOf(ExpertMeta) ..][0..@sizeOf(ExpertMeta)], std.mem.asBytes(&em));
-    try std.testing.expectError(error.Tfq3Misaligned, validateLayer(legacy, lwant));
-
-    em.gate_word_off -= 1;
-    em.b_bits = 6;
-    @memcpy(legacy[lparsed.meta.off + @sizeOf(ExpertMeta) ..][0..@sizeOf(ExpertMeta)], std.mem.asBytes(&em));
-    try std.testing.expectError(error.Tfq3Bits, validateLayer(legacy, lwant));
 }

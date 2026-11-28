@@ -18,13 +18,20 @@ const measured = [_]struct { []const u8, U }{
     .{ "tf_tfq3_wmma_sk8_5b", .{ .{ .regs = 62, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 } } },
     .{ "tf_tfq3_wmma_fused_5b", .{ .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 } } },
     .{ "tf_tfq3_wmma_prefill64_5b", .{ .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 } } },
+    .{ "tf_tfq4_fwht_x", .{ .{ .regs = 18, .static = 0, .bound = 0 }, .{ .regs = 18, .static = 0, .bound = 0 }, .{ .regs = 18, .static = 0, .bound = 0 }, .{ .regs = 16, .static = 0, .bound = 0 }, .{ .regs = 16, .static = 0, .bound = 0 } } },
+    .{ "tf_tfq4_e8p_dense_trained", .{ .{ .regs = 94, .static = 13312, .bound = 0 }, .{ .regs = 95, .static = 13312, .bound = 0 }, .{ .regs = 95, .static = 13312, .bound = 0 }, .{ .regs = 89, .static = 13312, .bound = 0 }, .{ .regs = 89, .static = 13312, .bound = 0 } } },
+    .{ "tf_tfq4_e8p_dense_e8p", .{ .{ .regs = 127, .static = 13824, .bound = 0 }, .{ .regs = 127, .static = 13824, .bound = 0 }, .{ .regs = 127, .static = 13824, .bound = 0 }, .{ .regs = 92, .static = 13824, .bound = 0 }, .{ .regs = 92, .static = 13824, .bound = 0 } } },
+    .{ "tf_tfq4_e8p_dense_e8p1024", .{ .{ .regs = 127, .static = 26880, .bound = 0 }, .{ .regs = 127, .static = 26880, .bound = 0 }, .{ .regs = 127, .static = 26880, .bound = 0 }, .{ .regs = 92, .static = 26880, .bound = 0 }, .{ .regs = 92, .static = 26880, .bound = 0 } } },
+    .{ "tf_tfq4_moe_gu_swiglu", .{ .{ .regs = 72, .static = 18752, .bound = 0 }, .{ .regs = 66, .static = 18752, .bound = 0 }, .{ .regs = 66, .static = 18752, .bound = 0 }, .{ .regs = 54, .static = 18752, .bound = 0 }, .{ .regs = 54, .static = 18752, .bound = 0 } } },
+    .{ "tf_tfq4_moe_gu_softcap", .{ .{ .regs = 72, .static = 18752, .bound = 0 }, .{ .regs = 65, .static = 18752, .bound = 0 }, .{ .regs = 65, .static = 18752, .bound = 0 }, .{ .regs = 54, .static = 18752, .bound = 0 }, .{ .regs = 54, .static = 18752, .bound = 0 } } },
+    .{ "tf_tfq4_moe_down", .{ .{ .regs = 56, .static = 18240, .bound = 0 }, .{ .regs = 52, .static = 18240, .bound = 0 }, .{ .regs = 52, .static = 18240, .bound = 0 }, .{ .regs = 50, .static = 18240, .bound = 0 }, .{ .regs = 50, .static = 18240, .bound = 0 } } },
 };
 fn usage(comptime symbol: []const u8) U {
     for (measured) |m| if (std.mem.eql(u8, m[0], symbol)) return m[1];
     @compileError("no measured TFQ3 usage for " ++ symbol);
 }
 pub const cuda = blk: {
-    var out: [15]reg.CudaRecord = undefined;
+    var out: [22]reg.CudaRecord = undefined;
     const fixed = .{
         .{ "tf_tfq3_fwht_x", "tfq3", 32 },
         .{ "tf_tfq3_fwht_y", "tfq3", 32 },
@@ -32,6 +39,13 @@ pub const cuda = blk: {
         .{ "tf_tfq3_moe_gu_softcap", "tfq3_moe", 256 },
         .{ "tf_tfq3_moe_down", "tfq3_moe", 256 },
         .{ "tf_tfq3_glu_contract", "tfq3_moe", 32 },
+        .{ "tf_tfq4_fwht_x", "tfq4", 32 },
+        .{ "tf_tfq4_e8p_dense_trained", "tfq4", 256 },
+        .{ "tf_tfq4_e8p_dense_e8p", "tfq4", 256 },
+        .{ "tf_tfq4_e8p_dense_e8p1024", "tfq4", 256 },
+        .{ "tf_tfq4_moe_gu_swiglu", "tfq4", 256 },
+        .{ "tf_tfq4_moe_gu_softcap", "tfq4", 256 },
+        .{ "tf_tfq4_moe_down", "tfq4", 256 },
     };
     for (fixed, 0..) |entry, i| out[i] = .{
         .launch = .{ .name = "tfq3 " ++ entry[0], .symbol = entry[0], .image = entry[1], .threads = entry[2], .min_sm = 80 },
