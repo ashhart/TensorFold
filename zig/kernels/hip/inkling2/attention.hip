@@ -55,20 +55,29 @@ extern "C" __global__ void __launch_bounds__(32)
     for (int i = 0; i < 4; ++i) dst[lane * 4 + i] = tobf(x[i]);
 }
 
-// tab[row, head, d] = bf16(rel[row, head, :] . proj[:, d]) for d < 1024, fp32 sums in tap order (rel_logits_proj).
-extern "C" __global__ void __launch_bounds__(256)
-    tf_ink2_rel_table(const uint16_t* __restrict__ rel, const uint16_t* __restrict__ proj,
-                      uint16_t* __restrict__ tab) {
-    using namespace ink2;
-    const size_t rh = blockIdx.x;
-    float r[kRel];
-    for (int j = 0; j < kRel; ++j) r[j] = bf(rel[rh * kRel + j]);
-    for (int d = threadIdx.x; d < kExtent; d += blockDim.x) {
-        float acc = 0.0f;
-        for (int j = 0; j < kRel; ++j) acc += r[j] * bf(proj[j * kExtent + d]);
-        tab[rh * kExtent + d] = tobf(acc);
+// tab[row, head, d] = bf16(rel[row, head, :] . proj[:, d]) for d < E (proj [16][E], fp32 sums in tap order), else 0.
+#define INK2_REL_TABLE(name, E)                                                                                   \
+    extern "C" __global__ void __launch_bounds__(256)                                                                 \
+        name(const uint16_t* __restrict__ rel, const uint16_t* __restrict__ proj, uint16_t* __restrict__ tab) {       \
+        using namespace ink2;                                                                                         \
+        static_assert(E > 0 && E <= kTabRow);                                                                         \
+        const size_t rh = blockIdx.x;                                                                                 \
+        float r[kRel];                                                                                                \
+        for (int j = 0; j < kRel; ++j) r[j] = bf(rel[rh * kRel + j]);                                                 \
+        for (int d = threadIdx.x; d < E; d += blockDim.x) {                                                           \
+            float acc = 0.0f;                                                                                         \
+            for (int j = 0; j < kRel; ++j) acc += r[j] * bf(proj[j * E + d]);                                         \
+            tab[rh * kTabRow + d] = tobf(acc);                                                                        \
+        }                                                                                                             \
+        if constexpr (E < kTabRow) {                                                                                  \
+            for (int d = E + static_cast<int>(threadIdx.x); d < kTabRow; d += blockDim.x) tab[rh * kTabRow + d] = 0;  \
+        }                                                                                                             \
     }
-}
+
+// Inkling 2 Mini's extent 1,024 (no suffix) and tiny-inkling2-mini's 256 and 128; hip_attention.zig refuses others.
+INK2_REL_TABLE(tf_ink2_rel_table, 1024)
+INK2_REL_TABLE(tf_ink2_rel_table_e256, 256)
+INK2_REL_TABLE(tf_ink2_rel_table_e128, 128)
 
 // Sliding layers (a chunk a block) and split global calls (a sub-chunk a block, `chunks` partials a row and head).
 extern "C" __global__ void __launch_bounds__(ink2::kWaves * 32)

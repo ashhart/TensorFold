@@ -10,17 +10,22 @@ const ref = contract.inkling2_attn_ref;
 const c = contract.spec;
 const g = contract.gates;
 const D = ref.D;
-const heads = fill_.heads;
-const kv = fill_.kv;
+const Model = fill_.Model;
 const R = ref.d_rel;
 const u: f64 = 0x1p-24;
 
 fn sh(rows: usize, k: usize) c.Shape {
-    return .{ .rows = rows, .n = heads * D, .k = k };
+    return .{ .rows = rows, .n = fill_.mini.heads * D, .k = k };
+}
+
+fn ts(rows: usize, k: usize) c.Shape {
+    return .{ .rows = rows, .n = fill_.tiny.heads * D, .k = k };
 }
 
 const prep_shapes = [_]c.Shape{ sh(16, 300000), sh(2048, 2048), sh(1, 1048576), sh(128, 1048576), sh(2048, 1048576), sh(7, 8192), sh(4, 8193), sh(2, 8194) };
 const apart_shapes = [_]c.Shape{ sh(16, 300000), sh(128, 1048576), sh(9, 20000) };
+const tiny_prep_shapes = [_]c.Shape{ ts(16, 300000), ts(2048, 2048), ts(1, 1048576), ts(128, 1048576), ts(2048, 1048576), ts(7, 8192), ts(4, 8193), ts(2, 8194) };
+const tiny_apart_shapes = [_]c.Shape{ ts(16, 300000), ts(128, 1048576), ts(9, 20000) };
 const nan_rule = "a NaN in a q, k or rel head stays NaN and leaves the head's other values unclipped (fminf drops the NaN " ++
     "norm, where transformers' clamp gives NaN); an infinity makes its head 0 and itself NaN; v rows propagate";
 
@@ -28,13 +33,16 @@ fn depthPrep(_: c.Shape) usize {
     return 4 + 5; // a lane's four squares, then the wave's five butterfly adds
 }
 
-/// rows x 24 heads x 128 (q); k: the first stream's context, so global rows meet tau (floor 8,192) at 1M positions.
-pub fn prepSpec(global: bool, apart: bool) c.Spec {
-    const name = if (apart) "inkling2 hip attn tf_ink2_prep global: three streams' rows and caches in one launch" else if (global) "inkling2 hip attn tf_ink2_prep global (q, rel scaled by tau; k, v into a 4,096-slot ring)" else "inkling2 hip attn tf_ink2_prep sliding (q, rel, k, v rows into the 3,072-slot ring)";
+/// rows x heads x 128 (q); k: the first stream's context, so global rows meet tau (floor 8,192) at 1M positions.
+pub fn prepSpec(model: Model, global: bool, apart: bool) c.Spec {
+    const tiny = fill_.isTiny(model);
+    const name = if (tiny)
+        (if (apart) "inkling2 hip attn tiny-mini tf_ink2_prep global: three streams' rows and caches in one launch" else if (global) "inkling2 hip attn tiny-mini tf_ink2_prep global (4/2 heads: q, rel scaled by tau; k, v into a 4,096-slot ring)" else "inkling2 hip attn tiny-mini tf_ink2_prep sliding (4/2 heads: q, rel, k, v rows into the 2,176-slot ring)")
+    else if (apart) "inkling2 hip attn tf_ink2_prep global: three streams' rows and caches in one launch" else if (global) "inkling2 hip attn tf_ink2_prep global (q, rel scaled by tau; k, v into a 4,096-slot ring)" else "inkling2 hip attn tf_ink2_prep sliding (q, rel, k, v rows into the 3,072-slot ring)";
     const why = "a head's sum of squares only scales it: a bf16 sum's error stays under the bf16 output's rounding";
-    var s: c.Spec = .{ .name = name, .accum = .f32, .depth = depthPrep, .ops = 16, .out = .bf16, .served = &prep_shapes, .nan = .{ .stated = nan_rule }, .sums = .{ .f16 = 100, .bf16 = 0, .why = why } };
+    var s: c.Spec = .{ .name = name, .accum = .f32, .depth = depthPrep, .ops = 16, .out = .bf16, .served = if (tiny) &tiny_prep_shapes else &prep_shapes, .nan = .{ .stated = nan_rule }, .sums = .{ .f16 = 100, .bf16 = 0, .why = why } };
     if (apart) {
-        s.served = &apart_shapes;
+        s.served = if (tiny) &tiny_apart_shapes else &apart_shapes;
         s.replaces = "tf_ink2_prep one stream at a time, at each stream's row and cache offsets";
     }
     return s;
@@ -47,14 +55,15 @@ pub const Fault = enum { none, tau_off, cross_write };
 pub const Prep = struct {
     rig: Rig,
     k: *const K.Kernels,
+    model: Model = fill_.mini,
     global: bool,
     apart: bool = false,
     fault: Fault = .none,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
     lay: fill_.Layout = undefined,
-    raw: [4][]u16 = .{ &.{}, &.{}, &.{}, &.{} }, // q [rows][24][128], k, v [rows][8][128], rel [rows][24][16]
-    scales: [2][]u16 = .{ &.{}, &.{} }, // q_scale [24][128], rel_scale [24][16]
+    raw: [4][]u16 = .{ &.{}, &.{}, &.{}, &.{} }, // q [rows][heads][128], k, v [rows][kv][128], rel [rows][heads][16]
+    scales: [2][]u16 = .{ &.{}, &.{} }, // q_scale [heads][128], rel_scale [heads][16]
     pos: []usize = &.{},
     stream: []usize = &.{},
     want: []f64 = &.{},
@@ -85,7 +94,7 @@ pub const Prep = struct {
     }
 
     pub fn kernel(self: *Prep) g.Kernel {
-        var s = prepSpec(self.global, self.apart);
+        var s = prepSpec(self.model, self.global, self.apart);
         switch (self.fault) {
             .none => {},
             .tau_off => s.name = "control: inkling2 hip attn tf_ink2_prep global rows without tau",
@@ -98,7 +107,8 @@ pub const Prep = struct {
 
     fn sizes(self: *const Prep) [4]usize {
         const rows = self.shape.rows;
-        const cache = self.lay.streams * kv * @as(usize, self.lay.layer.ring) * D;
+        const heads = self.model.heads;
+        const cache = self.lay.streams * self.model.kv * @as(usize, self.lay.layer.ring) * D;
         return .{ rows * heads * D, rows * heads * R, cache, cache };
     }
 
@@ -109,6 +119,8 @@ pub const Prep = struct {
 
     /// Projections as N(0, 3) (most heads clip), scales in [0.5, 3); stress: integers to 256, every partial sum exact.
     pub fn prepare(self: *Prep, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        const heads = self.model.heads;
+        const kv = self.model.kv;
         if (shape.n != heads * D or shape.rows == 0 or shape.k < shape.rows) return false;
         if (self.apart and shape.rows < 3) return false;
         self.free();
@@ -117,9 +129,10 @@ pub const Prep = struct {
         self.fill = fill;
         const a = self.rig.a;
         const rows = shape.rows;
-        const layer: K.Layer = if (self.global) .{ .window = 0, .ring = fill_.global_ring, .chunk = 0, .tau = true } else .{ .window = 1024, .ring = K.Layer.sliding(1024, 2048).ring, .chunk = 0, .tau = false };
+        const win = self.model.window;
+        const layer: K.Layer = if (self.global) .{ .window = 0, .ring = fill_.global_ring, .chunk = 0, .tau = true } else .{ .window = win, .ring = K.Layer.sliding(win, 2048).ring, .chunk = 0, .tau = false };
         const streams: usize = if (self.apart) 3 else if (rows >= 2 and rows <= 128) 2 else 1;
-        self.lay = fill_.Layout.of(layer, rows, shape.k, streams);
+        self.lay = fill_.Layout.of(self.model, layer, rows, shape.k, streams);
         self.pos = try a.alloc(usize, rows);
         self.stream = try a.alloc(usize, rows);
         const pos32 = try a.alloc(i32, 2 * rows);
@@ -179,13 +192,13 @@ pub const Prep = struct {
 
     fn config(self: *const Prep) K.Prep {
         const alpha: f32 = if (self.fault == .tau_off) 0 else @floatCast(ref.alpha);
-        return .{ .qk_clip = @floatCast(ref.qk_clip), .rel_clip = @floatCast(ref.rel_clip), .floor = @floatCast(fill_.floor_pos), .alpha = alpha, .eps = @floatCast(ref.eps) };
+        return .{ .qk_clip = @floatCast(ref.qk_clip), .rel_clip = @floatCast(ref.rel_clip), .floor = @floatCast(self.model.floor), .alpha = alpha, .eps = @floatCast(ref.eps) };
     }
 
     pub fn run(self: *Prep) !void {
         try self.rig.put(self.out[2], self.zeros); // slots no row writes stay 0, so a stray write shows
         try self.rig.put(self.out[3], self.zeros);
-        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = self.dev[0], .seg_of = self.dev[1], .segs = self.dev[2], .tiles = 0, .n_tiles = 0, .last_pos = @intCast(self.shape.k - 1), .streams = @intCast(self.lay.streams) };
+        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = @intCast(self.model.heads), .kv_heads = @intCast(self.model.kv), .pos = self.dev[0], .seg_of = self.dev[1], .segs = self.dev[2], .tiles = 0, .n_tiles = 0, .last_pos = @intCast(self.shape.k - 1), .streams = @intCast(self.lay.streams) };
         try K.prep(self.k, self.rig.s, r, self.lay.layer, self.config(), self.in[0..4].*, self.in[4..6].*, self.out[0], self.out[1], .{ .k = self.out[2], .v = self.out[3] });
         try self.rig.s.synchronize();
     }
@@ -193,13 +206,15 @@ pub const Prep = struct {
     /// Each stream's rows alone, at its row offsets into the inputs and outputs and its segment's cache offset.
     pub fn replaced(self: *Prep) ![]const u8 {
         const sz = self.sizes();
+        const heads = self.model.heads;
+        const kv = self.model.kv;
         const base = self.dev[4];
         const at = [4]u64{ base, base + sz[0] * 2, base + (sz[0] + sz[1]) * 2, base + (sz[0] + sz[1] + sz[2]) * 2 };
         try self.rig.put(at[2], self.zeros);
         try self.rig.put(at[3], self.zeros);
         for (self.lay.segs, self.alone) |s, one| {
             const r0: u64 = @intCast(s.row0);
-            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = heads, .kv_heads = kv, .pos = self.dev[0] + r0 * 4, .seg_of = self.dev[3], .segs = one, .tiles = 0, .n_tiles = 0, .last_pos = @intCast(s.p0 + s.n - 1), .streams = 1 };
+            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = @intCast(heads), .kv_heads = @intCast(kv), .pos = self.dev[0] + r0 * 4, .seg_of = self.dev[3], .segs = one, .tiles = 0, .n_tiles = 0, .last_pos = @intCast(s.p0 + s.n - 1), .streams = 1 };
             const raw = [4]u64{ self.in[0] + r0 * heads * D * 2, self.in[1] + r0 * kv * D * 2, self.in[2] + r0 * kv * D * 2, self.in[3] + r0 * heads * R * 2 };
             try K.prep(self.k, self.rig.s, r, self.lay.layer, self.config(), raw, self.in[4..6].*, at[0] + r0 * heads * D * 2, at[1] + r0 * heads * R * 2, .{ .k = at[2], .v = at[3] });
         }
@@ -240,10 +255,12 @@ pub const Prep = struct {
             @memset(@field(self, f), 0);
         }
         const sz = self.sizes();
+        const heads = self.model.heads;
+        const kv = self.model.kv;
         const ring: usize = self.lay.layer.ring;
         var x: [D]f64 = undefined;
         for (0..self.shape.rows) |r| {
-            const t: ?f64 = if (self.global) ref.tauAt(self.pos[r], fill_.floor_pos) else null;
+            const t: ?f64 = if (self.global) ref.tauAt(self.pos[r], self.model.floor) else null;
             for (0..heads) |h| {
                 for (x[0..D], 0..) |*v, i| v.* = ref.bf(self.raw[0][(r * heads + h) * D + i]) * ref.bf(self.scales[0][h * D + i]);
                 self.head(x[0..D], ref.qk_clip, t, (r * heads + h) * D, acc, order);
@@ -306,20 +323,33 @@ pub const Prep = struct {
     }
 };
 
-const table_shapes = [_]c.Shape{ .{ .rows = 16, .n = heads * ref.extent, .k = R }, .{ .rows = 2048, .n = heads * ref.extent, .k = R }, .{ .rows = 1, .n = heads * ref.extent, .k = R }, .{ .rows = 128, .n = heads * ref.extent, .k = R } };
+fn tableShapes(comptime heads: usize) [4]c.Shape {
+    const n = heads * K.table_row;
+    return .{ .{ .rows = 16, .n = n, .k = R }, .{ .rows = 2048, .n = n, .k = R }, .{ .rows = 1, .n = n, .k = R }, .{ .rows = 128, .n = n, .k = R } };
+}
+const table_shapes = tableShapes(fill_.mini.heads);
+const tiny_table_shapes = tableShapes(fill_.tiny.heads);
 
 fn depthTable(_: c.Shape) usize {
     return R; // a product and an add a rel value, in tap order
 }
 
-pub fn tableSpec() c.Spec {
-    return .{ .name = "inkling2 hip attn tf_ink2_rel_table (bf16 bias of each (row, head) at distances 0..1023)", .accum = .f32, .depth = depthTable, .out = .bf16, .served = &table_shapes };
+/// Mini's table at 24 heads and extent 1,024; tiny-mini's at 4 heads and 256 (global) or 128 (local) distances.
+pub fn tableSpec(model: Model, extent: usize) c.Spec {
+    const name = switch (extent) {
+        256 => "inkling2 hip attn tf_ink2_rel_table_e256 (tiny-mini's global layers: bias at distances 0..255, zeros to 1,023)",
+        128 => "inkling2 hip attn tf_ink2_rel_table_e128 (tiny-mini's local layers: bias at distances 0..127, zeros to 1,023)",
+        else => "inkling2 hip attn tf_ink2_rel_table (bf16 bias of each (row, head) at distances 0..1023)",
+    };
+    return .{ .name = name, .accum = .f32, .depth = depthTable, .out = .bf16, .served = if (fill_.isTiny(model)) &tiny_table_shapes else &table_shapes };
 }
 
-/// tf_ink2_rel_table: tab[rh][d] = bf16(sum_j rel[rh][j] proj[j][d]), proj the layer's rel_logits_proj [16][1024].
+/// tf_ink2_rel_table at an extent E: tab[rh][d] = bf16(sum_j rel[rh][j] proj[j][d]) for d < E, proj [16][E]; 0 past E.
 pub const Table = struct {
     rig: Rig,
     k: *const K.Kernels,
+    model: Model = fill_.mini,
+    extent: usize = ref.extent,
     late: bool = false, // control: the device reads proj one column late
     shape: c.Shape = undefined,
     rel: []u16 = &.{},
@@ -335,20 +365,25 @@ pub const Table = struct {
     }
 
     pub fn kernel(self: *Table) g.Kernel {
-        var s = tableSpec();
-        if (self.late) s.name = "control: inkling2 hip attn tf_ink2_rel_table reading rel_logits_proj one column late";
+        var s = tableSpec(self.model, self.extent);
+        if (self.late) s.name = switch (self.extent) {
+            256 => "control: inkling2 hip attn tf_ink2_rel_table_e256 reading rel_logits_proj one column late",
+            128 => "control: inkling2 hip attn tf_ink2_rel_table_e128 reading rel_logits_proj one column late",
+            else => "control: inkling2 hip attn tf_ink2_rel_table reading rel_logits_proj one column late",
+        };
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.late) .shapes else null };
     }
 
     const vt = g.hooks(Table);
 
     pub fn count(self: *const Table) usize {
-        return self.shape.rows * heads * ref.extent;
+        return self.shape.rows * self.model.heads * K.table_row;
     }
 
     /// rel as prep leaves it (clipped to 8), proj N(0, 0.5); stress: 512 x odd mirrored a step along, proj 1 or 2.
     pub fn prepare(self: *Table, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.n != heads * ref.extent or shape.k != R or shape.rows == 0) return false;
+        const e = self.extent;
+        if (shape.n != self.model.heads * K.table_row or shape.k != R or shape.rows == 0) return false;
         const a = self.rig.a;
         a.free(self.rel);
         a.free(self.proj);
@@ -358,10 +393,10 @@ pub const Table = struct {
         self.shape = shape;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        const n = shape.rows * heads;
+        const n = shape.rows * self.model.heads;
         self.rel = try a.alloc(u16, n * R);
-        self.proj = try a.alloc(u16, R * ref.extent);
-        for (self.proj, 0..) |*p, i| p.* = ref.bits(if (fill == .stress) projStress(i / ref.extent, i % ref.extent) else rng.floatNorm(f64) * 0.5);
+        self.proj = try a.alloc(u16, R * e);
+        for (self.proj, 0..) |*p, i| p.* = ref.bits(if (fill == .stress) projStress(i / e, i % e) else rng.floatNorm(f64) * 0.5);
         var x: [R]f64 = undefined;
         for (0..n) |rh| {
             for (&x, 0..) |*v, j| v.* = if (fill == .stress) relStress(rh, j) else rng.floatNorm(f64);
@@ -380,7 +415,7 @@ pub const Table = struct {
         if (self.late) {
             const t = try a.alloc(u16, self.proj.len);
             defer a.free(t);
-            for (t, 0..) |*v, i| v.* = if (i % ref.extent + 1 < ref.extent) self.proj[i + 1] else 0;
+            for (t, 0..) |*v, i| v.* = if (i % e + 1 < e) self.proj[i + 1] else 0;
             self.in[2] = try self.rig.input(std.mem.sliceAsBytes(t));
         }
         self.out = try self.rig.output(self.count() * 2);
@@ -398,15 +433,21 @@ pub const Table = struct {
     }
 
     pub fn run(self: *Table) !void {
-        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0, .streams = 1 };
-        try K.relTable(self.k, self.rig.s, r, self.in[0], self.in[2], self.out);
+        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = @intCast(self.model.heads), .kv_heads = @intCast(self.model.kv), .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0, .streams = 1 };
+        try K.relTable(self.k, self.rig.s, r, @intCast(self.extent), self.in[0], self.in[2], self.out);
         try self.rig.s.synchronize();
     }
 
+    /// Output o's terms: rel times proj at its distance, exact in fp32; none (0) from the extent to the row's end.
     fn terms(self: *const Table, o: usize, t: *[R]f64) void {
-        const rh = o / ref.extent;
-        const d = o % ref.extent;
-        for (t, 0..) |*v, j| v.* = ref.bf(self.rel[rh * R + j]) * ref.bf(self.proj[j * ref.extent + d]); // exact in fp32
+        const e = self.extent;
+        const rh = o / K.table_row;
+        const d = o % K.table_row;
+        if (d >= e) {
+            @memset(t, 0);
+            return;
+        }
+        for (t, 0..) |*v, j| v.* = ref.bf(self.rel[rh * R + j]) * ref.bf(self.proj[j * e + d]);
     }
 
     pub fn reference(self: *Table, want: []f64, mag: []f64) !void {
