@@ -12,10 +12,6 @@ pub const mtp_draw = @import("cuda_mtp_draw.zig");
 const types = @import("cuda_mtp_types.zig");
 const memory = @import("cuda_mtp_memory.zig");
 
-fn arrayBytes(a: usize, b: usize, c: usize) !usize {
-    return weights.checkedMul(try weights.checkedMul(a, b), c);
-}
-
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
 const dr = lanes.drafter;
@@ -133,7 +129,7 @@ pub const Mtp = struct {
         d.depth = @min(d.depth, max_drafts);
         d.batch = try platform.environment.read(bool, "TF_MTP_BATCH", true);
         try d.initializeMemorySizes();
-        try memory.check(gpa, io, e.g, dir, d.scratch_bytes, d.ring_bytes, calibration_cache_bytes, room);
+        try memory.check(gpa, io, e.g, dir, d.scratch_bytes, d.area_bytes, calibration_cache_bytes, room);
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen36_mtp);
         errdefer d.mod.unload();
         d.dmod = try cuda.Module.load(e.d, cuda.kernels.qwen35_draft);
@@ -220,44 +216,22 @@ pub const Mtp = struct {
     }
 
     pub fn initializeMemorySizes(d: *Mtp) !void {
-        try weights.validateGeometry(d.e.g);
-        const max_c_int: usize = @intCast(std.math.maxInt(c_int));
-        if (d.capacity == 0 or d.capacity > max_c_int) return error.UnsupportedMtpGeometry;
+        const sizes = try memory.sizes(d.e.g, d.capacity, batched.most, @sizeOf(batched.RingRow));
+        d.ring_bytes = sizes.ring_bytes;
+        d.area_bytes = sizes.area_bytes;
+        d.stream_bytes = sizes.stream_bytes;
+        d.scratch_bytes = sizes.scratch_bytes;
         const hidden_bytes = try weights.checkedMul(d.e.g.hidden, 2);
-        const kv_width = try weights.checkedMul(d.e.g.kv_heads, head_dim);
-        d.ring_bytes = try arrayBytes(try weights.checkedMul(2, d.capacity), kv_width, 2);
-        const aligned_ring = try weights.checkedAligned(d.ring_bytes);
-        d.step_offset = try weights.checkedAligned(try weights.checkedAdd(aligned_ring, hidden_bytes));
-        d.area_bytes = try weights.checkedAdd(d.step_offset, hidden_bytes);
-        d.area_bytes = try weights.checkedAdd(d.area_bytes, try weights.checkedMul(max_lanes, 4));
-        d.stream_bytes = try weights.checkedAdd(d.ring_bytes, try weights.checkedMul(2, hidden_bytes));
-        d.stream_bytes = try weights.checkedAdd(d.stream_bytes, try weights.checkedMul(max_lanes, 4));
-        d.scratch_bytes = try d.layout(false);
+        d.step_offset = try weights.checkedAligned(try weights.checkedAdd(try weights.checkedAligned(d.ring_bytes), hidden_bytes));
     }
 
     /// The scratch rows, measured (nothing assigned) or assigned from the scratch buffer.
     pub fn layout(d: *Mtp, assign: bool) !usize {
-        const g = d.e.g;
-        const R = @import("cuda_mtp_absorb.zig").prompt_kv_tile;
-        const L = max_lanes;
-        const aw = g.attnWidth();
-        const kw = d.kvWidth();
-        const sizes = .{
-            .{ "taps_in", try arrayBytes(R, g.hidden, 2) },                   .{ "hin", try arrayBytes(R, g.hidden, 2) },   .{ "hn", try arrayBytes(R, g.hidden, 2) },                                .{ "emb", try arrayBytes(R, g.hidden, 2) },
-            .{ "en", try arrayBytes(R, g.hidden, 2) },                        .{ "h", try arrayBytes(R, g.hidden, 2) },     .{ "r", try arrayBytes(R, g.hidden, 2) },                                 .{ "x", try arrayBytes(R, g.hidden, 2) },
-            .{ "qraw", try arrayBytes(R, try weights.checkedMul(2, aw), 2) }, .{ "q", try arrayBytes(R, aw, 2) },           .{ "kraw", try arrayBytes(R, kw, 2) },                                    .{ "kb", try arrayBytes(R, kw, 2) },
-            .{ "vb", try arrayBytes(R, kw, 2) },                              .{ "att", try arrayBytes(R, aw, 2) },         .{ "xs", try arrayBytes(R, @max(g.hidden, aw, g.intermediate) / 64, 4) }, .{ "logits", try arrayBytes(L, g.vocab, 2) },
-            .{ "words", try arrayBytes(L, lp_words, 4) },                     .{ "picks", try arrayBytes(L, 1, 4) },        .{ "lane_state", try arrayBytes(L, g.hidden, 2) },                        .{ "lane_k", try arrayBytes(L, kw, 2) },
-            .{ "lane_v", try arrayBytes(L, kw, 2) },                          .{ "anc", try arrayBytes(L, anc_stride, 4) }, .{ "ids", try arrayBytes(absorb_id_rows, 1, 4) },                         .{ "tok", try arrayBytes(L, 1, 4) },
-            .{ "rules", try arrayBytes(L, @sizeOf(cuda.sample.Rule), 1) },    .{ "meta", try arrayBytes(L, 1, 4) },         .{ "chain_tok", try arrayBytes(L, 1, 4) },                                .{ "tab", try arrayBytes(batched.most, @sizeOf(batched.RingRow), 1) },
+        const scratch_layout = try memory.scratchLayout(d.e.g, batched.most, @sizeOf(batched.RingRow));
+        if (assign) inline for (memory.scratch_fields, 0..) |name, index| {
+            @field(d.*, name) = d.scratch.ptr + scratch_layout.offsets[index];
         };
-        var total: usize = 0;
-        inline for (sizes) |s| {
-            const at = try weights.checkedAligned(total);
-            total = try weights.checkedAdd(at, s[1]);
-            if (assign) @field(d, s[0]) = d.scratch.ptr + at;
-        }
-        return total;
+        return scratch_layout.bytes;
     }
 
     pub fn drop(d: *Mtp, ctx: *Ctx) void {

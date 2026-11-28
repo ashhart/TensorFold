@@ -150,6 +150,9 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
     const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));
     b.step("test-flag-deps-host", "Flag dependencies: needs, refusals and build gates at the CLI").dependOn(&deps.step);
+    const embedding_residency = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "--embedding-residency accepts only", "embedding residency is forwarded only" } }));
+    b.step("test-embedding-residency-cli-host", "Embedding residency choices reach native CUDA requests and reject unknown values").dependOn(&embedding_residency.step);
+    all.dependOn(&embedding_residency.step);
     const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
     b.step("test-model-discovery-host", "Loaded context and reasoning offers for each model discovery entry").dependOn(&models.step);
     b.step("test-decision-context-host", "Decision context classification through actual HTTP errors").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: decision context", "prompt past the context", "System One" } })).step);

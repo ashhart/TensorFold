@@ -53,6 +53,7 @@ pub fn excluded(args: cli.Args) ?[]const u8 {
         .{ "--speed-up", args.speed_up != null },
         .{ "--kv-cache", !std.mem.eql(u8, args.kv_cache, "bf16") },
         .{ "--prompt-precision", !std.mem.eql(u8, args.prompt_precision, "bf16") },
+        .{ "--embedding-residency", args.embedding_residency != null },
         .{ "--rope-yarn", args.rope_yarn != null },
     };
     for (checks) |c| if (c[1]) return c[0];

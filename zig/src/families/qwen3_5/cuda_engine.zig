@@ -105,7 +105,7 @@ pub const Engine = struct {
     embed_s: u64,
     embed_b: u64,
     embed_bits: u8, // 4, 8, or 16 (bf16 rows: EXL3/ModelOpt/TFQ3)
-    host_embed: ?cuda.HostBuffer = null, // mapped host memory when discrete VRAM is short
+    host_embed: ?cuda.HostBuffer = null, // BF16 rows in mapped host memory when selected or explicitly requested
     kit: ?*x3w.Kit = null, // EXL3 checkpoint kernels (g.exl3)
     tfq3: ?*tfq3w.Kit = null, // TFQ3 checkpoint kernels and shards (g.tfq3)
     head: Proj,

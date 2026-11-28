@@ -227,6 +227,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal: `TF_Q27_IDLE_RELEASE=N` (off by default) releases the target weights it prepared after N quiet seconds, marking them purgeable so macOS may reclaim the memory. The next request restores them first, reloading only the buffers the OS emptied and checking each against a SHA-256 snapshot. Replies are unchanged (#5040).
 
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
+- Qwen3.5 on CUDA can select BF16 input-embedding residency for ModelOpt and compressed-tensors NVFP4 checkpoints; `auto` uses host rows when device-memory admission requires them, while `device` and `host` request explicit placement (issue #4942, PR #5052).
 
 - Ling-3.0-tiny on ARM CPUs: independent attention heads run in the persistent worker pool, each with its serial arithmetic and reduction order, so tokens and logits are unchanged; decode is about 10% faster at 1 and 4 threads (#5071). Thanks to @ThinkOffApp.
 

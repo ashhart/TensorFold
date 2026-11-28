@@ -1740,8 +1740,8 @@ Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
 ones below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
 `--spill-gib`, `--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`,
-`--vision`, `--tp` above 1, `--speed-up`, `--kv-cache` other than bf16, `--prompt-precision` other than bf16 or
-`--rope-yarn`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
+`--vision`, `--tp` above 1, `--speed-up`, `--kv-cache` other than bf16, `--prompt-precision` other than bf16,
+`--embedding-residency` when set or `--rope-yarn`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
 text file or the executable, or a checkpoint file the engine stamped, changed after it was opened or stamped) or
 `hash_failed` (a file could not be read; when the binary cannot be opened or the text files cannot be stamped at
 startup, a startup line says why). The engine's facts and the epoch are read under the lock every reload takes, so one

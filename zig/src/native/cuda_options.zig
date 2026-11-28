@@ -38,6 +38,18 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
             return false;
         };
     }
+    if (o.embedding_residency) |p| {
+        if (comptime @hasField(F.Options, "embedding_residency")) {
+            opts.embedding_residency = std.meta.stringToEnum(@FieldType(F.Options, "embedding_residency"), @tagName(p)) orelse {
+                problem.* = "--embedding-residency: this CUDA family does not accept the selected embedding residency";
+                return false;
+            };
+        } else {
+            problem.* = "--embedding-residency: this CUDA family does not support mapped host embedding rows";
+            return false;
+        }
+    }
+    if (comptime @hasField(F.Options, "embedding_residency_explicit")) opts.embedding_residency_explicit = o.embedding_residency != null;
     if (comptime @hasField(F.Options, "drafter")) opts.drafter = o.drafter;
     if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
     if (comptime @hasField(F.Options, "rope_yarn")) opts.rope_yarn = o.rope_yarn;
@@ -91,6 +103,28 @@ test "prompt precision: family options receive both explicit int8 and default bf
         try std.testing.expect(set(F, .{ .dir = "d", .model_type = "qwen3_5", .prompt_int8 = on }, &opts, &why));
         try std.testing.expectEqual(on, opts.prompt_int8);
     }
+}
+
+test "embedding residency is forwarded only to families that implement it" {
+    const Supported = struct {
+        pub const Options = struct { embedding_residency: enum { auto, device, host } = .auto, embedding_residency_explicit: bool = false };
+    };
+    const Unsupported = struct {
+        pub const Options = struct {};
+    };
+    var supported: Supported.Options = .{};
+    var unsupported: Unsupported.Options = .{};
+    var why: []const u8 = "";
+    try std.testing.expect(set(Supported, .{ .dir = "d", .model_type = "qwen3_5", .embedding_residency = .host }, &supported, &why));
+    try std.testing.expectEqual(@as(@TypeOf(supported.embedding_residency), .host), supported.embedding_residency);
+    try std.testing.expect(supported.embedding_residency_explicit);
+    supported = .{};
+    try std.testing.expect(set(Supported, .{ .dir = "d", .model_type = "qwen3_5" }, &supported, &why));
+    try std.testing.expect(!supported.embedding_residency_explicit);
+    try std.testing.expect(set(Supported, .{ .dir = "d", .model_type = "qwen3_5", .embedding_residency = .auto }, &supported, &why));
+    try std.testing.expect(supported.embedding_residency_explicit);
+    try std.testing.expect(!set(Unsupported, .{ .dir = "d", .model_type = "other", .embedding_residency = .host }, &unsupported, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "does not support") != null);
 }
 
 test "full-only precision: checkpoint is unknown before a family can load or allocate" {

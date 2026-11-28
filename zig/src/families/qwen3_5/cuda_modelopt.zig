@@ -63,6 +63,49 @@ fn slotUsed(g: Geometry, i: usize, slot: Slot) bool {
     };
 }
 
+fn isNvfp4(kind: Kind) bool {
+    return kind == .nvfp4 or kind == .nvfp4_w16;
+}
+
+/// Whether a ModelOpt or compressed-tensors checkpoint contains NVFP4 weights.
+pub fn hasNvfp4(g: Geometry) bool {
+    if (!g.kinds.modelopt) return false;
+    if ((g.heads and isNvfp4(g.kinds.head)) or (g.moe() and isNvfp4(g.kinds.experts))) return true;
+    for (g.first..g.first + g.layers) |i| for (std.enums.values(Slot)) |slot| {
+        if (slotUsed(g, i, slot) and isNvfp4(g.kinds.of(i, slot))) return true;
+    };
+    return false;
+}
+
+fn workspaceBytes(kind: Kind, n: usize, k: usize, clusters: bool) usize {
+    const w: ?cuda.qmmf.Weight = switch (kind) {
+        .nvfp4, .nvfp4_w16 => cuda.nvfp4.weight(0, 0, 1, n, k),
+        .fp8 => cuda.modelopt.fp8Weight(0, 1, n, k),
+        .bf16 => cuda.modelopt.bf16Weight(0, n, k),
+        .fp8c => cuda.fp8.weight(0, 0, n, k),
+        .affine => null,
+    };
+    if (w) |weight| {
+        const rows = @min(engine.max_rows, @as(usize, cuda.qmmf.fused_rows - 1));
+        const plan = cuda.qmmf.planFor(rows, weight, clusters);
+        return cuda.qmmf_part_bytes.required(rows, weight.n, plan.sk, plan.reduce);
+    }
+    return 0;
+}
+
+/// Exact deterministic scratch allocated by `Kernels.reserveParts`, from the served geometry.
+pub fn reservePartsBytes(g: Geometry, clusters: bool) usize {
+    var most: usize = 0;
+    if (g.heads) most = workspaceBytes(g.kinds.head, g.vocab, g.hidden, clusters);
+    for (g.first..g.first + g.layers) |i| for (std.enums.values(Slot)) |slot| {
+        if (slotUsed(g, i, slot)) {
+            const nk = g.projectionShape(slot);
+            most = @max(most, workspaceBytes(g.kinds.of(i, slot), nk[0], nk[1], clusters));
+        }
+    };
+    return most;
+}
+
 /// A plain BF16 checkpoint's kinds: every module and the head bf16 (a tied head packs embed_tokens), on HF names.
 pub fn plain(g: Geometry) !Kinds {
     if (g.moe()) return error.UnsupportedQwenQuantization;
@@ -277,35 +320,7 @@ pub const Kernels = struct {
 
     /// The slice partials every projection of `e` takes below fused_rows (none with clusters).
     pub fn reserveParts(k: *Kernels, e: *const Engine) !void {
-        var most: usize = 0;
-        const Each = struct {
-            fn bytes(lane: cuda.qmmf.Lane, p: Proj) usize {
-                return switch (p) {
-                    .ql => |w| switch (w) {
-                        .nvfp4, .fp8, .bf16, .fp8g => |q| lane.partBytes(@min(engine.max_rows, cuda.qmmf.fused_rows - 1), q),
-                        else => 0,
-                    },
-                    else => 0,
-                };
-            }
-        };
-        most = Each.bytes(k.lane, e.head);
-        for (e.layers) |l| {
-            switch (l.mlp) {
-                .dense => |m| for ([_]Proj{ m.gate, m.up, m.down }) |p| {
-                    most = @max(most, Each.bytes(k.lane, p));
-                },
-                .moe => {},
-            }
-            switch (l.mixer) {
-                .delta => |m| for ([_]Proj{ m.qkv, m.z, m.a, m.b, m.out }) |p| {
-                    most = @max(most, Each.bytes(k.lane, p));
-                },
-                .attention => |m| for ([_]Proj{ m.q, m.k, m.v, m.o }) |p| {
-                    most = @max(most, Each.bytes(k.lane, p));
-                },
-            }
-        }
+        const most = reservePartsBytes(e.g, k.lane.clusters);
         if (most > 0) k.part = try DeviceBuffer.alloc(e.d, most);
     }
 };
@@ -513,4 +528,62 @@ test "ModelOpt's floor refuses pre-Ampere cards and admits non-cluster reduction
     for ([_]u32{ 70, 75 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
     for ([_]u32{ 80, 86, 87, 89, 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
     try std.testing.expectEqualStrings("FP8 and NVFP4 weights decode to bf16 for mma.sync: a ModelOpt checkpoint needs compute capability 8.0 or newer", modeloptRefusal(75).?);
+}
+
+test "NVFP4 admission detection covers W4A16 and compressed tensors only in the active geometry" {
+    var g: Geometry = .{ .hidden = 512, .intermediate = 1024, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = false, .context = 128, .linear = @splat(false), .kinds = .{ .modelopt = true, .head = .bf16 } };
+    try std.testing.expect(!hasNvfp4(g)); // BF16 only
+    g.kinds.head = .fp8;
+    g.kinds.proj[0][@backingInt(Slot.down)] = .fp8;
+    try std.testing.expect(!hasNvfp4(g)); // FP8 only
+    g.kinds.head = .nvfp4_w16;
+    g.heads = false;
+    try std.testing.expect(!hasNvfp4(g)); // an inactive stage head is not owned
+    g.heads = true;
+    try std.testing.expect(hasNvfp4(g)); // W4A16_NVFP4 output head
+    g.kinds.head = .bf16;
+    g.heads = false;
+    g.first = 1;
+    g.layers = 1;
+    g.kinds.proj[0][@backingInt(Slot.down)] = .nvfp4;
+    g.kinds.proj[1][@backingInt(Slot.down)] = .fp8;
+    try std.testing.expect(!hasNvfp4(g)); // layer zero is outside [first, first + layers)
+    g.kinds.proj[1][@backingInt(Slot.down)] = .nvfp4_w16;
+    try std.testing.expect(hasNvfp4(g));
+    g.kinds.ct = true;
+    g.kinds.proj[1][@backingInt(Slot.down)] = .nvfp4;
+    try std.testing.expect(hasNvfp4(g)); // compressed-tensors (including Unsloth) NVFP4
+}
+
+test "ModelOpt reserveParts admission uses the same QMMF workspace function as allocation" {
+    var g: Geometry = .{ .hidden = 5120, .intermediate = 17408, .layers = 1, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 4096, .linear = @splat(false), .heads = false, .kinds = .{ .modelopt = true } };
+    g.kinds.proj[0][@backingInt(Slot.down)] = .nvfp4;
+    const expected_weight = cuda.nvfp4.weight(0, 0, 1, g.hidden, g.intermediate);
+    const rows = @min(engine.max_rows, @as(usize, cuda.qmmf.fused_rows - 1));
+    const plan = cuda.qmmf.planFor(rows, expected_weight, false);
+    const expected = cuda.qmmf_part_bytes.required(rows, expected_weight.n, plan.sk, plan.reduce);
+    try std.testing.expectEqual(expected, reservePartsBytes(g, false));
+    try std.testing.expect(reservePartsBytes(g, false) > 0);
+    try std.testing.expectEqual(@as(usize, 0), reservePartsBytes(g, true));
+}
+
+test "compressed-tensors index detects Unsloth NVFP4 rows while BF16 and FP8 exports stay on device" {
+    var g: Geometry = .{ .hidden = 512, .intermediate = 1024, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = false, .context = 128, .linear = @splat(false) };
+    const nvfp4_index =
+        \\{"weight_map":{"model.language_model.embed_tokens.weight":"model.safetensors","lm_head.weight_packed":"model.safetensors","model.language_model.layers.0.mlp.down_proj.weight_packed":"model.safetensors"}}
+    ;
+    g.kinds = try ctKindsBytes(std.testing.allocator, nvfp4_index, g);
+    try std.testing.expect(g.kinds.ct and hasNvfp4(g));
+
+    const fp8_index =
+        \\{"weight_map":{"model.language_model.embed_tokens.weight":"model.safetensors","lm_head.weight_scale":"model.safetensors","model.language_model.layers.0.mlp.down_proj.weight_scale":"model.safetensors"}}
+    ;
+    g.kinds = try ctKindsBytes(std.testing.allocator, fp8_index, g);
+    try std.testing.expect(g.kinds.ct and !hasNvfp4(g));
+
+    const bf16_index =
+        \\{"weight_map":{"model.language_model.embed_tokens.weight":"model.safetensors","lm_head.weight":"model.safetensors","model.language_model.layers.0.mlp.down_proj.weight":"model.safetensors"}}
+    ;
+    g.kinds = try ctKindsBytes(std.testing.allocator, bf16_index, g);
+    try std.testing.expect(g.kinds.ct and !hasNvfp4(g));
 }

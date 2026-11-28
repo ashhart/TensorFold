@@ -317,9 +317,25 @@ test "ModelOpt partials: real reservations cover every 27B projection below the 
     var e: Engine = undefined;
     e.d = &d;
     e.stream = .{ .d = &d, .handle = null };
+    const Geometry = @import("src/families/qwen3_5/cuda_geometry.zig").Geometry;
+    const Slot = @import("src/families/qwen3_5/cuda_geometry.zig").Slot;
+    var geo: Geometry = .{ .hidden = 5120, .intermediate = 17408, .layers = 2, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 4096, .linear = @splat(false) };
+    geo.linear[0] = true;
     var layers: [2]@import("src/families/qwen3_5/cuda_engine.zig").Layer = undefined;
     e.layers = &layers;
     for ([_]cuda.qmmf.Mode{ .fp4, .fp8, .fp8g, .bf16 }) |mode| {
+        const kind: @import("src/families/qwen3_5/cuda_geometry.zig").Kind = switch (mode) {
+            .fp4 => .nvfp4,
+            .fp8 => .fp8,
+            .fp8g => .fp8c,
+            .bf16 => .bf16,
+            .mxfp8 => unreachable,
+        };
+        geo.kinds = .{ .modelopt = true, .head = kind };
+        for (0..geo.layers) |i| for (std.enums.values(Slot)) |slot| {
+            geo.kinds.proj[i][@backingInt(slot)] = kind;
+        };
+        e.g = geo;
         const head = projection(mode, 248320, 5120);
         const gate = projection(mode, 17408, 5120);
         const down = projection(mode, 5120, 17408);

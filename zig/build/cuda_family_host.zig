@@ -61,6 +61,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const ct_run = b.addRunArtifact(b.addTest(.{ .root_module = ct_admit }));
     b.step("test-qwen35-modelopt-admission-host", "Synthetic stored-format admission and full-precision loading without devices").dependOn(&ct_run.step);
     step.dependOn(&ct_run.step);
+    const embedding_offload = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "rows stay on the card", "unsupported formats reject only explicit residency", "mapped embedding support", "mapped BF16 row preparation", "failed pinned allocation", "automatic pinned allocation failure", "automatic offload follows", "NVFP4 admission detection covers", "ModelOpt reserveParts admission", "compressed-tensors index detects Unsloth", "mapped ModelOpt BF16 embedding subtracts", "MTP admission sizes" } }));
+    b.step("test-qwen35-embedding-offload-host", "Embedding residency policy, NVFP4 detection, exact ModelOpt workspace and MTP memory accounting without a GPU").dependOn(&embedding_offload.step);
+    step.dependOn(&embedding_offload.step);
     const mo_experts = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen ModelOpt experts:"} }));
     b.step("test-qwen35-modelopt-experts-host", "Each NVFP4 expert part through core's reader, Qwen's own scale refusal").dependOn(&mo_experts.step);
     step.dependOn(&mo_experts.step);
@@ -254,7 +257,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const mtp_lifecycle = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP context lifecycle:"} }));
     b.step("test-qwen35-mtp-lifecycle-host", "MTP stream release and pooled context reset after interruption without devices").dependOn(&mtp_lifecycle.step);
     step.dependOn(&mtp_lifecycle.step);
-    const mtp_memory = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP startup peak"} }));
+    const mtp_memory = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "MTP startup peak", "MTP admission sizes" } }));
     b.step("test-qwen35-mtp-memory-host", "MTP startup device-memory accounting and overflow guards without a GPU").dependOn(&mtp_memory.step);
     step.dependOn(&mtp_memory.step);
 }

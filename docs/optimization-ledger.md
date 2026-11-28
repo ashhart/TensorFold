@@ -88,6 +88,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | open H[#4673] | ? | ? | ? | ? |
+| 40. Mapped host embeddings | yes | ? | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -130,6 +131,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | ? | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? | ? |
+| 40. Mapped host embeddings | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -173,6 +175,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
 | 40. CPU KDA heads | n/a | n/a | n/a | done CPU, exact independent heads (Refs #1247) |
+| 41. Mapped host embeddings | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -221,6 +224,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 40. Mapped host embeddings | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 | snloop |
 | --- | --- | --- | --- | --- |
@@ -263,6 +267,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 40. Mapped host embeddings | ? | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),

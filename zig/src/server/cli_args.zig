@@ -91,6 +91,7 @@ pub const Args = struct {
     segments: ?u32 = null,
     loops: ?u32 = null, // passes over a looped model's recurrent block (null: the checkpoint's own)
     precision: ?api.Precision = null, // an NVFP4 checkpoint's math on CUDA: NVIDIA's own (checkpoint) or full precision
+    embedding_residency: ?api.EmbeddingResidency = null,
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
     checkpoint_slots: ?i64 = null,
