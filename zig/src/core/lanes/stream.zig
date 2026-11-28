@@ -18,7 +18,6 @@ pub const Reason = enum {
     length,
     @"error",
     cancelled,
-
     pub fn name(r: Reason) []const u8 {
         return if (r == .none) "" else @tagName(r);
     }
@@ -221,6 +220,7 @@ pub const Stream = struct {
     shared_round: bool = false, // a round beside another stream: its times are not this stream's alone
     settle_step: bool = false, // the lane host bills this prompt step's time to decoders: end it on the device
     prices_seeded: bool = false, // its own prices started from the engine's kept calibration
+    lone_cold: u32 = 0, // a lone tree's band had no kept calibration: its prior nodes, drawn until the stream ends
     copy_landed: [2]f64 = .{ -1, -1 }, // a lone context copy's rows that landed, decayed, by short and long match (-1: unprimed)
     copy_broke: [2]f64 = .{ 0, 0 }, // and its chains that broke before their end: their ratio is a copied row's landing rate
     copied_landed: [2]f64 = .{ -1, -1 }, // a copy window's rows that landed, decayed, by source: context, Recall (-1: unprimed)

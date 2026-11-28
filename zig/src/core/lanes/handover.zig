@@ -2,6 +2,7 @@
 const Engine = @import("engine.zig").Engine;
 const Stream = @import("stream.zig").Stream;
 const trail = @import("trail.zig");
+const lone_costs = @import("lone_costs.zig");
 
 /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
 pub fn adopt(e: *Engine, s: *Stream) !void {

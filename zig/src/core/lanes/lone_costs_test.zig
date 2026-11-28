@@ -75,6 +75,26 @@ test "lone price: unseen widths retain measured tile jumps and full rounds are n
     }
 }
 
+test "lone price: with enough widths sampled one noisy timing does not move its neighbours' prices" {
+    var startup: Table = .{};
+    defer startup.deinit(a);
+    var samples: Table = .{};
+    defer samples.deinit(a);
+    for (1..11) |rows| try startup.put(a, @intCast(rows), 36 + 0.5 * @as(f64, @floatFromInt(rows)));
+    // samples are keyed by drafts: 1, 5 and 8 (2, 6 and 9 rows) are 2 ms over the startup model, the 5-draft one 5 ms
+    try samples.put(a, 1, 39);
+    try samples.put(a, 5, 44);
+    try samples.put(a, 8, 42.5);
+    try std.testing.expect(own.priceOf(startup, samples, 6, 0, true).? < 43);
+    try std.testing.expect(own.priceOf(startup, samples, 7, 0, true).? < 43);
+    // without the line a width keeps its own time and its neighbour the nearest one's
+    try std.testing.expectEqual(@as(?f64, 44), own.priceOf(startup, samples, 6, 0, false));
+    try std.testing.expectEqual(@as(?f64, 44.5), own.priceOf(startup, samples, 7, 0, false));
+    // two samples keep each width's own time
+    samples.slots[8] = null;
+    try std.testing.expectEqual(@as(?f64, 44), own.priceOf(startup, samples, 6, 0, true));
+}
+
 test "lone price: tile probes are bounded, respect available rows, and stop after calibration" {
     var cfg = try setup();
     defer cfg.deinit(a);
@@ -88,6 +108,7 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
     const tokens: [63]u32 = @splat(7);
     var p: win.Plan = .{ .stream = &s, .position = 1, .kind = .head, .tokens = &tokens };
     for ([_]u32{ 0, 15, 31, 47, 63 }) |count| {
+        // 8 rounds: the first deadline (cost_probe_after) and the default Cooldown.spacing, so a width is owed
         s.rounds += 8;
         try std.testing.expectEqual(@as(?u32, count), own.probe(&e, p));
         try e.rule.observeCost(count, 100, false, win.who(&s));
@@ -96,12 +117,15 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
         try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
         s.rounds -= 1;
     }
+    // 8 more rounds: the walk 1, 16, 32, 48, 64 is sampled, so null means nothing is owed
     s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
     p.tokens = tokens[0..16];
     try std.testing.expectEqual(@as(?u32, 16), own.probe(&e, p));
     try e.rule.observeCost(16, 100, false, win.who(&s));
     own.observe(&s, 17, 17, 100);
+    // 8 rounds is the default Cooldown.spacing: past it, null means nothing is owed, not a cooldown running
+    s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }
 
@@ -411,4 +435,38 @@ test "lone price: deadlines a run of streams backed off start the next stream at
     try std.testing.expectEqual(own.carry_most, next.cost_probe_spacing);
     try std.testing.expectEqual(2 + own.carry_most, next.cost_probes[16].after);
     try std.testing.expectEqual(own.carry_most, next.cost_probes[16].spacing);
+}
+
+test "lone price: without plain_guard no probe asks for a round with no draft, and a lone round is priced by its own times" {
+    var cfg = try setup();
+    defer cfg.deinit(a);
+    cfg.plain_guard = false;
+    cfg.lone_cost_tile = 4;
+    var target: fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    e.alone = true;
+    var s = try Stream.init(a, .{ .id = "no-plain", .prompt = &.{3}, .max_new = 128 });
+    defer s.deinit(a);
+    const tokens: [15]u32 = @splat(7);
+    const p: win.Plan = .{ .stream = &s, .position = 1, .kind = .head, .tokens = &tokens };
+    // the engine keeps shared pricing without plain_guard; a backend marks its lone rounds and probes by itself
+    try std.testing.expect(!own.enabled(&e, p));
+    var w = win.who(&s);
+    w.lone = true;
+    // 8 rounds is the first deadline, as for a stream's cost_probe_after and every Cooldown
+    s.rounds += 8;
+    for ([_]u32{ 1, 5, 9, 13, 15 }) |drafts| {
+        s.rounds += 8;
+        try std.testing.expectEqual(@as(?u32, drafts), own.probe(&e, p));
+        try e.rule.observeCost(drafts, 100, false, w);
+        own.observe(&s, drafts + 1, drafts + 1, 100);
+    }
+    try std.testing.expectEqual(@as(?f64, 100), s.depth.?.ms.?.get(15));
+    try std.testing.expect(e.rule.greedy_ms.empty()); // the shared rounds' table is left alone
+    // 8 rounds is the default Cooldown.spacing: past it, null means nothing is owed, not a cooldown running
+    s.rounds += 8;
+    try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }

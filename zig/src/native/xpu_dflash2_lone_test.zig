@@ -1,0 +1,535 @@
+//! A lone DFlash2 stream's tree width from the lane rule's lone pricing, and what no width can change: the tokens.
+const std = @import("std");
+const lanes = @import("lanes");
+const xq = @import("xpu_qwen27");
+const ad = @import("xpu_dflash2.zig");
+const Drafter = xq.drafter.Drafter;
+const gpa = std.testing.allocator;
+const lc = lanes.lone_costs;
+
+fn engine(cfg: *lanes.Config, target: *lanes.fake.Fake, clock: *lanes.fake.FixedClock) !lanes.Engine {
+    var costs: [16]lanes.config.Cost = undefined;
+    for (&costs, 1..) |*c, rows| c.* = .{ .width = @intCast(rows), .ms = 25 + 0.6 * @as(f64, @floatFromInt(rows)) };
+    cfg.* = try lanes.Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 15, .plain_guard = false, .hidden_rows = true, .batch_rows = 16, .window_costs = &costs, .lone_cost_tile = ad.lone_tile }, 16, 15);
+    target.* = .{ .gpa = gpa };
+    clock.* = .{};
+    return lanes.Engine.init(gpa, cfg, target.backend(), clock.clock());
+}
+
+/// A world's round ms by drafts: a verify costs `per` more a node, over `base`.
+const World = struct { base: f64, per: f64 };
+
+/// A lone stream of `context` tokens for `rounds` rounds in `world`: the nodes of its first, last, fewest, most rounds.
+const Nodes = struct { first: u32, last: u32, least: u32, most: u32 };
+
+fn lone(e: *lanes.Engine, context: usize, world: World, rounds: usize, nodes: u32) !Nodes {
+    const n = ad.priced(nodes) orelse return .{ .first = nodes, .last = nodes, .least = nodes, .most = nodes };
+    const prompt = try gpa.alloc(u32, context);
+    defer gpa.free(prompt);
+    @memset(prompt, 3);
+    var s = try lanes.Stream.init(gpa, .{ .id = "lone-width", .prompt = prompt, .max_new = 256 });
+    defer s.deinit(gpa);
+    var parents: [15]i32 = undefined;
+    var own: [15]f64 = undefined;
+    for (&parents, &own, 0..) |*p, *o, i| {
+        p.* = @as(i32, @intCast(i)) - 1; // a chain of drafts each 85 % likely under its parent
+        o.* = @log(0.85);
+    }
+    var landing: lanes.draft_tree.Landing = .{};
+    var chance: [15]f64 = undefined;
+    ad.chances(&landing, false, parents[0..n], own[0..n], chance[0..n]);
+    var first: u32 = 0;
+    var last: u32 = 0;
+    var least: u32 = 99;
+    var most: u32 = 0;
+    for (0..rounds) |i| {
+        const pick = try ad.width(e, &s, chance[0..n]);
+        if (i == 0) first = pick.nodes;
+        last = pick.nodes;
+        least = @min(least, pick.nodes);
+        most = @max(most, pick.nodes);
+        s.rounds += 1;
+        if (s.rounds > 1) try ad.measured(e, &s, pick.trial, pick.nodes, world.base + world.per * @as(f64, @floatFromInt(pick.nodes)));
+    }
+    ad.retain(e, &s); // the driver's own filing when its stream ends
+    return .{ .first = first, .last = last, .least = least, .most = most };
+}
+
+/// The drafts maximizing the tokens a ms in `world`, the chain of 85 % drafts `lone` grows, at most `cap`.
+fn best(world: World, cap: u32) u32 {
+    var top: u32 = 1;
+    var top_rate: f64 = 0;
+    var tokens: f64 = 1;
+    var chance: f64 = 1;
+    for (1..cap + 1) |n| {
+        chance *= 0.85;
+        tokens += chance;
+        const rate = tokens / (world.base + world.per * @as(f64, @floatFromInt(n)));
+        if (rate > top_rate) {
+            top = @intCast(n);
+            top_rate = rate;
+        }
+    }
+    return top;
+}
+
+test "draft sources: a lone tree's width follows its context band's measured rounds" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    const shallow: World = .{ .base = 30, .per = 1 };
+    const deep: World = .{ .base = 70, .per = 21.5 };
+    const long = 131072;
+    // a band's first stream draws its prior throughout and files only that width; the next one adapts from it
+    const cold = try lone(&e, 100, shallow, 120, 15);
+    try std.testing.expectEqual(Nodes{ .first = 15, .last = 15, .least = 15, .most = 15 }, cold);
+    const wide = try lone(&e, 100, shallow, 120, 15);
+    const deep_cold = try lone(&e, long, deep, 120, 15);
+    try std.testing.expectEqual(Nodes{ .first = 3, .last = 3, .least = 3, .most = 3 }, deep_cold);
+    const narrow = try lone(&e, long, deep, 120, 15);
+    try std.testing.expectEqual(best(shallow, 15), wide.last);
+    try std.testing.expectEqual(best(deep, 15), narrow.last);
+    // each band's next stream starts on what its band measured: the deep one narrow, the short one still wide
+    try std.testing.expectEqual(narrow.last, (try lone(&e, long + 9, deep, 1, 15)).first);
+    try std.testing.expectEqual(wide.last, (try lone(&e, 120, shallow, 1, 15)).first);
+}
+
+test "draft sources: a cold band's first request draws a prior by prompt length, under the cap" {
+    const world: World = .{ .base = 70, .per = 21.5 };
+    const cases = [_]struct { context: usize, cap: u32, nodes: u32 }{
+        .{ .context = ad.cold_context - 1, .cap = 15, .nodes = 15 },
+        .{ .context = ad.cold_context, .cap = 15, .nodes = 7 },
+        .{ .context = ad.cold_context + 1, .cap = 15, .nodes = 7 },
+        .{ .context = 8191, .cap = 15, .nodes = 7 },
+        .{ .context = 8192, .cap = 15, .nodes = 3 },
+        .{ .context = 8193, .cap = 15, .nodes = 3 },
+        .{ .context = 131072, .cap = 15, .nodes = 3 },
+        .{ .context = 100, .cap = 3, .nodes = 3 },
+        .{ .context = 4000, .cap = 5, .nodes = 5 },
+    };
+    for (cases) |c| {
+        var cfg: lanes.Config = undefined;
+        var target: lanes.fake.Fake = undefined;
+        var clock: lanes.fake.FixedClock = undefined;
+        var e = try engine(&cfg, &target, &clock);
+        defer e.deinit();
+        defer cfg.deinit(gpa);
+        defer target.deinit();
+        const r = try lone(&e, c.context, world, 60, c.cap);
+        try std.testing.expectEqual(c.nodes, r.least);
+        try std.testing.expectEqual(c.nodes, r.most);
+    }
+}
+
+test "draft sources: lengths within one calibration band share its calibration, the next band stays cold" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    const world: World = .{ .base = 30, .per = 1 };
+    const wide = best(world, 15);
+    try std.testing.expect(wide > 3 and wide != 7); // neither prior can pass for a calibrated width
+    // 9K, 16K and 12K prompts are one band (8,192 to 16,383): the first is cold, the rest start on what it measured
+    try std.testing.expectEqual(lc.band(9000), lc.band(16383));
+    try std.testing.expectEqual(Nodes{ .first = 3, .last = 3, .least = 3, .most = 3 }, try lone(&e, 9000, world, 120, 15));
+    try std.testing.expectEqual(wide, (try lone(&e, 16383, world, 120, 15)).last);
+    try std.testing.expectEqual(wide, (try lone(&e, 12000, world, 1, 15)).first);
+    // 28K is the next band: no calibration yet, so its prior, whatever the band below measured
+    try std.testing.expect(lc.band(28000) != lc.band(9000));
+    try std.testing.expectEqual(Nodes{ .first = 3, .last = 3, .least = 3, .most = 3 }, try lone(&e, 28000, world, 120, 15));
+    try std.testing.expectEqual(wide, (try lone(&e, 9000, world, 1, 15)).first); // and the band below kept its own
+    // the 2,048 to 8,191 band (prior 7) is one band across its lengths too
+    try std.testing.expectEqual(lc.band(2048), lc.band(8191));
+    try std.testing.expectEqual(Nodes{ .first = 7, .last = 7, .least = 7, .most = 7 }, try lone(&e, 3000, world, 120, 15));
+    try std.testing.expectEqual(wide, (try lone(&e, 8191, world, 120, 15)).last);
+    try std.testing.expectEqual(wide, (try lone(&e, 2049, world, 1, 15)).first);
+}
+
+test "draft sources: XPU_TREE caps a lone tree, and under 2 nodes nothing is priced" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    try std.testing.expectEqual(@as(?u32, 15), ad.priced(40));
+    try std.testing.expectEqual(@as(?u32, 3), ad.priced(3));
+    try std.testing.expectEqual(@as(?u32, null), ad.priced(1));
+    try std.testing.expectEqual(@as(?u32, null), ad.priced(0));
+    for ([_]u32{ 2, 3, 7, 40 }) |cap| {
+        const r = try lone(&e, 100, .{ .base = 30, .per = 1 }, 60, cap);
+        try std.testing.expect(r.last <= ad.priced(cap).?);
+        try std.testing.expect(r.last >= 1); // never a round with no draft
+    }
+    // fixed, as before
+    try std.testing.expectEqual(@as(u32, 1), (try lone(&e, 100, .{ .base = 30, .per = 1 }, 5, 1)).last);
+}
+
+/// A drafter that grows a chain of the nodes it is asked for and files each grow's count: `ad.lone`'s grows, no device.
+const Grows = struct {
+    pub const Drafter = struct { asked: [4]u32 = @splat(0), n: usize = 0 };
+    pub const Draw = xq.drafter.Draw;
+    pub const Note = xq.drafter.Note;
+    pub const Round = xq.drafter.Round;
+    pub fn grow(d: *Grows.Drafter, pending: u32, _: u32, nodes: u32, _: ?Draw) !xq.drafter.Grown {
+        if (d.n < d.asked.len) d.asked[d.n] = nodes;
+        d.n += 1;
+        var g: xq.drafter.Grown = .{ .n = nodes };
+        g.ids[0] = pending;
+        for (1..nodes + 1) |i| {
+            g.ids[i] = 3;
+            g.par[i] = @as(i32, @intCast(i)) - 2; // a chain: each draft under the previous one, the first under row 0
+            g.own[i] = @log(0.85);
+        }
+        return g;
+    }
+    pub fn settle(_: *Grows.Drafter, g: *const xq.drafter.Grown, nodes: u32, _: ?Draw, _: ?Note, out: *[16]u32) !Round {
+        out[0] = g.ids[0];
+        var r: Round = .{ .tokens = out[0..1], .terminal = 3, .drafted = @min(nodes, g.n), .accepted = 0 };
+        r.path[0] = 0;
+        r.rows = 1;
+        return r;
+    }
+    pub fn treeRound(_: *Grows.Drafter, _: u32, _: u32, _: u32, _: ?Draw, _: ?Note, _: *[16]u32) !Round {
+        return error.Unreachable;
+    }
+    pub fn now() f64 {
+        return 0;
+    }
+};
+
+test "draft sources: a new cold stream's first grow is its prior, a calibrated band's next stream grows the cap" {
+    const Dev = struct {
+        pub fn sync(_: @This()) !void {}
+    };
+    const Block = struct { block: u32 = 16, nodes: u32, landing: lanes.draft_tree.Landing = .{}, runner: struct { d: Dev = .{} } = .{} };
+    const cases = [_]struct { context: usize, cap: u32, nodes: u32 }{
+        .{ .context = 100, .cap = 15, .nodes = 15 },
+        .{ .context = ad.cold_context, .cap = 15, .nodes = 7 },
+        .{ .context = 8192, .cap = 15, .nodes = 3 },
+        .{ .context = 131072, .cap = 15, .nodes = 3 },
+        .{ .context = 4000, .cap = 5, .nodes = 5 },
+    };
+    for (cases) |c| {
+        var cfg: lanes.Config = undefined;
+        var target: lanes.fake.Fake = undefined;
+        var clock: lanes.fake.FixedClock = undefined;
+        var e = try engine(&cfg, &target, &clock);
+        defer e.deinit();
+        defer cfg.deinit(gpa);
+        defer target.deinit();
+        const prompt = try gpa.alloc(u32, c.context);
+        defer gpa.free(prompt);
+        @memset(prompt, 3);
+        var s = try lanes.Stream.init(gpa, .{ .id = "lone-first-grow", .prompt = prompt, .max_new = 256 });
+        defer s.deinit(gpa);
+        var b: Block = .{ .nodes = c.cap };
+        var d: Grows.Drafter = .{};
+        var skip = false;
+        var out: [16]u32 = undefined;
+        for (0..2) |_| _ = try ad.lone(Grows, Grows.now, &b, &d, &e, &s, 3, &skip, null, null, &out);
+        try std.testing.expectEqual(c.nodes, d.asked[0]); // the first round too
+        try std.testing.expectEqual(c.nodes, d.asked[1]);
+        ad.retain(&e, &s); // the band is calibrated: its next stream prices widths over a full grow
+        var next = try lanes.Stream.init(gpa, .{ .id = "lone-calibrated-grow", .prompt = prompt, .max_new = 256 });
+        defer next.deinit(gpa);
+        var dn: Grows.Drafter = .{};
+        _ = try ad.lone(Grows, Grows.now, &b, &dn, &e, &next, 3, &skip, null, null, &out);
+        try std.testing.expectEqual(@as(u32, 0), next.lone_cold);
+        try std.testing.expectEqual(ad.priced(c.cap).?, dn.asked[0]);
+    }
+}
+
+const NoDevice = struct {
+    pub fn sync(_: @This()) !void {}
+};
+const Host = struct { block: u32 = 16, nodes: u32 = 15, landing: lanes.draft_tree.Landing = .{}, runner: struct { d: NoDevice = .{} } = .{} };
+
+/// A stream of a `prompt`, its first sampled token committed, as the lane host commits it before alone() runs.
+fn firstCommitted(prompt: []u32, id: []const u8) !lanes.Stream {
+    @memset(prompt, 3);
+    var s = try lanes.Stream.init(gpa, .{ .id = id, .prompt = prompt, .max_new = 512 });
+    errdefer s.deinit(gpa);
+    _ = try s.commit(gpa, &.{3}, &.{});
+    return s;
+}
+
+/// `rounds` lone rounds of `s` through `ad.lone`: the grows its drafter was asked for.
+fn grows(e: *lanes.Engine, b: *Host, s: *lanes.Stream, rounds: usize) !Grows.Drafter {
+    var d: Grows.Drafter = .{};
+    var skip = false;
+    var out: [16]u32 = undefined;
+    for (0..rounds) |_| _ = try ad.lone(Grows, Grows.now, b, &d, e, s, 3, &skip, null, null, &out);
+    return d;
+}
+
+test "draft sources: the prior's boundaries are the prompt's length, after the first token is committed" {
+    const cases = [_]struct { prompt: usize, nodes: u32 }{
+        .{ .prompt = ad.cold_context - 1, .nodes = 15 },
+        .{ .prompt = ad.cold_context, .nodes = 7 },
+        .{ .prompt = 8191, .nodes = 7 },
+        .{ .prompt = 8192, .nodes = 3 },
+    };
+    for (cases) |c| {
+        var cfg: lanes.Config = undefined;
+        var target: lanes.fake.Fake = undefined;
+        var clock: lanes.fake.FixedClock = undefined;
+        var e = try engine(&cfg, &target, &clock);
+        defer e.deinit();
+        defer cfg.deinit(gpa);
+        defer target.deinit();
+        const prompt = try gpa.alloc(u32, c.prompt);
+        defer gpa.free(prompt);
+        var s = try firstCommitted(prompt, "lone-first-commit");
+        defer s.deinit(gpa);
+        try std.testing.expectEqual(c.prompt + 1, s.context.items.len);
+        var b: Host = .{};
+        const d = try grows(&e, &b, &s, 2);
+        try std.testing.expectEqual(c.nodes, d.asked[0]);
+        try std.testing.expectEqual(c.nodes, d.asked[1]);
+    }
+}
+
+test "draft sources: a reply that crosses a band boundary files its calibration in the band it seeded" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    const prompt = try gpa.alloc(u32, 8000);
+    defer gpa.free(prompt);
+    var s = try firstCommitted(prompt, "lone-crossing");
+    defer s.deinit(gpa);
+    var b: Host = .{};
+    _ = try grows(&e, &b, &s, 2);
+    const reply: [192]u32 = @splat(3);
+    _ = try s.commit(gpa, &reply, &.{});
+    const end = s.context.items.len;
+    try std.testing.expect(lc.band(end) != lc.band(prompt.len)); // the reply ends past 8,192
+    ad.retain(&e, &s); // the lone driver's filing when alone() returns
+    e.release(&s); // and the engine's when the stream ends
+    try std.testing.expect(e.lone_kept[0][lc.band(prompt.len)] != null);
+    try std.testing.expect(e.lone_kept[0][lc.band(end)] == null);
+    var next = try firstCommitted(prompt, "lone-after-crossing");
+    defer next.deinit(gpa);
+    const d = try grows(&e, &b, &next, 1);
+    try std.testing.expectEqual(@as(u32, 0), next.lone_cold); // the next 8,000-token request starts priced
+    try std.testing.expectEqual(ad.priced(b.nodes).?, d.asked[0]);
+}
+
+test "draft sources: a lone stream reclaimed after a detach resumes priced from its band's calibration" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    const prompt = try gpa.alloc(u32, 100);
+    defer gpa.free(prompt);
+    var b: Host = .{};
+    var first = try firstCommitted(prompt, "lone-calibrates");
+    defer first.deinit(gpa);
+    _ = try grows(&e, &b, &first, 2);
+    ad.retain(&e, &first);
+    const kept = slots(e.lone_kept[0][lc.band(prompt.len)]);
+    try std.testing.expect(kept.len > 0);
+    var s = try firstCommitted(prompt, "lone-reclaimed");
+    defer s.deinit(gpa);
+    _ = try grows(&e, &b, &s, 1);
+    try std.testing.expectEqualSlices(?f64, kept, s.depth.?.ms.?.slots);
+    // a request takes the stream into the lane core and leaves: the reclaim detaches it, its round state dropped
+    try e.adopt(&s);
+    try std.testing.expect(e.detach(&s));
+    try std.testing.expect(s.depth == null);
+    const d = try grows(&e, &b, &s, 1);
+    try std.testing.expectEqual(@as(u32, 0), s.lone_cold);
+    try std.testing.expect(s.depth != null and s.depth.?.ms != null);
+    // the band's kept times are back in the stream's table, beside the round it has just timed
+    const own = s.depth.?.ms.?.slots;
+    for (kept, 0..) |k, i| if (k != null) try std.testing.expect(i < own.len and own[i] != null);
+    try std.testing.expectEqual(ad.priced(b.nodes).?, d.asked[0]);
+}
+
+/// A lone stream of `context` tokens whose first `rounds` rounds ran on the wall clock in `world`.
+fn wallRounds(e: *lanes.Engine, s: *lanes.Stream, world: World, rounds: usize) !void {
+    var parents: [15]i32 = undefined;
+    var own: [15]f64 = undefined;
+    for (&parents, &own, 0..) |*p, *o, i| {
+        p.* = @as(i32, @intCast(i)) - 1;
+        o.* = @log(0.85);
+    }
+    var landing: lanes.draft_tree.Landing = .{};
+    var chance: [15]f64 = undefined;
+    ad.chances(&landing, false, &parents, &own, &chance);
+    for (0..rounds) |_| {
+        const pick = try ad.width(e, s, &chance);
+        s.rounds += 1;
+        if (s.rounds > 1) try ad.measured(e, s, pick.trial, pick.nodes, world.base + world.per * @as(f64, @floatFromInt(pick.nodes)));
+    }
+}
+
+/// `rounds` lone rounds of the engine's own, timed by its backend clock, in `world`.
+fn backendRounds(e: *lanes.Engine, s: *lanes.Stream, world: World) !void {
+    try lc.prepare(e, s, .backend);
+    for (1..16) |drafts| {
+        const ms = world.base + world.per * @as(f64, @floatFromInt(drafts));
+        try e.rule.observeCost(@intCast(drafts), ms, false, lc.marked(lanes.windows.who(s), true));
+    }
+}
+
+fn slots(k: ?lc.Kept) []const ?f64 {
+    return (k orelse return &.{}).ms.slots;
+}
+
+fn newStream(id: []const u8) !lanes.Stream {
+    const prompt = try gpa.alloc(u32, 100);
+    defer gpa.free(prompt);
+    @memset(prompt, 3);
+    return lanes.Stream.init(gpa, .{ .id = id, .prompt = prompt, .max_new = 256 });
+}
+
+fn mix(h: u64, x: u64) u64 {
+    return (h ^ x) *% 0x9E3779B97F4A7C15 +% 0x632BE59BD9B4E019;
+}
+
+// The tree walk over a synthetic target: a state hash a row, a greedy or keyed pick, the lattice the context's.
+const V = 40;
+const Sim = struct {
+    dr: *Drafter,
+    seed: u64,
+    sampled: bool,
+    rows: [16]u64 = undefined, // each verified row's target state
+    pos0: u64 = 0, // the position of the first pending token
+
+    fn pick(s: *const Sim, state: u64, position: u64) u32 {
+        const h = if (s.sampled) mix(mix(state, position), s.seed) else mix(state, 7);
+        return @intCast((h >> 33) % V);
+    }
+    fn row(ctx: *anyopaque, r: u32, position: u64) anyerror!u32 {
+        const s: *Sim = @ptrCast(@alignCast(ctx));
+        return s.pick(s.rows[r], position);
+    }
+    fn gumbel(ctx: *anyopaque, position: u64, id: u64) f64 {
+        const s: *Sim = @ptrCast(@alignCast(ctx));
+        const u = (@as(f64, @floatFromInt(mix(mix(s.seed, position), id) >> 11)) + 0.5) / (1 << 53);
+        return -@log(-@log(u));
+    }
+};
+
+const Out = struct { tokens: [16]u32 = undefined, n: usize = 0 };
+
+/// One round from the state `s0` after `pending`, `committed` tokens in: the context's lattice, `nodes` wide.
+fn round(sim: *Sim, s0: u64, pending: u32, committed: u64, oracle: []const u32, nodes: u32) !Out {
+    const dr = sim.dr;
+    const depths = 7;
+    for (0..depths) |d| for (0..16) |j| {
+        const k = mix(mix(committed, d), j);
+        const hit = j == 0 and (k >> 20) % 10 < 7 and committed + d < oracle.len;
+        dr.cand[d][j] = if (hit) oracle[committed + d] else @intCast((k >> 33) % V);
+        dr.unary[d][j] = 1.5 - 0.3 * @as(f64, @floatFromInt(j)) + @as(f64, @floatFromInt((k >> 40) % 100)) / 400;
+    };
+    const p0 = sim.pos0 + committed;
+    const draw: ?xq.drafter.Draw = if (sim.sampled) .{ .ctx = sim, .row = Sim.row, .gumbel = Sim.gumbel, .temperature = 1.0 } else null;
+    const full = xq.drafter.grown(dr, pending, depths, 15, draw, p0);
+    const g = xq.drafter.grown(dr, pending, depths, nodes, draw, p0);
+    // a tree of `nodes` is the first `nodes` drafts of the 15-node tree, in pop order
+    try std.testing.expectEqual(@min(nodes, full.n), g.n);
+    try std.testing.expectEqualSlices(u32, full.ids[0 .. g.n + 1], g.ids[0 .. g.n + 1]);
+    try std.testing.expectEqualSlices(i32, full.par[1 .. g.n + 1], g.par[1 .. g.n + 1]);
+    try std.testing.expectEqualSlices(f64, full.own[1 .. g.n + 1], g.own[1 .. g.n + 1]);
+    var rows: [16]i32 = undefined;
+    xq.drafter.treeRows(&g, g.n, &rows);
+    sim.rows[0] = s0;
+    var greedy: [16]u32 = undefined;
+    greedy[0] = sim.pick(s0, p0 + 1);
+    for (1..g.n + 1) |i| {
+        sim.rows[i] = mix(sim.rows[@intCast(rows[i])], g.ids[i]);
+        greedy[i] = sim.pick(sim.rows[i], p0 + 1);
+    }
+    var path_out: [16]u32 = undefined;
+    const round_ = try xq.drafter.follow(&g, nodes, greedy[0 .. g.n + 1], draw, null, &path_out);
+    var out: Out = .{};
+    @memcpy(out.tokens[0 .. round_.tokens.len - 1], round_.tokens[1..]);
+    out.n = round_.tokens.len - 1;
+    out.tokens[out.n] = round_.terminal;
+    out.n += 1;
+    return out;
+}
+
+fn newSim(sampled: bool) !*Sim {
+    const dr = try gpa.create(Drafter);
+    const pred = try gpa.alloc(u8, 64 * 256 * 2);
+    const succ = try gpa.alloc(u8, 64 * 256 * 2);
+    var h: u64 = 99;
+    for ([_][]u8{ pred, succ }) |t| for (0..t.len / 2) |i| {
+        h = mix(h, i);
+        std.mem.writeInt(u16, t[i * 2 ..][0..2], 0x3c00 | @as(u16, @truncate(h >> 50)), .little); // small positive bf16
+    };
+    dr.pred = pred;
+    dr.succ = succ;
+    dr.depths = 7;
+    for (&dr.sp, 0..) |*x, i| x.* = @floatCast(@as(f64, @floatFromInt(i % 7)) / 64);
+    const sim = try gpa.create(Sim);
+    sim.* = .{ .dr = dr, .seed = 4242, .sampled = sampled };
+    return sim;
+}
+
+fn freeSim(sim: *Sim) void {
+    gpa.free(sim.dr.pred);
+    gpa.free(sim.dr.succ);
+    gpa.destroy(sim.dr);
+    gpa.destroy(sim);
+}
+
+/// The target's own continuation of `pending`, `len` tokens, one at a time.
+fn autoregress(sim: *Sim, pending: u32, len: usize, out: []u32) void {
+    var st = mix(1, pending);
+    for (out[0..len], 0..) |*t, k| {
+        t.* = sim.pick(st, if (sim.sampled) sim.pos0 + k + 1 else 0);
+        st = mix(st, t.*);
+    }
+}
+
+/// `schedule[i % len]` nodes in round i, until `want` tokens: what the stream emitted.
+fn generate(sim: *Sim, oracle: []const u32, schedule: []const u32, want: usize, out: []u32) !void {
+    var committed: u64 = 0;
+    var st = mix(1, 5);
+    var pending: u32 = 5;
+    var i: usize = 0;
+    while (committed < want) : (i += 1) {
+        const r = try round(sim, st, pending, committed, oracle, schedule[i % schedule.len]);
+        for (r.tokens[0..r.n]) |t| {
+            if (committed < want) out[committed] = t;
+            committed += 1;
+            st = mix(st, t);
+        }
+        pending = r.tokens[r.n - 1];
+    }
+}
+
+test "draft sources: a lone tree's width never changes a token, greedy or keyed" {
+    for ([_]bool{ false, true }) |sampled| {
+        const sim = try newSim(sampled);
+        defer freeSim(sim);
+        var oracle: [160]u32 = undefined;
+        autoregress(sim, 5, oracle.len, &oracle);
+        var got: [120]u32 = undefined;
+        for (1..16) |nodes| {
+            try generate(sim, &oracle, &.{@intCast(nodes)}, got.len, &got);
+            try std.testing.expectEqualSlices(u32, oracle[0..got.len], &got);
+        }
+        try generate(sim, &oracle, &.{ 15, 3, 7, 1, 15, 2, 11, 3 }, got.len, &got);
+        try std.testing.expectEqualSlices(u32, oracle[0..got.len], &got);
+    }
+}

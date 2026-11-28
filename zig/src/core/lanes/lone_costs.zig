@@ -17,6 +17,43 @@ pub fn enabled(e: anytype, p: anytype) bool {
         e.cfg.draft_confidence == null and p.kind == .head and p.lanes == null;
 }
 
+/// The rule's view of a stream, marked as a lone round priced from its own times or not.
+pub fn marked(who: anytype, lone: bool) @TypeOf(who) {
+    var w = who;
+    w.lone = lone;
+    return w;
+}
+
+/// Widths sampled before a line over rows is fitted: with fewer, a width keeps its own sample or its nearest one.
+const fit_least = 3;
+
+/// A line over rows through the samples beyond the startup model: one noisy timing moves no width's price alone.
+fn fitted(startup: Table, samples: Table, rows: usize) ?f64 {
+    var n: f64 = 0;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var sxx: f64 = 0;
+    var sxy: f64 = 0;
+    for (samples.slots, 1..) |ms, width| {
+        if (!usable(ms)) continue;
+        const model = startup.get(@intCast(width)) orelse continue;
+        if (!usable(model)) continue;
+        const x: f64 = @floatFromInt(width);
+        const y = ms.? - model;
+        n += 1;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    const spread = sxx - sx * sx / n;
+    if (n < fit_least or spread <= 0) return null;
+    const slope = (sxy - sx * sy / n) / spread;
+    const base = startup.get(@intCast(rows)) orelse return null;
+    const price = base + (sy - slope * sx) / n + slope * @as(f64, @floatFromInt(rows));
+    return if (usable(price)) price else null;
+}
+
 /// Measured full-round time at this width; otherwise the nearest sample plus the startup forward-time difference.
 pub fn estimate(startup: Table, samples: Table, rows: usize, overhead: f64) ?f64 {
     if (usable(samples.get(@intCast(rows - 1)))) return samples.get(@intCast(rows - 1));
@@ -38,14 +75,20 @@ pub fn estimate(startup: Table, samples: Table, rows: usize, overhead: f64) ?f64
     return base + overhead;
 }
 
-/// Arena-owned complete-round prices; callers must pass zero additional overhead to the allocator.
-pub fn prices(e: anytype, p: anytype) !Table {
+/// `estimate`, or with `line` (a lone XPU tree; the engine keeps each width's own timing) the fitted time when sampled.
+pub fn priceOf(startup: Table, samples: Table, rows: usize, overhead: f64, line: bool) ?f64 {
+    if (line) if (fitted(startup, samples, rows)) |ms| return ms;
+    return estimate(startup, samples, rows, overhead);
+}
+
+/// Complete-round prices in the caller's allocator (an arena or a fixed buffer, never freed), with no added overhead.
+pub fn prices(e: anytype, a: std.mem.Allocator, p: anytype, line: bool) !Table {
     var out: Table = .{};
     const overhead = e.rule.overheadMs(1, p.stream.sampling != null);
     const samples = observed(p.stream);
     for (1..p.count() + 2) |rows| {
-        if (estimate(e.cfg.shared_costs, samples, rows, overhead)) |ms|
-            try out.put(e.arena.allocator(), @intCast(rows), ms);
+        if (priceOf(e.cfg.shared_costs, samples, rows, overhead, line)) |ms|
+            try out.put(a, @intCast(rows), ms);
     }
     return out;
 }
@@ -58,7 +101,8 @@ pub fn probe(e: anytype, p: anytype) ?u32 {
     const most: u32 = @intCast(@min(p.count() + 1, e.cfg.batch_rows));
     var retry: ?u32 = null;
     var earliest: u64 = std.math.maxInt(u64);
-    var rows: u32 = 1;
+    // without plain_guard, when the plan offers a draft, no round is drafted with nothing
+    var rows: u32 = @min(@as(u32, if (e.cfg.plain_guard) 1 else 2), most);
     while (true) {
         if (rows < s.cost_probes.len) {
             const cd = s.cost_probes[rows];
@@ -88,9 +132,9 @@ pub fn band(len: usize) usize {
 /// The furthest a kept deadline or spacing reaches into the next stream: carried doublings would end every re-check.
 pub const carry_most: u64 = 256;
 
-/// The kept calibration a stream starts from and leaves: its sampling mode's, at its context's band.
+/// The kept calibration a stream starts from and leaves: its sampling mode's, at its prompt's band, whatever its reply.
 pub fn slot(kept: *[2][bands]?Kept, s: anytype) *?Kept {
-    return &kept[@intFromBool(s.sampling != null)][band(s.context.items.len)];
+    return &kept[@intFromBool(s.sampling != null)][band(s.prompt_len)];
 }
 
 /// A finished lone stream's calibration, so the next stream starts priced instead of probing every width again.
@@ -132,6 +176,21 @@ pub fn seed(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
     for (&s.cost_probes, k.probes) |*cd, old| cd.* = .{ .after = s.rounds + @min(carry_most, old.after -| k.rounds), .spacing = @min(carry_most, old.spacing), .retry = old.retry };
     s.cost_probe_after = s.rounds + @min(carry_most, k.after -| k.rounds);
     s.cost_probe_spacing = @min(carry_most, k.spacing);
+}
+
+pub const Pick = struct { counts: []u32, prices: Table, trial: ?u32 };
+
+/// A lone round's drafts, for the engine and a backend alike, after `prepare`: price each width, pick or trial one.
+pub fn choose(e: anytype, a: std.mem.Allocator, p: anytype, chances: []const f64, least_rows: u32, line: bool) !Pick {
+    const priced = try prices(e, a, p, line);
+    const counts = try @import("allocate.zig").allocateDrafts(a, &.{1}, &.{chances}, &priced, 0, @max(1, e.cfg.batch_rows), .{ .least_rows = least_rows });
+    var out: Pick = .{ .counts = counts, .prices = priced, .trial = null };
+    if (probe(e, p)) |drafts| {
+        counts[0] = drafts;
+        out.trial = drafts + 1;
+        p.stream.cost_probe_trial = trial(p.stream, chances, drafts + 1);
+    }
+    return out;
 }
 
 /// A lone stream's copy prices (lanes/lone_copy.zig), kept as keep keeps a head's; `own_plain`: its plain times too.

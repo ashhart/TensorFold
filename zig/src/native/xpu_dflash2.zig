@@ -6,6 +6,9 @@ const Stream = lanes.Stream;
 const Held = lanes.stream.Held;
 const Allocator = std.mem.Allocator;
 
+const lone_costs = lanes.lone_costs;
+const Landing = lanes.draft_tree.Landing;
+
 pub const TREE_MIN = 5; // drafts from which a stream's window is a DFlash2 tree (below: its chain)
 
 /// The round loop's facts through Drafted as the lane target gave them alone (its own rule shares a round's rows).
@@ -13,6 +16,103 @@ pub fn facts(wrap: *const lanes.drafted.Drafted, target: lanes.Model) lanes.Mode
     var m = wrap.facts(target);
     m.allocate_shared_drafts = target.allocate_shared_drafts;
     return m;
+}
+
+/// Calibration probes every 4 rows, from row 2: 1, 5, 9, 13 and 15 drafts.
+pub const lone_tile = 4;
+
+/// The drafts a lone tree grows under the `XPU_TREE` cap, 15 at most; null: under 2 there is no width to choose.
+pub fn priced(cap: u32) ?u32 {
+    const n = @min(cap, 15);
+    return if (n >= 2) n else null;
+}
+
+/// A grown tree's node chances: each its landing chance under its parent times its parent's, as the CUDA drafter's.
+pub fn chances(landing: *const Landing, sampled: bool, parents: []const i32, own: []const f64, out: []f64) void {
+    for (out, parents[0..out.len], own[0..out.len]) |*o, parent, x| o.* = landing.chance(sampled, x) * (if (parent >= 0) out[@intCast(parent)] else 1);
+}
+
+/// Prompt rows from which a cold band's prior narrows: the drafter's window plus one (xpu/drafter.zig WIN + 1).
+pub const cold_context = 2048;
+
+/// A cold band's fixed nodes by prompt rows: the full tree, then 7 in band 0, then 3 (the best fixed trees measured).
+pub fn prior(rows: usize) u32 {
+    return if (rows < cold_context) 15 else if (lone_costs.band(rows) == 0) 7 else 3;
+}
+
+/// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
+pub const Width = struct { nodes: u32, trial: ?u32 = null };
+
+/// A stream's first lone round seeds its band's prices, or its prior when cold (no trial: it files the prior's times).
+pub fn seed(e: *lanes.Engine, s: *Stream) !void {
+    if (s.prices_seeded and s.depth != null) return; // a detach drops the round state: the reclaim seeds again
+    s.prices_seeded = true;
+    _ = try e.rule.rates(lanes.windows.who(s));
+    const kept = lone_costs.slot(&e.lone_kept, s).*;
+    s.lone_cold = if (kept == null) prior(s.prompt_len) else 0; // the prompt's rows: the first token is committed
+    try lone_costs.seed(e.gpa, kept, s);
+}
+
+/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds (a cold band: its prior).
+pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
+    const tokens: [16]u32 = @splat(0);
+    const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
+    try seed(e, s);
+    if (s.lone_cold > 0) return .{ .nodes = @min(s.lone_cold, @as(u32, @intCast(chance.len))) }; // the cap wins
+    // the prices and the counts are the round's temporaries: a lone tree prices at most 17 widths, 16 bytes each
+    var buf: [2048]u8 align(16) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buf);
+    // least_rows 2: a lone tree drafts at least one node; a line through its sampled widths, not one timing
+    const pick = try lone_costs.choose(e, fixed.allocator(), p, chance, 2, true);
+    return .{ .nodes = pick.counts[0], .trial = pick.trial };
+}
+
+/// A finished lone stream files its calibration under its prompt's band, so the next stream starts priced.
+pub fn retain(e: *lanes.Engine, s: *Stream) void {
+    lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
+}
+
+/// A complete lone round of `drafts` took `ms`: the rule blends it into the stream's table, and the trial's result.
+pub fn measured(e: *lanes.Engine, s: *Stream, trial: ?u32, drafts: u32, ms: f64) !void {
+    try e.rule.observeCost(drafts, ms, false, lone_costs.marked(lanes.windows.who(s), true));
+    lone_costs.observe(s, trial, drafts + 1, ms);
+}
+
+/// One lone round of `s` from `pending`: a tree grown at the cap and cut to the width `e` prices (none: a fixed tree).
+pub fn lone(comptime D: type, comptime now: fn () f64, b: anytype, d: *D.Drafter, e: ?*lanes.Engine, s: *Stream, pending: u32, skip: *bool, drawer: ?D.Draw, note: ?D.Note, out: *[16]u32) !D.Round {
+    const x = e orelse {
+        const round = try D.treeRound(d, pending, b.block - 1, b.nodes, drawer, note, out);
+        s.rounds += 1;
+        return round;
+    };
+    const t0 = now();
+    try seed(x, s); // before the first grow: a new cold stream grows its prior, not the cap
+    // a cold band draws its prior alone: the host grows no node that no round will verify (0.2 ms a round at 15)
+    const cap = priced(b.nodes).?;
+    const g = try D.grow(d, pending, b.block - 1, if (s.lone_cold > 0) @min(s.lone_cold, cap) else cap, drawer);
+    var chance: [15]f64 = undefined;
+    chances(&b.landing, s.sampling != null, g.par[1..], g.own[1..], chance[0..g.n]);
+    const pick = try width(x, s, chance[0..g.n]);
+    const round = try D.settle(d, &g, pick.nodes, drawer, note, out);
+    try b.runner.d.sync(); // the round as the stream pays it, taps included
+    const ms = (now() - t0) * 1e3;
+    s.rounds += 1;
+    b.landing.observeTree(s.sampling != null, g.par[1..], g.own[1..], round.drafted, round.path[0..round.rows]);
+    // the first round has the prefill switch, the one after a cold restart no drafter context
+    if (s.rounds > 1 and !skip.*) try measured(x, s, pick.trial, round.drafted, ms);
+    skip.* = false;
+    return round;
+}
+
+/// A lone round's accepted drafts and its terminal token, committed to `s` with their logprob rows (none: no logprobs).
+pub fn land(gpa: Allocator, s: *Stream, round: anytype, rows: []const lanes.LogprobRow) !void {
+    s.drafted += round.drafted;
+    s.accepted += round.accepted;
+    var landed: [17]u32 = undefined;
+    const n = round.tokens.len - 1;
+    @memcpy(landed[0..n], round.tokens[1..]);
+    landed[n] = round.terminal;
+    _ = try s.commit(gpa, landed[0 .. n + 1], rows);
 }
 
 /// `M`: the drafter's module (Drafter, Block, Absorb, TOPK, WIN); `H`: the lane target it reads slots and taps from.

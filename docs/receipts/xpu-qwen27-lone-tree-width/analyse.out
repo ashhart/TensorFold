@@ -1,0 +1,87 @@
+## Tokens: distinct token_sha256 per prompt and mode
+
+| prompt tokens | mode | requests | distinct hashes | variants |
+|---|---|---|---|---|
+| 34 | draft | 20 | 1 | 4 |
+| 34 | sampled | 12 | 1 | 3 |
+| 28,946 | draft | 16 | 1 | 4 |
+| 58,543 | draft | 20 | 1 | 4 |
+| 121,022 | draft | 20 | 1 | 4 |
+| 121,022 | sampled | 12 | 1 | 3 |
+
+CELLS WITH MORE THAN ONE HASH: 0
+greedy 34 (draft, and plain when run): 1 hash(es)
+greedy 28,946 (draft, and plain when run): 1 hash(es)
+greedy 58,543 (draft, and plain when run): 1 hash(es)
+greedy 121,022 (draft, and plain when run): 1 hash(es)
+
+## Decode tok/s, median of a pass's three measured requests, mean of the variant's passes (passes in brackets)
+
+| prompt tokens | main-t15 | main-t7 | main-t3 | head |
+|---|---|---|---|---|
+| 34 | 140.45 (140.46, 140.43) | 132.10 (132.10) | 91.45 (91.45) | 140.37 (140.37) |
+| 28,946 | 36.34 (36.34) | 47.51 (47.51) | 52.82 (52.82) | 53.01 (53.01) |
+| 58,543 | 25.71 (25.71) | 36.75 (36.75) | 43.83 (43.83, 43.83) | 44.67 (44.67) |
+| 121,022 | 13.30 (13.30) | 21.43 (21.43) | 27.54 (27.54, 27.53) | 29.52 (29.52) |
+
+## Head against the best fixed tree (unrounded means)
+
+| prompt tokens | best fixed | its tok/s | head tok/s | head / best fixed |
+|---|---|---|---|---|
+| 34 | main-t15 | 140.45 | 140.37 | 0.999 |
+| 28,946 | main-t3 | 52.82 | 53.01 | 1.003 |
+| 58,543 | main-t3 | 43.83 | 44.67 | 1.019 |
+| 121,022 | main-t3 | 27.54 | 29.52 | 1.072 |
+
+## Seeded sampling (temperature 1.0, top_k 20, top_p 0.95, seed 7): median of the three measured requests
+
+| prompt tokens | variant | tok/s | nodes a round | head / best fixed |
+|---|---|---|---|---|
+| 34 | main-t15 | 153.98 | 15.00 |  |
+| 34 | main-t3 | 102.15 | 3.00 |  |
+| 34 | head | 159.10 | 12.00 | 1.033 |
+| 121,022 | main-t15 | 14.09 | 15.00 |  |
+| 121,022 | main-t3 | 27.46 | 3.00 |  |
+| 121,022 | head | 28.92 | 2.51 | 1.053 |
+
+## Drafts verified a round (drafted / rounds) and accepted a round, mean of the measured requests
+
+| prompt tokens | variant | nodes a round | accepted a round |
+|---|---|---|---|
+| 34 | main-t15 | 15.00 | 4.67 |
+| 34 | main-t7 | 7.00 | 4.00 |
+| 34 | main-t3 | 3.00 | 2.27 |
+| 34 | head | 12.99 | 4.55 |
+| 28,946 | main-t15 | 15.00 | 2.69 |
+| 28,946 | main-t7 | 7.00 | 2.23 |
+| 28,946 | main-t3 | 3.00 | 1.69 |
+| 28,946 | head | 4.13 | 1.97 |
+| 58,543 | main-t15 | 15.00 | 3.16 |
+| 58,543 | main-t7 | 7.00 | 2.58 |
+| 58,543 | main-t3 | 3.00 | 1.89 |
+| 58,543 | head | 3.38 | 2.08 |
+| 121,022 | main-t15 | 15.00 | 2.81 |
+| 121,022 | main-t7 | 7.00 | 2.47 |
+| 121,022 | main-t3 | 3.00 | 1.69 |
+| 121,022 | head | 2.32 | 1.58 |
+
+## Head, every greedy request: nodes a round and tok/s (the warm-up request is rep 0)
+
+| prompt tokens | rep | nodes a round | tok/s |
+|---|---|---|---|
+| 34 | 0 | 11.49 | 121.46 |
+| 34 | 1 | 13.49 | 141.51 |
+| 34 | 2 | 13.02 | 140.37 |
+| 34 | 3 | 12.45 | 135.38 |
+| 28,946 | 0 | 5.02 | 48.26 |
+| 28,946 | 1 | 4.14 | 53.60 |
+| 28,946 | 2 | 4.28 | 52.43 |
+| 28,946 | 3 | 3.98 | 53.01 |
+| 58,543 | 0 | 4.88 | 39.97 |
+| 58,543 | 1 | 3.52 | 43.14 |
+| 58,543 | 2 | 3.19 | 45.33 |
+| 58,543 | 3 | 3.42 | 44.67 |
+| 121,022 | 0 | 3.79 | 24.34 |
+| 121,022 | 1 | 2.49 | 28.65 |
+| 121,022 | 2 | 2.24 | 29.52 |
+| 121,022 | 3 | 2.22 | 30.13 |

@@ -260,6 +260,17 @@ pub fn anySampled(plans: []const Plan) bool {
     return false;
 }
 
+/// The drafts of a round of several streams (or of an explicit floor): the rule's verify price when it has one.
+fn sharedCounts(e: *Engine, a: std.mem.Allocator, plans: []Plan, fixed: []const u32, probs: []const []const f64, explicit: bool) ![]u32 {
+    const untimed: @import("table.zig").Table = .{};
+    const costs = if (explicit) &untimed else &e.cfg.shared_costs;
+    const overhead = if (explicit) 0 else e.rule.overheadMs(plans.len, anySampled(plans));
+    const paired = if (explicit) null else e.rule.verifyPrice(plans.len, anySampled(plans));
+    if (paired) |p|
+        return alloc.allocateDrafts(a, fixed, probs, costs, p.fixed, e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .row_ms = p.row, .least_rows = e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
+    return alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .row_ms = if (explicit) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)), .least_rows = if (explicit) 0 else e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
+}
+
 /// Trim draft prefixes by landing probability to the shared width with the most expected tokens a ms.
 pub fn allocate(e: *Engine, plans: []Plan) !void {
     plainCopies(e, plans);
@@ -309,20 +320,16 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         _ = try e.rule.rates(who(s));
         try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
     }
-    const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
-    const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
-    const overhead = if (explicit or live) 0 else e.rule.overheadMs(plans.len, anySampled(plans));
-    const paired = if (explicit or live) null else e.rule.verifyPrice(plans.len, anySampled(plans));
-    const counts = if (paired) |p|
-        try alloc.allocateDrafts(a, fixed, probs, costs, p.fixed, e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .row_ms = p.row, .least_rows = e.rule.row_cost.leastRows(plans.len, anySampled(plans)) })
-    else
-        try alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit or live) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .row_ms = if (explicit or live) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)), .least_rows = if (explicit or live) 0 else e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
-    const trial = if (live) lone_costs.probe(e, plans[0]) else null;
-    if (trial) |count| {
-        counts[0] = count;
-        plans[0].cost_probe_rows = count + 1;
-        plans[0].stream.cost_probe_trial = lone_costs.trial(plans[0].stream, probs[0], count + 1);
-    }
+    var own = untimed;
+    var trial: ?u32 = null;
+    const counts = if (live) blk: {
+        // least_rows 0: the engine prices a lone window's head alone as well
+        const pick = try lone_costs.choose(e, a, plans[0], probs[0], 0, false);
+        own = pick.prices;
+        trial = pick.trial;
+        if (pick.trial) |rows| plans[0].cost_probe_rows = rows;
+        break :blk pick.counts;
+    } else try sharedCounts(e, a, plans, fixed, probs, explicit);
     if (live) {
         // a depth probe asks one draft past the priced width: keep it, or the acceptance it explores never moves
         keepProbe(&plans[0], counts);
