@@ -93,6 +93,7 @@
   "Planning only": "Tylko planowanie",
   "Planning only.": "Tylko planowanie.",
   "Playback speed": "Szybkość odtwarzania",
+  "Play a system sound when a run finishes while TensorFold is focused.": "Odtwarzaj dźwięk systemowy po zakończeniu zadania, gdy okno TensorFold jest aktywne.",
   "Plugin categories": "Kategorie wtyczek",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "Rejestracja wtyczki nie izoluje kodu ani nie potwierdza ładowania; sprawdź źródło przed udzieleniem zaufania.",
   "Plugins": "Wtyczki",

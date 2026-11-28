@@ -93,6 +93,7 @@
   "Planning only": "Только планирование",
   "Planning only.": "Только планирование.",
   "Playback speed": "Скорость воспроизведения",
+  "Play a system sound when a run finishes while TensorFold is focused.": "Воспроизводите системный звук при завершении выполнения, когда окно TensorFold активно.",
   "Plugin categories": "Категории плагинов",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "Регистрация плагина не изолирует код и не подтверждает успешную загрузку; проверьте исходник перед выдачей доверия.",
   "Plugins": "Плагины",

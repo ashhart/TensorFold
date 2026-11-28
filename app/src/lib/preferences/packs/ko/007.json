@@ -93,6 +93,7 @@
   "Planning only": "계획만",
   "Planning only.": "계획만 수행합니다.",
   "Playback speed": "재생 속도",
+  "Play a system sound when a run finishes while TensorFold is focused.": "TensorFold에 포커스가 있는 동안 실행이 완료되면 시스템 사운드를 재생합니다.",
   "Plugin categories": "플러그인 분류",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "플러그인 등록은 코드를 격리하거나 로드 성공을 확인하지 않습니다. 신뢰를 승인하기 전에 소스를 검토하세요.",
   "Plugins": "플러그인",

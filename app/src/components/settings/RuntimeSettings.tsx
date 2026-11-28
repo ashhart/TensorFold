@@ -106,7 +106,7 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
 
             <Field label={tx("Run notifications")} hint={draft.notifyRuns === false ? tx("Off") : tx("On")}>
               <div className="flex items-center gap-3 rounded-lg border border-line bg-card px-3 py-2.5">
-                <span className="flex-1 text-[13px] leading-snug text-ink-3">{tx("Notify me when a run finishes, fails or needs approval in the background.")}</span>
+                <span className="flex-1 text-[13px] leading-snug text-ink-3">{tx("Notify me when a run finishes, fails or needs approval while TensorFold is in the background.")}</span>
                 <Toggle label={tx("Run notifications")} checked={draft.notifyRuns !== false} onChange={(v) => patch({ notifyRuns: v })} />
               </div>
             </Field>

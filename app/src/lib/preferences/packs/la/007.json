@@ -93,6 +93,7 @@
   "Planning only": "Tantum consilia",
   "Planning only.": "Tantum consilia.",
   "Playback speed": "Celeritas soni",
+  "Play a system sound when a run finishes while TensorFold is focused.": "Sonum systematis ede cum cursus finitur et fenestra TensorFold activa est.",
   "Plugin categories": "Genera additamentorum",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "Descriptio additamenti codicem non separat nec onerationem comprobat; fontem recense antequam fidem concedas.",
   "Plugins": "Additamenta",

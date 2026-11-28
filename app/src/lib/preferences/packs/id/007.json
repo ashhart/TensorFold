@@ -93,6 +93,7 @@
   "Planning only": "Hanya perencanaan",
   "Planning only.": "Hanya perencanaan.",
   "Playback speed": "Kecepatan pemutaran",
+  "Play a system sound when a run finishes while TensorFold is focused.": "Putar suara sistem saat proses selesai ketika TensorFold sedang menjadi fokus.",
   "Plugin categories": "Kategori plugin",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "Pendaftaran plugin tidak mengisolasi kode atau mengonfirmasi pemuatan; tinjau sumber sebelum memberi kepercayaan.",
   "Plugins": "Plugin",
