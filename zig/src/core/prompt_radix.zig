@@ -202,11 +202,16 @@ pub const Store = struct {
 
     /// Every kept state and page dropped (a flush, or weights that moved): what it held, as `report` counts it.
     pub fn clear(s: *Store) Cleared {
-        return s.flush(0);
+        return s.flush(0) catch unreachable;
+    }
+
+    pub fn canFlush(s: *const Store, retain: u32) bool {
+        return retain == 0 or !s.page_only;
     }
 
     /// A flush keeps the newest complete states and every prefix page they need; called only between passes.
-    pub fn flush(s: *Store, retain: u32) Cleared {
+    pub fn flush(s: *Store, retain: u32) error{UnsupportedRetain}!Cleared {
+        if (!s.canFlush(retain)) return error.UnsupportedRetain;
         const before: Cleared = .{ .states = s.tree.snaps, .bytes = s.tree.held() };
         @import("prompt_radix_flush.zig").retain(&s.tree, retain);
         s.shared_keys.clearRetainingCapacity();

@@ -59,17 +59,19 @@ pub const Ask = struct {
     }
 
     /// The answer from TF_KV_SHARE's store over pool pages: no disk; flush keeps its newest `retain` states.
-    pub fn answerShared(a: *Ask, s: *radix.Store) void {
-        if (a.op == .flush and a.claim.cmpxchgStrong(.queued, .taken, .acq_rel, .acquire) != null) return; // withdrawn
+    pub fn answerShared(a: *Ask, s: *radix.Store) bool {
+        if (a.op == .flush and !s.canFlush(a.retain)) return false;
+        if (a.op == .flush and a.claim.cmpxchgStrong(.queued, .taken, .acq_rel, .acquire) != null) return true;
         defer a.done.store(true, .release);
         if (a.op == .flush) {
-            const c = s.flush(a.retain);
+            const c = s.flush(a.retain) catch unreachable;
             a.dropped = @intCast(c.states);
             a.ram_freed = c.bytes;
-            return;
+            return true;
         }
         const ram: u32 = if (s.find(.of(a.prompt))) |f| f.at() else 0; // keyed as a TF_KV_SHARE pass begins
         a.out = .{ .tokens = @intCast(a.prompt.len), .ram = ram, .from = if (ram > 0) .ram else .none };
+        return true;
     }
 
     /// A flush's caller stops waiting: true when the engine had not taken it, so nothing is dropped and nothing holds.

@@ -222,3 +222,33 @@ test "TF_KV_SHARE lane host: retain flush keeps a recently resumed parent and fr
     try t.expectEqual(@as(usize, 0), f.family.live);
     try t.expectEqual(@as(usize, 8), Pool.available(&f.pool));
 }
+
+test "TF_KV_SHARE lane host: page-only retain flush is refused without dropping any implicit resume pages" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.store.deinit();
+    f.store = try radix.Store.initGroups(gpa, f.family.snapshots(), f.pool.pages(), .{ .page = 4 }, .{ .legacy = false }, null);
+    f.store.limit(.{ .pages = 8 });
+    const ids = [_]u32{ 0, 1 };
+    for (ids) |id| Pool.retain(&f.pool, id);
+    var path: [2]u32 = undefined;
+    try t.expect(f.store.keep(.of(&prompt), 8, null, &ids, &path).held);
+    for (ids) |id| Pool.release(&f.pool, id);
+    try t.expectEqual(@as(usize, 0), f.store.tree.snaps);
+    try t.expectEqual(@as(usize, 2), f.store.tree.heldPages());
+    var retain: api.ImprintAsk = .{ .op = .flush, .retain = 1 };
+    try t.expect(!rows.ask(&f.host, &retain));
+    try t.expect(!retain.answerShared(&f.store));
+    try t.expect(!retain.done.load(.acquire));
+    try t.expectError(error.UnsupportedRetain, f.store.flush(1));
+    try t.expectEqual(@as(usize, 2), f.store.tree.heldPages());
+    try t.expectEqual(@as(u32, 1), f.pool.refs[0]);
+    try t.expectEqual(@as(u32, 1), f.pool.refs[1]);
+    var all: api.ImprintAsk = .{ .op = .flush };
+    try t.expect(rows.ask(&f.host, &all));
+    rows.answer(&f.host);
+    try t.expect(all.done.load(.acquire));
+    try t.expectEqual(@as(u64, 2), all.ram_freed);
+    try t.expectEqual(@as(usize, 8), Pool.available(&f.pool));
+}

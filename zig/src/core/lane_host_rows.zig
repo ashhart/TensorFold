@@ -29,6 +29,7 @@ pub fn ask(ctx: *anyopaque, a: *api.ImprintAsk) bool {
     h.lock();
     defer h.unlock();
     const none = h.cache == null and h.disk.shared == null;
+    if (a.op == .flush and h.cache == null) if (h.disk.shared) |s| if (!s.canFlush(a.retain)) return false;
     if (h.closing.load(.acquire) or (a.op == .flush and none) or !h.disk.push(h.gpa, a)) return false; // no store: 501
     h.wake.signal(h.io);
     return true;
@@ -55,7 +56,11 @@ const Flushes = std.ArrayList(*api.ImprintAsk);
 
 /// One ask answered from the host's store, or from TF_KV_SHARE's store over pool pages when that is the one.
 fn reply(h: *LaneHost, a: *api.ImprintAsk, keys: @import("rows_ask.zig").Keys) void {
-    if (h.cache == null) if (h.disk.shared) |s| return a.answerShared(s);
+    if (h.cache == null) if (h.disk.shared) |s| {
+        const answered = a.answerShared(s);
+        std.debug.assert(answered);
+        return;
+    };
     a.answer(h.cache, keys);
 }
 
