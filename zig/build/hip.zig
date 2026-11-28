@@ -193,6 +193,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("test-qwen35-hip-faults-host", "Qwen HIP page-reference rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{"Qwen HIP page faults:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
+    b.step("test-flashnext-staging-hip-host", "Prompt staging reserves the MTP head's aligned uploads before falling back").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next prompt staging:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
     b.step("test-nemotron-hip-faults-host", "Nemotron HIP adoption rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP page faults:"} })).step);
     b.step("test-nemotron-hip-resume-host", "Nemotron HIP prompt-cache resumes and the MTP head's shared rows without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP resume:"} })).step);

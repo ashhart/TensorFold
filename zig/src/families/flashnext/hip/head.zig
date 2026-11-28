@@ -24,7 +24,18 @@ pub fn caches(
     return cache.Caches.init(gpa, d, h.dims, &.{false}, cap, act, eos);
 }
 
-/// `segs`' tokens over `streams` (a row each) from each segment's `pos`; `prompt`: rows on prompt tiles.
+/// Staging bytes for the two aligned `i32` uploads `run` makes after the model's forward.
+pub fn inputBytes(rows: usize) usize {
+    const ids = forward.Host.putEnd(0, rows * @sizeOf(i32));
+    return forward.Host.putEnd(ids, rows * @sizeOf(i32));
+}
+
+/// The upper stage's limit leaves room for the MTP IDs and positions put after the forward.
+pub fn promptUpperLimit(len: usize, head_rows: usize) usize {
+    return len -| inputBytes(head_rows);
+}
+
+/// `segs`' tokens over `streams` from each segment's `pos`; `prompt`: a chunk's rows, caches only, outputs unread.
 pub fn run(
     ops: Ops,
     prompt: bool,
@@ -83,6 +94,12 @@ pub fn run(
     try forward.hcNorm(o, m, h, e, .{ .ptr = ones.base(), .kind = m.act }, x, l.ahc.scale, rows);
     const inject = try take(o, m.act, rows * d.streams);
     const mixed = try forward.hcPre(o, m, l.ahc, x, rows, inject);
+    if (prompt) {
+        // a prompt's rows: only the layer's caches are read later (its first draw runs the last row as a window)
+        try mixers.sparseKeys(o, m, d, l.mixer.sparse, segs, 0, mixed, rows, dev_pos);
+        for (segs) |g| g.c.pooled = (g.pos + g.tokens.len) / d.index_ratio;
+        return .{ .mixed = x, .streams = h };
+    }
     const branch = try mixers.sparse(o, m, d, l.mixer.sparse, segs, 0, mixed, rows, dev_pos, host, null);
     try forward.hcNorm(o, m, h, branch, inject, x, l.mhc.scale, rows);
     const mixed2 = try forward.hcPre(o, m, l.mhc, x, rows, inject);
@@ -121,4 +138,38 @@ pub fn draws(
         t.* = ids[i];
         p.* = @bitCast(f);
     }
+}
+
+test "Flash Next prompt staging: upper-half acceptance reserves aligned MTP inputs before offset-zero fallback" {
+    const staging_bytes = 64 << 20;
+    const half = staging_bytes / 2;
+    const rows = 129; // each 516-byte input puts the next one across a 16-byte boundary
+    const head = inputBytes(rows);
+    try std.testing.expectEqual(@as(usize, 528 + 516), head);
+    try std.testing.expect(head < half);
+    const limit = promptUpperLimit(staging_bytes, rows);
+    try std.testing.expectEqual(staging_bytes - head, limit);
+
+    // Accepted: the forward's S bytes and both head uploads exactly fill the upper half.
+    const accepted = half - head;
+    try std.testing.expect(half + accepted <= limit);
+    try std.testing.expect(accepted + head == half);
+
+    // Supplied accepted this upper stage (`half + S <= len`), then the head puts crossed `len`.
+    const fallback = accepted + 16;
+    try std.testing.expect(fallback <= half);
+    try std.testing.expect(fallback + head > half);
+    try std.testing.expect(half + fallback <= staging_bytes);
+    try std.testing.expect(half + fallback + head > staging_bytes);
+    // Fixed admission falls back to offset zero, where both the stage and head uploads fit.
+    try std.testing.expect(half + fallback > limit);
+    try std.testing.expect(fallback <= staging_bytes);
+    try std.testing.expect(fallback + head <= staging_bytes);
+    try std.testing.expect(fallback + head < staging_bytes);
+
+    // Offset zero still accepts exactly full staging, but nothing genuinely past it.
+    const full = staging_bytes - head;
+    try std.testing.expect(full + head == staging_bytes);
+    try std.testing.expect(full + 1 + head > staging_bytes);
+    try std.testing.expect(promptUpperLimit(staging_bytes, 0) == staging_bytes);
 }
