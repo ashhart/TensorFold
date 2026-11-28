@@ -303,6 +303,7 @@ pub const Engine = struct {
                     var chain_kept: usize = 0;
                     for (path[1..]) |r| chain_kept += @intFromBool((p.branch_from == 0 or r < p.branch_from) and r < own_end);
                     try e.rule.observeDepth(win.who(s), std.mem.max(u32, chain), @intCast(chain_kept));
+                    if (p.parents == null and p.branch_from == 0) @import("shared_draft_growth.zig").observe(e.cfg, s, own, chain_kept, e.alone);
                 }
                 var kept_branch: u64 = 0; // the context's graft rows kept, then Recall's
                 var kept_recall: u64 = 0;

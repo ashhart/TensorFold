@@ -36,6 +36,7 @@ pub const Model = struct {
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     window_costs_lone: bool = false, // window_costs price a lone stream only; shared forwards use shared_costs
     shared_drafts: u32 = 0, // allocate_shared_drafts: a shared round's most head drafts a stream (0: drafts)
+    shared_draft_growth: u32 = 0, // opt-in ceiling grown from shared_drafts by verified head prefixes
     shared_mtp_cap: u32 = 0, // most head drafts a stream chains in a shared round; a lone one chains `drafts` (0: off)
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
     shared_step_ms: ?f64 = null, // a separate shared head step; null keeps mtp_step_ms
@@ -111,6 +112,7 @@ pub const Config = struct {
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // Model.draft_step_ms
     shared_drafts: u32 = 0, // Model.shared_drafts
+    shared_draft_growth: u32 = 0,
     shared_mtp_cap: u32 = 0, // Model.shared_mtp_cap
     lone_cost_tile: u32 = 0, // Model.lone_cost_tile
     context_copies: bool = false, // Model.context_copies, within the existing verification width
@@ -153,6 +155,7 @@ pub const Config = struct {
         errdefer gpa.free(depth_prior);
         return .{
             .allocate_shared_drafts = m.allocate_shared_drafts,
+            .shared_draft_growth = m.shared_draft_growth,
             .limit_shared_drafts = m.limit_shared_drafts,
             .root_copies = m.root_copies and m.copy_drafts,
             .context_copies = m.context_copies and m.copy_drafts,

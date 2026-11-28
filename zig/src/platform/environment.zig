@@ -206,6 +206,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_QWEN_PDL", .scope = .common, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_GLM_SHARED_MTP_DEPTH", .scope = .glm, .kind = .u32, .only = &.{ 0, 7, 15 }, .forms = "0 (default: shared cap 3), 7 or 15 (native TP2 shared heads grow after verified full prefixes)" },
     .{ .name = "TF_GLM_WIDE_EXPERT_TILE", .scope = .glm, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DSCORES", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
