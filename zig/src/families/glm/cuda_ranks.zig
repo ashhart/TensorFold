@@ -1,15 +1,14 @@
 //! A TP rank's settings fingerprint, all-gathered before weights load: a mismatch stops every rank.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
 const l2pf = @import("cuda_l2pf.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
-
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
     kv8: bool = false, // --kv-cache fp8, supplied by the native options rather than an environment override
     pages: bool = false, // TF_KV_PAGES as `open` resolves it (with the world and --kv-cache): every sequence on pages
+    prefill_shared_once: bool = false, // TF_GLM_PREFILL_SHARED_ONCE: exact prompt shared/dense work at TP=2
     prompt_fixed_k: bool = false, // TF_GLM_PROMPT_K: one (default) or shape (experimental fixed K slices)
     tiled: bool = true, // TF_GLM_MM: 1 (the bf16 linears on glm_mm, tiled at load) or 0
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
@@ -33,12 +32,10 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
-
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
         return s.roce_wide or s.draft_split;
     }
-
     /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
     pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         return readSet(&struct {
@@ -48,10 +45,10 @@ pub const Settings = struct {
             }
         }.set, problem);
     }
-
     /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
     fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
+        s.prefill_shared_once = try @import("cuda_ranks_flag.zig").read("TF_GLM_PREFILL_SHARED_ONCE", false, get("TF_GLM_PREFILL_SHARED_ONCE"), problem);
         if (get("TF_GLM_PROMPT_K")) |v| {
             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
                 problem.* = "TF_GLM_PROMPT_K: one or shape";
@@ -209,10 +206,8 @@ pub const Settings = struct {
         return s;
     }
 };
-
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
-
 /// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
@@ -237,11 +232,12 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // main layout 24 plus prefill_shared_once
     world: u32,
     rank: u32,
     kv8: u32 = 0,
     pages: u32 = 0, // TF_KV_PAGES: the engine's own sequence is made on pages at init, so every rank pages alike
+    prefill_shared_once: u32 = 0,
     prompt_fixed_k: u32,
     tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
@@ -281,6 +277,7 @@ pub const Fingerprint = extern struct {
         keep_seqs,
         kv8,
         pages,
+        prefill_shared_once,
         prompt_fixed_k,
         tiled,
         split,
@@ -328,6 +325,7 @@ pub const Fingerprint = extern struct {
             .pages = @intFromBool(s.pages),
             .world = @intCast(world),
             .rank = @intCast(rank),
+            .prefill_shared_once = @intFromBool(s.prefill_shared_once),
             .prompt_fixed_k = @intFromBool(s.prompt_fixed_k),
             .tiled = @intFromBool(s.tiled),
             .split = if (!s.split) 0 else if (s.ring) 2 else 1,
@@ -369,6 +367,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
         const fields = .{
             "kv8",
             "pages",
+            "prefill_shared_once",
             "prompt_fixed_k",
             "world",
             "tiled",
@@ -498,6 +497,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .keep_seqs => "TF_GLM_KEEP_SEQS",
         .kv8 => "--kv-cache fp8",
         .pages => "TF_KV_PAGES (unset or auto pages from two ranks)",
+        .prefill_shared_once => "TF_GLM_PREFILL_SHARED_ONCE",
         .prompt_fixed_k => "TF_GLM_PROMPT_K",
         .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",

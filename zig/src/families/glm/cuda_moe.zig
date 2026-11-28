@@ -44,6 +44,7 @@ pub const Scratch = struct {
 
 /// The kernels the block runs: the captured Triton set, the grouped NVFP4 experts, the plan, and glm_ops.
 pub const Kernels = struct {
+    shared_once: bool = false,
     set: glue.Set,
     experts: *const experts.Kernels,
     exl3: *const exl3.Kernels,
@@ -75,6 +76,18 @@ pub fn prepare(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_
 
 /// The block up to its fill: the router, the top-k pick, the plan and the routed experts into the slot rows.
 pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool) !void {
+    try routedBody(k, stream, l, s, x, x_stride, rows, prompt);
+    try prepareShared(k, stream, l, s, x, x_stride, rows, prompt);
+}
+
+/// Only the BF16 prompt tile with one K slice; other formats retain their existing shared path.
+pub fn sharedOnce(k: Kernels, l: Layer, prompt: bool) bool {
+    if (!k.shared_once or !prompt or !k.set.prompt or l.exl3 != null or l.tfq3 != null or l.routed.format != .nvfp4) return false;
+    if (l.shared_gu != .bf16 or l.shared_down != .bf16) return false;
+    const tiled = k.set.mm orelse return false;
+    return !tiled.prompt_fixed_k;
+}
+fn routedBody(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool) !void {
     const d = l.routed.dims;
     const slots = l.top_k + 1;
     const shared_id: i32 = @intCast(l.count);
@@ -103,9 +116,7 @@ pub fn shared(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_s
     const n = hi - lo;
     const bf16_slots = prompt and l.exl3 == null and l.tfq3 == null;
     const eb: usize = if (bf16_slots) 2 else 4;
-    try projection.matmul(k.set, stream, l.shared_gu, x + lo * x_stride * 2, x_stride, s.sgu + lo * 2 * l.shared * 2, s.mm_part, n, 2 * l.shared, d, false);
-    try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.routed.limit, n, l.shared);
-    try projection.matmul(k.set, stream, l.shared_down, s.sact + lo * l.shared * 2, l.shared, s.sy + lo * d * 4, s.mm_part, n, d, l.shared, true);
+    if (!sharedOnce(k, l, prompt)) try sharedCompute(k, stream, l, s, x, x_stride, lo, hi);
     if (direct(k, l, hi, prompt)) { // body ran these rows direct: a decode window, filled whole; fill sums it (combineTail)
         if (lo != 0) return error.BadWindow;
         return;
@@ -135,4 +146,20 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
         return glue.combineTail(k.set, stream, y, s.sy, s.wts, out, hi - lo, d, l.top_k + 1);
     }
     try combine(k, stream, l, s, lo, hi, prompt, out);
+}
+
+/// The original three shared-expert projections over independent rows [lo, hi).
+fn sharedCompute(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, lo: usize, hi: usize) !void {
+    const n = hi - lo;
+    const d = l.routed.dims;
+    try projection.matmul(k.set, stream, l.shared_gu, x + lo * x_stride * 2, x_stride, s.sgu + lo * 2 * l.shared * 2, s.mm_part, n, 2 * l.shared, d, false);
+    try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.routed.limit, n, l.shared);
+    try projection.matmul(k.set, stream, l.shared_down, s.sact + lo * l.shared * 2, l.shared, s.sy + lo * d * 4, s.mm_part, n, d, l.shared, true);
+}
+
+pub fn prepareShared(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool) !void {
+    if (!sharedOnce(k, l, prompt)) return;
+    const stamp = prof_mod.span(k.prof, stream, .shared_expert);
+    defer stamp.end();
+    try sharedCompute(k, stream, l, s, x, x_stride, 0, rows);
 }

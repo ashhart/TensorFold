@@ -6,6 +6,7 @@
 
 #include "common/qmm_frag.cuh"
 #include "common/fp_pairs.cuh"
+#include "glm_swiglu.cuh"
 
 namespace tf_prompt16 {
 
@@ -242,6 +243,7 @@ template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, LEAN_BF16>(TF_LEAN_
 template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, LEAN_F32>(TF_LEAN_ARGS);
 // The gate/up pair: two lean products then tf_q35_mlp_act's bytes in one launch (tf_prompt_lean_swiglu in nvfp4.zig).
 template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, LEAN_SWIGLU>(TF_LEAN_ARGS);
+template __global__ void prompt_lean<FP4, 128, 256, 1, 8, 3, LEAN_GLM_CLAMP>(TF_LEAN_ARGS);
 #undef TF_LEAN_ARGS
 
 

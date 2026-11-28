@@ -39,7 +39,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
     }
     try e.gate(null);
     var one: [1]Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = &e.bp, .segs = segs[0..parts.len] }};
-    var f: Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = &e.pieces, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(true) else null };
+    var f: Forward = .{ .d = e.d, .m = &e.m, .prefill_shared_once = e.settings.prefill_shared_once, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = &e.pieces, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(true) else null };
     try f.run(@ptrCast(ids[0..rows]));
     if (e.drafter) |dr| for (parts, segs[0..parts.len]) |p, g|
         try dr.promptSegment(e, p.slot, 0, g.rows, p.ids.len, g.row0);
