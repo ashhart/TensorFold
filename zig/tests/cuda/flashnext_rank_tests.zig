@@ -11,11 +11,12 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8, master_
     for (modes) |m| {
         if (std.mem.eql(u8, m, mode_arg)) break;
     } else return error.UnknownRankMode;
-    if (std.mem.eql(u8, mode_arg, "late") or std.mem.eql(u8, mode_arg, "gone")) return startWait(gpu, rank, port, mode_arg);
+    if (std.mem.eql(u8, mode_arg, "late") or std.mem.eql(u8, mode_arg, "gone")) return startWait(gpu, rank, port, mode_arg, master_arg);
     // eof-scatter and timeout-scatter: the peer fails during a reduce-scatter, the first collective
     const scatter = std.mem.endsWith(u8, mode_arg, "-scatter");
     const mode = if (scatter) mode_arg[0 .. mode_arg.len - "-scatter".len] else mode_arg;
     const missing = std.mem.eql(u8, mode, "missing");
+    const master = if (std.mem.eql(u8, mode, "graph-eof")) @import("sys").getenv("TF_FLASHNEXT_RANK_TEST_MASTER") orelse master_arg else master_arg;
     const started = wire.now();
     if (missing) {
         try std.testing.expectError(error.RankTimeout, wire.Link.open(gpu.io, master, port, rank, 200));
@@ -23,7 +24,6 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8, master_
         check.pass("rank {d}: missing peer startup timed out within bound", .{rank});
         return;
     }
-    const master = if (std.mem.eql(u8, mode, "graph-eof")) @import("sys").getenv("TF_FLASHNEXT_RANK_TEST_MASTER") orelse master_arg else master_arg;
     const link = try wire.Link.open(gpu.io, master, port, rank, 30_000);
     defer link.close();
     var no_delay: c_int = 0;
@@ -162,9 +162,9 @@ fn outlive() void {
 }
 
 /// Rank 1 loads past the first collective's bound (`late`) or fails its load and leaves (`gone`) while rank 0 waits.
-fn startWait(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
+fn startWait(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8, master: []const u8) !void {
     const late = std.mem.eql(u8, mode, "late");
-    const s = try flash.rank_engine.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, std.mem.zeroes(flash.rank_engine.Identity), 30_000);
+    const s = try flash.rank_engine.Session.init(gpu.gpa, gpu.io, master, port, rank, std.mem.zeroes(flash.rank_engine.Identity), 30_000);
     var stream = try cuda.Stream.init(gpu.d, true);
     defer stream.deinit();
     const delay_ms = if (late) s.collective.timeout_ms + 5_000 else 1_000;

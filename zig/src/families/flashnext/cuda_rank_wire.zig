@@ -295,6 +295,7 @@ test "a link wait polls briefly, then blocks, and still ends at its data, its de
     const t = try std.Thread.spawn(.{}, sendLater, .{ pair[1], 5, true });
     defer t.join();
     try std.testing.expectError(error.RankDisconnected, l.receive(&byte, deadline(1000)));
+}
 test "one host is a Unix socket, a loopback peer or one address at both ends; two addresses are two hosts" {
     const P = std.Io.Threaded.PosixAddress;
     const at = struct {

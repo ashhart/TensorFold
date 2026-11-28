@@ -77,7 +77,6 @@ pub const Cache = struct {
     }
 };
 
-
 test {
     _ = @import("cuda_round_graph_test.zig");
 }

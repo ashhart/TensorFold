@@ -50,7 +50,6 @@ fn session(rank: usize, pair: *[2]c_int) !ranks.Session {
     s.collective.comm = @ptrFromInt(0x1000);
     s.collective.link = .{ .fd = pair[0] };
     s.collective.parent = null;
-    s.collective.release = null;
     s.collective.timeout_ms = 50;
     s.collective.lib.api.ncclCommCount = Fake.count;
     s.collective.api.ncclCommAbort = Fake.abort;
