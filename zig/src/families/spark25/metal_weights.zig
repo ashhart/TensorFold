@@ -51,6 +51,8 @@ pub const Weights = struct {
     layers: []Layer,
     /// The stacked matrices' own buffers (copies of the checkpoint's).
     stacked: std.ArrayList(mtl.Buffer) = .empty,
+    /// Their bytes, which the shards no longer hold: part of what a load keeps resident.
+    stacked_bytes: u64 = 0,
 
     pub fn deinit(w: *Weights, gpa: std.mem.Allocator) void {
         gpa.free(w.layers);
@@ -121,6 +123,7 @@ fn stacked(gpa: std.mem.Allocator, device: mtl.Device, w: *Weights, parts: []con
                 row += d.n;
             }
             try w.stacked.append(gpa, buf);
+            w.stacked_bytes += n * k * 2;
             return .{ .bf16 = .{ .buf = buf, .off = 0, .n = n, .k = k } };
         },
         .affine => |first| {
@@ -142,6 +145,7 @@ fn stacked(gpa: std.mem.Allocator, device: mtl.Device, w: *Weights, parts: []con
                 row += a.n;
             }
             try w.stacked.append(gpa, buf);
+            w.stacked_bytes += b_at + total * groups * 2;
             const out = rows.Weights{ .w = buf, .w_off = 0, .scales = buf, .s_off = s_at, .biases = buf, .b_off = b_at, .n = total, .k = k, .group = first.group, .bits = first.bits };
             try out.validate();
             return .{ .affine = out };

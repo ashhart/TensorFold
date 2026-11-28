@@ -51,9 +51,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     const text: ?[]const u8 = if (std.c.getenv("SPARK_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
-    // the decode window's and the prompt chunk's buffers
-    const scratch: u64 = fl.state.scratchBytes(fl.state.batch_rows) + fl.state.scratchBytes(fl.state.prompt_rows);
-    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
+    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, fl.budget.resident(model)) catch {
         model.deinit();
         problem.* = "SPARK_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
@@ -65,7 +63,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
-    std.log.info("spark2_5: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
+    const held: [3]f64 = .{ @floatFromInt(model.checkpoint.residentBytes()), @floatFromInt(model.weights.stacked_bytes), @floatFromInt(fl.budget.scratch) };
+    std.log.info("spark2_5: resident {d:.3} GB (shards {d:.3}, stacks {d:.3}, scratch {d:.3}), {d:.1} GiB for caches, context up to {d} tokens", .{ (held[0] + held[1] + held[2]) / 1e9, held[0] / 1e9, held[1] / 1e9, held[2] / 1e9, @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;

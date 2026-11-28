@@ -133,6 +133,7 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.engine, test_step);
         @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
         b.step("test-shared-head-cost-metal-host", "Metal family head-cost grants without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"shared head costs:"} })).step);
+        b.step("test-spark25-budget-metal-host", "Spark2.5's Metal load budget: shards, stacks and scratch against the limit, no device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"spark metal budget:"} })).step);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/dsv41_metal.zig").steps(b, budget_mods.metal, budget_mods.sources, test_step);
