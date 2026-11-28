@@ -29,3 +29,8 @@ pub fn source(a: std.mem.Allocator, name: []const u8) ![]u8 {
     defer a.free(body);
     return std.fmt.allocPrint(a, "#define Q27_XS {d}\n{s}", .{ @intFromBool(xs), body });
 }
+/// The family's kernels carry a marker where the specialization goes; the limits pass compiles the real one.
+pub fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u8) ![]u8 {
+    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownLaunch;
+    return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+}

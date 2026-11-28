@@ -8,6 +8,7 @@ const Config = @import("config.zig").Config;
 pub const Ref = @import("projection.zig").Ref;
 const Frame = @import("gpu_frame.zig").Frame;
 const ane_mlp = @import("ane_mlp.zig");
+const norm_steer = @import("norm_steer_gpu.zig");
 
 pub const Mixer = struct {
     ptr: *anyopaque,
@@ -86,6 +87,8 @@ pub const Stages = struct {
     norm: ?wts.Tensor = null,
     /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
     logits: ?Ref = null,
+    /// Whether the target's control-vector plan applies at the block norms; the MTP head's own block sets this false.
+    steer: bool = true,
     /// The rows layer `index`'s post and the final norm run: the tail's on the last layer, else every row.
     fn rowsAt(s: *const Stages, index: usize) Span {
         const f = &s.model.frame;
@@ -124,10 +127,17 @@ pub const Stages = struct {
             try @import("loop.zig").preMhc(&m.mhc.?, &m.kernels, m.config, index, layer, m.weights.mhc[m.config.exec_phys[index]], &s.hidden, &s.residual, &s.pending, f, s.rows, e, tap);
             return;
         }
-        try m.kernels.normShift(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows, m.config.shift_norms);
+        // The direction for the block before this one rides along with the norm that adds that block's output.
+        const dir = if (s.pending != null) s.direction(index - 1) else null;
+        if (dir) |d| {
+            try norm_steer.encode(&m.kernels, d.plan, e, s.hidden, s.pending.?, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), d.buffer, h, s.rows);
+        } else {
+            try m.kernels.normShift(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows, m.config.shift_norms);
+        }
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
+            // The residual now holds the output of the block before this one, which is layer `index - 1`.
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
             if (stage_planes.on) try stage_planes.record(s.model.glue, e, .{ .block = index - 1 }, s.hidden, s.rows);
         }
@@ -285,9 +295,16 @@ pub const Stages = struct {
         const h: u32 = @intCast(m.config.hidden);
         const t = s.rowsAt(m.config.layers - 1);
         const pending: ?Ref = if (s.pending) |p| t.at(p, h) else null;
-        try m.kernels.normShift(e, t.at(s.hidden, h), pending, wts.ref(s.norm orelse m.weights.norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n, m.config.shift_norms);
+        // The last block's output is layer `layers - 1`, and the direction for it rides along with the norm.
+        const dir = if (pending != null) s.direction(m.config.layers - 1) else null;
+        if (dir) |d| {
+            try norm_steer.encode(&m.kernels, d.plan, e, t.at(s.hidden, h), pending.?, wts.ref(s.norm orelse m.weights.norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), d.buffer, h, t.n);
+        } else {
+            try m.kernels.normShift(e, t.at(s.hidden, h), pending, wts.ref(s.norm orelse m.weights.norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n, m.config.shift_norms);
+        }
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        // The residual now holds the output of the last block, which is layer `layers - 1`.
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
         if (stage_planes.on) {
             // the last block is the residual stream; final is the normed rows the head reads (f.input)
@@ -322,6 +339,20 @@ pub const Stages = struct {
         }
         if (s.tail) |tail| try tail.encode(tail.ptr, e);
     }
+
+    /// The direction that steers the layer whose residual just landed; none in force (or off) means nothing done.
+    pub fn direction(s: *const Stages, layer: usize) ?Direction {
+        if (!s.steer) return null;
+        const plan = s.model.steer orelse return null;
+        const buffer = plan.dir(@intCast(layer)) orelse return null;
+        return .{ .plan = plan, .buffer = buffer };
+    }
+
+    /// A direction on the device and the plan it belongs to, whose alpha it is added at.
+    pub const Direction = struct {
+        plan: *@import("steer.zig").Plan,
+        buffer: mtl.Buffer,
+    };
 };
 
 /// `e` is the caller's encoder, but seams reopen it: the final one is written back through the pointer, so commit it.

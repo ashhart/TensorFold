@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face डाउनलोड कहाँ सहेजता है। TensorFold अपने मॉडल फ़ोल्डर सेटिंग्स → मॉडल फ़ोल्डर में रखता है।",
  "Engine knob: append per-request records to a file for diagnostics.": "इंजन विकल्प: निदान के लिए अनुरोध-वार रिकॉर्ड फ़ाइल में जोड़ें।",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "इंजन के टर्मिनल में लाइव टेक्स्ट प्रदर्शन छिपाने के लिए 1 सेट करें; सेवाया गया मॉडल वैसा ही रहता है।",
- "Engine knob: mix a salt into request seeds.": "इंजन विकल्प: अनुरोध सीड्स में नमक मिलाएँ।"
+ "Engine knob: mix a salt into request seeds.": "इंजन विकल्प: अनुरोध सीड्स में नमक मिलाएँ।",
+ "Control vector": "नियंत्रण वेक्टर",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "नियंत्रण वेक्टर स्थानीय मॉडल के जवाबों की शैली या विषय को दिशा देता है। आप इसे चालू करने तक यह बंद रहता है। इंजन शुरू होते समय लोड की गई फ़ाइल और उसका SHA-256 बताता है, और यह भी कि जवाब निर्देशित हैं।",
+ "Apply a control vector": "नियंत्रण वेक्टर लागू करें",
+ "Choose…": "चुनें…",
+ "Strength": "तीव्रता",
+ "File: {value0}": "फ़ाइल: {value0}",
+ "In force in the loaded model.": "लोड किए गए मॉडल में लागू है।",
+ "Strength scales the added direction. Large values can degrade replies.": "तीव्रता जोड़ी गई दिशा का आकार तय करती है। बड़े मान जवाबों की गुणवत्ता घटा सकते हैं।",
+ "The strength must be above 0 and at most {value0}.": "तीव्रता 0 से अधिक और {value0} तक या उससे कम होनी चाहिए।",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "इस बिल्ड का TensorFold इंजन अभी नियंत्रण वेक्टर नहीं देता, इसलिए मौजूदा इंजन इसे नहीं लेगा।",
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "नियंत्रण वेक्टर लागू होने पर जवाब उस शैली या विषय की ओर निर्देशित होते हैं जिसे फ़ाइल कूटबद्ध करती है। केवल जोड़ने वाले (add) वेक्टर समर्थित हैं; इंजन प्रोजेक्ट वेक्टर और उन फ़ाइलों को अस्वीकार करता है जिन्हें वह सत्यापित नहीं कर सकता।"
 }

@@ -19,6 +19,7 @@ const reserve = @import("qwen27_reserve.zig");
 const StartupLine = startup.StartupLine;
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
+const steer_served = @import("qwen27_steer_served.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
 const Allocator = std.mem.Allocator;
 const helpers = @import("qwen27_served_helpers.zig");
@@ -46,6 +47,7 @@ pub const Options = struct {
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
     rope_yarn: ?f64 = null,
+    glp: ?api.glp.Glp = null, // the control vector the model steers with (null: none)
     slide: bool = false, // --slide: Folded Memory Weights v3 live learning
     dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
 };
@@ -247,7 +249,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
-        why.* = try drafterRefusal(a, dir, d, err);
+        why.* = try @import("qwen27_mtp_flags.zig").drafterRefusal(a, dir, d, err);
         return err;
     };
     const model = q.model.Model.loadDeferredOpts(gpa, io, dir, reserve.loaded_rows, .{ .rope_yarn = o.rope_yarn }) catch |err| {
@@ -257,6 +259,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         return err;
     };
     errdefer model.deinit();
+    if (o.glp) |g| try steer_served.apply(gpa, model, dir, g, a, why);
     if (@import("qwen27_mtp_flags.zig").deviceRefusal(o.mtp_drafts, model.device.tensorUnits(), try q.decode_round.pagesOn())) |r| {
         why.* = r.why;
         return r.err;
@@ -432,7 +435,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
-    if (o.learn) |l| try disk.attach(h, io, a, l);
+    if (o.learn) |l| try disk.attach(h, io, a, l, if (o.glp) |*g| g else null);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
@@ -451,6 +454,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else if (h.sn_mtp != null) slots else 0, .drafter = if (h.draft) |d| d.model.graph.config.kind() else "DFlash2", .images = o.images != null }});
+    if (o.glp) |g| if (model.steer != null) steer_served.report(g);
     return h;
 }
 
@@ -527,6 +531,7 @@ test {
     if (builtin.os.tag == .macos) {
         _ = @import("qwen27_served_startup_test.zig");
         _ = @import("qwen27_draft_block.zig");
+        _ = @import("qwen27_mtp.zig");
         _ = @import("qwen27_share_fit.zig");
         _ = @import("qwen27_served_test.zig");
         _ = @import("qwen27_startup_test.zig");

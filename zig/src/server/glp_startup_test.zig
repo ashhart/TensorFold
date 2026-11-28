@@ -1,0 +1,353 @@
+//! The control vector's serve checks: the file, the reader, the family and the line that reports what is in force.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const glp = @import("engine_api").glp;
+const serve = @import("glp_startup.zig");
+const log = @import("log.zig");
+
+const io = std.testing.io;
+
+/// The width Qwen3.8-27B has; a vector that steers it is this wide.
+const width = 5120;
+
+/// The depth Qwen3.8-27B has; its last block is layer 63.
+const depth = 64;
+
+/// Whether this platform's engine steers: only the Metal engine does, and only on a Mac.
+const steers = builtin.os.tag == .macos;
+
+/// The lines the server printed, for the report the operator reads.
+const Sink = struct {
+    list: std.ArrayList(u8) = .empty,
+    a: std.mem.Allocator,
+};
+
+fn capture(ctx: *anyopaque, text: []const u8) void {
+    const sink: *Sink = @ptrCast(@alignCast(ctx));
+    sink.list.appendSlice(sink.a, text) catch {};
+}
+
+/// A checkpoint folder with a config.json, a vector file beside it and the vector read.
+const Fixture = struct {
+    tmp: std.testing.TmpDir,
+    /// The model's folder, as the serve path names it.
+    model: []const u8,
+    /// The vector the file holds, read once.
+    g: ?serve.Vec,
+
+    fn make(a: std.mem.Allocator, w: usize, hidden: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f64) !Fixture {
+        return makeDepth(a, w, hidden, depth, ids, spec, alpha);
+    }
+
+    fn makeDepth(a: std.mem.Allocator, w: usize, hidden: usize, layers: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f64) !Fixture {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const model = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+        const json = try std.fmt.allocPrint(a, "{{\"model_type\":\"qwen3_5\",\"hidden_size\":{d},\"num_hidden_layers\":{d},\"text_config\":{{\"hidden_size\":{d}}}}}", .{ hidden, layers, hidden });
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = json });
+        const bytes = try vectorBytes(a, w, ids, spec);
+        try tmp.dir.writeFile(io, .{ .sub_path = "vector.gguf", .data = bytes });
+        const path = try std.fs.path.join(a, &.{ model, "vector.gguf" });
+        var g: ?serve.Vec = serve.withPath(null, path);
+        if (alpha) |x| g = serve.withAlpha(g, x);
+        if (try serve.read(a, &g)) |why| {
+            std.debug.print("refused: {s}\n", .{why});
+            return error.UnexpectedRefusal;
+        }
+        return .{ .tmp = tmp, .model = model, .g = g };
+    }
+};
+
+/// The reason the file was refused, as the operator reads it.
+fn refused(a: std.mem.Allocator, g: *?serve.Vec) ![]const u8 {
+    return (try serve.read(a, g)) orelse return error.UnexpectedlyAccepted;
+}
+
+/// A vector file with one direction per layer, each a unit vector the reader accepts.
+fn vectorBytes(a: std.mem.Allocator, w: usize, ids: []const u32, spec: glp.WriteSpec) ![]u8 {
+    const layers = try a.alloc(glp.Layer, ids.len);
+    for (ids, 0..) |id, i| {
+        const dir = try a.alloc(f32, w);
+        dir[0] = 1.0;
+        layers[i] = .{ .id = id, .dir = dir };
+    }
+    var s = spec;
+    s.layers = layers;
+    return glp.write(a, s);
+}
+
+test "a missing file is refused with the path and the reason" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var g: ?serve.Vec = serve.withPath(null, ".zig-cache/tmp/no-such-vector.gguf");
+    const why = try refused(a, &g);
+    try std.testing.expect(std.mem.indexOf(u8, why, "argument --glp:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "cannot read") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "no such file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "no-such-vector.gguf") != null);
+}
+
+test "a file the reader refuses is refused with the reader's reason" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "vector.gguf", .data = "not a control vector" });
+    const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "vector.gguf" });
+    var g: ?serve.Vec = serve.withPath(null, path);
+    const why = try refused(a, &g);
+    try std.testing.expect(std.mem.indexOf(u8, why, "argument --glp:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "not a GGUF container") != null);
+}
+
+test "--glp-alpha without --glp is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var g: ?serve.Vec = serve.withAlpha(null, 0.5);
+    const why = try refused(a, &g);
+    try std.testing.expect(std.mem.indexOf(u8, why, "needs --glp") != null);
+}
+
+test "the strength must be finite and above 0" {
+    try std.testing.expect(serve.strength("0.5") != null);
+    try std.testing.expect(serve.strength("0") == null);
+    try std.testing.expect(serve.strength("-1") == null);
+    try std.testing.expect(serve.strength("inf") == null);
+    try std.testing.expect(serve.strength("nan") == null);
+    try std.testing.expect(serve.strength("1e100") == null);
+    try std.testing.expect(serve.strength("1e-100") == null);
+    try std.testing.expect(serve.strength("abc") == null);
+}
+
+test "the line shows the file name escaped, so a name cannot add a line of its own" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    var named = f.g.?;
+    named.path = "dir/a\nglp off: \"x\".gguf";
+    var sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
+    defer log.Test.sink = null;
+    serve.report(a, named);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "dir/a\\nglp off: \\\"x\\\".gguf") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, sink.list.items, "\n"));
+}
+
+test "a good vector is accepted where the engine steers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .alpha = 0.5, .base_model = "TensorFold/Qwen3.8-27B-MLX-4bit", .base_revision = "8f2c1d4e", .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?);
+    if (steers) {
+        try std.testing.expect(why == null);
+        return;
+    }
+    // Only the Metal engine steers, so on this platform the same file is refused by name.
+    try std.testing.expect(why != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.?, "Metal") != null);
+}
+
+test "the operator's strength is the one in force" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .alpha = 0.5, .layers = &.{} }, 0.25);
+    defer f.tmp.cleanup();
+    if (!steers) {
+        try std.testing.expectError(error.GlpRefused, serve.engine(a, f.model, "qwen3_5", "auto", f.g));
+        return;
+    }
+    const g = (try serve.engine(a, f.model, "qwen3_5", "auto", f.g)).?;
+    try std.testing.expectEqual(@as(f32, 0.25), g.alpha);
+    try std.testing.expectEqual(@as(usize, 2), g.vector.layers.len);
+}
+
+test "a family that is not steered is refused by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "glm5_next", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "glm5_next") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "Qwen3.8-27B") != null);
+}
+
+test "a Gemma family is refused outright" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "gemma4", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "Gemma") != null);
+    // The family speaks before the vector's width does, even when the two disagree.
+    var other = try Fixture.make(a, 4096, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer other.tmp.cleanup();
+    const family = (try serve.refusal(a, other.model, "gemma4", "auto", other.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, family, "Gemma") != null);
+    try std.testing.expect(std.mem.indexOf(u8, family, "4096") == null);
+}
+
+test "a vector the model's width does not match is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, 4096, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "4096") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "5120") != null);
+}
+
+test "a vector that names a layer past the model's depth is refused before the model loads" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.makeDepth(a, width, width, 4, &.{ 1, 4 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "layer 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "4 layers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "deepest layer is 3") != null);
+}
+
+test "a nested config's depth is read from text_config" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.makeDepth(a, width, width, 4, &.{ 1, 4 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    // The depth lives in text_config only, as a nested config carries it.
+    const json = try std.fmt.allocPrint(a, "{{\"model_type\":\"qwen3_5\",\"text_config\":{{\"hidden_size\":{d},\"num_hidden_layers\":4}}}}", .{width});
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = json });
+    const why = (try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "layer 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "4 layers") != null);
+}
+
+test "a vector that stops at the model's deepest layer is accepted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.makeDepth(a, width, width, 4, &.{ 1, 3 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?);
+    if (steers) try std.testing.expect(why == null) else try std.testing.expect(why != null and std.mem.indexOf(u8, why.?, "Metal") != null);
+}
+
+test "the CUDA engine does not steer" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "qwen3_5", "cuda", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "Metal") != null);
+}
+
+test "the ROCm engine does not steer" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "qwen3_5", "rocm", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "ROCm") != null);
+}
+
+test "a vector derived at another site is reported" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .derived_at = "ffn_out_pre_residual", .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    var sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
+    defer log.Test.sink = null;
+    serve.report(a, f.g.?);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "warning:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "ffn_out_pre_residual") != null);
+}
+
+test "a vector derived at another site is not refused where the engine steers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .derived_at = "ffn_out_pre_residual", .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?);
+    if (steers) {
+        try std.testing.expect(why == null);
+        return;
+    }
+    // The site's warning is not the refusal here; the engine is.
+    try std.testing.expect(why != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.?, "Metal") != null);
+}
+
+test "the control vector's flags are the serve table's flag type" {
+    // cli.zig concatenates this table into its own, so both must name one type, not two equal shapes.
+    const cli = @import("cli.zig");
+    try std.testing.expect(@TypeOf(serve.flags[0]) == cli.Flag);
+}
+
+test "the report says verified only when the parsed digest was checked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    var sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
+    defer log.Test.sink = null;
+    var unchecked = f.g.?;
+    unchecked.vector.?.claims_digest = false;
+    serve.report(a, unchecked);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "the file claims none") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "(verified)") == null);
+    sink.list.clearRetainingCapacity();
+    serve.report(a, f.g.?);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "(verified)") != null);
+}
+
+/// Remove the file's parsed digest key, leaving any text that merely reads like it.
+fn dropDigestKey(bytes: []u8) void {
+    const at = std.mem.indexOf(u8, bytes, "glp.content_sha256").?;
+    bytes[at + "glp.content_sha256".len - 1] = '7';
+}
+
+test "a description that reads like a digest does not make the loaded file verified" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try vectorBytes(a, width, &.{ 1, 2 }, .{ .layers = &.{}, .publication = .{ .description = "the file carries glp.content_sha256 in its description" } });
+    dropDigestKey(bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "vector.gguf", .data = bytes });
+    const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "vector.gguf" });
+    var g: ?serve.Vec = serve.withPath(null, path);
+    try std.testing.expectEqual(@as(?[]const u8, null), try serve.read(a, &g));
+    try std.testing.expect(!g.?.vector.?.claims_digest);
+    var sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
+    defer log.Test.sink = null;
+    serve.report(a, g.?);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "the file claims none") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "(verified)") == null);
+}
+
+test "the control-vector flags are the serve table's type and a file flag" {
+    for (serve.flags) |f| try std.testing.expectEqual(steers, f.advertised);
+    // A config file's relative --glp starts at the file's folder, as its other file flags do.
+    try std.testing.expect(serve.flags[0].path);
+}

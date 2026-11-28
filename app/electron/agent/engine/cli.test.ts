@@ -42,6 +42,15 @@ async function main() {
     'weights: 12.00 GiB (12884901888 bytes)',
     'startup budget: not priced (--context is past this checkpoint\'s max_position_embeddings)',
   ].join('\n')), /family: Qwen3\.8 Flash Next/)
+  // The current engine prints a startup budget on the same topic: the app prices that line instead of refusing the model.
+  const budget = parseInfoOutput([
+    'family: Qwen3.8 Flash Next (qwen4_exp)',
+    'format: 6-bit, group 32',
+    'context: 65536',
+    'weights: 12.00 GiB (12884901888 bytes)',
+    'startup budget: 21.34 GiB at --context 65536: weights, 1 stream of KV and state, 1-row prompt scratch (no drafter or images)',
+  ].join('\n'))
+  assert.deepEqual(budget, { family: 'Qwen3.8 Flash Next', modelType: 'qwen4_exp', format: '6-bit, group 32', contextTokens: 65536, weightsBytes: 12884901888, memoryFloorBytes: Math.round(21.34 * 1024 ** 3) })
   assert.throws(() => parseInfoOutput('Org/X is not in the Hugging Face cache; run: tensorfold pull Org/X\n'), /not in the Hugging Face cache/)
 
   const caps = parseCapabilities('{"schema": 1, "engine": "zig", "version": "1.0.7", "chip": null, "backends": ["auto", "mlx"], "families": {"nemotron_h": ["mlx-q4g64"], "qwen3_5": ["mlx-q4g64"]}, "serve": {"flags": {"--host": {}, "--drafter": {}}}, "env": ["TENSORFOLD_API_KEY"]}\n')

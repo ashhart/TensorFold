@@ -139,6 +139,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("hy4_records.zig").metal ++
     @import("uocr_records.zig").records ++
     @import("bolt_records.zig").records ++
+    @import("steer_records.zig").metal ++
     @import("ricursive_records.zig").records;
 pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda ++
     @import("dory_cuda_records.zig").cuda ++

@@ -116,6 +116,10 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/quant_geometry_host.zig").steps(b, test_step);
     @import("zig/build/glm_tfq3_host.zig").steps(b, test_step);
     @import("zig/build/stage.zig").steps(b, test_step);
+    @import("zig/build/glp.zig").tests(b, test_step);
+    @import("zig/build/glp_steer.zig").tests(b, test_step);
+    @import("zig/build/glp_serve.zig").tests(b, test_step);
+    @import("zig/build/steer.zig").tests(b, test_step);
     @import("zig/build/dsv41_metal.zig").hostSteps(b);
     if (b.graph.host.result.os.tag == .macos) {
         const step5_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
