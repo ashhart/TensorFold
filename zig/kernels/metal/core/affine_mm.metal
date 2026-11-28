@@ -12,7 +12,7 @@ constant constexpr int STEP_BYTES = 8 * TF_BITS; // a weight row's bytes in one 
 constant constexpr int HALF_BYTES = 4 * TF_BITS; // a thread's half of them (32 codes)
 constant constexpr int NG = TF_GROUP > 64 ? 1 : 64 / TF_GROUP; // groups a step touches (g128: one, over two steps)
 constant constexpr int PAD = 64 + 8;              // the code tile's row pitch (bf16)
-constant constexpr float OFF = TF_BITS == 4 ? 128.0f : 0.0f; // bf16(128 + q) is q's bits ORed with 0x4300; bias - 128 scale undoes it
+constant constexpr float OFF = (TF_BITS == 4 || TF_BITS == 6) ? 128.0f : 0.0f; // bf16(128 + q) is q's bits ORed with 0x4300; bias - 128 scale undoes it
 
 struct MmArgs {
   int rows, n, k, experts; // rows (sorted by expert for a gather), outputs a row, depth, experts (gather)
@@ -118,6 +118,31 @@ inline void am_codes(thread const Codes& c, threadgroup bfloat* out) {
       o[2 * i + j / 2][2 * (j % 2) + 1] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f2[j])), as_type<ushort>(bfloat(f3[j]))));
     }
   }
+#elif TF_BITS == 6
+  const uint b0 = c.v[0];
+  const uint b1 = (c.v[0] >> 24) | (c.v[1] << 8);
+  const uint b2 = (c.v[1] >> 16) | (c.v[2] << 16);
+  const uint b3 = c.v[2] >> 8;
+  const uint b4 = c.v[3];
+  const uint b5 = (c.v[3] >> 24) | (c.v[4] << 8);
+  const uint b6 = (c.v[4] >> 16) | (c.v[5] << 16);
+  const uint b7 = c.v[5] >> 8;
+  o[0] = uint4(0x43004300u | (b0 & 0x3fu) | (((b0 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b0 >> 12) & 0x3fu) | (((b0 >> 18) & 0x3fu) << 16),
+               0x43004300u | (b1 & 0x3fu) | (((b1 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b1 >> 12) & 0x3fu) | (((b1 >> 18) & 0x3fu) << 16));
+  o[1] = uint4(0x43004300u | (b2 & 0x3fu) | (((b2 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b2 >> 12) & 0x3fu) | (((b2 >> 18) & 0x3fu) << 16),
+               0x43004300u | (b3 & 0x3fu) | (((b3 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b3 >> 12) & 0x3fu) | (((b3 >> 18) & 0x3fu) << 16));
+  o[2] = uint4(0x43004300u | (b4 & 0x3fu) | (((b4 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b4 >> 12) & 0x3fu) | (((b4 >> 18) & 0x3fu) << 16),
+               0x43004300u | (b5 & 0x3fu) | (((b5 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b5 >> 12) & 0x3fu) | (((b5 >> 18) & 0x3fu) << 16));
+  o[3] = uint4(0x43004300u | (b6 & 0x3fu) | (((b6 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b6 >> 12) & 0x3fu) | (((b6 >> 18) & 0x3fu) << 16),
+               0x43004300u | (b7 & 0x3fu) | (((b7 >> 6) & 0x3fu) << 16),
+               0x43004300u | ((b7 >> 12) & 0x3fu) | (((b7 >> 18) & 0x3fu) << 16));
 #elif TF_BITS % 4 != 0
   TF_UNROLL
   for (short i = 0; i < 8; i++) { // codes 4i .. 4i + 3 of the little-endian bit stream, as themselves
@@ -161,6 +186,14 @@ inline void am_codes_kn(thread const Codes& c, threadgroup bfloat* tile, int w_n
     const uint w = c.v[i];
     TF_UNROLL
     for (short j = 0; j < 16; j++) tile[(w_kh * 32 + i * 16 + j) * PAD + w_n] = bfloat(float((w >> (2 * j)) & 3u));
+  }
+#elif TF_BITS == 6
+  TF_UNROLL
+  for (short j = 0; j < 32; j++) {
+    const short at = 6 * j, word = at / 32, shift = at % 32;
+    uint v = c.v[word] >> shift;
+    if (shift + 6 > 32) v |= c.v[word + 1] << (32 - shift);
+    tile[(w_kh * 32 + j) * PAD + w_n] = as_type<bfloat>(ushort(0x4300u | (v & 0x3fu)));
   }
 #elif TF_BITS % 4 != 0
   TF_UNROLL
