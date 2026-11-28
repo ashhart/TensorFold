@@ -24,7 +24,7 @@ const aliases: usize = blk: {
 };
 
 pub const families: []const api.Family = blk: {
-    var out: [registry.len + 6 + aliases]api.Family = undefined;
+    var out: [registry.len + 7 + aliases]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats, .decision_formats = if (@hasDecl(F, "decision_formats")) F.decision_formats else &.{} };
     out[registry.len] = lfm2.family;
     out[registry.len + 1] = .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} };
@@ -32,7 +32,8 @@ pub const families: []const api.Family = blk: {
     out[registry.len + 3] = .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats };
     out[registry.len + 4] = .{ .model_type = qwen3.native.model_type, .formats = qwen3.native.formats };
     out[registry.len + 5] = .{ .model_type = "zonos3", .formats = &.{"bf16"} };
-    var at: usize = registry.len + 6;
+    out[registry.len + 6] = @import("uocr_cuda.zig").family;
+    var at: usize = registry.len + 7;
     for (registry) |F| if (@hasDecl(F, "cuda_also_model_types")) for (F.cuda_also_model_types) |alias| {
         out[at] = .{ .model_type = alias, .formats = F.formats, .decision_formats = if (@hasDecl(F, "decision_formats")) F.decision_formats else &.{} };
         at += 1;
@@ -42,7 +43,7 @@ pub const families: []const api.Family = blk: {
 };
 
 test "every registered family and d1's decision engine are listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len + 6 + aliases), families.len);
+    try std.testing.expectEqual(@as(usize, registry.len + 7 + aliases), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
     try std.testing.expectEqualStrings("lfm2_moe", families[registry.len - 2].model_type);
     try std.testing.expectEqualStrings("inkling2_loop", families[registry.len - 1].model_type);
@@ -50,6 +51,7 @@ test "every registered family and d1's decision engine are listed for capabiliti
     try std.testing.expectEqualStrings("qwen4_text", families[registry.len + 3].model_type);
     try std.testing.expectEqualStrings("qwen3", families[registry.len + 4].model_type);
     try std.testing.expectEqualStrings("zonos3", families[registry.len + 5].model_type);
+    try std.testing.expectEqualStrings("unlimited-ocr", families[registry.len + 6].model_type);
 }
 
 test "CUDA aliases: each is listed for capabilities, model info and benchmarks, with its family's formats" {

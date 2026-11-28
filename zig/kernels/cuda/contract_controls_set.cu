@@ -2,6 +2,9 @@
 
 #include "contract_controls.cu"
 #include "contract_js_controls.cuh"
+#include "contract_uocr_decoder.cuh"
+#include "contract_uocr_vision.cuh"
+#include "contract_uocr_glue.cuh"
 #include "contract_dense_controls.cuh"
 #include "contract_lfm3_controls.cuh"
 #include "contract_experts_bf16_controls.cuh"

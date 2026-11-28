@@ -170,6 +170,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
+    if (std.mem.eql(u8, o.model_type, "unlimited-ocr")) return @import("uocr_cuda.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows);
     switch (try open_family.special(a, gpa, io, o, problem)) {
         .not_mine => {},
@@ -556,6 +557,7 @@ test "Flash Next takes --vision at family admission" {
 }
 test {
     _ = @import("cuda_health_test.zig");
+    _ = @import("uocr_cuda.zig"); // test-uocr-cuda's "Unlimited-OCR-2 on CUDA" open tests
     _ = @import("cuda_ceiling_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");

@@ -132,7 +132,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     @import("minimax_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core, mods.lanes, runner);
     @import("inkling2.zig").targets(b, target, optimize, strip, cuda, mods.core, mods.lanes, runner);
     @import("idol_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core, runner);
-    for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "ricursive_cuda", @import("ricursive_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) } }) |m| runner.addImport(m[0], m[1]);
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "ricursive_cuda", @import("ricursive_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "uocr_cuda", native.engines.import_table.get("uocr_cuda").? } }) |m| runner.addImport(m[0], m[1]);
     runner.addImport("hy4_nvfp4", b.createModule(.{ .root_source_file = b.path("zig/src/families/hy4_flash/moe_nvfp4_cuda.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } }));
     runner.addImport("hy4_ihc_fused_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/hy4_flash/ihc_fused_cuda.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
     runner.addImport("ernie5_5_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/ernie5_5/cuda_head.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
@@ -388,6 +388,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("locate_host.zig").cudaTests(b, mods.nemotron, step);
     const adapter_tests = b.createModule(.{ .root_source_file = b.path("zig/src/native/slide_adapter_test.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = native_modules.api }} });
     b.step("test-slide-cuda-host", "Unsupported CUDA learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"slide admission:"} })).step);
+    const uocr = b.step("test-uocr-cuda", "Unlimited-OCR-2 on CUDA: the family's tests and the open's refusals before a checkpoint is read");
+    uocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"Unlimited-OCR-2 on CUDA"} })).step);
+    uocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native.import_table.get("uocr_cuda").? })).step);
     b.step("test-slide-adapter-host", "Slide adapter: initial learner progress, and --slide's startup refusals").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter_tests })).step);
     @import("drama3_host.zig").native(b, step, drama3, mods.core, native_modules.api, cuda, "drama_cuda_native_host");
     @import("drama3_host.zig").plan(b, drama3, mods.core, native_modules.api, cuda);

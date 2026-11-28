@@ -81,3 +81,19 @@ test {
     _ = @import("moetile_records.zig"); // its own test: the shared down's slot-output entries
     _ = @import("qmmf_prompt_records.zig"); // its own test: the 128-row BF16 prompt entries
 }
+
+test "Unlimited-OCR-2's CUDA launches: nvcc 13.0's, 13.2's and 13.3's measured usage fit all five SMs, each once" {
+    for (@import("uocr_cuda_records.zig").cuda) |r| {
+        var found: usize = 0;
+        for (registry.all_cuda) |active| found += @intFromBool(std.mem.eql(u8, active.launch.name, r.launch.name));
+        try std.testing.expectEqual(@as(usize, 1), found);
+        try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{r}, true));
+        try std.testing.expectEqual(r.usage, registry.usageFor(r, .{ .major = 13, .minor = 0 }));
+        for ([_]u8{ 2, 3 }) |minor| {
+            var measured = r;
+            measured.usage = registry.usageFor(r, .{ .major = 13, .minor = minor });
+            try std.testing.expect(!std.meta.eql(measured.usage, none));
+            try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{measured}, true));
+        }
+    }
+}

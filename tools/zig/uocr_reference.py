@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Unlimited-OCR-2's reference: the release's own code on the CPU, in torch bf16 and float32 (see --help)."""
+"""Unlimited-OCR-2's reference: the release's own code on the CPU or CUDA, in torch bf16 and float32 (see --help)."""
 
-USAGE = """Unlimited-OCR-2's reference: the release's own `infer` (modeling_unlimitedocr.py) on the CPU, greedy, in
-torch bf16 and float32: the transcripts, stage dumps and block cases the native engine is compared with. It reads the
-release's modules only through their inputs and outputs (forward hooks).
+USAGE = """Unlimited-OCR-2's reference: the release's own `infer` (modeling_unlimitedocr.py) on the CPU (or CUDA,
+`dump --device cuda`), greedy, in torch bf16 and float32: the transcripts, stage dumps and block cases the native
+engine is compared with. It reads the release's modules only through their inputs and outputs (forward hooks).
 
 Pinned: baidu/Unlimited-OCR-2 at 0480966938291445591f69f08a13b041c073a96a, transformers 4.52.1 (the model card's),
-torch 2.15.0 (the card tests 2.13.0 on CUDA; this runs on the CPU), Pillow 13.0.0, PyMuPDF 1.27.2.2.
+torch 2.15.0 on the CPU and 2.13.0 with CUDA 13.0 for --device cuda (the version the card tests on CUDA),
+Pillow 13.0.0, PyMuPDF 1.27.2.2.
 
   pages DIR MODEL          writes the check pages to DIR: two synthetic report pages (A4 at 150 dpi, macOS's Arial)
                            and pages 1, 3 and 10 of the paper the release ships (Unlimited-OCR-2.pdf) at 150 dpi
@@ -14,13 +15,16 @@ torch 2.15.0 (the card tests 2.13.0 on CUDA; this runs on the CPU), Pillow 13.0.
                            runs `infer` on each case's pages in order (gundam mode, the publisher's server default;
                            --base for the global view alone) and writes OUT/<case>.json: the prompt ids, the
                            generated ids and the text
-  dump MODEL OUT PAGE[,PAGE...] [--base]
+  dump MODEL OUT PAGE[,PAGE...] [--base] [--device cuda]
                            the stage dumps tf-uocr-vision and tf-uocr-decode read: `infer` in bf16 with hooks writes
                            OUT.safetensors (each image encoder call's pixels{i}, sam{i}, clip{i} and projector{i}; the
                            decoder's input rows `embeds`, each layer's prompt rows layer{l}, the first `logits`) and
                            OUT.json (prompt and generated ids, text, and `top2`: each step's two highest logits,
                            id and value, which tf-uocr-decode's tie check reads); the float32 model on the same bf16
-                           pixels and prompt writes OUT-f32.safetensors and OUT-f32.json (its own greedy reply)
+                           pixels and prompt writes OUT-f32.safetensors and OUT-f32.json (its own greedy reply).
+                           --device cuda runs both on the GPU instead, through the release's own CUDA path (its Triton
+                           block-sparse attention), with TF32 off so float32 stays float32: the CUDA engine's reference,
+                           made on the GPU it is checked on
   blocks MODEL DUMP OUT --call I --view V
                            the block cases tf-uocr-blocks reads, for one view of a dump: float32 runs SAM and CLIP on
                            its pixels and keeps each SAM block's and CLIP layer's input and output; torch bf16 then
@@ -92,13 +96,18 @@ def pages(out: Path, model: Path) -> None:
         print(p)
 
 
-def _load(model: Path, dtype):
+def _load(model: Path, dtype, device: str = "cpu"):
     import torch
     from transformers import AutoModel, AutoTokenizer
-    torch.Tensor.cuda = lambda self, *a, **k: self  # the release's code moves masks with .cuda(); this runs on the CPU
+    if device == "cpu":
+        # the release's code moves masks with .cuda(); on the CPU that is a no-op
+        torch.Tensor.cuda = lambda self, *a, **k: self
+    else:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     m = AutoModel.from_pretrained(model, trust_remote_code=True, use_safetensors=True, torch_dtype=dtype).eval()
-    return m, tok
+    return m.to(device), tok
 
 
 def capture(model: Path, out: Path, cases: list[str], base: bool) -> None:
@@ -186,21 +195,21 @@ def _infer_hooked(m, tok, files, base, pixels=None):
 def _save_dump(cap, res, out: Path, gen):
     import torch
     from safetensors.torch import save_file
-    t = {"embeds": cap["emb"].contiguous(), "logits": cap["logits"][None].contiguous()}
+    t = {"embeds": cap["emb"].cpu().contiguous(), "logits": cap["logits"][None].cpu().contiguous()}
     for i, c in enumerate(cap["calls"]):
         for k in ("pixels", "sam", "clip", "projector"):
-            t[f"{k}{i}"] = c[k].contiguous()
+            t[f"{k}{i}"] = c[k].cpu().contiguous()
     for l, v in cap["layers"].items():
-        t[f"layer{l}"] = v.contiguous()
+        t[f"layer{l}"] = v.cpu().contiguous()
     save_file(t, f"{out}.safetensors")
     top2 = cap["top2"][:len(gen)]  # one lm_head call a step; a trailing call after the last token is dropped
     Path(f"{out}.json").write_text(json.dumps({"prompt": cap["ids"], "gen": gen, "text": res.get("text", ""), "top2": top2}))
 
 
-def dump(model: Path, out: Path, files: list[str], base: bool) -> None:
+def dump(model: Path, out: Path, files: list[str], base: bool, device: str = "cpu") -> None:
     import gc
     import torch
-    m, tok = _load(model, torch.bfloat16)
+    m, tok = _load(model, torch.bfloat16, device)
     cap, res = _infer_hooked(m, tok, files, base)
     gen = [int(x) for x in res.get("token_ids", [])]
     _save_dump(cap, res, out, gen)
@@ -208,7 +217,9 @@ def dump(model: Path, out: Path, files: list[str], base: bool) -> None:
     pixels = [c["pixels"] for c in cap["calls"]]
     del m, cap
     gc.collect()
-    m, tok = _load(model, torch.float32)
+    if device != "cpu":
+        torch.cuda.empty_cache()
+    m, tok = _load(model, torch.float32, device)
     cap, res = _infer_hooked(m, tok, files, base, pixels=pixels)
     gen = [int(x) for x in res.get("token_ids", [])]
     _save_dump(cap, res, Path(f"{out}-f32"), gen)
@@ -322,6 +333,7 @@ def main(argv=None) -> int:
     dp.add_argument("out", type=Path)
     dp.add_argument("pages")
     dp.add_argument("--base", action="store_true", help="the global view alone (crop_mode=False)")
+    dp.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="where torch runs (default: the CPU)")
     bp = sub.add_parser("blocks", help="the block cases of one view of a dump")
     bp.add_argument("model", type=Path)
     bp.add_argument("dump", type=Path)
@@ -334,7 +346,7 @@ def main(argv=None) -> int:
     elif a.cmd == "capture":
         capture(a.model.expanduser(), a.out, a.cases, a.base)
     elif a.cmd == "dump":
-        dump(a.model.expanduser(), a.out, a.pages.split(","), a.base)
+        dump(a.model.expanduser(), a.out, a.pages.split(","), a.base, a.device)
     else:
         blocks(a.model.expanduser(), a.dump, a.out, a.call, a.view)
     return 0

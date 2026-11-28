@@ -53,6 +53,7 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     inline for (.{ "hy4_route", "hy4_rows", "hy4_dfly2_glue" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "fn_int4")) return kk.fn_int4;
     if (std.mem.eql(u8, name, "hy4_engram_fp8")) return kk.hy4_engram_fp8;
+    inline for (.{"uocr"}) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
     return error.UnknownContractImage;
 }
