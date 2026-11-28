@@ -62,6 +62,7 @@ pub const Kernels = struct {
         k.silu_mul = try m[4].function("tf_lfm2_silu_mul");
         k.lane = try cuda.qmmf.Lane.load(d, (try ctx.capability()) / 10);
         errdefer k.lane.unload();
+        try loadPromptEnabled(&k.lane, d);
         k.norms = try cuda.norms.Norms.load(d);
         errdefer k.norms.unload();
         k.embed = try cuda.embed_rows.EmbedRows.load(d);
@@ -138,8 +139,150 @@ pub const Kernels = struct {
     }
 };
 
+/// The loader's BF16 prompt enablement: on unless `TF_DENSE_PROMPT_BF16=0`.
+pub fn loadPromptEnabled(lane: *cuda.qmmf.Lane, d: *const cuda.Driver) !void {
+    if (try @import("sys").environment.read(bool, "TF_DENSE_PROMPT_BF16", true)) try lane.loadPrompt(d);
+}
+
 test "AttnSegs is paged_attn.cuh's struct, padded to 8 bytes: 304" {
     try std.testing.expectEqual(@as(usize, 304), @sizeOf(AttnSegs));
     try std.testing.expectEqual(@as(usize, 256), @offsetOf(AttnSegs, "ps"));
     try std.testing.expectEqual(@as(usize, 296), @offsetOf(AttnSegs, "n"));
+}
+
+test "the loader's prompt enablement loads the tile by default and TF_DENSE_PROMPT_BF16=0 leaves it empty" {
+    const Fake = struct {
+        var fns: usize = 0;
+        fn getFunction(out: *cuda.abi.Function, _: cuda.abi.Module, _: [*:0]const u8) callconv(.c) c_int {
+            fns += 1;
+            out.* = @ptrFromInt(fns);
+            return 0;
+        }
+        fn setAttribute(_: cuda.abi.Function, _: cuda.abi.FunctionAttribute, _: c_int) callconv(.c) c_int {
+            return 0;
+        }
+        fn ctxDevice(out: *cuda.abi.Device) callconv(.c) c_int {
+            out.* = 0;
+            return 0;
+        }
+        fn deviceAttribute(out: *c_int, a: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) c_int {
+            out.* = switch (a) {
+                .compute_capability_major => 12,
+                .compute_capability_minor => 0,
+                .multiprocessor_count => 48,
+                else => 0,
+            };
+            return 0;
+        }
+        fn driver() cuda.Driver {
+            fns = 0;
+            var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+            d.api.cuModuleGetFunction = getFunction;
+            d.api.cuFuncSetAttribute = setAttribute;
+            d.api.cuCtxGetDevice = ctxDevice;
+            d.api.cuDeviceGetAttribute = deviceAttribute;
+            return d;
+        }
+    };
+    const env = @import("sys").env;
+    const name = "TF_DENSE_PROMPT_BF16";
+    _ = env.unsetenv(name);
+    defer _ = env.unsetenv(name);
+    const d = Fake.driver();
+    var lane: cuda.qmmf.Lane = .{
+        .mod = .{ .d = &d, .handle = @ptrFromInt(1) },
+        .fns = undefined,
+        .f32_fns = undefined,
+        .reduce = undefined,
+        .half = undefined,
+        .prompt = null,
+        .prompt_k32 = null,
+        .clusters = true,
+    };
+    // unset: the default loads the prompt tile through the real loadPrompt on the stub driver
+    try loadPromptEnabled(&lane, &d);
+    try std.testing.expect(lane.prompt != null);
+    try std.testing.expect(lane.prompt_k32 != null);
+    try std.testing.expectEqual(@as(u32, 48), lane.prompt_sms);
+    // 0: the lane stays decode-only
+    try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, "0", 1));
+    var off: cuda.qmmf.Lane = .{
+        .mod = .{ .d = &d, .handle = @ptrFromInt(1) },
+        .fns = undefined,
+        .f32_fns = undefined,
+        .reduce = undefined,
+        .half = undefined,
+        .prompt = null,
+        .prompt_k32 = null,
+        .clusters = true,
+    };
+    try loadPromptEnabled(&off, &d);
+    try std.testing.expect(off.prompt == null and off.prompt_k32 == null);
+}
+
+test "Kernels.load enables the prompt tile through the real call site, and TF_DENSE_PROMPT_BF16=0 leaves it empty" {
+    if (!cuda.kernels.available) return error.SkipZigTest; // the lane's module image exists only in a fatbin build
+    const Fake = struct {
+        var mods: usize = 0;
+        var fns: usize = 0;
+        fn loadModule(out: *cuda.abi.Module, _: ?*const anyopaque) callconv(.c) c_int {
+            mods += 1;
+            out.* = @ptrFromInt(mods);
+            return 0;
+        }
+        fn unloadModule(_: cuda.abi.Module) callconv(.c) c_int {
+            return 0;
+        }
+        fn getFunction(out: *cuda.abi.Function, _: cuda.abi.Module, _: [*:0]const u8) callconv(.c) c_int {
+            fns += 1;
+            out.* = @ptrFromInt(fns);
+            return 0;
+        }
+        fn setAttribute(_: cuda.abi.Function, _: cuda.abi.FunctionAttribute, _: c_int) callconv(.c) c_int {
+            return 0;
+        }
+        fn ctxDevice(out: *cuda.abi.Device) callconv(.c) c_int {
+            out.* = 0;
+            return 0;
+        }
+        fn deviceAttribute(out: *c_int, a: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) c_int {
+            out.* = switch (a) {
+                .compute_capability_major => 12,
+                .compute_capability_minor => 1,
+                .multiprocessor_count => 48,
+                else => 0,
+            };
+            return 0;
+        }
+        fn driver() cuda.Driver {
+            mods = 0;
+            fns = 0;
+            var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+            d.api.cuModuleLoadData = loadModule;
+            d.api.cuModuleUnload = unloadModule;
+            d.api.cuModuleGetFunction = getFunction;
+            d.api.cuFuncSetAttribute = setAttribute;
+            d.api.cuCtxGetDevice = ctxDevice;
+            d.api.cuDeviceGetAttribute = deviceAttribute;
+            return d;
+        }
+    };
+    const env = @import("sys").env;
+    const name = "TF_DENSE_PROMPT_BF16";
+    _ = env.unsetenv(name);
+    defer _ = env.unsetenv(name);
+    var d = Fake.driver();
+    const ctx: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
+    // dots.mocr's geometry: group 6 over head_dim 128 picks the two-heads-a-block pattn instance
+    const g: Geometry = .{ .hidden = 1536, .layers = 28, .heads = 12, .kv_heads = 2, .head_dim = 128, .vocab = 151936, .eps = 1e-6, .context = 131072, .acc = 2048, .wide = 17920, .mid = 8960 };
+    // unset (the default): the full loader leaves the lane's prompt tile filled
+    var k = try Kernels.load(&ctx, g);
+    defer k.deinit();
+    try std.testing.expect(k.lane.prompt != null and k.lane.prompt_k32 != null);
+    try std.testing.expectEqual(@as(usize, 48), k.lane.prompt_sms);
+    // 0: the same loader leaves the lane decode-only
+    try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, "0", 1));
+    var off = try Kernels.load(&ctx, g);
+    defer off.deinit();
+    try std.testing.expect(off.lane.prompt == null and off.lane.prompt_k32 == null);
 }

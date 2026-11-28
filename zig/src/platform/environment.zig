@@ -76,6 +76,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
+    .{ .name = "TF_DENSE_PROMPT_BF16", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .also = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
