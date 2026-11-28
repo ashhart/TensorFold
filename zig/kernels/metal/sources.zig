@@ -372,6 +372,11 @@ pub const inkling2_glue = @import("threadgroup_source.zig").normalize(@embedFile
 pub const inkling2_sample = inkling2.sample;
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
 pub const inkling2_runtime = inkling2.runtime;
+/// Inkling 2 Mini's steered visit output (--glp): compiled only when a control vector is in force.
+pub const inkling2_steer = @embedFile("inkling2/glue.metal") ++ "\n" ++ @embedFile("inkling2/glue_kv_conv.metal") ++ "\n" ++
+    @embedFile("inkling2/glue_norm.metal") ++ "\n" ++ @embedFile("inkling2/glue_split.metal") ++ "\n" ++
+    @embedFile("inkling2/steer.metal") ++ "\n" ++ @embedFile("inkling2/steer_fused.metal") ++ "\n" ++
+    @embedFile("inkling2/steer_norm.metal");
 /// Inkling 2 Mini's TFQ3 (3/4/5-bit 2D-AffineCoset/half4) routed MoE kernels.
 pub const inkling2_tfq3 = @import("inkling2/tfq3_sources.zig").tfq3;
 

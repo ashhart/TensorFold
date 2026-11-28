@@ -518,6 +518,18 @@ pub fn main(init: std.process.Init) !u8 {
     var sn_lin = @import("metal_sensenova_linear.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer sn_lin.deinit();
     try sn_lin.collect(o.only);
+    var steer: @import("metal_qwen27_steer.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer steer.deinit();
+    try steer.collect(o.only, o.gates, o.seed);
+    var ink_steer: @import("metal_inkling2_steer.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer ink_steer.deinit();
+    try ink_steer.collect(o.only, o.gates, o.seed);
+    var ink_steer_fused: @import("metal_inkling2_steer_fused.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer ink_steer_fused.deinit();
+    try ink_steer_fused.collect(o.only, o.gates, o.seed);
+    var ink_steer_norm: @import("metal_inkling2_steer_norm.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer ink_steer_norm.deinit();
+    try ink_steer_norm.collect(o.only, o.gates, o.seed);
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol.destroy();
     const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);

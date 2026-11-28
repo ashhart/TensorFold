@@ -12,6 +12,7 @@ pub const dense_tiled = owner.dense_tiled;
 pub const loop = owner.loop;
 pub const loop_mma = owner.loop_mma;
 pub const runtime = owner.runtime;
+pub const steer = owner.steer;
 pub const tree = owner.tree;
 pub const inkling2_dspark = owner.inkling2_dspark;
 pub const inkling2_dspark_pre_m5 = owner.inkling2_dspark_pre_m5;

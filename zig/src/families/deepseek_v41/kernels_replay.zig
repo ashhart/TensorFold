@@ -201,6 +201,7 @@ pub fn call(k: *const Kernels, s: cuda.Stream, ext: []const u8, func: []const u8
     if (is(ext, "tf_dsv41_pfdense_v1")) return pfdenseExt(k.others(s), func, args, kwargs);
     if (is(ext, "tf_dsv41_l2pace_v1") and is(func, "paced")) return paced(k.others(s), args, kwargs);
     if (is(ext, "tf_dsv41_l2pf_v1") and is(func, "segments")) return segments(k.others(s), args, kwargs);
+    if (is(ext, "tf_dsv41_glp_add_v1")) return glpExt(k.glpOps(s) orelse return error.GlpNotLoaded, func, args, kwargs);
     return false; // engram_gate.gate_copy reads host-mapped words a capture cannot relocate: not replayed
 }
 
@@ -219,6 +220,7 @@ const route = replay_ops.route;
 const pfdenseExt = replay_ops.pfdenseExt;
 const paced = replay_ops.paced;
 const segments = replay_ops.segments;
+const glpExt = @import("kernels_replay_glp.zig").glpExt;
 
 test "arguments by position and keyword" {
     const shape = [_]i64{ 2, 3 };

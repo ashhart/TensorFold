@@ -3,10 +3,16 @@ const std = @import("std");
 const sources = @import("kernel_sources");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
+const contract = @import("contract");
 
 pub const Resolved = struct { here: []const u8, pre_m5: []const u8 };
 
 pub fn resolve(a: std.mem.Allocator, device: mtl.Device, name: []const u8, offline: bool) !Resolved {
+    if (std.mem.startsWith(u8, name, "qwen27 norm steer ")) {
+        const q = tf.qwen27.quant_gpu;
+        const here = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, if (device.tensorUnits()) 64 else 0));
+        return .{ .here = here, .pre_m5 = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, 0)) };
+    }
     if (std.mem.startsWith(u8, name, "q27 stack ")) {
         const body = try source(a, name);
         return .{ .here = body, .pre_m5 = if (offline) body else "" };

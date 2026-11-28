@@ -37,6 +37,7 @@ const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HO
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
     " [--thinking-budget THINKING_BUDGET] [--thinking-reserve THINKING_RESERVE] [--loop-guard] [--loop-guard-stop] [--tool-think-close] [--no-drafts]" ++
     " [--drafter DRAFTER]" ++
+    " [--glp FILE] [--glp-alpha ALPHA]" ++
     " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--idle-unload SECONDS]" ++
     " [--silence-floor-dbfs DBFS] [--silence-seconds SECONDS]" ++
     " [--silence-onset-s SECONDS] [--silence-onset-voiced-s SECONDS]" ++

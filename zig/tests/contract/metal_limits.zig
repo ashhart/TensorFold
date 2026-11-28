@@ -6,7 +6,7 @@ const contract = @import("contract");
 const sources = @import("kernel_sources");
 const topk_text = tf.bf16_topk_gpu.source;
 const rig_ = @import("rig.zig");
-
+const steer_limits = @import("metal_steer_limits.zig");
 const limits = contract.limits;
 const registry = contract.registry;
 
@@ -61,7 +61,7 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
-    if (std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ")) {
+    if (std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ") or std.mem.startsWith(u8, d.name, "qwen27 norm steer ")) {
         if (!assemble) return undefined;
         const resolved = try @import("metal_q27_limits.zig").resolve(a, device, d.name, d.offline);
         return .{ .decl = d, .function = fun, .here = resolved.here, .pre_m5 = resolved.pre_m5 };
@@ -240,14 +240,14 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
         if (!assemble) return undefined;
-        const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
-            @import("inkling2_metal").inkling2_dspark
-        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dflash2 "))
+        const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dflash2 "))
             @import("inkling2_metal").inkling2_dflash2
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
             @import("inkling2_metal").runtime
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))
             @import("inkling2_metal").tree
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 steer "))
+            @import("inkling2_metal").steer
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 loop "))
             @import("inkling2_metal").loop
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
@@ -581,7 +581,10 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     }
     var n = try registry.checkMetal(a, list.items, false);
     std.debug.print("{s} limits: {d} selected registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
-    for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    for (list.items) |d| {
+        const l = try launchOf(a, device, d);
+        n += try steer_limits.steerServed(a, device, l) + try onThisGpu(a, device, l, false);
+    }
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;

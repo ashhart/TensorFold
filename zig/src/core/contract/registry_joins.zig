@@ -131,6 +131,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("inkling2_loop_metal_records.zig").records ++
     @import("inkling2_runtime_metal_records.zig").records ++
     @import("inkling2_tree_metal_records.zig").records ++
+    @import("inkling2_steer_metal_records.zig").records ++
     @import("inkling2_dspark_metal_records.zig").records ++
     @import("inkling2_vision_metal_records.zig").records ++
     @import("inkling2_dflash2_metal_records.zig").records ++
@@ -139,7 +140,8 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("hy4_records.zig").metal ++
     @import("uocr_records.zig").records ++
     @import("bolt_records.zig").records ++
-    @import("ricursive_records.zig").records;
+    @import("ricursive_records.zig").records ++
+    @import("steer_records.zig").metal;
 pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda ++
     @import("dory_cuda_records.zig").cuda ++
     registry.gradient_pending ++
@@ -174,7 +176,8 @@ pub const all_cuda = @import("qmmf_prompt_records.zig").records ++
 pub const dsv41_pending = @import("registry_union.zig").extra(
     landed_cuda,
     @import("dsv41_pending_1.zig").records ++
-        @import("dsv41_pending_2.zig").records,
+        @import("dsv41_pending_2.zig").records ++
+        @import("glp_cuda_records.zig").records,
 );
 
 test {
@@ -188,6 +191,7 @@ test {
     _ = @import("inkling2_loop_metal_records.zig");
     _ = @import("inkling2_runtime_metal_records.zig");
     _ = @import("inkling2_tree_metal_records.zig");
+    _ = @import("inkling2_steer_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");
     _ = @import("inkling2_sample_metal_records.zig");
     _ = @import("h3_image_cuda_records.zig");
@@ -197,5 +201,6 @@ test {
     _ = @import("hy4_ihc_hc_records.zig");
     _ = @import("qmmf_many_records.zig");
     _ = @import("hy4_route_rows_records.zig");
+    _ = @import("glp_cuda_records.zig"); // its own test: unmeasured additive GLP launches refuse qualification
     _ = @import("hy4_engram_fp8_records.zig");
 }

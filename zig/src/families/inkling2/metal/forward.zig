@@ -8,7 +8,7 @@ const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
-const dense_mma = @import("dense.zig");
+const dense_launch = @import("dense_launch.zig");
 const tree = @import("tree.zig");
 const conv = @import("forward_conv.zig");
 const state = @import("state.zig");
@@ -51,7 +51,7 @@ pub fn finalPlan(rows: usize, all: bool, taps: bool) FinalPlan {
 
 const RArgs = extern struct { count: u32, boundary: u32 = 0 };
 const NormArgs = extern struct { rows: u32, width: u32, heads: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 };
-pub const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
+pub const DenseArgs = dense_launch.DenseArgs;
 
 fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
@@ -118,49 +118,12 @@ fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, o
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-pub const DenseStep = struct { variant: usize, rows: usize };
-
-/// Ceiling-power-of-two matvec variant for `left` rows, reading weights once per <=32 rows.
-pub fn denseStep(left: usize) DenseStep {
-    std.debug.assert(left > 0);
-    const take = @min(left, 32);
-    const variant: usize = if (take <= 1) 0 else if (take <= 2) 1 else if (take <= 4) 2 else if (take <= 8) 3 else if (take <= 16) 4 else 5;
-    return .{ .variant = variant, .rows = take };
-}
-
-/// Every projection uses the shared BF16 matvec's FP32 reduction and one BF16 store.
-pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
-    encodeDense(mtl.ComputeEncoder, m, e, weight, input, out, rows);
-}
-
-/// Dispatch helper parameterized on encoder so host tests record exact launch counts and arguments.
-pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
-    const k = weight.shape[weight.rank - 1];
-    const n = weight.shape[weight.rank - 2];
-    var base: usize = 0;
-    while (base < rows) {
-        const step = denseStep(rows - base);
-        e.setPipeline(m.dense[step.variant]);
-        e.setBuffer(input.buf, input.off + base * k * 2, 0);
-        e.setBuffer(weight.buffer, weight.offset, 1);
-        e.setValue(DenseArgs{ .rows = @intCast(step.rows), .n = @intCast(n), .k = @intCast(k), .ldy = @intCast(n) }, 2);
-        e.setBuffer(out.buf, out.off + base * n * 2, 3);
-        e.dispatchGroups(mtl.Size.of((n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
-        base += step.rows;
-    }
-}
-
-/// A visit's projection: `dense`, simdgroup matrices without tensor units, or register-tiled bf16 on tensor-unit GPUs.
-fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
-    const n: u32 = @intCast(weight.shape[weight.rank - 2]);
-    const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
-    if (m.dense_mma) |mma| {
-        if (dense_mma.Mma.serves(call)) return mma.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
-    } else if (m.dense_tiled) |tiled| {
-        if (dense_mma.Tiled.serves(call)) return tiled.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
-    }
-    dense(m, e, weight, input, out, rows);
-}
+/// Dense projection dispatch and its host-recorder entry points.
+pub const DenseStep = dense_launch.DenseStep;
+pub const denseStep = dense_launch.denseStep;
+pub const dense = dense_launch.dense;
+pub const encodeDense = dense_launch.encodeDense;
+const project = dense_launch.project;
 
 pub fn canPreFuse(v: *const layer_plan.Visit) bool {
     return v.layer != 0 and !(v.pass > 1 and v.layer == 6);
@@ -460,24 +423,54 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
     try routedExperts(m, e, s, v.layer, rows);
     postConv(m, e, s, segments, seg_meta, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0));
+    // a steered visit launches main's kernel shape with p steered; the widen and the mix stay main's, in main's order
+    const d = steerDir(m, v);
     if (next_v) |nv| {
         if (canPreFuseNorm(&m.weight_plan, nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
-            glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
+            if (d) |dv| {
+                m.steer.?.partialArNorm(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
+            } else glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
         } else if (canPreFuse(nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
-            glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
+            const qs = r(m.weights.attn_queries[nv.layer - 1]);
+            if (d) |dv| {
+                m.steer.?.partialAr(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), qs, at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
+            } else glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), qs, at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
         } else {
-            runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, rows * state.hidden, 0);
+            mlpPartial(m, e, s, d, 0, rows);
         }
         if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
     } else if (final_rows == rows) {
-        glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
+        if (d) |dv| {
+            m.steer.?.partialArNorm(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
+        } else glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
     } else {
         const last = rows - 1;
-        runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, last * state.hidden, 0);
-        glue.mlpPartialArNorm(&m.glue, e, row(s.partial, last, state.hidden * 4), row(s.mlp_conv, last, state.hidden * 2), at(s.blocks, last * state.block_slots * state.hidden * 2), at(s.block_inv_rms, last * state.block_slots * 4), r(m.weights.output_query), r(m.weights.norm), row(s.p, last, state.hidden * 2), row(s.partial, last, state.hidden * 4), at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
+        mlpPartial(m, e, s, d, 0, last);
+        const lt = row(s.partial, last, state.hidden * 4);
+        const lx = row(s.mlp_conv, last, state.hidden * 2);
+        const lb = at(s.blocks, last * state.block_slots * state.hidden * 2);
+        const li = at(s.block_inv_rms, last * state.block_slots * 4);
+        const lpo = row(s.p, last, state.hidden * 2);
+        if (d) |dv| {
+            m.steer.?.partialArNorm(e, dv, lt, lx, lb, li, r(m.weights.output_query), r(m.weights.norm), lpo, lt, at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
+        } else glue.mlpPartialArNorm(&m.glue, e, lt, lx, lb, li, r(m.weights.output_query), r(m.weights.norm), lpo, lt, at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
     }
+}
+
+/// p for rows first..first+n: main's mlp_partial, or the steered one when the visit has a direction.
+fn mlpPartial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, d: ?Ref, first: usize, n: usize) void {
+    if (n == 0) return;
+    if (d) |dv| {
+        m.steer.?.partial(e, dv, row(s.partial, first, state.hidden * 4), row(s.mlp_conv, first, state.hidden * 2), row(s.p, first, state.hidden * 2), n * state.hidden);
+    } else runtime(m, e, .mlp_partial, &.{ row(s.partial, first, state.hidden * 4), row(s.mlp_conv, first, state.hidden * 2), row(s.p, first, state.hidden * 2) }, n * state.hidden, 0);
+}
+
+/// The direction --glp adds to this visit's output; null when none is in force or the vector skips the visit.
+fn steerDir(m: *const Model, v: *const layer_plan.Visit) ?Ref {
+    const plan = m.steer orelse return null;
+    return plan.dir(v.cache_slot);
 }
 
 fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, meta: []const SegMeta) void {

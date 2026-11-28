@@ -1,0 +1,600 @@
+//! A GLP control vector, read and written; implements the GLP format defined by the `weightless` project (@msuiche).
+
+const std = @import("std");
+const paired = @import("glp_paired.zig");
+const gguf = @import("glp_container.zig");
+
+/// Why a file was refused, in one sentence the server prints.
+pub const Why = struct {
+    buf: [320]u8 = undefined,
+    len: usize = 0,
+
+    pub fn set(self: *Why, comptime fmt: []const u8, args: anytype) void {
+        var w: std.Io.Writer = .fixed(&self.buf);
+        w.print(fmt, args) catch {};
+        self.len = w.end;
+    }
+
+    pub fn text(self: *const Why) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+pub const Error = error{BadGlpVector} || std.mem.Allocator.Error;
+
+/// The mode word a file may carry and this reader applies: h += alpha*d, llama.cpp's control vector, a bias.
+const add_mode = "add";
+
+/// One layer's direction: its zero-based layer id and the vector itself.
+pub const Layer = struct {
+    id: u32,
+    dir: []const f32,
+};
+
+/// What the file says about itself: the keys a consumer reads before it reads the directions.
+pub const Publication = struct {
+    name: ?[]const u8 = null, // general.name
+    description: ?[]const u8 = null, // general.description
+    author: ?[]const u8 = null, // general.author
+    license: ?[]const u8 = null, // general.license
+    model_hint: ?[]const u8 = null, // controlvector.model_hint
+    measured_effect: ?[]const u8 = null, // glp.measured_effect
+    created: ?[]const u8 = null, // glp.created
+};
+
+/// A vector read whole and accepted.
+pub const Vector = struct {
+    alpha: f32,
+    hook_point: []const u8,
+    derived_at: []const u8,
+    base_model: []const u8,
+    base_revision: []const u8,
+    method: []const u8,
+    contrast: []const u8,
+    width: usize,
+    layers: []const Layer,
+    sha256: [32]u8,
+    /// The SHA-256 of the file's exact bytes, as the reader was handed them.
+    file_sha256: [32]u8,
+    transferred: bool,
+    publication: Publication = .{},
+    /// glp.spec_version as the file declares it: 1 is a residual vector (Qwen), 3 the DeepSeek paired fold's.
+    spec_version: u32 = 1,
+    /// Whether the file claims a content digest, which the reader then checked against the vectors.
+    digest_claimed: bool = false,
+    validation: ?[]const u8 = null, // glp.validation: the suites the shipped strength passed
+
+    /// The direction for layer `id`, or null when the vector does not steer it; the layers ascend by id as read.
+    pub fn layer(self: Vector, id: u32) ?[]const f32 {
+        var lo: usize = 0;
+        var hi: usize = self.layers.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const at = self.layers[mid].id;
+            if (at == id) return self.layers[mid].dir;
+            if (at < id) lo = mid + 1 else hi = mid;
+        }
+        return null;
+    }
+
+    /// Whether this is the DeepSeek paired vector: glp.spec_version 3 at the hc fold site and its writer.
+    pub fn isPaired(self: Vector) bool {
+        return self.spec_version == paired_version and std.mem.eql(u8, self.hook_point, paired_site);
+    }
+};
+
+/// The control vector a serve applies to the residual stream (--glp).
+pub const Glp = struct {
+    /// The file's vector: one direction per layer and the checkpoint it was derived from.
+    vector: Vector,
+    /// The strength in force: --glp-alpha, or the file's own alpha_default.
+    alpha: f32,
+
+    /// Whether every edit is bypassed: a strength of exactly 0 leaves the stream's bits as an unsteered run has them.
+    pub fn off(self: Glp) bool {
+        return self.alpha == 0;
+    }
+};
+
+/// The residual site this reader applies at, the one llama.cpp's control vectors name.
+pub const residual_site = "residual_stream_post_layer";
+
+/// The site the DeepSeek paired vector applies at: the fold before Engram, and the attention writer before mHC post.
+pub const paired_site = "hc_fold_pre_engram";
+
+pub const ffn_site = "ffn_out_pre_residual"; // the FFN/MoE write before the residual: Inkling 2 Mini's --glp site
+
+/// glp.spec_version of a residual vector.
+const residual_version: u32 = 1;
+
+/// glp.spec_version of the DeepSeek paired vector.
+pub const paired_version: u32 = 3;
+pub const checkpoint = @import("glp_checkpoint.zig");
+
+/// The largest finite BF16 magnitude: an add edit past it would turn into an infinity at the stream's storage.
+const bf16_max: f64 = 3.3895313892515355e38;
+
+fn refuse(why: *Why, comptime fmt: []const u8, args: anytype) Error {
+    why.set(fmt, args);
+    return error.BadGlpVector;
+}
+
+/// The direction's layer id, or null when the tensor is not one.
+fn directionId(name: []const u8) ?u32 {
+    if (!std.mem.startsWith(u8, name, "direction.")) return null;
+    const tail = name["direction.".len..];
+    if (tail.len == 0) return null;
+    for (tail) |ch| if (ch < '0' or ch > '9') return null;
+    return std.fmt.parseInt(u32, tail, 10) catch null;
+}
+
+/// The digest over the tensor bytes; the file's own key names the vectors it covers.
+fn digest(file: gguf.File, only_directions: bool) ?[32]u8 {
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    for (file.tensors) |t| {
+        if (only_directions and directionId(t.name) == null) continue;
+        const raw = file.bytesOf(t) orelse return null;
+        h.update(raw);
+    }
+    var out: [32]u8 = undefined;
+    h.final(&out);
+    return out;
+}
+
+/// Read a vector whole and accept it, or refuse it with a reason; the strings and layers live in `a`.
+pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
+    if (bytes.len < 8) return refuse(why, "the file is too short to be a control vector", .{});
+    const file = try parseContainer(a, bytes, why);
+    const version: ?u64 = if (file.find("glp.spec_version") == null) null else file.num("glp.spec_version") orelse
+        return refuse(why, "glp.spec_version is not an unsigned integer", .{});
+    if (version == paired_version) return paired.read(a, bytes, file, why);
+    return readResidual(a, bytes, file, version, why);
+}
+
+/// A residual vector, the format #1835 reads: version 1 or no glp keys at all, applied after a layer's writes.
+fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, version: ?u64, why: *Why) Error!Vector {
+    var glp_keys: usize = 0;
+    for (file.entries) |e| {
+        // The keys whose meaning the spec version decides; alpha and the digest mean the same in every version.
+        const interpretation = std.mem.eql(u8, e.key, "glp.mode") or std.mem.eql(u8, e.key, "glp.rank") or
+            std.mem.eql(u8, e.key, "glp.orthonormal") or std.mem.eql(u8, e.key, "glp.hook_point") or
+            std.mem.eql(u8, e.key, "glp.derived_at") or std.mem.eql(u8, e.key, "glp.dir_scales") or
+            std.mem.eql(u8, e.key, "glp.layer_scales");
+        if (interpretation) glp_keys += 1;
+    }
+
+    // Only an add vector is applied: a mode the file names, in either key, has to be the word add.
+    for ([_][]const u8{ "glp.mode", "dspark.mode" }) |key| {
+        if (file.find(key) == null) continue;
+        const mode = file.str(key) orelse return refuse(why, "the file's {s} is not text; this reader applies add vectors only", .{key});
+        if (std.mem.eql(u8, mode, "project")) return refuse(why, "the file's mode is project; this reader applies add vectors only", .{});
+        if (!std.mem.eql(u8, mode, add_mode)) return refuse(why, "the file's mode is not one this reader applies; it applies add vectors only", .{});
+    }
+
+    if (version) |v| {
+        if (v != residual_version) {
+            return refuse(why, "glp.spec_version {d}; this reader implements version {d} (a residual vector) and {d} (the DeepSeek paired fold)", .{ v, residual_version, paired_version });
+        }
+    } else if (glp_keys > 0) {
+        return refuse(why, "the file carries glp keys but no glp.spec_version", .{});
+    }
+    for ([_][]const u8{ "glp.dir_scales", "glp.layer_scales" }) |k| {
+        if (file.find(k) != null) return refuse(why, "the file carries {s}: per-direction and per-layer scales are not implemented", .{k});
+    }
+    if (glp_keys > 0) {
+        const rank = file.num("glp.rank") orelse value: {
+            if (file.find("glp.rank") != null) return refuse(why, "glp.rank is not an integer", .{});
+            break :value 1;
+        };
+        if (rank != 1) return refuse(why, "glp.rank {d}; this reader implements rank 1", .{rank});
+        const site = file.str("glp.hook_point") orelse return refuse(why, "the file names no glp.hook_point", .{});
+        if (std.mem.eql(u8, site, paired_site)) return refuse(why, "the file's hook point is {s}, a DeepSeek paired site that needs glp.spec_version {d}; version 1 applies at {s} or {s}", .{ site, paired_version, residual_site, ffn_site });
+        if (!std.mem.eql(u8, site, residual_site) and !std.mem.eql(u8, site, ffn_site)) return refuse(why, "the file's hook point is {s}; this reader applies at {s} or {s}", .{ site, residual_site, ffn_site });
+    }
+
+    var layers: std.ArrayList(Layer) = .empty;
+    var width: usize = 0;
+    for (file.tensors) |t| {
+        const id = directionId(t.name) orelse continue;
+        if (id == 0) return refuse(why, "the file holds direction.0; layer 0 is not steerable", .{});
+        if (t.kind != gguf.f32_type) return refuse(why, "{s} is not fp32", .{t.name});
+        if (t.dims.len != 1) return refuse(why, "{s} is not one dimensional", .{t.name});
+        if (width == 0) width = @intCast(t.dims[0]) else if (width != t.dims[0]) return refuse(why, "{s} is {d} wide; the other directions are {d}", .{ t.name, t.dims[0], width });
+        const raw = file.bytesOf(t) orelse return refuse(why, "{s} points past the file", .{t.name});
+        const dir = try a.alloc(f32, t.dims[0]);
+        for (dir, 0..) |*v, i| v.* = @bitCast(std.mem.readInt(u32, raw[i * 4 ..][0..4], .little));
+        try layers.append(a, .{ .id = id, .dir = dir });
+    }
+    if (layers.items.len == 0) return refuse(why, "the file holds no direction tensors", .{});
+    std.mem.sort(Layer, layers.items, {}, struct {
+        fn lessThan(_: void, x: Layer, y: Layer) bool {
+            return x.id < y.id;
+        }
+    }.lessThan);
+    // "direction.5" and "direction.05" both parse as layer 5; refuse a file that names one layer twice.
+    for (layers.items[1..], 1..) |l, i| {
+        if (l.id == layers.items[i - 1].id) return refuse(why, "the file holds two directions for layer {d}", .{l.id});
+    }
+
+    if (file.str("glp.layer_ids_zero_based")) |list| {
+        var it = std.mem.splitScalar(u8, list, ',');
+        var i: usize = 0;
+        while (it.next()) |part| {
+            if (i >= layers.items.len) return refuse(why, "the file names more layers than it holds", .{});
+            const id = std.fmt.parseInt(u32, std.mem.trim(u8, part, " "), 10) catch return refuse(why, "the file's layer id list is not a number list", .{});
+            if (id != layers.items[i].id) return refuse(why, "the file's layer id {d} does not match its tensor's {d}", .{ id, layers.items[i].id });
+            i += 1;
+        }
+        if (i != layers.items.len) return refuse(why, "the file names {d} layers and holds {d}", .{ i, layers.items.len });
+    }
+
+    // A direction is applied as it stands, so a NaN or an infinity is refused.
+    for (layers.items) |l| {
+        for (l.dir) |v| if (!std.math.isFinite(v)) return refuse(why, "layer {d}'s direction holds a value that is not finite", .{l.id});
+    }
+
+    var sha: [32]u8 = undefined;
+    if (file.find("glp.content_sha256")) |v| switch (v) {
+        .string => {},
+        else => return refuse(why, "glp.content_sha256 is not text", .{}),
+    };
+    if (file.str("glp.content_sha256")) |claimed| {
+        const all = digest(file, false) orelse return refuse(why, "the file's tensors point past its end", .{});
+        const dirs = digest(file, true) orelse return refuse(why, "the file's tensors point past its end", .{});
+        // The file may claim the digest over every tensor or over the directions alone; the match decides.
+        const hex_all = std.fmt.bytesToHex(all, .lower);
+        const hex_dirs = std.fmt.bytesToHex(dirs, .lower);
+        if (std.mem.eql(u8, hex_all[0..], claimed)) {
+            sha = all;
+        } else if (std.mem.eql(u8, hex_dirs[0..], claimed)) {
+            sha = dirs;
+        } else {
+            return refuse(why, "the file's content digest does not match its vectors", .{});
+        }
+    } else sha = digest(file, true) orelse std.mem.zeroes([32]u8);
+
+    const hook = file.str("glp.hook_point") orelse residual_site;
+    const derived = file.str("glp.derived_at") orelse hook;
+    var file_sha256: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &file_sha256, .{});
+    return .{
+        .file_sha256 = file_sha256,
+        .spec_version = residual_version,
+        .digest_claimed = file.str("glp.content_sha256") != null,
+        .alpha = if (file.find("glp.alpha_default")) |v| switch (v) {
+            .f32v => |x| x,
+            .f64v => |x| @floatCast(x),
+            else => return refuse(why, "glp.alpha_default is not a floating-point strength", .{}),
+        } else 1.0,
+        .hook_point = hook,
+        .derived_at = derived,
+        .base_model = file.str("glp.base_model") orelse file.str("general.base_model.0.repo_url") orelse "",
+        .base_revision = file.str("glp.base_revision") orelse "",
+        .method = file.str("glp.method") orelse "",
+        .contrast = file.str("glp.contrast") orelse "",
+        .width = width,
+        .layers = layers.items,
+        .sha256 = sha,
+        .transferred = !std.mem.eql(u8, derived, hook),
+        .validation = file.str("glp.validation"),
+        .publication = .{
+            .name = file.str("general.name"),
+            .description = file.str("general.description"),
+            .author = file.str("general.author"),
+            .license = file.str("general.license"),
+            .model_hint = file.str("controlvector.model_hint"),
+            .measured_effect = file.str("glp.measured_effect"),
+            .created = file.str("glp.created"),
+        },
+    };
+}
+
+/// Check the vector against the model it would steer: the site that model applies at, its width and its checkpoint.
+pub fn checkModel(v: Vector, hidden: usize, site: []const u8, base_model: []const u8, why: *Why) Error!void {
+    if (v.spec_version != residual_version or std.mem.eql(u8, v.hook_point, paired_site)) {
+        return refuse(why, "the vector is a GLP version {d} file for the hook {s}: this model takes residual vectors (version 1) only", .{ v.spec_version, v.hook_point });
+    }
+    // A vector is calibrated for one site: applying it at another degrades without an error, so refuse it.
+    if (!std.mem.eql(u8, v.hook_point, site)) return refuse(why, "the vector applies at {s}; this model steers at {s}", .{ v.hook_point, site });
+    if (v.width != hidden) return refuse(why, "the vector's directions are {d} wide; the model is {d}", .{ v.width, hidden });
+    if (base_model.len > 0 and v.base_model.len > 0 and !sameModel(v.base_model, base_model)) {
+        return refuse(why, "the vector is for {s}; the model is {s}", .{ v.base_model, base_model });
+    }
+}
+
+/// The served checkpoint is the vector's model when it is that model or a conversion of it.
+fn sameModel(base: []const u8, served: []const u8) bool {
+    if (std.mem.eql(u8, base, served)) return true;
+    return std.mem.startsWith(u8, nameOf(served), nameOf(base));
+}
+
+/// A repo id's model name: what follows its owner.
+fn nameOf(repo: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, repo, '/')) |i| return repo[i + 1 ..];
+    return repo;
+}
+
+/// The hub's URL prefix: a base model named by URL names the repo that follows it.
+pub const hub_prefix = "https://huggingface.co/";
+
+/// A repo id, whether the file names the model as an id or as the hub's URL for it.
+pub fn repoId(name: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, name, hub_prefix)) name[hub_prefix.len..] else name;
+}
+
+/// Check a paired vector against the DeepSeek model it would steer: its width, backbone layers and exact hub repo.
+pub fn checkPairedModel(v: Vector, hidden: usize, layer_count: usize, base_model: []const u8, why: *Why) Error!void {
+    if (!v.isPaired()) {
+        return refuse(why, "the vector is a GLP version {d} file for the hook {f}: this model takes version {d} at {s}", .{ v.spec_version, std.zig.fmtString(v.hook_point), paired_version, paired_site });
+    }
+    if (v.width != hidden) return refuse(why, "the vector's directions are {d} wide; the model is {d}", .{ v.width, hidden });
+    if (v.layers.len == 0) return refuse(why, "the vector holds no layers", .{});
+    var last: ?u32 = null;
+    for (v.layers) |l| {
+        if (l.id == 0) return refuse(why, "the vector holds layer 0, which is not steerable", .{});
+        if (l.id >= layer_count) {
+            return refuse(why, "the vector steers layer {d} of a model with {d} backbone layers: its deepest steerable layer is {d}", .{ l.id, layer_count, layer_count -| 1 });
+        }
+        if (last) |p| if (l.id <= p) return refuse(why, "the vector's layers do not ascend: layer {d} follows layer {d}", .{ l.id, p });
+        if (l.dir.len != hidden) return refuse(why, "layer {d}'s direction is {d} wide; the model is {d}", .{ l.id, l.dir.len, hidden });
+        last = l.id;
+    }
+    if (base_model.len == 0 or v.base_model.len == 0) return;
+    // Only the very repo is the vector's checkpoint: a similarly named or forked repo is not an alias.
+    const base = repoId(v.base_model);
+    const served = repoId(base_model);
+    if (!std.ascii.eqlIgnoreCase(base, served)) {
+        return refuse(why, "the vector is for {f}; the model is {f}", .{ std.zig.fmtString(base), std.zig.fmtString(served) });
+    }
+}
+
+/// The shortest commit name that may stand for a longer one: git's own abbreviation floor.
+const short_commit = 7;
+
+/// Two commit names agree when they are equal, or when one is the other cut short at no fewer than seven characters.
+fn revisionMatches(a: []const u8, b: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(a, b)) return true;
+    if (@min(a.len, b.len) < short_commit) return false;
+    return std.ascii.startsWithIgnoreCase(a, b) or std.ascii.startsWithIgnoreCase(b, a);
+}
+
+/// Check the commit of the served snapshot against the one the vector pins, once the repos are known to agree.
+pub fn checkPairedRevision(v: Vector, revision: []const u8, why: *Why) Error!void {
+    if (v.base_revision.len == 0 or revision.len == 0) return;
+    if (!revisionMatches(v.base_revision, revision)) {
+        return refuse(why, "the vector is for revision {f}; the model is revision {f}", .{ std.zig.fmtString(v.base_revision), std.zig.fmtString(revision) });
+    }
+}
+
+/// Check an effective strength: finite and from 0, and small enough that the edit stays inside what BF16 holds.
+pub fn checkStrength(v: Vector, alpha: f32, why: *Why) Error!void {
+    if (!std.math.isFinite(alpha) or alpha < 0) return refuse(why, "the strength is not finite and from 0", .{});
+    for (v.layers) |l| {
+        var top: f64 = 0;
+        for (l.dir) |x| top = @max(top, @abs(@as(f64, x)));
+        if (top * alpha > bf16_max) return refuse(why, "layer {d}'s direction times the strength is past what BF16 holds", .{l.id});
+    }
+}
+
+/// An FP32 strength from a number the operator or a file gave: finite, from 0, exactly 0 or a normal float.
+pub fn strength(x: f64) ?f32 {
+    if (!std.math.isFinite(x) or x < 0) return null;
+    const applied: f32 = @floatCast(x);
+    if (!std.math.isFinite(applied)) return null;
+    if (x == 0) return 0;
+    if (applied < std.math.floatMin(f32)) return null;
+    return applied;
+}
+
+/// The bytes a vector file may hold.
+pub const file_limit: usize = 64 << 20;
+
+/// Read a vector file whole and accept it; its strings and layers live in `a`, which must outlive the vector.
+pub fn readFile(a: std.mem.Allocator, io: std.Io, path: []const u8, why: *Why) Error!Vector {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(file_limit)) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        return refuse(why, "cannot read '{s}': {s}", .{ path, readReason(e) });
+    };
+    return read(a, bytes, why);
+}
+
+/// Read a vector file with the operator's strength or the file's own: the one loader every consumer shares.
+pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8, alpha: ?f32, why: *Why) Error!Glp {
+    const vector = try readFile(a, io, path, why);
+    const effective: f32 = if (alpha) |x|
+        strength(x) orelse return refuse(why, "the strength is not finite and from 0: zero, or a normal float", .{})
+    else
+        strength(vector.alpha) orelse
+            return refuse(why, "the file's own alpha_default is {d}; the strength must be finite and from 0: pass --glp-alpha", .{vector.alpha});
+    try checkStrength(vector, effective, why);
+    return .{ .vector = vector, .alpha = effective };
+}
+
+/// Why a file could not be read, in words the operator reads.
+fn readReason(e: anyerror) []const u8 {
+    return switch (e) {
+        error.FileNotFound => "no such file",
+        error.AccessDenied => "permission denied",
+        error.IsDir => "the path is a directory",
+        error.BadPathName => "the path is not a file name",
+        error.NameTooLong => "the path is too long",
+        error.StreamTooLong => "the file is over the size limit",
+        else => "the file cannot be read",
+    };
+}
+
+/// The container's metadata and tensor headers; the arena keeps every allocation.
+fn parseContainer(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!gguf.File {
+    var problem: gguf.Problem = .{};
+    const file = gguf.parse(a, bytes, &problem) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return refuse(why, "{s}", .{problem.text()});
+    };
+    return file;
+}
+
+/// What a producer writes: the vector's fields and one direction per layer.
+pub const WriteSpec = struct {
+    alpha: f32 = 1.0,
+    /// glp.spec_version: 1 writes a residual vector or an FFN-write one, 3 the DeepSeek paired one.
+    spec_version: u32 = 1,
+    hook_point: []const u8 = residual_site,
+    derived_at: ?[]const u8 = null,
+    base_model: []const u8 = "",
+    base_revision: []const u8 = "",
+    method: []const u8 = "",
+    contrast: []const u8 = "",
+    validation: ?[]const u8 = null, // glp.validation: the suites the shipped strength passed, named
+    /// What the file says about itself; the keys a consumer reads before it reads the directions.
+    publication: Publication = .{},
+    layers: []const Layer,
+};
+
+/// Write a vector file the way the spec names it; the returned bytes are owned by the caller.
+pub fn write(a: std.mem.Allocator, spec: WriteSpec) Error![]u8 {
+    if (spec.layers.len == 0) return error.BadGlpVector;
+    switch (spec.spec_version) {
+        residual_version => if (!std.mem.eql(u8, spec.hook_point, residual_site) and !std.mem.eql(u8, spec.hook_point, ffn_site)) return error.BadGlpVector,
+        paired_version => if (!std.mem.eql(u8, spec.hook_point, paired_site) or strength(spec.alpha) == null) return error.BadGlpVector,
+        else => return error.BadGlpVector,
+    }
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tmp = arena.allocator();
+
+    // The file lists its layers in ascending order, whatever order the caller hands them over in.
+    const sorted = try tmp.alloc(Layer, spec.layers.len);
+    @memcpy(sorted, spec.layers);
+    std.mem.sort(Layer, sorted, {}, struct {
+        fn lessThan(_: void, x: Layer, y: Layer) bool {
+            return x.id < y.id;
+        }
+    }.lessThan);
+
+    const width = sorted[0].dir.len;
+    for (sorted, 0..) |l, i| {
+        if (i > 0 and l.id == sorted[i - 1].id) return error.BadGlpVector;
+        if (l.id == 0 or l.dir.len == 0 or l.dir.len != width) return error.BadGlpVector;
+        for (l.dir) |v| if (!std.math.isFinite(v)) return error.BadGlpVector;
+    }
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(tmp);
+    for (sorted) |l| {
+        for (l.dir) |v| {
+            var buf: [4]u8 = undefined;
+            std.mem.writeInt(u32, &buf, @bitCast(v), .little);
+            try payload.appendSlice(tmp, &buf);
+        }
+    }
+
+    // The digest covers the concatenated tensor bytes, which is what the reader hashes to check the file.
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    h.update(payload.items);
+    var sha: [32]u8 = undefined;
+    h.final(&sha);
+    const hex = std.fmt.bytesToHex(sha, .lower);
+
+    var ids: std.ArrayList(u8) = .empty;
+    defer ids.deinit(tmp);
+    for (sorted, 0..) |l, i| {
+        if (i > 0) try ids.append(tmp, ',');
+        try ids.print(tmp, "{d}", .{l.id});
+    }
+
+    const dims = try tmp.alloc(u64, 1);
+    dims[0] = width;
+    const names = try tmp.alloc([32]u8, sorted.len);
+    const tensors = try tmp.alloc(gguf.OutTensor, sorted.len);
+    var start: usize = 0;
+    for (sorted, tensors, 0..) |l, *t, i| {
+        const name = std.fmt.bufPrint(names[i][0..], "direction.{d}", .{l.id}) catch return error.BadGlpVector;
+        t.* = .{ .name = name, .dims = dims, .kind = gguf.f32_type, .data = payload.items[start..][0 .. l.dir.len * 4] };
+        start += l.dir.len * 4;
+    }
+
+    const entries = [_]gguf.Entry{
+        .{ .key = "general.architecture", .value = .{ .string = "controlvector" } },
+        .{ .key = "general.alignment", .value = .{ .u32v = 32 } },
+        .{ .key = "controlvector.layer_count", .value = .{ .u32v = @intCast(sorted.len) } },
+        .{ .key = "glp.spec_version", .value = .{ .u32v = spec.spec_version } },
+        .{ .key = "glp.mode", .value = .{ .string = add_mode } },
+        .{ .key = "glp.rank", .value = .{ .u32v = 1 } },
+        .{ .key = "glp.alpha_default", .value = .{ .f32v = spec.alpha } },
+        .{ .key = "glp.hook_point", .value = .{ .string = spec.hook_point } },
+        .{ .key = "glp.derived_at", .value = .{ .string = spec.derived_at orelse spec.hook_point } },
+        .{ .key = "glp.base_model", .value = .{ .string = spec.base_model } },
+        .{ .key = "glp.base_revision", .value = .{ .string = spec.base_revision } },
+        .{ .key = "glp.method", .value = .{ .string = spec.method } },
+        .{ .key = "glp.contrast", .value = .{ .string = spec.contrast } },
+        .{ .key = "glp.layer_ids_zero_based", .value = .{ .string = ids.items } },
+        .{ .key = "glp.content_sha256", .value = .{ .string = hex[0..] } },
+    };
+    var written = std.ArrayList(gguf.Entry).empty;
+    defer written.deinit(tmp);
+    try written.appendSlice(tmp, &entries);
+    // The model the vector came from, in the shape a consumer reads: the repo it was derived from.
+    if (spec.base_model.len > 0) {
+        const is_url = std.mem.startsWith(u8, spec.base_model, "http");
+        const owner = std.mem.lastIndexOfScalar(u8, spec.base_model, '/');
+        const url = if (is_url)
+            spec.base_model
+        else
+            try std.fmt.allocPrint(tmp, "https://huggingface.co/{s}", .{spec.base_model});
+        try written.append(tmp, .{ .key = "general.base_model.count", .value = .{ .u32v = 1 } });
+        if (!is_url) {
+            const org = if (owner) |i| spec.base_model[0..i] else "";
+            const repo_name = if (owner) |i| spec.base_model[i + 1 ..] else spec.base_model;
+            try written.append(tmp, .{ .key = "general.base_model.0.name", .value = .{ .string = repo_name } });
+            try written.append(tmp, .{ .key = "general.base_model.0.organization", .value = .{ .string = org } });
+        }
+        try written.append(tmp, .{ .key = "general.base_model.0.version", .value = .{ .string = spec.base_revision } });
+        try written.append(tmp, .{ .key = "general.base_model.0.repo_url", .value = .{ .string = url } });
+    }
+    // What the file says about itself, when the producer named it.
+    const about = spec.publication;
+    try appendText(&written, tmp, "general.name", about.name);
+    try appendText(&written, tmp, "general.description", about.description);
+    try appendText(&written, tmp, "general.author", about.author);
+    try appendText(&written, tmp, "general.license", about.license);
+    try appendText(&written, tmp, "controlvector.model_hint", about.model_hint);
+    try appendText(&written, tmp, "glp.measured_effect", about.measured_effect);
+    try appendText(&written, tmp, "glp.created", about.created);
+    try appendText(&written, tmp, "glp.validation", spec.validation);
+    return gguf.write(a, written.items, tensors) catch |err| switch (err) {
+        error.BadGguf => error.BadGlpVector,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// One more metadata key, when the producer named one.
+fn appendText(written: *std.ArrayList(gguf.Entry), tmp: std.mem.Allocator, key: []const u8, text: ?[]const u8) !void {
+    const value = text orelse return;
+    try written.append(tmp, .{ .key = key, .value = .{ .string = value } });
+}
+
+/// Write a vector read earlier back out, so a file can be rewritten with the same fields.
+pub fn writeVector(a: std.mem.Allocator, v: Vector) Error![]u8 {
+    return write(a, .{
+        .alpha = v.alpha,
+        .spec_version = v.spec_version,
+        .hook_point = v.hook_point,
+        .derived_at = v.derived_at,
+        .base_model = v.base_model,
+        .base_revision = v.base_revision,
+        .method = v.method,
+        .contrast = v.contrast,
+        .validation = v.validation,
+        .publication = v.publication,
+        .layers = v.layers,
+    });
+}
+
+test {
+    _ = @import("glp_test.zig");
+    _ = @import("glp_publication_test.zig");
+    _ = @import("glp_paired_test.zig");
+    _ = @import("glp_paired_api_test.zig");
+    _ = @import("glp_checkpoint.zig");
+}

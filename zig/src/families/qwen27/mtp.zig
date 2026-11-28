@@ -46,6 +46,20 @@ pub fn pick(values: []const u16) !Pick {
     return .{ .token = token, .chance = @floatCast(1 / sum) };
 }
 
+/// The head's stages with steering off: its rows arrive steered, so its own block must not apply one again.
+pub fn headStages(
+    m: *Model,
+    rows: u32,
+    hooks: forward.Mixer,
+    head: forward.Head,
+    norm: ?wts.Tensor,
+    logits: Ref,
+    hidden: Ref,
+    residual: Ref,
+) forward.Stages {
+    return .{ .model = m, .rows = rows, .hooks = hooks, .head = head, .norm = norm, .logits = logits, .hidden = hidden, .residual = residual, .steer = false };
+}
+
 /// One head pass over `rows` frame rows (ids and positions set): `hidden` row i beside token i; returns normed rows.
 pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forward.Mixer, hidden: Ref, rows: u32, head: forward.Head) !Ref {
     const w = m.weights.mtp orelse return error.NoMtpHead;
@@ -64,7 +78,7 @@ pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forw
     e.barrier();
     var lane = @import("core").segments.Lane{ .k = 0, .cb = undefined, .enc = e.*, .fence = undefined };
     defer e.* = lane.enc;
-    var s = forward.Stages{ .model = m, .rows = rows, .hooks = hooks, .head = head, .norm = w.norm, .logits = .{ .buffer = sc.logits }, .hidden = f.get(.hidden), .residual = f.get(.residual) };
+    var s = headStages(m, rows, hooks, head, w.norm, .{ .buffer = sc.logits }, f.get(.hidden), f.get(.residual));
     const block = m.config.layers;
     try s.pre(&lane, block);
     try s.mixer(&lane, block);
