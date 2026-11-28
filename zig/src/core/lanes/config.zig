@@ -18,6 +18,7 @@ pub const Model = struct {
     limit_shared_drafts: bool = false, // retain the cost rule's depth cap before reserving shared rows
     root_copies: bool = false, // verified context copies precede head drafts and skip their proposal pass
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
+    copy_select: bool = false, // compare suffix copies with the native head after enough judgments
     own_copy_rates: bool = false, // a copy window is priced by its stream's own copies, not copy_rate's prior
 
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
@@ -71,6 +72,7 @@ pub const Config = struct {
     root_copies: bool = false,
     family_width: u32,
     max_copy: u32,
+    copy_select: bool = false, // Model.copy_select
     own_copy_rates: bool = false, // Model.own_copy_rates
     first_copy: u32,
     base_width: u32,
@@ -161,6 +163,7 @@ pub const Config = struct {
             .lone_cost_tile = m.lone_cost_tile,
             .family_width = width,
             .max_copy = max_copy,
+            .copy_select = m.copy_select,
             .own_copy_rates = m.own_copy_rates,
             .first_copy = first_copy,
             .base_width = @min(width, first_copy + 1),

@@ -339,3 +339,23 @@ The arithmetic bodies live in `zig/kernels/cuda/common/kda.cuh`; no reduction or
 projection dispatch. Host tests do not prove machine-code identity: before landing, run the complete
 [CUDA SASS comparison](cuda-sass-identity.md) against the parent before extraction, then `tf-cuda-test glm-ref`
 for the independent FP64, fused/wide and replay checks, and the complete CUDA kernel contract.
+
+### Native suffix admission experiment
+
+`TF_GLM_COPY_SELECT=1` lets native MTP at TP=2 choose a head window over a weak
+suffix copy. It defaults to `0`. Each stream keeps separate histories for suffix
+matches below 20 tokens and matches of at least 20. After four judged copies in
+a band and four judged head windows, a copy loses admission when its estimated
+kept tokens per millisecond is below an available head depth. A tie or missing
+price retains the copy. Every eighth eligible choice probes the head during
+warmup, then retries the copy after both histories are established.
+
+Only committed history is indexed. The head-depth probe and next window share
+one cached lookup and decision. Verification and rollback still decide every
+output token. Root/context copy mode, DFlash2, full GLM DSA and other rank counts
+keep their current admission. `TF_GLM_SHARED_MTP_DEPTH` controls shared head depth
+separately; source admission neither enables nor changes that setting.
+
+The cost comparison is a policy estimate, not a measured speedup. Compare both
+switches alone and together on code and chat at one and two requests, retaining
+plain and main token hashes, kept tokens per round and per-request/aggregate tok/s.

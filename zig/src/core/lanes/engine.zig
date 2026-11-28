@@ -302,6 +302,7 @@ pub const Engine = struct {
                     const chain = if (p.branch_from > 0) ds[0..p.branch_from] else ds[0..own_end];
                     var chain_kept: usize = 0;
                     for (path[1..]) |r| chain_kept += @intFromBool((p.branch_from == 0 or r < p.branch_from) and r < own_end);
+                    if (e.cfg.copy_select and p.parents == null and p.branch_from == 0) s.copy_select.heads +|= 1;
                     try e.rule.observeDepth(win.who(s), std.mem.max(u32, chain), @intCast(chain_kept));
                 }
                 var kept_branch: u64 = 0; // the context's graft rows kept, then Recall's

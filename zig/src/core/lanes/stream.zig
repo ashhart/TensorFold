@@ -257,6 +257,7 @@ pub const Stream = struct {
     grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
     draft_chances_cut: ?usize = null, // first chance a cut left unknown (null: measured); a chances hook marks it
+    copy_select: @import("copy_selection.zig").State = .{},
     copy_width: ?u32 = null,
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
         var s: Stream = .{
@@ -335,6 +336,8 @@ pub const Stream = struct {
         s.draft_chances.deinit(gpa);
         s.draft_chances = .empty;
         s.draft_chances_cut = null;
+        s.copy_select.tokens.deinit(gpa);
+        s.copy_select = .{};
         s.copy_width = null;
         s.proposal_depth = null;
     }

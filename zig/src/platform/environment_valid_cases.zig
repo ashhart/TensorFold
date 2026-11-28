@@ -396,4 +396,6 @@ pub const valid = [_]Case{
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = " 0 ", .n = 0 },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = "\t1\r\n", .n = 1 },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_GLM_COPY_SELECT", .raw = "0", .n = 0 },
+    .{ .name = "TF_GLM_COPY_SELECT", .raw = "1", .n = 1 },
 };

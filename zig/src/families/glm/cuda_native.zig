@@ -149,6 +149,8 @@ pub const window_rows: u32 = fw.window_rows;
 
 const snapshots = @import("cuda_snapshots.zig");
 
+pub const copy_select = @import("cuda_copy_select.zig");
+
 const Owned = struct {
     gpa: std.mem.Allocator,
     benchmark_group: ?[]const u8,
@@ -159,6 +161,7 @@ const Owned = struct {
     lanes: glm_lanes.Lanes,
     layout: ?kv.Layout,
     share: usize, // TF_KV_SHARE: states the shared store over the pool's pages keeps (0: the host store)
+    select_copies: bool,
     copies: bool, // TF_GLM_COPIES=1: verified root and context copies
 };
 
@@ -221,6 +224,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const p = a.p;
     const roce_bytes = a.roce_bytes;
     const copies = try cuda.priority_copies.read("TF_GLM_COPIES", o.drafts);
+    const select_copies = if (p.rank == 0) try copy_select.read() else false;
     var load_cache = @import("core").checkpoint.cache.Load.begin(io, p.world > 1);
     defer load_cache.deinit();
     // TF_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
@@ -230,6 +234,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
+    own.select_copies = select_copies;
     own.benchmark_group = null;
     own.share = a.share;
     own.copies = copies;
@@ -354,6 +359,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.link.lead(cuda.tp_watch.open(), p.world); // the other ranks begin asleep (follow): the first step wakes them
     if (own.e.local.len > 0 and o.mtp_confidence != null) return error.SharesOneRankEach; // chances need every share's
     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared or own.e.local.len > 0, .mtp_confidence = o.mtp_confidence };
+    own.lanes.copy_selection = .{ .on = own.select_copies, .world = p.world, .dsa = own.e.c.dsa };
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     if (own.share > 0) if (own.layout) |*l| { // TF_KV_SHARE: the plan counts each kept state's slot

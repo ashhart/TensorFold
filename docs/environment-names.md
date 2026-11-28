@@ -577,6 +577,7 @@ reports the setting's own value, does not count as logging.
 | `TF_GLM_CLEAR_THINKING` | release, tool, test | other |
 | `TF_GLM_CONTEXT_CEILING` | release, tool, test | other |
 | `TF_GLM_COPIES` | release, tool, test | other |
+| `TF_GLM_COPY_SELECT` | release, tool, test | other |
 | `TF_GLM_DENSE_BITS` | release, tool, test | other |
 | `TF_GLM_DFLASH2_LOG` | release, tool, test | logs-content |
 | `TF_GLM_DFLASH2_PROF` | release, tool, test | logs |

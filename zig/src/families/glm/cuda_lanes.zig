@@ -33,6 +33,7 @@ pub const Lanes = struct {
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
+    copy_selection: @import("cuda_copy_select.zig").Settings = .{},
     copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
     costs: ?lane_costs.Table = null, // MTP's window and draft prices, timed at load (cuda_lane_costs)
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
@@ -41,7 +42,6 @@ pub const Lanes = struct {
     next: u64 = 0,
     bits: ?cuda.HostBuffer = null, // structured output's grammar words (shared_rows rows), device-read, at first use
     bits_dev: u64 = 0,
-
     pub fn deinit(self: *Lanes) void {
         if (self.bits) |*b| b.free();
         var it = self.lanes.valueIterator();
@@ -126,7 +126,7 @@ pub const Lanes = struct {
     /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
     pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
         self.copy_confidence = enabled and self.x.e.mtp;
-        return copy_policy.apply(self.facts(), enabled, self.x.e.drafter == null and self.costs != null);
+        return @import("cuda_copy_select.zig").apply(copy_policy.apply(self.facts(), enabled, self.x.e.drafter == null and self.costs != null), self.copy_selection.on, self.copy_selection.world, self.copy_selection.dsa, self.x.e.drafter != null);
     }
 
     fn of(ptr: *anyopaque) *Lanes {
