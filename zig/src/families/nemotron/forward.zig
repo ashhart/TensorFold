@@ -82,7 +82,7 @@ pub const Forward = struct {
     members: usize = 0, // routed experts' member rows a pass (2 or 4: the shared-unpack kernels; 0: one at a time)
     serial_attention: bool = false, // pre-M5 paged host verify chains use the one-row attention program
     round: ?layers.RoundArgs = null, // a GPU-side round's Mamba tables and routed rows, written on the GPU (one segment)
-    masks: ?*const Masks = null, // structured output's bits (segments with a mask_row)
+    masks: ?*Masks = null, // structured output's bits (segments with a mask_row)
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
     untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught streams', else all
     segs: []const Seg = &.{}, // the pass's streams, as body() runs them
@@ -345,7 +345,7 @@ pub const Forward = struct {
                 .none => {},
                 .last => {
                     const off = (at + g.rows - 1) * d * 2;
-                    if (self.w.head_dense) |hd| self.denseHead(e, hd, off, 1) else {
+                    if (self.w.head_dense) |hd| self.denseHeadRow(e, hd, off, 0, g.mask_row) else {
                         self.xsumHidden(e, s.x, off, s.hx, 1);
                         self.coop(e, "head", self.w.head, s.x, off, s.hx, s.logits, 1);
                     }
@@ -358,7 +358,7 @@ pub const Forward = struct {
             at += g.rows;
         }
         if (head != .all) return;
-        if (self.w.head_dense) |hd| self.denseHead(e, hd, 0, at) else self.coop(e, "head", self.w.head, s.x, 0, s.xs, s.logits, at);
+        if (self.w.head_dense) |hd| self.denseHead(e, hd, segs, at) else self.coop(e, "head", self.w.head, s.x, 0, s.xs, s.logits, at);
         at = 0;
         for (segs) |g| {
             if (g.mask_row) |r| self.masks.?.encode(e, s.logits, at * self.c.vocab * 2, self.c.vocab, r, g.rows);
@@ -484,8 +484,37 @@ pub const Forward = struct {
     }
 
     /// logits = x . lm_head^T for a full-precision bf16 LM head (Bolt keeps lm_head unquantized).
-    fn denseHead(self: Forward, e: *Enc, hd: wts.Dense, x_off: usize, rows: usize) void {
-        bolt.gemv(self, e, hd, self.s.x, x_off, self.s.logits, rows);
+    fn denseHead(self: Forward, e: *Enc, hd: wts.Dense, segs: []const Seg, rows: usize) void {
+        if (self.masks) |m| if (m.legal != null) {
+            var begin: usize = 0;
+            var row_at: usize = 0;
+            for (segs) |g| {
+                for (0..g.rows) |i| {
+                    defer row_at += 1;
+                    const mask_row = if (g.mask_row) |r| r + i else continue;
+                    const count = m.legalCount(mask_row);
+                    if (count == 0) continue;
+                    self.denseHeadRange(e, hd, begin, row_at);
+                    bolt.headSubset(self, e, hd, row_at * hd.k * 2, row_at * hd.n * 2, mask_row, count);
+                    begin = row_at + 1;
+                }
+            }
+            return self.denseHeadRange(e, hd, begin, rows);
+        };
+        bolt.gemv(self, e, hd, self.s.x, 0, self.s.logits, rows);
+    }
+
+    fn denseHeadRange(self: Forward, e: *Enc, hd: wts.Dense, begin: usize, end: usize) void {
+        if (begin == end) return;
+        bolt.gemvAt(self, e, hd, self.s.x, begin * hd.k * 2, self.s.logits, begin * hd.n * 2, end - begin);
+    }
+
+    fn denseHeadRow(self: Forward, e: *Enc, hd: wts.Dense, x_off: usize, y_off: usize, mask_row: ?usize) void {
+        if (mask_row) |r| {
+            const count = self.masks.?.legalCount(r);
+            if (count != 0) return bolt.headSubset(self, e, hd, x_off, y_off, r, count);
+        }
+        bolt.gemvAt(self, e, hd, self.s.x, x_off, self.s.logits, y_off, 1);
     }
 
     /// Hands the stage just written to the test tool's tap, if any (nothing is encoded without one).

@@ -1,5 +1,6 @@
 //! Structured output on Nemotron's Metal backend: bits staged by window row, a masked first draw, held drafts read.
 const lanes = @import("lanes");
+const bolt = @import("bolt.zig");
 const st = @import("state.zig");
 const Masks = @import("../../core/grammar_mask.zig").Masks;
 const Metal = @import("backend.zig").Metal;
@@ -9,7 +10,19 @@ const be = lanes.backend;
 /// The backend's bits, made at the first structured request (one row a forward row, and a first token's).
 fn masks(b: *Metal) !*Masks {
     if (b.masks == null) {
-        b.masks = try Masks.init(b.m.device, b.scratch.rows, b.m.config.vocab);
+        const vocab = b.m.config.vocab;
+        var m = try Masks.init(b.m.device, b.scratch.rows, vocab);
+        errdefer m.deinit();
+        const env = @import("sys").environment;
+        if (b.m.weights.head_dense) |head| {
+            const subset = @import("../../core/grammar_head_subset.zig");
+            const enabled = bolt.supportsHeadSubset(head) and try env.read(bool, "TF_GRAMMAR_HEAD_SUBSET", false);
+            const pipeline = b.m.prefill.pipelines.get("tf_gemv_bf16_bm8_subset");
+            const fits = if (pipeline) |pipe| pipe.maxThreads() >= 256 else false;
+            const limit = if (enabled) try env.read(u32, "TF_GRAMMAR_HEAD_SUBSET_MAX", subset.default_limit) else 0;
+            try m.enableHeadSubset(b.m.device, subset.capacity(enabled and fits, vocab, limit));
+        }
+        b.masks = m;
         if (b.residency) |f| @import("metal").resident.fields.apply(&b.masks.?, f, true);
     }
     return &b.masks.?;

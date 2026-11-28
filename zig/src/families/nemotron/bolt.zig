@@ -10,15 +10,36 @@ const Forward = fwd.Forward;
 
 /// y [rows, n] = x W^T a row at a time in MLX's gemv at its tiles for (k, n) (tools/zig/bolt_op_cases.py: bit for bit).
 pub fn gemv(f: Forward, e: *Enc, w: wts.Dense, x: Buffer, x_off: usize, y: Buffer, rows: usize) void {
+    gemvAt(f, e, w, x, x_off, y, 0, rows);
+}
+
+pub fn gemvAt(f: Forward, e: *Enc, w: wts.Dense, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize) void {
     const wide = w.k >= 16 * w.n; // matmul.cpp: bn 8 along K, else bm 8 from N 4096 or bm 4, bn 1
     const bm: usize = if (wide) 1 else if (w.n >= 4096) 8 else 4;
     e.pipe(f.p.?.get(if (wide) "tf_gemv_bf16_tm4" else if (bm == 8) "tf_gemv_bf16_bm8_tm4" else "tf_gemv_bf16_bm4_tm4"));
     e.buf(w.w, w.off, 0);
     e.buf(x, x_off, 1);
     e.bytes([3]i32{ @intCast(w.k), @intCast(w.n), @intCast(w.k) }, 2);
-    e.buf(y, 0, 3);
+    e.buf(y, y_off, 3);
     const groups = (w.n + 4 * bm - 1) / (4 * bm);
     if (wide) e.run(.{ 32 * groups, 8, rows }, .{ 32, 8, 1 }) else e.run(.{ 32 * groups, 1, bm * rows }, .{ 32, 1, bm });
+}
+
+pub fn supportsHeadSubset(w: wts.Dense) bool {
+    return w.n >= 4096 and w.k < 16 * w.n;
+}
+
+pub fn headSubset(f: Forward, e: *Enc, w: wts.Dense, x_off: usize, y_off: usize, mask_row: usize, count: usize) void {
+    const masks = f.masks.?;
+    e.pipe(f.p.?.get("tf_gemv_bf16_bm8_subset"));
+    e.buf(w.w, w.off, 0);
+    e.buf(f.s.x, x_off, 1);
+    e.bytes([3]i32{ @intCast(w.k), @intCast(count), @intCast(w.k) }, 2);
+    e.buf(f.s.logits, y_off, 3);
+    e.buf(masks.legal.?, (mask_row * masks.stride + 1) * 4, 4);
+    e.run(.{ 32 * ((count + 31) / 32), 1, 8 }, .{ 32, 1, 8 });
+    masks.subset_rows += 1;
+    masks.subset_tokens += count;
 }
 
 /// Gate, top-k, the shared expert in hidden, into, the routed experts in the latent, their combine, out, add_norm.
