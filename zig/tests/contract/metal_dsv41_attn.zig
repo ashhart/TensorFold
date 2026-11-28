@@ -87,6 +87,7 @@ pub const Proj = struct {
 
     pub fn prepare(p: *Proj, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         p.drop();
+        if (p.v.layout == .prompt) attn.checkPromptHeads(@intCast(shape.n / D)) catch return false;
         attn.check(.{ .rows = @intCast(shape.rows), .heads = @intCast(shape.n / D), .out = p.v.out }) catch return false;
         var f = ref.Attn.init(p.a, shape, .{ .layout = p.v.layout }) catch return false;
         errdefer f.deinit();
@@ -212,10 +213,48 @@ pub const Suite = struct {
         }
     }
 
+    fn promptBase(s: *Suite, queue: mtl.Queue, queue_name: []const u8, seed: u64, t: *g.Tally) !void {
+        const fragment = @embedFile("dsv41_base/csa2_prompt.metal");
+        const text = try std.mem.concat(s.a, u8, &.{ sources.dsv41.csa2_attn, fragment });
+        defer s.a.free(text);
+        for ([_]attn.Out{ .f32, .bf16 }) |out| {
+            var p = try Proj.init(s.a, s.device, queue, .{ .layout = .prompt, .out = out }, base ++ "fixed head pairs");
+            defer p.deinit();
+            const slot = &p.pipes.pre[@backingInt(out)];
+            const name = if (out == .f32) "tf_base_dsv41_attn_pre_f32" else "tf_base_dsv41_attn_pre_bf16";
+            const original = try rig_.pipeline(s.device, text, name);
+            defer original.deinit();
+            for ([_]usize{ 2, 4, 8, 64 }) |heads| for ([_]usize{ 0, 37, 512 }) |keys| {
+                if (!try p.prepare(sh(3, heads, keys), .random, seed)) return error.Refused;
+                const bytes = p.rig.bytes(rr(p.b.o), p.count() * c.size(spec(p.v, p.name).out));
+                @memset(bytes, 0xff);
+                try p.run();
+                const want = try s.a.dupe(u8, bytes);
+                defer s.a.free(want);
+                @memset(bytes, 0);
+                {
+                    const fixed = slot.*;
+                    slot.* = original;
+                    defer slot.* = fixed;
+                    try p.run();
+                }
+                const equal = std.mem.eql(u8, bytes, want);
+                if (!equal) t.failed += 1;
+                std.debug.print("{s} {s} {s}: {d} heads, {d} selected, {d} output bytes against the original kernel\n", .{ if (equal) "PASS" else "FAIL", queue_name, @tagName(out), heads, keys, bytes.len });
+            };
+        }
+    }
+
     /// Row bits: whole launch, chunk splits at several offsets and decode on both windows agree; the control must not.
     pub fn invariance(s: *Suite, io: std.Io, seed: u64, t: *g.Tally) !void {
         _ = io;
         if (s.probes.items.len == 0) return;
+        try s.promptBase(s.queue, "Metal 3", seed, t);
+        if (s.device.hasMetal4()) {
+            const queue4 = try s.device.queue4();
+            defer queue4.deinit();
+            try s.promptBase(queue4, "Metal 4", seed, t);
+        }
         var bad: usize = 0;
         var launches: usize = 0;
         const n: usize = 8192;

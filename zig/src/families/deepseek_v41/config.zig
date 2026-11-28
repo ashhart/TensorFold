@@ -508,3 +508,14 @@ test "asset metadata preserves release checks, and the release's own config pars
 test {
     _ = @import("dsq_admission_test.zig");
 }
+
+test "Metal CSA2 prompt accepts complete pairs of checkpoint heads" {
+    const shape = @import("attn_shape.zig");
+    const release = try Config.parseMetadata(std.testing.allocator, @embedFile("fixtures/flash1017-config.json"));
+    try shape.check(release.heads);
+    try shape.check(tiny().heads);
+    try shape.check(2);
+    try std.testing.expectError(error.UnsupportedAttentionHeadCount, shape.check(0));
+    try std.testing.expectError(error.UnsupportedAttentionHeadCount, shape.check(1));
+    try std.testing.expectError(error.UnsupportedAttentionHeadCount, shape.check(release.heads - 1));
+}

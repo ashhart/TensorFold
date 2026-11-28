@@ -1,5 +1,6 @@
 //! The family's backend-neutral host files as one module, for a backend package built beside them (metal/).
 pub const config = @import("config.zig");
+pub const attn_shape = @import("attn_shape.zig"); // the Metal CSA2 prompt kernel's head pairs, checked here
 pub const pack = @import("pack.zig");
 pub const projection = @import("projection.zig");
 pub const names = @import("names.zig");
