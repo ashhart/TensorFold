@@ -215,15 +215,15 @@ test "prompt_cache why: the ring keeps the newest 64 states in under 3 KiB, and 
     try t.expect(@sizeOf(why.Gone) <= 3 * 1024);
     for (0..why.Gone.SIZE + 1) |i| {
         const tokens = [_]u32{ @intCast(i + 1), 7 };
-        box.s.gone.note(&tokens, 1, why.queryKey(&box.s, &tokens), .evicted);
+        box.s.gone.note(&tokens, 1, why.queryKey(&box.s, &tokens, 1, &.{}), .evicted);
     }
-    try t.expect(box.s.gone.match(&box.s, &.{ 1, 7, 9 }, 0) == null); // the oldest was overwritten
-    try t.expectEqual(why.Reason.evicted, box.s.gone.match(&box.s, &.{ 65, 7, 9 }, 0).?.reason);
+    try t.expect(box.s.gone.match(&box.s, &.{ 1, 7, 9 }, 0, &.{}) == null); // the oldest was overwritten
+    try t.expectEqual(why.Reason.evicted, box.s.gone.match(&box.s, &.{ 65, 7, 9 }, 0, &.{}).?.reason);
     const next = box.s.gone.next;
-    box.s.gone.note(&.{ 65, 7 }, 1, why.queryKey(&box.s, &.{ 65, 7 }), .shed);
+    box.s.gone.note(&.{ 65, 7 }, 1, why.queryKey(&box.s, &.{ 65, 7 }, 1, &.{}), .shed);
     try t.expectEqual(next, box.s.gone.next);
-    try t.expectEqual(why.Reason.shed, box.s.gone.match(&box.s, &.{ 65, 7, 9 }, 0).?.reason);
-    try t.expect(box.s.gone.match(&box.s, &.{ 65, 7, 9 }, 1) == null); // only states past the resume point
+    try t.expectEqual(why.Reason.shed, box.s.gone.match(&box.s, &.{ 65, 7, 9 }, 0, &.{}).?.reason);
+    try t.expect(box.s.gone.match(&box.s, &.{ 65, 7, 9 }, 1, &.{}) == null); // only states past the resume point
 }
 
 test "prompt_cache why: diagnose reads the store and changes nothing a lookup or eviction reads" {
@@ -267,4 +267,45 @@ test "prompt_cache why: live and removed records respect the active cache namesp
     try expectWhy(.cold, 0, 0, why.diagnose(&box.s, &words, &.{}, &.{}, null));
     box.s.salt = 7;
     try expectWhy(.evicted, 90, 0, why.diagnose(&box.s, &words, &.{}, &.{}, null));
+}
+
+test "prompt_cache why: removed records isolate canonical decoded spans through the state" {
+    var box: Box = .{};
+    box.init(open, 1 << 20);
+    defer box.deinit();
+    try t.expect(box.keep(&words, 60, &.{.{ 20, 80 }}));
+    box.s.remove(0);
+    try t.expectEqual(why.Reason.evicted, why.diagnose(&box.s, &words, &.{}, &.{.{ 20, 90 }}, null).reason);
+    try t.expectEqual(why.Reason.cold, why.diagnose(&box.s, &words, &.{}, &.{.{ 21, 90 }}, null).reason);
+    try t.expectEqual(why.Reason.cold, why.diagnose(&box.s, &words, &.{}, &.{.{ 20, 59 }}, null).reason);
+    try t.expectEqual(why.Reason.cold, why.diagnose(&box.s, &words, &.{}, &.{}, null).reason);
+}
+
+test "prompt_cache why: removed records isolate every image identity field" {
+    const picture: Image = .{ .pixels = &.{}, .at = 20, .tokens = 4, .gh = 2, .gw = 2, .hash = 77 };
+    var box: Box = .{};
+    box.init(open, 1 << 20);
+    defer box.deinit();
+    _ = box.f.pass(&box.s, words[0..60], .{});
+    try t.expect(box.s.keepBornImages(&words, 100, 60, null, &.{}, &.{}, &.{picture}));
+    box.s.remove(0);
+    box.s.image_query = &.{picture};
+    try t.expectEqual(why.Reason.evicted, why.diagnose(&box.s, &words, &.{}, &.{}, null).reason);
+    var changed = picture;
+    inline for (.{ "at", "tokens", "gh", "gw", "hash" }) |field| {
+        changed = picture;
+        @field(changed, field) += 1;
+        box.s.image_query = &.{changed};
+        try t.expectEqual(why.Reason.cold, why.diagnose(&box.s, &words, &.{}, &.{}, null).reason);
+    }
+    box.s.image_query = null;
+}
+
+test "prompt_cache why: refused records use the same clipped span and image namespace" {
+    var box: Box = .{};
+    box.init(open, 0);
+    defer box.deinit();
+    try t.expect(!box.keep(&words, 60, &.{.{ 20, 80 }}));
+    try t.expectEqual(why.Reason.not_kept, why.diagnose(&box.s, &words, &.{}, &.{.{ 20, 90 }}, null).reason);
+    try t.expectEqual(why.Reason.cold, why.diagnose(&box.s, &words, &.{}, &.{.{ 21, 90 }}, null).reason);
 }

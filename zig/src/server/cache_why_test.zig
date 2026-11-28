@@ -35,8 +35,9 @@ const Clock = struct {
 
 /// Bytes as tokens; every prompt renders as "prompt".
 const ByteText = struct {
+    with_starts: bool = false,
     fn text(b: *@This()) model_text.Text {
-        return .{ .ctx = b, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
+        return .{ .ctx = b, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .token_bytes = tokenBytes } };
     }
     fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
         const out = try a.alloc(u32, input.len);
@@ -47,6 +48,10 @@ const ByteText = struct {
         const out = try a.alloc(u8, tokens.len);
         for (tokens, out) |id, *byte| byte.* = @intCast(id);
         return out;
+    }
+    fn tokenBytes(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 {
+        const self: *ByteText = @ptrCast(@alignCast(ctx));
+        return if (self.with_starts) try decode(ctx, a, &.{id}) else null;
     }
     fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
         return null;
@@ -60,7 +65,12 @@ const ByteText = struct {
     fn eosIds(_: *anyopaque) []const u32 {
         return &.{};
     }
-    fn render(_: *anyopaque, a: Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+    fn render(ctx: *anyopaque, a: Allocator, _: json.Value, opts: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        const self: *ByteText = @ptrCast(@alignCast(ctx));
+        if (self.with_starts) {
+            if (opts.message_starts) |out| out.* = try a.dupe(usize, &.{ 0, 4, 8 });
+            return .{ .text = try a.dupe(u8, "p000p111p222") };
+        }
         return .{ .text = try a.dupe(u8, "prompt") };
     }
     fn templateSource(_: *anyopaque) []const u8 {
@@ -110,23 +120,31 @@ const Line = struct {
     }
 };
 
+const ReplyResult = struct { body: []const u8, line: []const u8, counts: cache_why.Counts };
+
 const body = "{\"model\":\"m\",\"max_tokens\":2,\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}";
 
 /// One chat completion on a server with TF_CACHE_WHY `on`: its body, its done line and the reason counts.
-fn chat(a: Allocator, on: bool, why: ?Why) !struct { body: []const u8, line: []const u8, counts: cache_why.Counts } {
+fn chat(a: Allocator, on: bool, why: ?Why) !ReplyResult {
+    return reply(a, on, why, body, true, false);
+}
+
+fn reply(a: Allocator, on: bool, why: ?Why, request_body: []const u8, is_chat: bool, with_starts: bool) !ReplyResult {
     Clock.next = 0;
     var lines: Line = .{};
     defer lines.bytes.deinit(t.allocator);
     log.Test.sink = .{ .ctx = &lines, .call = Line.line };
     defer log.Test.sink = null;
-    var text: ByteText = .{};
+    var text: ByteText = .{ .with_starts = with_starts };
     var script: Script = .{ .why = why };
     const srv = try server.Server.init(t.allocator, Clock.io(), script.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .cache_why = on }, null);
     defer srv.deinit();
+    try t.expectEqual(@as(u32, 0), srv.info.prefill_step);
+    if (!is_chat) srv.chunks.openers = &.{112};
     var wire: Wire = .{ .a = a };
-    var headers = [_]@import("http_conn.zig").Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{body.len}) }};
-    var c: Conn = .{ .fd = -1, .peer = "", .buf = try a.dupe(u8, body), .end = body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = "/v1/chat/completions", .headers = &headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
-    @import("openai.zig").post(srv, &c, a, true);
+    var headers = [_]@import("http_conn.zig").Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{request_body.len}) }};
+    var c: Conn = .{ .fd = -1, .peer = "", .buf = try a.dupe(u8, request_body), .end = request_body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = "/v1/chat/completions", .headers = &headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
+    @import("openai.zig").post(srv, &c, a, is_chat);
     const raw = wire.bytes.items;
     const split = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.BadReply;
     const done = std.mem.indexOf(u8, lines.bytes.items, "done ") orelse return error.NoDoneLine;
@@ -191,12 +209,12 @@ test "cache why: /metrics has one lookups and one lost-tokens series a reason, a
     try t.expectEqual(@as(u64, 1), sum);
 }
 
-test "cache why: the message holding N counts the template's message openers" {
-    const prompt = [_]u32{ 7, 1, 2, 7, 3, 4, 7, 5 };
-    try t.expectEqual(@as(?u32, 0), cache_why.messageAt(&.{7}, &prompt, 2));
-    try t.expectEqual(@as(?u32, 1), cache_why.messageAt(&.{7}, &prompt, 4));
-    try t.expectEqual(@as(?u32, 2), cache_why.messageAt(&.{7}, &prompt, 8)); // N past the prompt: its last message
-    try t.expectEqual(@as(?u32, null), cache_why.messageAt(&.{}, &prompt, 4));
+test "cache why: the message holding N uses rendered starts, including the last message" {
+    const starts = [_]u32{ 3, 6 };
+    try t.expectEqual(@as(?u32, 0), cache_why.messageAt(&starts, 2));
+    try t.expectEqual(@as(?u32, 1), cache_why.messageAt(&starts, 4));
+    try t.expectEqual(@as(?u32, 2), cache_why.messageAt(&starts, 8));
+    try t.expectEqual(@as(?u32, null), cache_why.messageAt(&.{}, 4));
 }
 
 test "cache why: TF_CACHE_WHY takes 0 or 1 through the settings table" {
@@ -204,4 +222,24 @@ test "cache why: TF_CACHE_WHY takes 0 or 1 through the settings table" {
     try t.expect(try env.value(bool, "TF_CACHE_WHY", "1", false));
     try t.expect(!try env.value(bool, "TF_CACHE_WHY", null, false));
     try t.expectError(error.InvalidEnvironment, env.value(bool, "TF_CACHE_WHY", "yes please", false));
+}
+
+test "cache why: rendered message starts survive zero prefill step" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try reply(a, true, .{ .reason = .evicted, .shared = 5, .resumed = 0 }, body, true, true);
+    const field = (try json.parse(a, got.body)).ok.get("tensorfold").?.get("prompt_cache").?;
+    try t.expect(field.get("message") != null);
+    try t.expectEqual(@as(?i64, 1), field.get("message").?.int64());
+}
+
+test "cache why: raw completion opener words never imply a message" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "{\"model\":\"m\",\"max_tokens\":2,\"prompt\":\"p000p111p222\"}";
+    const got = try reply(a, true, .{ .reason = .evicted, .shared = 5, .resumed = 0 }, raw, false, false);
+    const field = (try json.parse(a, got.body)).ok.get("tensorfold").?.get("prompt_cache").?;
+    try t.expect(field.get("message") == null);
 }

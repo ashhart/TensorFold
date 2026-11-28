@@ -81,7 +81,7 @@ pub const Generation = struct {
     recover: bool = false, // a chat request with no forced tool or structure: an unclosed think block may be the answer
     deadline_ns: ?i96 = null, // "deadline_s": when the server ends the reply itself
     deadline_hit: bool = false, // it did: the engine was cancelled there; what it gave before its end still lands
-    prompt_ids: []const u32 = &.{}, // the rendered prompt: TF_CACHE_WHY's message index reads it
+    message_starts: []const u32 = &.{}, // exact rendered offsets, independent of stepped prefill
 
     fn eos(g: *const Generation, t: u32) bool {
         return g.grammar.ends(g.ignore_eos, g.srv.eos, t);
@@ -428,7 +428,7 @@ pub const Generation = struct {
         }
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
         if (m.stats.prompt_cache) |w| g.srv.metrics.noteCache(g.srv.io, w);
-        if (g.srv.config.cache_why) if (m.stats.prompt_cache) |w| try runtime.put(a, "prompt_cache", try @import("cache_why.zig").value(g.srv, a, w, g.prompt_ids));
+        if (g.srv.config.cache_why) if (m.stats.prompt_cache) |w| try runtime.put(a, "prompt_cache", try @import("cache_why.zig").value(a, w, g.message_starts, g.chat));
         if (m.stats.loop_period) |period| {
             const loop_field = try json.newObject(a);
             try loop_field.put(a, "period", try json.intValue(a, period));
