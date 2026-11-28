@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: a reply can continue the conversation's final assistant message, so a client can start it with `{` for JSON or with an answer's first words. `/v1/messages` now continues a trailing assistant message as Messages' prefill does, where it opened a new turn before, and `/v1/chat/completions` does so with `"continue_final_message": true`. The response holds only the continuation and usage counts the prefill. A request that turns thinking on itself, trailing whitespace on Messages, tool calls and a template that rewrites the message get HTTP 400 by name; with thinking on only by the server's default, the continuation runs with thinking off (#3548).
+
 - Qwen3.5 and Qwen3.8 (including the 27B) on CUDA: a full load now refuses a checkpoint with tensors the engine never binds, naming the first five; MTP, vision and tied-head tensors are scoped so they never count (#4577).
 
 - CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
