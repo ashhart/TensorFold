@@ -198,7 +198,7 @@ fn run(init: std.process.Init, opt: shard.Options, jobs: u32, gpus: u32) !u8 {
         std.debug.print("FAIL kernel-contract: {d} of {d} shards did not finish, so there is no merged SUMMARY\n", .{ unfinished, jobs });
         return 1;
     }
-    const sum = shard.merge(reports[0..jobs], after.filtered(opt.words)) catch |err| {
+    const sum = shard.merge(reports[0..jobs], opt.words.len > 0) catch |err| {
         std.debug.print("FAIL kernel-contract: the shards do not add up: {t}\n", .{err});
         return 1;
     };

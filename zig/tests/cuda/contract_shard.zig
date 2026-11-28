@@ -157,14 +157,29 @@ pub fn parseNamed(a: std.mem.Allocator, args: []const [:0]const u8, culprit: *Cu
     return o;
 }
 
+/// Whether `only` names any positive word; empty or `-word`-only runs all standalone suites.
+pub fn hasPositive(only: []const []const u8) bool {
+    for (only) |w| if (!std.mem.startsWith(u8, w, "-")) return true;
+    return false;
+}
+
+/// Whether `name` holds no `-word` and, when positive words are given, at least one of them.
+pub fn wanted(name: []const u8, only: []const []const u8) bool {
+    var named = !hasPositive(only);
+    for (only) |w| {
+        const minus = std.mem.startsWith(u8, w, "-");
+        const hit = std.mem.indexOf(u8, name, if (minus) w[1..] else w) != null;
+        if (minus and hit) return false;
+        named = named or hit;
+    }
+    return named;
+}
+
 /// Keeps the items named by `only`'s words (empty: all), then `sh`'s share of those; returns how many the words kept.
 pub fn keep(comptime T: type, items: *std.ArrayList(T), only: []const []const u8, sh: Shard) usize {
     var kept: usize = 0;
     for (items.items) |item| {
-        const named = only.len == 0 or for (only) |w| {
-            if (std.mem.indexOf(u8, item.spec.name, w) != null) break true;
-        } else false;
-        if (!named) continue;
+        if (!wanted(item.spec.name, only)) continue;
         items.items[kept] = item;
         kept += 1;
     }
