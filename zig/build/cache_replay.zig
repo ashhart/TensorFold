@@ -15,6 +15,8 @@ pub fn steps(b: *std.Build) void {
     b.step("test-cache-replay-host", "Replay equivalence, ownership, accounting and selector witnesses without devices").dependOn(&b.addRunArtifact(tests).step);
     const existing = b.addTest(.{ .root_module = cache });
     b.step("test-prompt-cache-host", "The snapshot store's existing host suite without a device backend").dependOn(&b.addRunArtifact(existing).step);
+    const budget_tests = b.addTest(.{ .root_module = cache, .filters = &.{"cache budget fallback:"} });
+    b.step("test-prompt-cache-budget-host", "Affordable legal cold checkpoints and exact state reuse without devices").dependOn(&b.addRunArtifact(budget_tests).step);
     const miss_tests = b.addTest(.{ .root_module = cache, .filters = &.{"miss reasons:"} });
     b.step("test-prompt-cache-miss-host", "Prompt-cache miss attribution without a device backend").dependOn(&b.addRunArtifact(miss_tests).step);
     const store_tests = b.addTest(.{ .root_module = cache, .filters = &.{ "prompt_cache", "prompt_radix" } });

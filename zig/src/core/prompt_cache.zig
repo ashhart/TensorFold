@@ -387,9 +387,14 @@ pub const Store = struct {
             if (at != s.active_rewind_at) primary = @max(primary, at);
         };
         s.reserve(prompt, born, e, marked, spans, primary);
+        const requested = primary > from and primary < prompt.len and (std.mem.indexOfScalar(u32, marked, primary) != null or s.family.vtable.bytes(s.family.ptr, primary) > s.budget);
         const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marked, spans, e, born, primary);
+        const affordable = @import("prompt_cache_budget.zig").add(s, a, fitted, .{ .prompt = prompt, .born = born, .from = from, .endpoint = primary, .requested = requested, .starts = starts, .spans = spans, .restored = e }) catch |err| {
+            a.free(fitted);
+            return err;
+        };
         if (e) |entry| entry.borrowers += 1;
-        return .{ .entry = e, .marks = fitted, .miss = miss };
+        return .{ .entry = e, .marks = affordable, .miss = miss };
     }
 
     const reserve = @import("prompt_cache_reserve.zig").reserve;
@@ -566,6 +571,7 @@ pub const Seen = @import("prompt_cache_status.zig").Seen;
 pub const status = @import("prompt_cache_status.zig"); // read-only copies for /stats and the dashboard
 
 test {
+    _ = @import("prompt_cache_budget_test.zig");
     _ = @import("prompt_cache_report_test.zig");
     _ = @import("prompt_cache_review_test.zig");
     _ = @import("prompt_cache_promised_test.zig");
