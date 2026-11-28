@@ -78,7 +78,7 @@ for (const language of ['en', 'es']) {
   assert.match(firstHtml, language === 'es' ? /El camino a tu primera respuesta/ : /Your path to a first answer/)
   assert.match(firstHtml, language === 'es' ? /Vuelve a Modelos para completar/ : /Return to Models to finish/)
   assert.ok(firstHtml.includes(flowTextFor(language).authored(firstModel.FIRST_ANSWER_STARTERS[0].prompt)), 'Only predefined new starter prompts are localized; existing conversation content stays original')
-  collect(firstTree, node => node.type === 'input' && node.props.value === 'plan')[0].props.onChange()
+  collect(firstTree, node => node.type === 'button' && node.props['data-testid'] === 'first-answer-starter-plan')[0].props.onClick()
   const approvalTree = approval({ title: 'Run', subject: 'Choose a model\nOriginal 用户文字', mono: true, reason: 'sending email requires approval', canAllowScoped: true, onAllow: () => { effects++ }, onDeny: () => { effects++ }, onAllowScoped: () => { effects++ } })
   const approvalHtml = renderToStaticMarkup(approvalTree)
   assert.match(approvalHtml, language === 'es' ? /¿Ejecutar este comando/ : /Run this command/)
