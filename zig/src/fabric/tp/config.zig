@@ -3,6 +3,7 @@ const std = @import("std");
 const log = @import("log.zig");
 const graph_cache = @import("cuda").graph_cache;
 const nccl = @import("cuda").nccl;
+const auth = @import("sys").rank_auth;
 
 pub const Backend = enum {
     /// NCCL for everything (the default).
@@ -76,6 +77,8 @@ pub const Config = struct {
     graph_cache: ?graph_cache.Settings = null,
     /// TF_GRAPH_CACHE as read (`Cache.init` applies the same value); only its effect on `graph_cache` is compared.
     graph_cache_env: ?[]const u8 = null,
+    /// TF_RANK_SECRET_FILE's key, proven on every bootstrap connection; none meets ranks on this host only.
+    secret: auth.Secret = .none,
 
     /// Reads every setting from `get` (the environment in `fromEnv`); unset names keep the defaults.
     pub fn parse(get: *const fn ([]const u8) ?[]const u8) Error!Config {
@@ -166,6 +169,14 @@ pub const Config = struct {
             }
         }
         c.graph_cache_env = get("TF_GRAPH_CACHE");
+        const secret_path = @import("sys").environment.path("TF_RANK_SECRET_FILE", get("TF_RANK_SECRET_FILE")) catch {
+            log.warn("{s}: expected a key-file path without control characters", .{auth.env_name});
+            return error.BadSetting;
+        };
+        if (secret_path) |path| c.secret = keyFile(path) catch |e| {
+            log.warn("{s}: {s}", .{ auth.env_name, auth.explain(e) orelse @errorName(e) });
+            return error.BadSetting;
+        };
         return c;
     }
 
@@ -213,14 +224,21 @@ pub const Config = struct {
     }
 };
 
+fn keyFile(path: []const u8) auth.key.Error!auth.Secret {
+    var buf: [4096]u8 = undefined;
+    if (path.len >= buf.len) return error.SecretUnreadable;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return auth.Secret.fromFile(buf[0..path.len :0]);
+}
+
 fn envGet(name: []const u8) ?[]const u8 {
     var buf: [64]u8 = undefined;
     if (name.len >= buf.len) return null;
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
-    const v = std.c.getenv(buf[0..name.len :0]) orelse return null;
-    const s = std.mem.span(v);
-    return if (s.len == 0) null else s;
+    const v = (@import("sys").environment.Process{}).get(buf[0..name.len :0]) orelse return null;
+    return if (v.len == 0) null else v;
 }
 
 fn int(comptime T: type, get: *const fn ([]const u8) ?[]const u8, name: []const u8, default: T, lo: T, hi: T) Error!T {
@@ -412,4 +430,29 @@ test "the link label: quotes, backslashes and control bytes become ?, and a cut 
     try std.testing.expectEqualStrings("cable ?2?", (try Config.parse(&Fake.get)).linkLabel(&wide));
     Fake.pairs = &.{};
     try std.testing.expectEqualStrings("unnamed link (set TF_TP_LINK)", (try Config.parse(&Fake.get)).linkLabel(&wide));
+}
+
+test "rank secret settings: unset and blank select no secret" {
+    defer Fake.pairs = &.{};
+    for ([_][]const [2][]const u8{ &.{}, &.{.{ "TF_RANK_SECRET_FILE", "" }}, &.{.{ "TF_RANK_SECRET_FILE", " \t" }} }) |pairs| {
+        Fake.pairs = pairs;
+        try std.testing.expect(!(try Config.parse(&Fake.get)).secret.keyed);
+    }
+}
+
+test "rank secret settings: validate control bytes before reading an existing key file" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "rank\nkey", .{ .permissions = .fromMode(0o600) });
+    file.close(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "rank\nkey", .data = "a fictional group key of32 bytes!!" });
+    const path = try tmp.dir.realPathFileAlloc(io, "rank\nkey", a);
+    Fake.pairs = &.{.{ "TF_RANK_SECRET_FILE", path }};
+    defer Fake.pairs = &.{};
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
 }

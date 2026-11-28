@@ -15,6 +15,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living }, .{ .name = "core", .module = mods.core } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    @import("rank_secret_host.zig").cliTests(b, host, server_tests);
     const confidential_cli = b.createModule(.{
         .root_source_file = b.path("zig/src/server/cli.zig"),
         .target = host,

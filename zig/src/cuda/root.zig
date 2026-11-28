@@ -162,6 +162,7 @@ test {
     _ = @import("ck.zig");
     _ = @import("tp_watch.zig");
     _ = @import("rendezvous.zig");
+    _ = @import("tp_line.zig");
     _ = @import("shared_test.zig");
     _ = @import("tree_attention.zig");
     _ = @import("block_attention.zig");

@@ -713,6 +713,7 @@ reports the setting's own value, does not count as logging.
 | `TF_QWEN_PDL` | release, tool, test | other |
 | `TF_QWEN_POOL_LOG` | release, tool, test | logs |
 | `TF_QWEN_REQUEST_STARTS` | release, tool, test | other |
+| `TF_RANK_SECRET_FILE` | release, tool, test | loads |
 | `TF_ROCE` | release, tool, test | other |
 | `TF_ROCE_GID_INDEX` | release, tool, test | other |
 | `TF_ROCE_HCA` | release, tool, test | other |
