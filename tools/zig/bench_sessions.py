@@ -145,8 +145,17 @@ class Client:
         run["tensorfold"] = {k: v for k, v in runtime.items() if k != "token_ids"} if isinstance(runtime, dict) else {}
         run["speculative"] = spec if isinstance(spec, dict) else None
         run["content"] = "".join(text)
-        run["calls"] = [calls[k] for k in sorted(calls)] if run["finish"] != "length" else []  # a cut call is dropped
+        done = (runtime.get("complete_tool_calls") or []) if isinstance(runtime, dict) else []
+        run["calls"] = [calls[k] for k in sorted(calls) if run["finish"] != "length" or whole(calls[k], done, k)]
         return run
+
+
+def whole(call: dict, complete: list, at: int) -> bool:
+    """Whether the server closed this call's envelope and its arguments form a JSON object."""
+    try:
+        return at in complete and isinstance(json.loads((call.get("function") or {}).get("arguments") or ""), dict)
+    except ValueError:
+        return False
 
 
 def merge(calls: dict, call: dict) -> None:

@@ -1,4 +1,4 @@
-import type { GetState, Slice } from '../types'
+import type { AppState, GetState, Slice } from '../types'
 import { effectiveThreadCwd } from '../../thread-workspace'
 import { readFullWorkspaceLayout, saveFullWorkspaceLayout } from '../../full-workspace-layout'
 
@@ -20,10 +20,15 @@ function viewedThread(get: GetState): { id: string; hasFolder: boolean } | null 
   const project = thread.projectId ? projects.find((p) => p.id === thread.projectId) ?? null : null
   return { id: thread.id, hasFolder: thread.kind === 'task' && !!effectiveThreadCwd(thread, project) }
 }
+export const PICKER_GUIDANCE_MESSAGE = 'Choose a folder for this conversation. Your draft and attachments stay here if you cancel.'
+
+export function isPickerGuidance(notice: AppState['notice'], message: string): boolean {
+  return notice?.kind === 'info' && notice.persistent === true && notice.message === message
+}
 
 export const uiSlice: Slice = (set, get) => ({
   ready: false,
-  notice: null as { kind: 'error' | 'info'; message: string } | null,
+  notice: null as AppState['notice'],
   resolvedTheme: 'light' as 'light' | 'dark',
   newProjectOpen: false,
   newProjectIntent: 0,

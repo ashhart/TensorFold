@@ -4,7 +4,7 @@ import ts from 'typescript'
 import { ConversationDrafts } from '../lib/conversation-drafts'
 import { composerDraftKey } from '../../shared/composer-drafts'
 import { insertTextareaText } from '../lib/textarea-editing'
-const file = ts.createSourceFile('Composer.tsx', readFileSync('src/components/Composer.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
+const file = ts.createSourceFile('ComposerView.tsx', readFileSync('src/components/composer/ComposerView.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
 let callback: ts.Expression | undefined
 const walk = (node: ts.Node) => {
   if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(file) === 'PromptHistory') {
