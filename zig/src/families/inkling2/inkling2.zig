@@ -27,7 +27,5 @@ test {
     _ = loop_model;
     _ = loop_math_cuda;
     _ = dspark_ops;
-    _ = @import("dspark.zig");
-    _ = @import("dspark_head.zig");
     _ = @import("shared_kernels_test.zig");
 }

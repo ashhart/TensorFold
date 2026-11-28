@@ -281,6 +281,11 @@ test "Mini DSpark serving: native target and drafter entrypoints compile togethe
     std.mem.doNotOptimizeAway(&openDrafter);
 }
 
+test {
+    _ = dspark;
+    _ = @import("dspark_head.zig");
+}
+
 test "clearing target taps frees the tap buffer and restores plain state" {
     const Track = struct {
         allocs: usize = 0,
