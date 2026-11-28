@@ -278,11 +278,13 @@ pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_p
     return @import("prompt_rows.zig").frameRequested(generation, c.moe(), value, geometry);
 }
 
-/// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).
-const Size = struct { hidden: usize, intermediate: usize, layers: usize, heads: usize, v_heads: usize };
+/// The qualified sizes: the 27B's, the 9B's, and the tied 4B and 0.8B (the same heads of 256 and 128).
+const Size = struct { hidden: usize, intermediate: usize, layers: usize, heads: usize, v_heads: usize, kv_heads: usize };
 const sizes = [_]Size{
-    .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .heads = 24, .v_heads = 48 },
-    .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32 },
+    .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .heads = 24, .v_heads = 48, .kv_heads = 4 },
+    .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32, .kv_heads = 4 },
+    .{ .hidden = 2560, .intermediate = 9216, .layers = 32, .heads = 16, .v_heads = 32, .kv_heads = 4 },
+    .{ .hidden = 1024, .intermediate = 3584, .layers = 24, .heads = 8, .v_heads = 16, .kv_heads = 2 },
 };
 
 /// The served config: a dense tied head is admitted only under TF_QWEN27_TIED_HEAD=1.
@@ -292,13 +294,13 @@ pub fn parseServed(a: std.mem.Allocator, text: []const u8, generation: ?[]const 
 
 fn qualifiedSize(c: cfg.Config) bool {
     const layers = c.physicalLayers();
-    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
+    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads and c.kv_heads == z.kv_heads) return true;
     return false;
 }
 
 /// A qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
-    const dense = qualifiedSize(c) and c.kv_heads == 4 and c.k_heads == 16 and !c.moe();
+    const dense = qualifiedSize(c) and c.k_heads == 16 and !c.moe();
     // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
     const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
     if (!(dense or routed or a3b(c)) or c.vocab != 248320) return error.UnqualifiedQwenShape;
@@ -343,6 +345,32 @@ test "the 27B's Neural Engine share of 3,072 columns holds 5,760 MiB of fp16 wei
     try std.testing.expectEqual(@as(u64, 5760 << 20), ane_mlp.Share.bytes(c, 3072));
 }
 
+fn testShapeTied(hidden: u32, intermediate: u32, layers: u32, heads: u32, v_heads: u32) !void {
+    // the tied-aware parser with admission enabled: the same shape the serve path takes under the gate
+    var problem: cfg.Problem = .{};
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5","text_config":{{"model_type":"qwen3_5_text","hidden_size":{d},"intermediate_size":{d},
+        \\ "num_hidden_layers":{d},"num_attention_heads":{d},"num_key_value_heads":4,"head_dim":256,"vocab_size":248320,
+        \\ "tie_word_embeddings":true,"linear_num_key_heads":16,"linear_num_value_heads":{d},"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\ "linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}}}
+    , .{ hidden, intermediate, layers, heads, v_heads });
+    defer a.free(text);
+    return supported(try cfg.parseTied(a, text, null, &problem, true));
+}
+
+fn testShapeKv(hidden: u32, intermediate: u32, layers: u32, heads: u32, kv_heads: u32, v_heads: u32) !void {
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5","text_config":{{"model_type":"qwen3_5_text","hidden_size":{d},"intermediate_size":{d},
+        \\ "num_hidden_layers":{d},"num_attention_heads":{d},"num_key_value_heads":{d},"head_dim":256,"vocab_size":248320,
+        \\ "linear_num_key_heads":16,"linear_num_value_heads":{d},"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\ "linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}}}
+    , .{ hidden, intermediate, layers, heads, kv_heads, v_heads });
+    defer a.free(text);
+    return supported(try cfg.parse(a, text, null));
+}
+
 fn testShape(hidden: u32, intermediate: u32, layers: u32, heads: u32, v_heads: u32) !void {
     const a = std.testing.allocator;
     const text = try std.fmt.allocPrint(a,
@@ -358,7 +386,10 @@ fn testShape(hidden: u32, intermediate: u32, layers: u32, heads: u32, v_heads: u
 test "a qwen3_5 dense checkpoint opens at the 27B and 9B shapes and refuses its neighbours" {
     try testShape(5120, 17408, 64, 24, 48);
     try testShape(4096, 12288, 32, 16, 32);
-    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(2560, 9216, 32, 16, 32)); // the 4B
+    try testShapeTied(2560, 9216, 32, 16, 32); // the tied 4B: qualified by #3702's size rows
+    // wrong KV counts: a consistent GDN width set with the other size's KV count must still refuse
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShapeKv(2560, 9216, 32, 16, 2, 32)); // the 4B row, KV 2 (the 0.8B's KV count)
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShapeKv(1024, 3584, 24, 8, 4, 16)); // the 0.8B row, KV 4 (the 4B's KV count)
     try std.testing.expectError(error.UnqualifiedQwenShape, testShape(4096, 12288, 64, 16, 32)); // 9B widths, 27B depth
     try std.testing.expectError(error.UnqualifiedQwenShape, testShape(5120, 17408, 64, 24, 32)); // 27B, 9B GDN heads
 }
