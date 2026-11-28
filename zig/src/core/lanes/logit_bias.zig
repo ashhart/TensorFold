@@ -48,6 +48,7 @@ pub fn apply(values: []f32, entries: []const Entry) !void {
 
 /// Host draws of raw BF16 rows apply a bias and round as the CUDA sparse launch does, without editing cached logits.
 pub fn draw(a: std.mem.Allocator, words: []const u16, settings: ?sampling.Sampling, position: u64, mask: []const u32, entries: []const Entry) !u32 {
+    for (entries) |e| if (e.token >= words.len) return error.BadLogitBiasToken;
     const values = try a.alloc(f64, words.len);
     defer a.free(values);
     const ids = try a.alloc(u64, words.len);
@@ -118,6 +119,14 @@ test "bias draws equal main's row draw over the processed row, raw or as the dev
 
 fn allocationCase(a: std.mem.Allocator) !void {
     _ = try draw(a, &.{ 0x3f80, 0x4000 }, null, 0, &.{}, &.{.{ .token = 0, .value = 3 }});
+}
+
+test "bias host draws refuse an entry past the row's words, as the CUDA sparse launch does" {
+    const a = std.testing.allocator;
+    const words = [_]u16{ 0, 0, 0, 0 };
+    _ = try draw(a, &words, null, 0, &.{}, &.{.{ .token = 3, .value = 1 }});
+    try std.testing.expectError(error.BadLogitBiasToken, draw(a, &words, null, 0, &.{}, &.{.{ .token = 4, .value = 1 }}));
+    try std.testing.expectError(error.BadLogitBiasToken, draw(a, &words, null, 0, &.{}, &.{ .{ .token = 9 }, .{ .token = 0, .value = 1 } }));
 }
 
 test "bias host allocations release both arrays on every allocation failure" {

@@ -149,6 +149,31 @@ test "execution witness reply: known binds the read route's witness, the prompt 
     try t.expectEqualStrings(b.strField("prompt_sha256").?, longer.strField("prompt_sha256").?);
 }
 
+test "execution witness reply: a bias-only request change moves request_sha256, and unbiased requests omit the field" {
+    var c = try fixture.Checkpoint.init();
+    defer c.deinit();
+    var engine: fixture.Engine = .{};
+    var h: fixture.Harness = .{};
+    try ready(&h, &engine, &c, .{});
+    defer h.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = (try post(&h, a, "/v1/completions", ids_prompt)).get("execution_witness").?;
+    try t.expect(plain.get("request").?.get("logit_bias") == null);
+    try expectConsistent(plain);
+    const biased = (try post(&h, a, "/v1/completions", open_body ++ ",\"logit_bias\":{\"17\":-2.5}}")).get("execution_witness").?;
+    const entries = biased.get("request").?.get("logit_bias").?.array;
+    try t.expectEqual(@as(usize, 1), entries.len);
+    try t.expectEqual(@as(?i64, 17), entries[0].get("token").?.int64());
+    try t.expectEqual(@as(?f64, -2.5), entries[0].get("value").?.float);
+    try t.expectEqual(false, entries[0].get("ban").?.bool);
+    try expectConsistent(biased);
+    try t.expect(!std.mem.eql(u8, plain.strField("request_sha256").?, biased.strField("request_sha256").?));
+    try t.expect(!std.mem.eql(u8, plain.strField("binding").?, biased.strField("binding").?));
+    try t.expectEqualStrings(plain.strField("prompt_sha256").?, biased.strField("prompt_sha256").?);
+}
+
 test "execution witness reply: an unsupported path or an excluded flag binds unknown with the digests" {
     var c = try fixture.Checkpoint.init();
     defer c.deinit();
