@@ -5,6 +5,18 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - CUDA and Metal: additive GLPv3 control vectors (`--glp FILE`, `--glp-alpha`) apply per-pass directions at DeepSeek-V4.1's `hc_fold_pre_engram` site and at Qwen3.8-27B's post-block residual site; with no vector loaded the launch list, kernels and saved-state identity are unchanged (#4273).
+- Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
+
+- Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
+
+
+
+- Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
+
+- GLM on CUDA: the DFlash2 draft selector skips candidate ids outside the vocabulary and treats an invalid anchor as token 0 instead of reading past the table; in-range drafts are unchanged (#5449). Thanks to @kelchm.
+
+- Kolibri 1.1: the cache-cap comments now say K and V are rounded to NVFP4 as the reference does, not kept in bf16; comments only (#5445). Thanks to @jschmied.
+
 - CUDA kernels: the MXFP4 experts' SiTU up (`tf_mxfp4_experts_up_situ` and `tf_mxfp4_experts_prompt_up_situ`, in the `experts_mxfp4` image): an expert's gate and up matrices read as stored, each sum rounded to bf16, then ERNIE 5.5's SiTU (beta tanh(g/beta) sigmoid(g) times linear beta tanh(u/linear beta), at 4 and 25) into bf16 rows, from a new `situ` epilogue in `experts.cuh`; under the kernel contract against float64; the four downs' SASS is unchanged and nothing serves through the up yet (#5385, part of #4926).
 - The New Project Folder row keeps **Browse** on one line while the folder input shrinks. (#4824) Thanks @jamesadcock for the report.
 

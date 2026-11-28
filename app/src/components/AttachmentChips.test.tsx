@@ -27,7 +27,7 @@ const html = renderToStaticMarkup(loaded.exports.AttachmentChips({ items, onRemo
 for (const name of items.map((item) => item.name)) assert.ok(html.includes(name))
 assert.match(html, /This file cannot be read/)
 assert.match(html, /Retry unreadable.txt/)
-assert.match(html, /Select remembered.png again/)
+assert.match(html, /aria-label="Select again remembered.png"/)
 assert.equal((html.match(/data-attachment-id=/g) ?? []).length, 4)
 const unsupported = renderToStaticMarkup(loaded.exports.AttachmentChips({ items: [{ id: 'i', kind: 'image', name: 'note.png', mime: 'image/png', status: 'ready', dataUrl: 'data:image/png;base64,AA' }], onRemove() {}, onExtractText() {}, extractionUnavailableReason: 'Local extraction requires the macOS app.' }))
 assert.match(unsupported, /vision-capable model/)
