@@ -46,21 +46,25 @@ pub fn greedyChance(e: *Engine, logits: u64) !chance.Pick {
     return pick(e, logits, true);
 }
 
-fn pick(e: *Engine, logits: u64, sums: bool) !chance.Pick {
-    const world = e.share.world;
+pub fn pick(e: anytype, logits: u64, sums: bool) !chance.Pick {
+    try enqueue(e, logits, e.pairs.ptr, sums);
+    try e.stream.synchronize();
+    try e.checkGathers();
+    var all: [ranks.max_world][4]u32 = undefined; // Engine.init refuses a larger world
+    try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&all)[0 .. e.share.world * pair_bytes]);
+    return chance.pick(all[0..e.share.world], sums);
+}
+
+/// The unchanged top-1 and rank gather into an owned pick slot, with no host read or stream drain.
+pub fn enqueue(e: anytype, logits: u64, dst: u64, sums: bool) !void {
     var a: cuda.Args = .{};
     a.add(logits);
     a.add(@as(i64, @intCast(e.share.vocab.len())));
     a.add(@as(u32, @intCast(e.share.vocab.lo)));
-    a.add(e.pairs.ptr + e.share.rank * pair_bytes);
+    a.add(dst + e.share.rank * pair_bytes);
     try cuda_pdl.launch(if (sums) e.m.glue.top1_sums else e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
-    const mine = e.pairs.ptr + e.share.rank * pair_bytes;
+    const mine = dst + e.share.rank * pair_bytes;
     const stamp = @import("cuda_prof.zig").span(e.profiling_prompt, e.stream, .token_gather);
-    if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, pair_bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, pair_bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
+    if (e.group) |g| try g.allGather(e.stream, mine, dst, pair_bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, dst, pair_bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
     stamp.end();
-    try e.stream.synchronize();
-    try e.checkGathers();
-    var all: [ranks.max_world][4]u32 = undefined; // Engine.init refuses a larger world
-    try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&all)[0 .. world * pair_bytes]);
-    return chance.pick(all[0..world], sums);
 }

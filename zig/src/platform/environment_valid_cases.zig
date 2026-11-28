@@ -269,6 +269,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
+    .{ .name = "TF_GLM_MTP_CHAIN", .raw = "0", .n = 0 },
+    .{ .name = "TF_GLM_MTP_CHAIN", .raw = "1", .n = 1 },
     .{ .name = "TF_LOAD_PREFETCH", .raw = "0", .n = 0 },
     .{ .name = "TF_LOAD_PREFETCH", .raw = "8", .n = 8 },
     .{ .name = "TF_LOAD_PREFETCH", .raw = "16", .n = 16 },

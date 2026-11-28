@@ -35,6 +35,9 @@ pub const prompt_sink = @import("cuda_prompt_sink.zig");
 pub const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
+pub const mtp_loop = @import("cuda_mtp_loop.zig");
+pub const engine_pick = @import("cuda_engine_pick.zig");
+pub const mtp_chance = @import("cuda_mtp_chance.zig");
 pub const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const pages = @import("cuda_pages.zig");
 pub const share = @import("cuda_share.zig");
@@ -116,6 +119,7 @@ test {
     _ = engine;
     _ = follow;
     _ = lanes;
+    _ = lane_costs;
     _ = @import("cuda_zero_budget_test.zig");
     _ = native;
     _ = native_dsa;

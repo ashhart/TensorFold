@@ -142,6 +142,16 @@ range (0.25% at least), and inside the rest. Other checkpoints and sampled repli
 
 ## Window prices
 
+`TF_GLM_MTP_CHAIN=1` on every rank is an unqualified, default-off experiment for native greedy MTP at TP=2.
+At depths 2 to 15, intermediate token IDs stay on the device and all rank-pick words are read once at the end.
+Each depth still runs the same top-1 or top-1-with-sums kernel, rank gather and MTP forward. The original host scan
+still computes the returned IDs and confidence values. Integer comparisons in the intermediate selector preserve
+ties, signed zeros, subnormals and the host scan's NaN rule. Sampled or structured drafts, DFlash2, full GLM-5.3,
+in-process shares and other rank counts retain their existing paths. The switch is part of rank agreement and the
+timing-cache identity. Turning it off requires no new picker symbol in an older kernel image.
+No device speed or whole-model equality receipt is recorded for this experiment. Compare main, head with the
+switch off and head with it on, at identical checkpoint content and settings, before enabling it by default.
+
 Decode windows reach 32 rows and MTP chains 15 drafts. With drafts and enough scratch context, rank 0 races
 classic NVFP4 experts against the factored form, which gives the same bits, over real text on every rank at windows
 of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows. Five untimed sweeps of every width on both forms come first, then each
