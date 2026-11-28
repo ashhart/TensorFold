@@ -38,6 +38,7 @@ archives), so every host sees the same three release servers. It configures a se
 
 | Scope | Meaning |
 | --- | --- |
+| `TF_CUDA_PREFILL_TRACE` | release, tool, test | logs |
 | `release` | A `tensorfold-native` server the `dist` archives ship: macOS arm64 and both Linux CUDA builds. |
 | `tool` | Another executable: the `tf-*` developer programs and runners, and any server no archive ships. |
 | `test` | Only test builds: test steps, the test runner's environment, or a function only a test build option calls (`forgetFail`, behind `-Dslide-test-hooks`). |

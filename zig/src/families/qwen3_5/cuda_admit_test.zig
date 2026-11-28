@@ -124,3 +124,15 @@ test "Qwen share faults: --parallel N admits N streams at once with every stream
 test "Qwen pages default: --parallel a cap with TF_QWEN_KV_PAGES set, a request waits for pages; unset, a window each" {
     try caps(native.Lanes);
 }
+
+test "Qwen lane startup: prefill trace allocation failure releases the lane" {
+    _ = env.setenv("TF_CUDA_PREFILL_TRACE", "1", 1);
+    defer _ = env.unsetenv("TF_CUDA_PREFILL_TRACE");
+    var d = @import("cuda_sm110_open_test.zig").driver(120);
+    const ctx: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
+    var e = engine(&d);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const l = try failing.allocator().create(native.Lanes);
+    l.* = .{ .gpa = failing.allocator(), .io = std.testing.io, .e = &e, .capacity = 1, .target = undefined };
+    try std.testing.expectError(error.OutOfMemory, @import("cuda_lane_startup.zig").open(l, &ctx));
+}

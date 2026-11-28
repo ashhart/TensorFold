@@ -13,6 +13,7 @@ pub const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 pub const HostBuffer = @import("memory.zig").HostBuffer;
 pub const memory = @import("memory.zig");
 pub const download_stage = @import("download_stage.zig");
+pub const prefill_attribution = @import("prefill_attribution.zig");
 pub const memory_receipt = @import("memory_receipt.zig");
 pub const setAllocationLimit = @import("memory.zig").setAllocationLimit;
 pub const usage = @import("memory.zig").usage;
@@ -216,4 +217,8 @@ pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");
 
 test {
     _ = @import("tfq3_lifecycle_test.zig");
+}
+
+test {
+    _ = @import("prefill_attribution_test.zig");
 }
