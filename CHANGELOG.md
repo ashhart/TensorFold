@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal (M5, fused attention plans): the norm and RoPE dispatch, as `q27_qk_cache_rope`, writes rotated K and V straight into the KV cache (contiguous and paged) and Q into the packed `qa` buffer, padding slots included, so the intermediate barrier and the separate append and pack dispatches go; other chips and unfused plans keep the single `q27_qk_norm_rope` dispatch, and on an M5 Ultra every cache row and `qa` byte and the served replies match the previous path (#2960, part of #2940).
+
 - CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
 
 - Nemotron 3.5 Super on CUDA at TP=2: the expert rank runs a window's shared expert on a side stream beside its routed experts, with the same plans and kernels, so tokens are unchanged (#4886).
