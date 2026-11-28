@@ -22,7 +22,7 @@ pub const usage =
     \\  moetile                   whole shared down writes only slot 10 with identical FP32 bytes
     \\  moetile-contract          shared down replacement gates and the planted control
     \\  moetile-bench             alternate shared-down plus scatter and direct-slot GPU timings
-    \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
+    \\  nvfp4-fact                NVFP4 FACT64/FACT128 prompt bytes vs decode, including 2048/3072/8192-row chunks, FP64
     \\  hy4-nvfp4-experts         Hy4-flash's ModelOpt NVFP4 routed experts: each pair FP64-bounded under the SwiGLU clamp
     \\  hy4-nvfp4-experts-ckpt <ckpt> <layer>  the published build's experts at one layer: FP64-bounded pairs
     \\  mla-sink [<fatbin>]       the sink merge at Hy4-flash's shapes: the mla image gives Hy4-flash's bytes, FP64-bounded

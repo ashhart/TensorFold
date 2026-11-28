@@ -490,6 +490,7 @@ test {
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_attn_lanes_pending.zig");
+    _ = @import("nvfp4_fact128_pending.zig");
 }
 test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {

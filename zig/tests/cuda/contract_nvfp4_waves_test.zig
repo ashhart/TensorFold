@@ -13,7 +13,7 @@ fn loaded(warps: usize, up: usize, down: usize) fx {
     var resident: [7]usize = @splat(1);
     resident[4] = up;
     resident[5] = down;
-    return .{ .mod = undefined, .fns = undefined, .resident = resident, .prompt_fns = undefined, .pair_fns = undefined, .fact_fns = undefined, .warps = warps };
+    return .{ .mod = undefined, .fns = undefined, .resident = resident, .prompt_fns = undefined, .pair_fns = undefined, .fact_fns = undefined, .fact128_fns = undefined, .warps = warps };
 }
 
 /// The waves kinds, the entry each launches and whether it runs the 1-warp CTAs; each control follows its twin.

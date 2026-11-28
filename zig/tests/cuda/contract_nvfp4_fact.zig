@@ -13,7 +13,7 @@ const grouped = cuda.grouped;
 const nz5 = @import("contract_nvfp4_nz5.zig");
 
 /// Fact up/down, a control, waves' entries, 1-warp CTAs, two cut controls, block 32's and NVFP4_NZ5's five, controls.
-pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one, b32_up, b32_down, b32_down_bf16, b32_prompt_up, b32_prompt_down, b32_control, nz5_up, nz5_down, nz5_down_bf16, nz5_prompt_up, nz5_prompt_down, nz5_control, nz5_sums_control };
+pub const Kind = enum { up, down, up128, down128, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one, b32_up, b32_down, b32_down_bf16, b32_prompt_up, b32_prompt_down, b32_control, nz5_up, nz5_down, nz5_down_bf16, nz5_prompt_up, nz5_prompt_down, nz5_control, nz5_sums_control };
 
 /// experts_waves.zig's entry a kind launches, or null for the prompt-tile and classic kinds.
 fn wavesEntry(kind: Kind) ?usize {
@@ -27,7 +27,7 @@ fn wavesEntry(kind: Kind) ?usize {
 
 fn isDown(kind: Kind) bool {
     return switch (kind) {
-        .down, .down_waves, .down_one, .down_bf16_one, .down_waves_one, .cut_waves_one, .b32_down, .b32_down_bf16, .b32_prompt_down, .nz5_down, .nz5_down_bf16, .nz5_prompt_down => true,
+        .down, .down128, .down_waves, .down_one, .down_bf16_one, .down_waves_one, .cut_waves_one, .b32_down, .b32_down_bf16, .b32_prompt_down, .nz5_down, .nz5_down_bf16, .nz5_prompt_down => true,
         else => false,
     };
 }
@@ -100,6 +100,8 @@ const prompt_up_served = [_]c.Shape{
     .{ .rows = 32, .n = 512, .k = 4096 },
 };
 const prompt_down_served = [_]c.Shape{ .{ .rows = 130, .n = 2560, .k = 640 }, .{ .rows = 1, .n = 2560, .k = 640 }, .{ .rows = 130, .n = 2048, .k = 512 }, .{ .rows = 1, .n = 2048, .k = 512 } };
+const prompt_up128_served = [_]c.Shape{ .{ .rows = 2, .n = 640, .k = 2560 }, .{ .rows = 32, .n = 640, .k = 2560 }, .{ .rows = 34, .n = 640, .k = 2560 }, .{ .rows = 128, .n = 640, .k = 2560 }, .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 256, .n = 640, .k = 2560 }, .{ .rows = 258, .n = 640, .k = 2560 } };
+const prompt_down128_served = [_]c.Shape{ .{ .rows = 2, .n = 2560, .k = 640 }, .{ .rows = 32, .n = 2560, .k = 640 }, .{ .rows = 34, .n = 2560, .k = 640 }, .{ .rows = 128, .n = 2560, .k = 640 }, .{ .rows = 130, .n = 2560, .k = 640 }, .{ .rows = 256, .n = 2560, .k = 640 }, .{ .rows = 258, .n = 2560, .k = 640 } };
 
 /// GLM-5.3-Flash's routed experts, 4,096 dims: TP=2's rank is 1,024 wide, TP=3's are 704 and 640.
 const b32_up_served = [_]c.Shape{ .{ .rows = 1, .n = 1024, .k = 4096 }, .{ .rows = 16, .n = 1024, .k = 4096 }, .{ .rows = 16, .n = 704, .k = 4096 }, .{ .rows = 16, .n = 640, .k = 4096 } };
@@ -139,6 +141,8 @@ pub fn spec(kind: Kind) c.Spec {
         .up => .{ .name = "cuda nvfp4 experts prompt gate-up tf_nvfp4_fact_swiglu (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &prompt_up_served, .sums = .{ .bf16 = 30, .why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable" } },
         .control => .{ .name = "control: scaled-code prompt tile tf_nvfp4_prompt_swiglu posing as the decode gate-up", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &.{.{ .rows = 130, .n = 640, .k = 2560 }} },
         .down => .{ .name = "cuda nvfp4 experts prompt down tf_nvfp4_fact_down_f32 (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = down_tiles, .served = &prompt_down_served },
+        .up128 => .{ .name = "cuda nvfp4 experts FACT128 gate-up tf_nvfp4_fact128_swiglu (WM=2, RT=4)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = [3]c.Tile{ .{ .size = 128 / slots }, .{ .size = 128, .step = 32, .min = 32 }, .{ .size = 64, .step = 32, .min = 32 } }, .served = &prompt_up128_served, .sums = .{ .bf16 = 30, .why = why } },
+        .down128 => .{ .name = "cuda nvfp4 experts FACT128 down tf_nvfp4_fact128_down_f32 (WM=2, RT=4)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = [3]c.Tile{ .{ .size = 128 / slots }, .{ .size = 128, .step = 32, .min = 32 }, .{ .size = 64, .step = 32, .min = 32 } }, .served = &prompt_down128_served },
         .b32_up => .{ .name = "cuda nvfp4 block 32 decode gate-up tf_nvfp4_decode32_swiglu", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
         .b32_down => .{ .name = "cuda nvfp4 block 32 decode down tf_nvfp4_decode32_down_f32", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_down_served },
         .b32_down_bf16 => .{ .name = "cuda nvfp4 block 32 decode down bf16 tf_nvfp4_decode32_down_bf16", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "nvfp4_expert_kernel<1, 3, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
@@ -293,7 +297,9 @@ pub const Experts = struct {
         for (self.scales) |*s| s.* = 0x20 + rng.uintLessThan(u8, 0x28);
         for (&self.globals) |*v| v.* = 0.005 + rng.float(f32) * 0.03;
         for (self.x) |*v| v.* = c.toBf16((rng.float(f32) - 0.5) * 2);
-        for (self.picks, 0..) |*p, i| p.* = @intCast(if (i < experts) i else rng.uintLessThan(usize, experts));
+        // Every wide served shape rows=2*cnt puts exactly cnt pairs on hot expert 0 (cnt=64 and above).
+        const hot = if ((self.kind == .up128 or self.kind == .down128) and shape.rows > 64) shape.rows / 2 else 0;
+        for (self.picks, 0..) |*p, i| p.* = @intCast(if (i < hot) 0 else if (hot > 0) 1 + rng.uintLessThan(usize, experts - 1) else if (i < experts) i else rng.uintLessThan(usize, experts));
         switch (fill) {
             .random => {},
             .nonfinite => {
@@ -341,7 +347,7 @@ pub const Experts = struct {
         defer a.free(zeros);
         @memset(zeros, 0);
         self.plan = try self.route(ids, 16, zeros);
-        self.wide = try self.route(ids, cuda.experts.promptTile(.nvfp4), zeros);
+        self.wide = try self.route(ids, if (self.kind == .up128 or self.kind == .down128) 128 else cuda.experts.promptTile(.nvfp4), zeros);
         try self.rig.s.synchronize();
         self.out = try self.rig.output(self.outBytes());
         self.base = try self.rig.scratch(self.outBytes());
@@ -445,6 +451,8 @@ pub const Experts = struct {
             try self.k.runPrompt(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
         } else if (fact and self.tile != null) {
             try self.tile.?.run(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
+        } else if (fact and (self.kind == .up128 or self.kind == .down128)) {
+            try self.k.runFact128(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, 128), -1);
         } else if (fact) {
             try self.k.runFact(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
         } else try self.k.run(self.rig.s, epi, in, self.layer(), self.plan, out, items, -1);
