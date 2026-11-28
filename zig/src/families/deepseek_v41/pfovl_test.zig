@@ -49,7 +49,7 @@ fn roleOf(x: calls.Arg) []const u8 {
 /// A call the overlap re-emits per piece: wo_a / wo_b / shared-expert projections, their glue, and the exchanges.
 fn isPieced(c: calls.Call) bool {
     if (std.mem.startsWith(u8, c.name, "glue.exchange")) return true;
-    if (std.mem.eql(u8, c.name, "glue.swiglu") or std.mem.eql(u8, c.name, "glue.moe_sum")) return true;
+    if (std.mem.eql(u8, c.name, "glue.swiglu") or std.mem.eql(u8, c.name, "tensorfold_exl3_experts_v1.combine_add")) return true;
     // a projection's rot_in, unpack and GEMM read the producer's weights or its words ("s.<w>.lanes")
     for (c.args) |x| if (x.arg == .t and x.arg.t.role != .empty) {
         const r = roleOf(x.arg);
@@ -102,7 +102,7 @@ test "TF_DSV41_PF_OVERLAP on the prefill emitter: k pieces an exchange behind th
             try testing.expectEqual(@as(usize, 0), count(on, "glue.exchange"));
             try testing.expectEqual(xs * @as(usize, @intCast(k)), count(on, "glue.exchange_rows"));
             try testing.expectEqual(count(off, "tensorfold_exl3_linear_v4.rot_in") + (@as(usize, @intCast(k)) - 1) * layers.len * (4 + 1 + 3), count(on, "tensorfold_exl3_linear_v4.rot_in"));
-            try testing.expectEqual(@as(usize, @intCast(k)) * count(off, "glue.moe_sum"), count(on, "glue.moe_sum"));
+            try testing.expectEqual(@as(usize, @intCast(k)) * count(off, "tensorfold_exl3_experts_v1.combine_add"), count(on, "tensorfold_exl3_experts_v1.combine_add"));
             // the streams: only the partials are shared inside a fork region
             const sh = try branches.shared(aa, on);
             for (sh) |r| try testing.expect(std.mem.eql(u8, r, "L.part") or std.mem.eql(u8, r, "L.moe16"));
