@@ -68,8 +68,9 @@ const Model = struct {
         o.clock += 1;
         o.mine.items[i].used = o.clock;
     }
-    /// The index rewritten from this writer's records less `key`: another's records since its last read are lost.
+    /// The current index is reloaded before this writer rewrites it without `key`; no committed record is lost.
     fn remove(o: *Model, a: Allocator, key: u64) !void {
+        try o.reload(a);
         const i = linear(o.mine.items, key) orelse return;
         _ = o.mine.orderedRemove(i);
         o.file.clearRetainingCapacity();

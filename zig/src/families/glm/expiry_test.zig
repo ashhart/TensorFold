@@ -1,13 +1,20 @@
 //! GLM expiry coupled to the actual cache; no GPU or checkpoint is needed for snapshot ownership and pool metadata.
 const std = @import("std");
 const pc = @import("../../core/prompt_cache.zig");
+const platform = @import("sys");
 const slot_mod = @import("slots.zig");
 const kept = @import("kept.zig");
 const pool = @import("pool.zig");
 const Snap = @import("snapshot.zig").Snap;
 const Engine = @import("engine.zig").Engine;
+const Ep = std.meta.Child(std.meta.Child(blk: {
+    const info = @typeInfo(Engine).@"struct";
+    for (info.field_names, info.field_types) |name, field_type| if (std.mem.eql(u8, name, "ep")) break :blk field_type;
+    @compileError("Engine.ep type is unavailable");
+}));
 const control = @import("ep_control.zig");
-const Kind = @import("mirror.zig").Kind;
+const mirror = @import("mirror.zig");
+const Kind = mirror.Kind;
 const fabric = @import("fabric");
 const a = std.testing.allocator;
 
@@ -81,6 +88,271 @@ const Fixture = struct {
         return snap;
     }
 };
+
+const PeerDisk = struct {
+    const Space = struct {
+        fn free(_: [:0]const u8) ?u64 {
+            return 1 << 30;
+        }
+        fn clock() ?u64 {
+            return 100;
+        }
+    };
+
+    temp: std.testing.TmpDir = undefined,
+    root: [:0]const u8 = &.{},
+    dir: [:0]const u8 = &.{},
+    cluster: *fabric.fake.Cluster = undefined,
+    failed: std.atomic.Value(bool) = .init(false),
+    c: [2]control.Control = undefined,
+    ep: Ep = undefined,
+    f: Fixture = .{},
+    snap: Snap = undefined,
+    wins: [2]slot_mod.Win = undefined,
+    drafts: [2]slot_mod.Draft = undefined,
+
+    fn init(p: *PeerDisk) !void {
+        p.temp = std.testing.tmpDir(.{});
+        p.root = try p.temp.dir.realPathFileAlloc(std.testing.io, ".", a);
+        p.dir = try std.fmt.allocPrintSentinel(a, "{s}/0000000000000001", .{p.root}, 0);
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(p.dir, 0o700));
+        p.cluster = try fabric.fake.Cluster.init(a, 2, control.BYTES, .immediate, null);
+        p.c[0] = try control.Control.init(a, p.cluster.endpoint(0), 0, &p.failed);
+        p.c[1] = try control.Control.init(a, p.cluster.endpoint(1), 0, &p.failed);
+        for (&p.c) |*c| c.limit = 24_000_000;
+        p.ep = undefined;
+        p.ep.rank = 1;
+        p.ep.ctl = p.c[1];
+        p.f.init();
+        p.f.engine.ep = &p.ep;
+        p.f.sl.learned = p.dir;
+        p.f.sl.disk.admission = .{ .floor = 0, .free = Space.free, .clock = Space.clock };
+        p.snap = .{ .id = 9, .at = 0, .buf = undefined, .bytes = 1 };
+        try p.f.sl.snaps.put(a, p.snap.id, &p.snap);
+    }
+
+    fn deinit(p: *PeerDisk) void {
+        _ = p.f.sl.snaps.remove(p.snap.id);
+        p.f.deinit();
+        for (&p.c) |*c| c.deinit(a);
+        p.cluster.deinit();
+        a.free(p.dir);
+        a.free(p.root);
+        p.temp.cleanup();
+    }
+
+    fn apply(p: *PeerDisk, kind: Kind, words: []const u32) !void {
+        return p.applyFrom(kind, words, "/tf-kf81-distinct-leader");
+    }
+
+    fn applyLegacy(p: *PeerDisk, kind: Kind, words: []const u32) !void {
+        return p.applyFrom(kind, words, null);
+    }
+
+    fn applyFrom(p: *PeerDisk, kind: Kind, words: []const u32, root: ?[]const u8) !void {
+        var out: [5 + 1 + (1100 + 3) / 4]u32 = undefined;
+        var sent: []const u32 = words;
+        if (root) |leader_root| {
+            @memcpy(out[0..words.len], words);
+            out[words.len] = @intCast(leader_root.len);
+            const packed_len = (leader_root.len + 3) / 4;
+            out[words.len + packed_len] = 0;
+            const packed_bytes = std.mem.sliceAsBytes(out[words.len + 1 ..][0..packed_len]);
+            @memcpy(packed_bytes[0..leader_root.len], leader_root);
+            sent = out[0 .. words.len + 1 + packed_len];
+        }
+        try p.c[0].sendCommand(@backingInt(kind), sent);
+        const cmd = (try p.f.sl.e.ep.?.ctl.waitCommand()).?;
+        if (cmd != .lanes) return error.PeerOutOfStep;
+        if (@hasDecl(mirror, "applyDisk")) return mirror.applyDisk(&p.f.sl, cmd.lanes.kind, cmd.lanes.words);
+        return p.applyExisting(kind, cmd.lanes.words);
+    }
+
+    fn applyExisting(p: *PeerDisk, kind: Kind, w: []const u32) !void {
+        const need: usize = switch (kind) {
+            .disk_need => 3,
+            .disk_reserve => 5,
+            .disk_finish, .disk_other_next => 3,
+            .disk_other_remove, .forget => 2,
+            else => return error.CommandOutOfStep,
+        };
+        if (w.len < need) return error.CommandOutOfStep;
+        const ctl = &p.f.sl.e.ep.?.ctl;
+        const dirs = @import("lanes").learned_dirs;
+        const dir = p.f.sl.learned orelse return error.NotLearning;
+        switch (kind) {
+            .disk_need => {
+                const snap = p.f.sl.snaps.get(w[0]) orelse return ctl.replyValue(std.math.maxInt(u64));
+                const extra = @as(u64, w[1]) | @as(u64, w[2]) << 32;
+                try ctl.replyValue(p.f.sl.disk.need(dir, snap.bytes, extra));
+            },
+            .disk_reserve => {
+                const snap = p.f.sl.snaps.get(w[0]) orelse return ctl.reply(false);
+                const key = @as(u64, w[1]) | @as(u64, w[2]) << 32;
+                const extra = @as(u64, w[3]) | @as(u64, w[4]) << 32;
+                p.f.sl.disk.reserve(dir, key, snap.bytes, extra) catch return ctl.reply(false);
+                try ctl.reply(true);
+            },
+            .disk_finish => {
+                const key = @as(u64, w[0]) | @as(u64, w[1]) << 32;
+                p.f.sl.disk.finish(dir, key, w[2] != 0) catch return ctl.reply(false);
+                try ctl.reply(true);
+            },
+            .disk_other_remove => {
+                const id = @as(u64, w[0]) | @as(u64, w[1]) << 32;
+                dirs.removeOther(dirs.rootOf(dir), dir, id) catch return ctl.reply(false);
+                try ctl.reply(true);
+            },
+            .disk_other_next => {
+                const id = @as(u64, w[0]) | @as(u64, w[1]) << 32;
+                const found = dirs.next(dirs.rootOf(dir), dir, if (w[2] != 0) id else null) catch return ctl.replyValue(std.math.maxInt(u64));
+                if (found) |value| try ctl.replyValue(value) else try ctl.reply(false);
+            },
+            .forget => {
+                var buf: [1100]u8 = undefined;
+                const file = try @import("snapshot.zig").path(&buf, dir, @as(u64, w[0]) | @as(u64, w[1]) << 32, 1);
+                dirs.unlink(file) catch return ctl.reply(false);
+                try ctl.reply(true);
+            },
+            else => unreachable,
+        }
+    }
+
+    fn followerExit(p: *PeerDisk) void {
+        if (@hasDecl(mirror, "releaseDisk")) mirror.releaseDisk(&p.f.sl);
+    }
+
+    fn locked(p: *PeerDisk) !void {
+        const lease = platform.folder_lock.hold(a, p.root, true) catch |err| {
+            try std.testing.expectEqual(error.Busy, err);
+            return;
+        };
+        lease.release();
+        return error.FollowerRootNotLeased;
+    }
+
+    fn released(p: *PeerDisk) !void {
+        const lease = try platform.folder_lock.hold(a, p.root, true);
+        lease.release();
+    }
+
+    fn makeIdentity(p: *PeerDisk, id: u64) !void {
+        var path: [1100]u8 = undefined;
+        const dir = try std.fmt.bufPrintSentinel(&path, "{s}/{x:0>16}", .{ p.root, id }, 0);
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(dir, 0o700));
+    }
+
+    fn expectIdentityGone(p: *PeerDisk, id: u64) !void {
+        var path: [1100]u8 = undefined;
+        const dir = try std.fmt.bufPrintSentinel(&path, "{s}/{x:0>16}", .{ p.root, id }, 0);
+        const fd = platform.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(platform.c.mode_t, 0));
+        if (fd >= 0) {
+            _ = platform.c.close(fd);
+            return error.LearnedIdentityRemains;
+        }
+        try std.testing.expectEqual(.NOENT, platform.c.errno(fd));
+    }
+};
+
+test "GLM expiry: a distinct follower root stays leased from peer planning through disk finish" {
+    var leader_temp = std.testing.tmpDir(.{});
+    defer leader_temp.cleanup();
+    const leader_root = try leader_temp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(leader_root);
+    const leader = try platform.folder_lock.hold(a, leader_root, true);
+    defer leader.release();
+    var p: PeerDisk = .{};
+    try p.init();
+    defer p.deinit();
+    try p.makeIdentity(2);
+    try p.applyFrom(.disk_need, &.{ 9, 0, 0 }, leader_root);
+    try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
+    try p.locked();
+    try p.apply(.disk_reserve, &.{ 9, 77, 0, 0, 0 });
+    try std.testing.expect(try p.c[0].waitReply());
+    try p.locked();
+    try p.apply(.disk_other_remove, &.{ 2, 0 });
+    try std.testing.expect(try p.c[0].waitReply());
+    try p.expectIdentityGone(2);
+    try p.locked();
+    // The same transaction root reuses its active owner instead of recursively acquiring a second lease.
+    try p.apply(.forget, &.{ 66, 0 });
+    try std.testing.expect(try p.c[0].waitReply());
+    try p.locked();
+    try p.apply(.disk_finish, &.{ 77, 0, 1 });
+    try std.testing.expect(try p.c[0].waitReply());
+    try p.released();
+    {
+        const contender = try platform.folder_lock.hold(a, p.root, true);
+        defer contender.release();
+        try p.applyFrom(.disk_need, &.{ 9, 0, 0 }, leader_root);
+        try std.testing.expectEqual(std.math.maxInt(u64), try p.c[0].waitReplyValue());
+    }
+    try p.released();
+}
+
+test "GLM expiry: an identical pathname still refuses a local contender before retry" {
+    var p: PeerDisk = .{};
+    try p.init();
+    defer p.deinit();
+    {
+        const contender = try platform.folder_lock.hold(a, p.root, true);
+        defer contender.release();
+        try p.applyFrom(.disk_need, &.{ 9, 0, 0 }, p.root);
+        try std.testing.expectEqual(std.math.maxInt(u64), try p.c[0].waitReplyValue());
+    }
+    try p.applyFrom(.disk_need, &.{ 9, 0, 0 }, p.root);
+    try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
+    try p.locked();
+    try p.apply(.disk_finish, &.{ 77, 0, 1 });
+    try std.testing.expect(try p.c[0].waitReply());
+    try p.released();
+}
+
+test "GLM expiry: a peer command error releases the follower root lease" {
+    var p: PeerDisk = .{};
+    try p.init();
+    defer p.deinit();
+    try p.apply(.disk_need, &.{ 9, 0, 0 });
+    try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
+    try p.locked();
+    try std.testing.expectError(error.CommandOutOfStep, p.applyLegacy(.disk_other_next, &.{}));
+    try p.released();
+    try p.apply(.disk_finish, &.{ 77, 0, 1 });
+    try std.testing.expect(!try p.c[0].waitReply());
+}
+
+test "GLM expiry: failed rollback deletion retains the lease through disk finish" {
+    var p: PeerDisk = .{};
+    try p.init();
+    defer p.deinit();
+    try p.apply(.disk_need, &.{ 9, 0, 0 });
+    try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
+    try p.apply(.disk_reserve, &.{ 9, 77, 0, 0, 0 });
+    try std.testing.expect(try p.c[0].waitReply());
+    var path: [1100]u8 = undefined;
+    const file = try @import("snapshot.zig").path(&path, p.dir, 66, 1);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(file, 0o700));
+    defer _ = platform.c.rmdir(file);
+    try p.apply(.forget, &.{ 66, 0 });
+    try std.testing.expect(!try p.c[0].waitReply());
+    try p.locked();
+    try p.apply(.disk_finish, &.{ 77, 0, 0 });
+    try std.testing.expect(try p.c[0].waitReply());
+    try p.released();
+    try std.testing.expect(p.f.sl.disk.pending == null);
+}
+
+test "GLM expiry: follower exit releases an active peer disk root lease" {
+    var p: PeerDisk = .{};
+    try p.init();
+    defer p.deinit();
+    try p.apply(.disk_need, &.{ 9, 0, 0 });
+    try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
+    try p.locked();
+    p.followerExit();
+    try p.released();
+}
 
 test "GLM expiry: a failed relocation keeps its selected restore borrow alive until reported" {
     const log_level = std.testing.log_level;

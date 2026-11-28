@@ -242,7 +242,7 @@ test "actual Store learn writes neither half on peer refusal, backs off, and rem
     try std.testing.expectEqual(@as(usize, 1), fake.writes);
     try std.testing.expectEqual(@as(usize, 1), fake.disk_peer_writes);
     try std.testing.expect(!fake.disk_reserved);
-    try std.testing.expectEqual(@as(usize, 1), fake.disk_finishes);
+    try std.testing.expectEqual(@as(usize, 2), fake.disk_finishes);
     try std.testing.expect(!im.has(imprint.Imprint.keyOf(prompt[0..6])));
     try std.testing.expectEqual(@as(u64, 0), im.admission.reserved);
     var file_path: [512]u8 = undefined;

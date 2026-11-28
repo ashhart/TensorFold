@@ -14,6 +14,8 @@ pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
     const write = s.family.vtable.write orelse return;
     const key = imprint.Imprint.keyOf(e.tokens);
     if (im.admission.waiting(im.dir)) return;
+    const lease = @import("sys").folder_lock.hold(s.gpa, im.root, true) catch return;
+    defer lease.release();
     finishPending(s, im) catch {
         im.admission.refuse(im.dir);
         return;
@@ -35,6 +37,8 @@ pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
         im.admission.refuse(im.dir);
         return;
     }
+    var success = false;
+    defer if (s.family.vtable.peer_finish) |finish| finish(s.family.ptr, key, success) catch |err| note("finishing peer disk admission failed ({s})", .{@errorName(err)});
     const dirs = @import("lanes").learned_dirs;
     const others = otherCandidates(s, im) catch {
         im.admission.refuse(im.dir);
@@ -89,9 +93,7 @@ pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
         .refused => return learningPaused(im),
         .ready => {},
     }
-    var success = false;
     defer im.admission.finish(im.dir, disk_bytes, success);
-    defer if (s.family.vtable.peer_finish) |finish| finish(s.family.ptr, key, success) catch |err| note("finishing peer disk admission failed ({s})", .{@errorName(err)});
     if (s.family.vtable.peer_reserve) |peer_reservation| peer_reservation(s.family.ptr, e.saved, key, extra) catch return;
     im.beginWrite(key) catch return;
     write(s.family.ptr, e.saved, im.dir, key) catch |err| {
@@ -109,6 +111,8 @@ pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
 
 /// A planned stop: a learned write left half made is settled now, not at the next learn.
 pub fn settle(s: *Store, im: *imprint.Imprint) void {
+    const lease = @import("sys").folder_lock.hold(s.gpa, im.root, true) catch return;
+    defer lease.release();
     finishPending(s, im) catch |err| note("learned cleanup remains pending ({s})", .{@errorName(err)});
 }
 
@@ -118,6 +122,8 @@ fn unlearnChecked(s: *Store, im: *imprint.Imprint, key: u64) !void {
     try im.remove(key);
 }
 pub fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {
+    const lease = @import("sys").folder_lock.hold(s.gpa, im.root, true) catch return;
+    defer lease.release();
     unlearnChecked(s, im, key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
 }
 fn finishPending(s: *Store, im: *imprint.Imprint) !void {

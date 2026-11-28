@@ -20,19 +20,8 @@ pub fn path(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
 
 /// `st` to `file` (its header, then its bytes), through a temporary file renamed into place.
 pub fn writeFile(st: *const State, file: [:0]const u8) !void {
-    var tmp_buf: [1100]u8 = undefined;
-    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.part", .{file}, 0);
-    const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
-    if (fd < 0) return error.SnapshotWrite;
-    errdefer _ = platform.c.unlink(tmp);
-    {
-        defer _ = platform.c.close(fd);
-        const head: Head = .{ .magic = FILE_MAGIC, .layout = @backingInt(st.layout), .at = st.at, .bytes = st.bytes, .hist = st.hist };
-        try put(fd, std.mem.asBytes(&head));
-        try put(fd, st.buf.contents()[0..st.bytes]);
-        if (platform.c.fsync(fd) != 0) return error.SnapshotWrite;
-    }
-    if (platform.c.rename(tmp, file) != 0) return error.SnapshotWrite;
+    const head: Head = .{ .magic = FILE_MAGIC, .layout = @backingInt(st.layout), .at = st.at, .bytes = st.bytes, .hist = st.hist };
+    try @import("snapshot_file").publish(file, &.{ std.mem.asBytes(&head), st.buf.contents()[0..st.bytes] });
 }
 
 /// `file`'s state after `at` tokens, in a buffer from the engine's pool; another position, layout or size is refused.
@@ -49,15 +38,6 @@ pub fn readFile(e: *Engine, gpa: std.mem.Allocator, at: usize, file: [:0]const u
     try get(fd, st.buf.contents()[0..st.bytes], @sizeOf(Head));
     st.hist = head.hist;
     return st;
-}
-
-fn put(fd: c_int, b: []const u8) !void {
-    var done: usize = 0;
-    while (done < b.len) {
-        const n = platform.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
-        if (n <= 0) return error.SnapshotWrite;
-        done += @intCast(n);
-    }
 }
 
 fn get(fd: c_int, b: []u8, at: u64) !void {

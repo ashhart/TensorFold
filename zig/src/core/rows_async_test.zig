@@ -7,6 +7,23 @@ const rows = @import("rows_store.zig");
 const Fake = @import("rows_fake.zig").Fake;
 const rmTree = @import("prompt_imprint_test.zig").rmTree;
 
+const rowdir = @import("rows_dir.zig");
+
+var fail_state_directory_sync = false;
+
+fn renameThenFailStateSync(old_fd: c_int, old: [*:0]const u8, new_fd: c_int, new: [*:0]const u8) callconv(.c) c_int {
+    const rc = platform.c.renameat(old_fd, old, new_fd, new);
+    if (rc == 0 and std.mem.endsWith(u8, std.mem.sliceTo(new, 0), ".st")) fail_state_directory_sync = true;
+    return rc;
+}
+
+fn failArmedDirectorySync(fd: c_int) callconv(.c) c_int {
+    if (fail_state_directory_sync) {
+        fail_state_directory_sync = false;
+        return platform.c.fsync(-1);
+    }
+    return platform.c.fsync(fd);
+}
 const Gate = struct {
     entered: std.atomic.Value(bool) = .init(false),
     release: std.atomic.Value(bool) = .init(false),
@@ -150,6 +167,48 @@ test "spill I/O: ENOSPC, truncated short writes and fsync failures publish nothi
         try std.testing.expect(first.id != x.r.failures.records[1].?.id);
         try std.testing.expectEqual(@as(u64, 0), x.r.admission.reserved);
     }
+}
+
+test "spill I/O: synchronous state rename followed by directory-sync failure publishes neither memory nor disk state" {
+    try directorySyncFailurePublishesNothing(true);
+}
+
+test "spill I/O: asynchronous state rename followed by directory-sync failure publishes neither memory nor disk state" {
+    try directorySyncFailurePublishesNothing(false);
+}
+
+fn directorySyncFailurePublishesNothing(synchronous: bool) !void {
+    const x = try Fixture.open(if (synchronous) "rename-sync" else "rename-async", .evicted, synchronous, 1 << 20);
+    defer x.close();
+    fail_state_directory_sync = false;
+    rowdir.test_renameat = renameThenFailStateSync;
+    rowdir.test_fsync = failArmedDirectorySync;
+    defer {
+        rowdir.test_renameat = null;
+        rowdir.test_fsync = null;
+    }
+    const tokens = fixture.prompt(if (synchronous) 31 else 32);
+    try x.keep(&tokens, 600);
+    x.s.remove(0);
+    try x.settle();
+    try std.testing.expect(!fail_state_directory_sync);
+    try std.testing.expectEqual(@as(u64, 1), x.r.counts.failed);
+    try std.testing.expectEqual(@as(usize, 0), x.r.states.items.len);
+    try std.testing.expectEqual(@as(usize, 0), x.r.blocks.count());
+    try std.testing.expectEqual(@as(u64, 0), x.r.held());
+    try std.testing.expectEqual(@as(u64, 0), x.r.admission.reserved);
+    try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".st"));
+    try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".blk"));
+    try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".part"));
+
+    x.s.deinit();
+    x.r.deinit();
+    x.s = pc.Store.init(fixture.a, x.f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 30);
+    x.r = try rows.attach(fixture.a, &x.s, .{ .root = x.root, .identity = 7, .cap = 1 << 30, .floor = 0, .daily = 1 << 30, .lookahead = 1, .spill = .evicted, .sync_writes = synchronous, .staging_bytes = 1 << 20 });
+    try std.testing.expectEqual(@as(usize, 0), x.r.states.items.len);
+    try std.testing.expectEqual(@as(usize, 0), x.r.blocks.count());
+    try std.testing.expectEqual(@as(u64, 0), x.r.held());
+    try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".st"));
 }
 
 test "spill I/O: the byte permit skips immediately and leaves token state unchanged" {
@@ -408,4 +467,26 @@ test "spill I/O: shutdown keeps a completed job's own filesystem error" {
     try std.testing.expectEqual(error.NoSpaceLeft, x.r.failures.records[0].?.err);
     try std.testing.expectEqual(@as(u64, 1), x.r.counts.failed);
     try std.testing.expectEqual(@as(u64, 0), x.r.admission.reserved);
+}
+
+test "POSIX dot reopen scans independently after an earlier scan reached parent EOF" {
+    if (platform.windows) return error.SkipZigTest;
+    const t = std.testing;
+    const a = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "entry", .data = "contents" });
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(root);
+    const dir = try rowdir.openPath(root);
+    defer rowdir.close(dir);
+    for (0..2) |_| {
+        const stream = try rowdir.scan(dir);
+        defer _ = platform.c.closedir(stream);
+        var found = false;
+        while (platform.c.readdir(stream)) |entry| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&entry.name, 0), "entry")) found = true;
+        }
+        try t.expect(found);
+    }
 }
