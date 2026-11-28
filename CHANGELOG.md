@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Vulkan on Apple silicon: submits batch dispatches into one command buffer per batch instead of one submission per dispatch, with hazard-tracked barriers between conflicting dispatches and one barrier owed to the previous submission at the next batch's start; the same logits, 2% to 20% less run time on a 13-inch M1 and a 16-inch M1 Max (#2038, part of #1420). Thanks to @joshuaswarren.
+
 - Server: `"kept_probs": true` on `/v1/chat/completions` (with `logprobs: true`) and `/v1/completions` (with a `logprobs` count) adds a `kept_probs` list for each reply token: the tokens left after temperature, `top_k`, `top_p` and `min_p`, renormalized to sum to 1; a sampled request needs `top_k` from 1 to 20, and a nonzero `presence_penalty` or `frequency_penalty` or a grammar returns HTTP 400; the reply's tokens and every other field are the same with the option on or off (#3207, fixes #3182).
 
 - Vulkan on Apple silicon: submits batch dispatches into one command buffer per batch instead of one submission per dispatch, with hazard-tracked barriers between conflicting dispatches and one barrier owed to the previous submission at the next batch's start; the same logits, 2% to 20% less run time on a 13-inch M1 and a 16-inch M1 Max (#2038, part of #1420). Thanks to @joshuaswarren.
