@@ -1,6 +1,8 @@
-//! cuBLASLt projections with one plan and one algorithm per (n, k), the row count set per call.
+//! cuBLASLt projections, one plan and algorithm per (n, k) at any row count; 1 row may run a bit-equal second one.
 const std = @import("std");
 const cuda = @import("cuda");
+
+const one_row = cuda.one_row;
 
 const cublaslt = cuda.cublaslt;
 const Allocator = std.mem.Allocator;
@@ -45,27 +47,33 @@ fn attribute(lt: *const cublaslt.Library, algo: *const cublaslt.Algo, id: c_int,
 
 pub const Gemms = struct {
     gpa: Allocator,
+    d: *const cuda.Driver,
     lt: cublaslt.Library,
     workspace: cuda.DeviceBuffer,
     /// The one plan each (n, k) runs, on the one algorithm its rows keep at every count.
     plans: std.AutoHashMapUnmanaged([2]u64, Plan) = .empty,
+    /// A check mode: every call of a plan with a 1-row algorithm also runs the other algorithm and compares each row.
+    tally: ?*one_row.Tally = null,
 
     /// A (n, k)'s plan and the row counts its algorithm has been checked at.
-    const Plan = struct {
+    pub const Plan = struct {
         linear: cublaslt.Linear,
         /// The row counts already checked: one in here needs no `cublasLtMatmulAlgoCheck` again.
         checked: std.AutoHashMapUnmanaged(u64, void) = .empty,
+        /// A 1-row call's algorithm when one gives the plan's bits (cuda/one_row.zig); null: the plan's own at 1 row.
+        one: ?cublaslt.Linear = null,
     };
 
     pub fn init(gpa: Allocator, d: *const cuda.Driver) !Gemms {
         var lt = try cublaslt.Library.open();
         errdefer lt.close();
-        return .{ .gpa = gpa, .lt = lt, .workspace = try cuda.DeviceBuffer.alloc(d, workspace_bytes) };
+        return .{ .gpa = gpa, .d = d, .lt = lt, .workspace = try cuda.DeviceBuffer.alloc(d, workspace_bytes) };
     }
 
     pub fn deinit(g: *Gemms) void {
         var it = g.plans.valueIterator();
         while (it.next()) |p| {
+            if (p.one) |*o| o.deinit();
             p.checked.deinit(g.gpa);
             p.linear.deinit();
         }
@@ -78,9 +86,41 @@ pub const Gemms = struct {
     pub fn run(g: *Gemms, s: cuda.Stream, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize) !void {
         if (rows == 0) return;
         const p = try g.plan(n, k);
+        if (rows == 1) if (p.one) |*o| {
+            try o.run(x, w, y, g.workspace.ptr, workspace_bytes, s.handle);
+            if (g.tally) |t| try g.compare(s, p, x, w, y, rows, n, k, t);
+            return;
+        };
+        try g.runPlan(s.handle, p, x, w, y, rows, n, k);
+        if (g.tally) |t| if (p.one != null) try g.compare(s, p, x, w, y, rows, n, k, t);
+    }
+
+    fn runPlan(g: *Gemms, s: cuda.abi.Stream, p: *Plan, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize) !void {
         try setCols(&g.lt, &p.linear, rows);
         if (!p.checked.contains(columns(rows))) try g.check(p, n, k, rows);
-        try p.linear.run(x, w, y, g.workspace.ptr, workspace_bytes, s.handle);
+        try p.linear.run(x, w, y, g.workspace.ptr, workspace_bytes, s);
+    }
+
+    /// The check mode's comparison of `y` [rows, n]: the plan's algorithm at 1 row, or each row alone on the 1-row one.
+    fn compare(g: *Gemms, s: cuda.Stream, p: *Plan, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize, t: *one_row.Tally) !void {
+        var other = try cuda.DeviceBuffer.alloc(g.d, 2 * rows * n);
+        defer other.free();
+        errdefer s.synchronize() catch {}; // a refused later launch: the queued rows' writes land before `other` goes
+        if (rows == 1) try g.runPlan(s.handle, p, x, w, other.ptr, 1, n, k) else for (0..rows) |r| {
+            try p.one.?.run(x + r * k * 2, w, other.ptr + r * n * 2, g.workspace.ptr, workspace_bytes, s.handle);
+        }
+        try s.synchronize();
+        const a = try g.gpa.alloc(u8, 2 * rows * n);
+        defer g.gpa.free(a);
+        const b = try g.gpa.alloc(u8, 2 * rows * n);
+        defer g.gpa.free(b);
+        const view: cuda.DeviceBuffer = .{ .d = g.d, .ptr = y, .len = a.len, .borrowed = true };
+        try view.download(0, a);
+        try other.download(0, b);
+        for (0..rows) |r| {
+            if (!std.mem.eql(u8, a[r * n * 2 ..][0 .. n * 2], b[r * n * 2 ..][0 .. n * 2])) t.differ += 1;
+        }
+        t.rows += rows;
     }
 
     /// Builds the plans of the (n, k) pairs a pass multiplies by, so a split-K algorithm is refused before any request.
@@ -98,8 +138,8 @@ pub const Gemms = struct {
         }
     }
 
-    /// The (n, k)'s plan, built once at `reference_rows` on its one algorithm.
-    fn plan(g: *Gemms, n: usize, k: usize) !*Plan {
+    /// The (n, k)'s plan, built once at `reference_rows` on its one algorithm, with its 1-row algorithm if any.
+    pub fn plan(g: *Gemms, n: usize, k: usize) !*Plan {
         const got = try g.plans.getOrPut(g.gpa, key(n, k));
         if (got.found_existing) return got.value_ptr;
         errdefer g.plans.removeByPtr(got.key_ptr);
@@ -107,7 +147,16 @@ pub const Gemms = struct {
         errdefer linear.deinit();
         try accept(&g.lt, n, k, linear.algo);
         got.value_ptr.* = .{ .linear = linear };
+        errdefer got.value_ptr.checked.deinit(g.gpa);
         try g.check(got.value_ptr, n, k, reference_rows);
+        got.value_ptr.one = g.oneRow(got.value_ptr, n, k) catch |e| switch (e) {
+            error.CudaContextLost => return e,
+            // optional: no 1-row algorithm, a failed setup or a refused probe buffer leaves the batch plan's
+            else => none: {
+                std.log.warn("qwen3: (n {d}, k {d}): 1 row on the {d}-row pick, the 1-row probe failed: {s}", .{ n, k, reference_rows, @errorName(e) });
+                break :none null;
+            },
+        };
         return got.value_ptr;
     }
 
@@ -125,6 +174,80 @@ pub const Gemms = struct {
         p.linear.workspace_need = @max(p.linear.workspace_need, checked.workspace_size);
         try p.checked.put(g.gpa, columns(rows), {});
     }
+
+    /// The 1-row heuristic's first candidate one_row.pick takes, or null; `plan` takes an error for null too.
+    fn oneRow(g: *Gemms, p: *Plan, n: usize, k: usize) !?cublaslt.Linear {
+        var one = try cublaslt.Linear.initEpilogue(&g.lt, 1, n, k, .bf16, workspace_bytes, .none);
+        errdefer one.deinit();
+        var found: [one_row.candidates]cublaslt.Heuristic = undefined;
+        var count: c_int = 0;
+        // optional, so no error line: `plan` warns and keeps the batch plan
+        if (g.lt.api.cublasLtMatmulAlgoGetHeuristic(one.handle, one.desc, one.a, one.b, one.c, one.c, one.pref, one_row.candidates, &found, &count) != 0) return error.HeuristicRefused;
+        if (try g.oneRowFrom(p, &one, n, k, found[0..@intCast(@max(count, 0))])) return one;
+        one.deinit();
+        return null;
+    }
+
+    /// Sets `one` to the candidate one_row.pick takes from `cands`, against the plan's algorithm on the probe rows.
+    pub fn oneRowFrom(g: *Gemms, p: *Plan, one: *cublaslt.Linear, n: usize, k: usize, cands: []const cublaslt.Heuristic) !bool {
+        var pr = try one_row.Probe.init(g.gpa, g.d, n, k);
+        defer pr.deinit(g.gpa);
+        errdefer _ = g.d.api.cuCtxSynchronize(); // a failed probe's queued runs finish before its buffers go
+        try g.probeRef(p, &pr, n, k);
+        const ctx: Same = .{ .g = g, .one = one, .pr = &pr, .n = n, .k = k };
+        const i = try one_row.pick(cands, workspace_bytes, ctx) orelse {
+            std.log.info("qwen3: (n {d}, k {d}): 1 row on the {d}-row pick, no 1-row pick gives its bits", .{ n, k, reference_rows });
+            return false;
+        };
+        one.algo = cands[i].algo;
+        one.workspace_need = cands[i].workspace_size;
+        std.log.info("qwen3: (n {d}, k {d}): 1 row on the 1-row heuristic's pick {d}: {d} probe rows alone give the {d}-row pick's bits", .{ n, k, i, one_row.rows, reference_rows });
+        return true;
+    }
+
+    /// Whether `h` gives the plan's bits on every probe row, run alone; the K-order check is the caller's (a control).
+    pub fn probeSame(g: *Gemms, p: *Plan, n: usize, k: usize, h: cublaslt.Heuristic) !bool {
+        var one = try cublaslt.Linear.initEpilogue(&g.lt, 1, n, k, .bf16, workspace_bytes, .none);
+        defer one.deinit();
+        var pr = try one_row.Probe.init(g.gpa, g.d, n, k);
+        defer pr.deinit(g.gpa);
+        errdefer _ = g.d.api.cuCtxSynchronize(); // a failed candidate's queued rows finish before the probe goes
+        try g.probeRef(p, &pr, n, k);
+        return (Same{ .g = g, .one = &one, .pr = &pr, .n = n, .k = k }).same(h);
+    }
+
+    /// The plan's algorithm over all the probe rows at once, downloaded into `pr.want`.
+    fn probeRef(g: *Gemms, p: *Plan, pr: *one_row.Probe, n: usize, k: usize) !void {
+        try g.runPlan(null, p, pr.x.ptr, pr.w.ptr, pr.ref.ptr, one_row.rows, n, k);
+        try g.d.check(g.d.api.cuCtxSynchronize(), "cuCtxSynchronize");
+        try pr.ref.download(0, pr.want);
+    }
+
+    /// one_row.pick's view of the device: a candidate's K order, and its probe rows run alone against the plan's.
+    const Same = struct {
+        g: *Gemms,
+        one: *cublaslt.Linear,
+        pr: *one_row.Probe,
+        n: usize,
+        k: usize,
+
+        pub fn keepsOrder(c: Same, algo: cublaslt.Algo) bool {
+            const x = config(&c.g.lt, algo) orelse return false;
+            return oneOrder(x);
+        }
+
+        pub fn same(c: Same, h: cublaslt.Heuristic) !bool {
+            const g = c.g;
+            c.one.algo = h.algo;
+            c.one.workspace_need = h.workspace_size;
+            for (0..one_row.rows) |r| {
+                try c.one.run(c.pr.x.ptr + r * c.k * 2, c.pr.w.ptr, c.pr.y.ptr + r * c.n * 2, g.workspace.ptr, workspace_bytes, null);
+            }
+            try g.d.check(g.d.api.cuCtxSynchronize(), "cuCtxSynchronize");
+            try c.pr.y.download(0, c.pr.got);
+            return std.mem.eql(u8, c.pr.got, c.pr.want);
+        }
+    };
 };
 
 /// Refuses an algorithm whose K sums are split or reduced, and says what it is: one algorithm an (n, k) keeps.

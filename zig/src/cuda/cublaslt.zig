@@ -67,6 +67,7 @@ pub const Api = struct {
     cublasLtMatmulAlgoGetHeuristic: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, Preference, c_int, [*]Heuristic, *c_int) callconv(.c) S,
     cublasLtMatmulAlgoCheck: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, *const Algo, *Heuristic) callconv(.c) S,
     cublasLtMatmulAlgoConfigGetAttribute: *const fn (*const Algo, c_int, ?*anyopaque, usize, ?*usize) callconv(.c) S,
+    cublasLtMatmulAlgoConfigSetAttribute: *const fn (*Algo, c_int, CPtr, usize) callconv(.c) S,
     cublasLtMatmul: *const fn (Handle, MatmulDesc, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, ?*const Algo, abi.DevicePtr, usize, abi.Stream) callconv(.c) S,
 };
 

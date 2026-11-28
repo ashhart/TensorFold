@@ -5,8 +5,9 @@ const qa = @import("qwen3_asr");
 const tok = @import("tokenizer");
 const host = qa.host;
 
-const usage = "usage: tf-qwen3-asr MODEL_DIR CLIP.wav [--case DIR [--ids-only] [--min-cos X]] [--tokens N]\n" ++
-    "  with a case, a gate: exit 1 when the prompt or transcript differs or a stage's cosine is under X (default 0.99)\n";
+const usage = "usage: tf-qwen3-asr MODEL_DIR CLIP.wav [--case DIR [--ids-only] [--min-cos X]] [--tokens N] [--check-one-row]\n" ++
+    "  with a case, a gate: exit 1 when the prompt or transcript differs or a stage's cosine is under X (default 0.99)\n" ++
+    "  --check-one-row: every projection's rows also on the other algorithm (1-row vs batch), exit 1 on a differing bit\n";
 const eos = [_]u32{ 151645, 151643 };
 
 fn seconds() f64 {
@@ -85,11 +86,15 @@ pub fn main(init: std.process.Init) !u8 {
     var case_dir: ?[]const u8 = null;
     var max_new: usize = 448;
     var ids_only = false; // a case of ids and margins only: no stage compared
+    var check_one_row = false;
     var min_cos: f64 = 0.99;
     var i: usize = 3;
     while (i < args.len) : (i += 2) {
         if (std.mem.eql(u8, args[i], "--ids-only")) {
             ids_only = true;
+            i -= 1;
+        } else if (std.mem.eql(u8, args[i], "--check-one-row")) {
+            check_one_row = true;
             i -= 1;
         } else if (i + 1 >= args.len) {
             std.debug.print(usage, .{});
@@ -132,6 +137,8 @@ pub fn main(init: std.process.Init) !u8 {
     const opts: qa.Options = .{ .audio_rows = plan.rows, .pass_rows = ids.len, .positions = ids.len + max_new + 1 };
     const m = try qa.Model.load(gpa, io, &driver, s, args[1], cfg, opts);
     defer m.deinit();
+    var tally: qa.Model.Tally = .{};
+    if (check_one_row) m.lm.g.tally = &tally;
     var rows_buf = try cuda.DeviceBuffer.alloc(&driver, plan.rows * cfg.audio.out * 2);
     defer rows_buf.free();
     const gib = struct {
@@ -192,6 +199,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer gpa.free(reply);
     std.debug.print("TIMES mel {d:.1} ms, tower {d:.1} ms ({d} rows), prompt pass {d:.1} ms ({d} rows), decode {d} tokens {d:.1} tok/s\n", .{ mel_s * 1e3, tower_s * 1e3, rows, prompt_s * 1e3, ids.len, out.items.len, @as(f64, @floatFromInt(out.items.len)) / @max(dec_s, 1e-9) });
     std.debug.print("TEXT {s}\n", .{reply});
+    const one_row_ok = !check_one_row or (tally.rows > 0 and tally.differ == 0);
+    if (check_one_row) std.debug.print("ONE-ROW {d} rows compared, 1-row algorithm against the batch one: {d} differ: {s}\n", .{ tally.rows, tally.differ, if (one_row_ok) "PASS" else "FAIL" });
     if (cmp) |*c| {
         const want = try c.case.ids(gpa, "greedy_ids");
         defer gpa.free(want);
@@ -208,9 +217,9 @@ pub fn main(init: std.process.Init) !u8 {
                 if (first < ref.len) ref[first] else 0,
             });
         }
-        const pass = same_prompt and same and c.worst >= min_cos; // NaN fails
+        const pass = same_prompt and same and c.worst >= min_cos and one_row_ok; // NaN fails
         std.debug.print("SUMMARY qwen3-asr cuda: worst stage cosine {d:.9} (gate {d}), transcript {s}: {s}\n", .{ c.worst, min_cos, if (same) "equal" else "different", if (pass) "PASS" else "FAIL" });
         if (!pass) return 1;
     }
-    return 0;
+    return if (one_row_ok) 0 else 1;
 }

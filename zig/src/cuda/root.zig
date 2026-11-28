@@ -30,6 +30,7 @@ pub const Config = launch.Config;
 pub const Dim3 = launch.Dim3;
 pub const graph = @import("graph.zig");
 pub const cublaslt = @import("cublaslt.zig");
+pub const one_row = @import("one_row.zig");
 pub const nccl = @import("nccl.zig");
 pub const roce = @import("roce.zig");
 pub const roce_pair_rule = @import("roce_pair_rule.zig");
@@ -99,6 +100,7 @@ pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
 
 test {
+    _ = one_row;
     _ = priority_copies;
     _ = nccl;
     _ = @import("p2p_nvml.zig");
