@@ -18,6 +18,10 @@ pub const Fake = struct {
     cand: [16][16]u32 = undefined,
     multi: [16][16][16]u32 = undefined,
 
+    pub fn ctxBytes() usize {
+        return 0;
+    }
+
     fn note(f: *Fake, xs: []const u64) void {
         f.log.appendSlice(gpa, xs) catch @panic("oom");
     }
@@ -427,7 +431,9 @@ test "draft sources: XPU DFlash2 through Drafted keeps the lane target's round f
     var a: ad.Adapter(xq.drafter, L) = .{ .d = b.drafter.?, .host = &b };
     var x = try Drafted.init(gpa, b.backend(), a.drafter());
     defer x.deinit();
-    try std.testing.expectEqualDeep(b.facts(), ad.facts(&x, b.facts()));
+    var want = b.facts();
+    want.draft_kv = .{ .bytes = xq.drafter.Drafter.ctxBytes(), .dtype = .bf16 };
+    try std.testing.expectEqualDeep(want, ad.facts(&x, b.facts()));
     _ = &Drafted.backend; // and the adapter's operations compile on the real drafter
     _ = &@TypeOf(a).drafter;
 }
