@@ -24,11 +24,11 @@ pub fn absorbed(at: usize, rows: usize, n: usize) usize {
 /// One chunk from `at` at today's cut (`flight.rows`), submitted on `b`; the row after it.
 pub fn chunk(b: anytype, ops: anytype, s: *Stream, at: usize, next: *usize) !usize {
     const rows = flight.rows(s, at, ops.cap(), ops.decision(s), next);
-    if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
+    try flight.checkpoint(s);
     try ops.grow(s, at + rows);
     try flight.submit(b, s, ops.body(s, at, rows));
     const end = at + rows;
-    s.fill_at.store(@intCast(at), .monotonic); // landed tokens only: the newest chunk is still queued on the GPU
+    flight.advanced(s, end, rows);
     if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
     return end;
 }
@@ -38,7 +38,7 @@ pub fn whole(b: anytype, ops: anytype, s: *Stream) !void {
     var at = try ops.open(s);
     var next: usize = 0;
     while (at < s.prompt_len) at = chunk(b, ops, s, at, &next) catch |err| {
-        if (err == error.Cancelled) try retain(b, s, at);
+        if (err == error.Cancelled or err == error.Yielded) try retain(b, s, at);
         return err;
     };
     try ops.finish(s);

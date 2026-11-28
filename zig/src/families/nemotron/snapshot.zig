@@ -3,7 +3,6 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const st = @import("state.zig");
-const fwd = @import("forward.zig");
 const Metal = @import("backend.zig").Metal;
 const kvp = @import("../../core/metal_kv_pages.zig");
 
@@ -43,7 +42,7 @@ const Copies = struct {
     snap: *const Snap,
     into: bool,
 
-    fn part(self: @This(), b: *Metal, e: *fwd.Enc, off: *usize, live: mtl.Buffer, live_off: usize, n: usize) void {
+    fn part(self: @This(), b: anytype, e: anytype, off: *usize, live: mtl.Buffer, live_off: usize, n: usize) void {
         e.alongside(); // every part reads and writes its own rows
         e.pipe(b.m.kernels.get("tf_copy_u32"));
         if (self.into) {
@@ -57,7 +56,7 @@ const Copies = struct {
         off.* += n;
     }
 
-    pub fn encode(self: @This(), b: *Metal, e: *fwd.Enc) !void {
+    pub fn encode(self: @This(), b: anytype, e: anytype) !void {
         const c = b.m.config;
         var off: usize = 0;
         for (0..b.pool.layers) |m| {
@@ -87,7 +86,7 @@ const Copies = struct {
 };
 
 /// The stream's state after `at` prompt tokens (its pass stands there) into a new buffer, copied on the queue.
-pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
+pub fn save(b: anytype, cache: *st.Cache, at: u32) !*Snap {
     const head = cache.mtp != null;
     if (at == 0 or cache.len != at or cache.replay != 0 or cache.pending != null or (head and cache.mtp_len != at)) return error.SnapshotOutOfStep;
     const n = bytes(b.m.config, at, head);
@@ -102,7 +101,7 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
 }
 
 /// A fresh stream's cache becomes `snap`'s, in a new state slot, copied on the queue before its first prompt chunk.
-pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
+pub fn restore(b: anytype, cache: *st.Cache, snap: *const Snap) !void {
     if (cache.len != 0 or snap.head != (cache.mtp != null)) return error.SnapshotLayout;
     if (snap.at + 1 > cache.kv[0].capacity) return error.ContextFull;
     try @import("kv_pages.zig").grow(cache, snap.at);
@@ -114,7 +113,7 @@ pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
 }
 
 /// A state's buffer goes once no command buffer in flight reads it (the queue holds unretained references).
-pub fn drop(b: *Metal, snap: *Snap) void {
+pub fn drop(b: anytype, snap: *Snap) void {
     b.drain() catch {};
     if (snap.residency) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();

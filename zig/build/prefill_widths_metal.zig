@@ -20,6 +20,7 @@ pub fn tests(b: *std.Build, parent: *std.Build.Step) void {
     steps_run.has_side_effects = true;
     b.step("test-nemotron-metal-steps-host", "Nemotron Metal's stepped prompt pass on recording fakes, no GPU").dependOn(&steps_run.step);
     parent.dependOn(&steps_run.step);
+    @import("nemotron_warm_state.zig").tests(b, parent);
 }
 
 pub fn compileHost(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.Module) void {
