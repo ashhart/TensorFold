@@ -241,3 +241,30 @@ test "prompt_cache why: diagnose reads the store and changes nothing a lookup or
     try t.expectEqualDeep(before, .{ box.s.counts, box.s.held, box.s.clock, box.s.entries.items.len, box.s.gone });
     for (box.s.entries.items, used[0..box.s.entries.items.len]) |e, u| try t.expectEqual(u, e.used);
 }
+
+test "prompt_cache why: an empty prompt remains valid beside existing states" {
+    var box: Box = .{};
+    box.init(open, 1 << 20);
+    defer box.deinit();
+    try t.expect(box.keep(&words, 90, &.{}));
+    try expectWhy(.too_short, 0, 0, why.diagnose(&box.s, &.{}, &.{}, &.{}, null));
+}
+
+test "prompt_cache why: live and removed records respect the active cache namespace" {
+    var box: Box = .{};
+    box.init(open, 1 << 20);
+    defer box.deinit();
+    box.s.salt = 7;
+    try t.expect(box.keep(&words, 90, &.{}));
+    box.s.salt = 8;
+    try expectWhy(.cold, 0, 0, why.diagnose(&box.s, &words, &.{}, &.{}, null));
+    box.s.image_frame = 1;
+    try expectWhy(.cold, 0, 0, why.diagnose(&box.s, &words, &.{}, &.{}, null));
+    box.s.image_frame = 0;
+    box.s.salt = 7;
+    box.s.remove(0);
+    box.s.salt = 8;
+    try expectWhy(.cold, 0, 0, why.diagnose(&box.s, &words, &.{}, &.{}, null));
+    box.s.salt = 7;
+    try expectWhy(.evicted, 90, 0, why.diagnose(&box.s, &words, &.{}, &.{}, null));
+}

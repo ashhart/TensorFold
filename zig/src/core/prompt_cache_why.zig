@@ -76,9 +76,10 @@ pub const Gone = struct {
     }
 };
 
-/// A kept state's key: its tokens, the family frame and its images' identities.
+/// A kept state's key: its namespace, tokens, family frame and image identities.
 pub fn entryKey(e: *const pc.Entry) u64 {
     var h = std.hash.Wyhash.init(e.image_frame);
+    if (e.salt) |salt| h.update(std.mem.asBytes(&salt));
     h.update(std.mem.sliceAsBytes(e.tokens));
     for (e.images) |i| h.update(std.mem.asBytes(&i.hash));
     return h.final();
@@ -87,6 +88,7 @@ pub fn entryKey(e: *const pc.Entry) u64 {
 /// The key the store's scoped query gives `tokens`: as `entryKey` for a state kept with them.
 pub fn queryKey(s: *const pc.Store, tokens: []const u32) u64 {
     var h = std.hash.Wyhash.init(s.image_frame);
+    if (s.salt) |salt| h.update(std.mem.asBytes(&salt));
     h.update(std.mem.sliceAsBytes(tokens));
     for (s.image_query orelse &.{}) |i| if (i.at < tokens.len) h.update(std.mem.asBytes(&i.hash));
     return h.final();
@@ -105,7 +107,7 @@ pub fn diagnose(s: *const pc.Store, prompt: []const u32, starts: []const u32, sp
     for (s.by_position.items) |k| { // a deeper state whose tokens match, refused by a reuse check: longest first
         if (k.at <= from) break;
         const m = @min(k.tokens.len, prompt.len);
-        if (k.expired or k.tokens[m - 1] != prompt[m - 1] or !std.mem.eql(u32, k.tokens[0..m], prompt[0..m])) continue;
+        if (k.expired or k.salt != s.salt or m == 0 or k.tokens[m - 1] != prompt[m - 1] or !std.mem.eql(u32, k.tokens[0..m], prompt[0..m])) continue;
         w.reason = if (k.at >= prompt.len or k.tokens.len > prompt.len) .ends_inside else if (!s.usable(k.at, starts)) .off_grid else if (!modes.equal(k.decode_spans, spans, k.at))
             .rows_changed
         else if (k.image_frame != s.image_frame) .frame_changed else if (!images.equal(k.images, s.image_query orelse &.{}, @intCast(k.tokens.len))) .image_changed else continue;
@@ -120,7 +122,7 @@ pub fn diagnose(s: *const pc.Store, prompt: []const u32, starts: []const u32, sp
     var best: ?*const pc.Entry = null; // the kept prompt sharing the most, as the fork rule scans
     for (s.entries.items) |k| {
         const n = w.shared;
-        if (k.expired or k.last.len <= n or n >= prompt.len or k.last[n] != prompt[n]) continue; // cannot share more
+        if (k.expired or k.salt != s.salt or k.last.len <= n or n >= prompt.len or k.last[n] != prompt[n]) continue; // cannot share more
         const d: u32 = @intCast(std.mem.indexOfDiff(u32, k.last, prompt) orelse @min(k.last.len, prompt.len));
         if (d > n) {
             w.shared = d;
@@ -143,7 +145,7 @@ pub fn diagnose(s: *const pc.Store, prompt: []const u32, starts: []const u32, sp
 
 /// Whether a kept state parts from `prompt` at `n` inside the reply it was born with.
 fn inReply(s: *const pc.Store, prompt: []const u32, n: u32) bool {
-    for (s.entries.items) |k| if (!k.expired and k.born <= n and n < k.tokens.len and k.tokens[n] != prompt[n] and std.mem.eql(u32, k.tokens[0..n], prompt[0..n])) return true;
+    for (s.entries.items) |k| if (!k.expired and k.salt == s.salt and k.born <= n and n < k.tokens.len and k.tokens[n] != prompt[n] and std.mem.eql(u32, k.tokens[0..n], prompt[0..n])) return true;
     return false;
 }
 
