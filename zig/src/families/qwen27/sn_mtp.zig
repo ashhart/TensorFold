@@ -494,20 +494,23 @@ pub const Mtp = struct {
         const q_dim_u32: u32 = @intCast(2 * m.heads * m.head_dim);
         try scratch_mod.encodeMatSplit(sn, e, w.qkv, m.ref(.x), m.ref(.qg), rows, q_dim_u32, prompt_lin, null, .{
             .split1 = q_dim_u32,
-            .y1 = .{ .buf = m.buf(.kv_raw) },
-            .ldy1 = 2 * kv_dim_u32,
+            .y1 = .{ .buf = m.buf(.k) },
+            .ldy1 = kv_dim_u32,
             .split2 = q_dim_u32 + kv_dim_u32,
-            .y2 = .{ .buf = m.buf(.kv_raw), .off = kv_dim_u32 * 2 },
-            .ldy2 = 2 * kv_dim_u32,
+            .y2 = .{ .buf = m.buf(.v) },
+            .ldy2 = kv_dim_u32,
         });
         e.barrier();
-        const prep: attn.Preprocess = .{ .qg = m.ref(.qg), .mixed = m.ref(.kv_raw), .q_gain = wts.ref(w.q_norm), .k_gain = wts.ref(w.k_norm), .norm_q = m.ref(.norm_q), .norm_k = m.ref(.norm_k), .query = m.ref(.query), .rotated_key = m.ref(.rot_k), .positions = pos_ref, .rows = rows, .eps = cfg.eps, .theta = cfg.rope_theta, .geometry = m.geometry, .shift = true, .rope = cfg.rope };
+        var prep: attn.Preprocess = .{ .qg = m.ref(.qg), .mixed = m.ref(.k), .key_row_stride = kv_dim_u32, .q_gain = wts.ref(w.q_norm), .k_gain = wts.ref(w.k_norm), .norm_q = m.ref(.norm_q), .norm_k = m.ref(.norm_k), .query = m.ref(.query), .rotated_key = m.ref(.rot_k), .positions = pos_ref, .rows = rows, .eps = cfg.eps, .theta = cfg.rope_theta, .geometry = m.geometry, .shift = true, .rope = cfg.rope };
         if (keys_only) {
+            prep.key = m.ref(.k);
+            prep.value = m.ref(.v);
+            prep.key_row_stride = 0;
             try m.attention.keysOnly(e, scratch, binding, plan, prep, caches);
             return;
         }
         try m.attention.preprocess(e, prep);
-        try m.attention.encode(e, scratch, binding, plan, m.ref(.query), m.ref(.rot_k), m.ref(.kv_raw), m.ref(.attn_out), caches, m.ref(.qg), prompt_lin, false);
+        try m.attention.encodeContiguous(e, scratch, binding, plan, m.ref(.query), m.ref(.rot_k), m.ref(.v), m.ref(.attn_out), caches, m.ref(.qg), prompt_lin, false);
         e.barrier();
         try scratch_mod.encodeMat(sn, e, w.o, m.ref(.attn_out), m.ref(.r), rows, hidden_u32, prompt_lin, null);
         e.barrier();
