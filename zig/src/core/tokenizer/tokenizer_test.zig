@@ -539,3 +539,9 @@ test "security: a tokenizer file cannot name a token id that sizes a huge table"
     defer t.deinit();
     try std.testing.expectEqual(@as(?u32, 1), t.vocab.get("b"));
 }
+
+test {
+    _ = @import("fast_split.zig");
+    _ = @import("fast_bpe.zig");
+    _ = @import("fast_bpe_parallel.zig");
+}
