@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 57 settings: 35 switches, 13 integers, 4 reals, 5 structured" {
+test "Flash Next strict env: the table holds all 55 settings: 34 switches, 13 integers, 3 reals, 5 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
-        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.startsWith(u8, r.name, "FZ_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256") or std.mem.eql(u8, r.name, "TENSORFOLD_PREFILL_SHARE"));
+        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.startsWith(u8, r.name, "FZ_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 35, 13, 4, 5 }, counts);
+    try t.expectEqual([4]usize{ 34, 13, 3, 5 }, counts);
 }
 
 test "Flash Next strict env: unset reads the caller default and every row keeps its blank contract" {
@@ -236,16 +236,21 @@ test "Flash Next migrated settings: unset, one valid value and one malformed val
     }
 }
 
-test "Flash Next migrated shared names stay outside other families' startup validation" {
-    for ([_][2][]const u8{
-        .{ "TENSORFOLD_CHECKPOINT_SHA256", "bad\npath" },
-        .{ "TENSORFOLD_PREFILL_SHARE", "0" },
-    }) |c| {
-        const fx: Fixture = .{ .name = c[0], .raw = c[1] };
-        const other: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .dsv41 = true, .glm = true };
-        try t.expect(try e.refusal(t.allocator, fx, other) == null);
-        const why = (try e.refusal(t.allocator, fx, .{ .flashnext = true })).?;
-        defer t.allocator.free(why);
-        try t.expect(std.mem.startsWith(u8, why, c[0]));
-    }
+test "Flash Next migrated shared names keep checkpoint scope and common prefill validation" {
+    const other: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .dsv41 = true, .glm = true };
+    const checkpoint: Fixture = .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .raw = "bad\npath" };
+    const outside = try e.refusal(t.allocator, checkpoint, other);
+    defer if (outside) |why| t.allocator.free(why);
+    try t.expect(outside == null);
+    const inside = (try e.refusal(t.allocator, checkpoint, .{ .flashnext = true })).?;
+    defer t.allocator.free(inside);
+    try t.expect(std.mem.startsWith(u8, inside, checkpoint.name));
+
+    const share: Fixture = .{ .name = "TENSORFOLD_PREFILL_SHARE", .raw = "0" };
+    const common = (try e.refusal(t.allocator, share, other)).?;
+    defer t.allocator.free(common);
+    try t.expect(std.mem.startsWith(u8, common, share.name));
+    const flash = (try e.refusal(t.allocator, share, .{ .flashnext = true })).?;
+    defer t.allocator.free(flash);
+    try t.expect(std.mem.startsWith(u8, flash, share.name));
 }

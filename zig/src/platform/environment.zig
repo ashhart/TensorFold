@@ -355,16 +355,11 @@ const stock_rules = [_]Rule{
     .{ .name = "FZ_BATCH_MTP_SERIAL", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (1 gives each stream its own draft buffers; default 0)" },
     .{ .name = "FZ_VERIFY_OVERLAP", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 verifies on a serial encoder; default 1)" },
     .{ .name = "FZ_SETTLE_SYNC", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (set drops the cross-round fence; default unset)" },
-    .{ .name = "TF_FLASHNEXT_PROMPT_EXPERT_TILE", .scope = .flashnext, .kind = .word, .blank_default = false, .words = &.{ "0", "1", "2" }, .forms = "0, 1 or 2 (off, up, both; default 0)" },
-    .{ .name = "TF_FLASHNEXT_LOAD_THREADS", .scope = .flashnext, .kind = .size, .blank_default = false, .min = 1, .max = 32, .forms = "a whole load-thread count from 1 to 32 (default 8)" },
     .{ .name = "TF_FLASHNEXT_TEMPERATURE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite sampling temperature (default 1)" },
     .{ .name = "TF_FLASHNEXT_TOP_P", .scope = .flashnext, .kind = .signed_real, .forms = "a finite nucleus probability (default 0.95)" },
     .{ .name = "TF_FLASHNEXT_TOP_K", .scope = .flashnext, .kind = .u32, .forms = "a whole top-k count from 0 to 4294967295 (default 20)" },
     .{ .name = "TF_FLASHNEXT_REPEAT", .scope = .flashnext, .kind = .size, .forms = "a whole decode repeat count (default 1)" },
     .{ .name = "TF_FLASHNEXT_SEED", .scope = .flashnext, .kind = .u64, .blank_default = false, .forms = "a whole unsigned 64-bit sampling seed (unset keeps sampling off)" },
-    .{ .name = "TF_FLASHNEXT_PLE_IO", .scope = .flashnext, .kind = .word, .blank_default = false, .words = &.{ "mmap", "pread" }, .forms = "mmap or pread (unset picks by platform)" },
-    .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .scope = .flashnext, .kind = .path, .forms = "64 hex digits of the checkpoint digest" },
-    .{ .name = "TENSORFOLD_PREFILL_SHARE", .scope = .flashnext, .kind = .positive_real, .max = 1, .forms = "a finite share greater than 0 and at most 1 (lane host takes 0.01 to 1)" },
 };
 
 pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
