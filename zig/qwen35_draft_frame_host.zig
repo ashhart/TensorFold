@@ -158,7 +158,18 @@ test "Draft frames: actual holds group mixed head widths and invalidate drafts o
     for ([_]usize{ 8, 16 }) |block| try actualFrame(block);
 }
 fn actualFrame(block: usize) !void {
-    Record.block = block;
+    return frameCase(block, .{});
+}
+const ContextCase = struct { active: bool = false, enabled: bool = false, cached: u32 = 0, depth: u32 = 3, want: ?usize = null, cohort: ?usize = null };
+pub fn contextHoldFrame(cached: u32, depth: u32, want: usize, enabled: bool) !void {
+    return frameCase(16, .{ .active = true, .enabled = enabled, .cached = cached, .depth = depth, .want = want });
+}
+pub fn contextHoldSelectionBase(cohort: usize) !void {
+    return frameCase(16, .{ .active = true, .enabled = true, .cached = 4096, .depth = 3, .want = 8, .cohort = cohort });
+}
+fn frameCase(block: usize, option: ContextCase) !void {
+    const physical = option.want orelse block;
+    Record.block = physical;
     const F = q.draft.frame;
     var driver: cuda.Driver = undefined;
     driver.api.cuLaunchKernel = Record.launch;
@@ -216,6 +227,7 @@ fn actualFrame(block: usize) !void {
     d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
     d.streams = .empty;
     d.trace = null;
+    d.graphs = .{ .on = option.active };
     defer d.streams.deinit(a);
     d.selection_base = 0;
     inline for (@typeInfo(@TypeOf(d.fns)).@"struct".field_names) |name| @field(d.fns, name) = function(&driver, 10);
@@ -248,23 +260,39 @@ fn actualFrame(block: usize) !void {
     try std.testing.expect(d.hp + F.max_streams * d.c.block * d.c.rank * 2 <= d.scratch.ptr + measured);
     try std.testing.expect(d.po + F.max_streams * d.c.block * d.c.heads * d.c.chunks() * 128 * 4 <= d.scratch.ptr + measured);
     var contexts: [128]q.draft.Ctx = undefined;
+    var real_streams: [128]lanes.Stream = undefined;
     var holds: [128]lanes.drafter.Hold = undefined;
     const shape: lanes.shape.Shape = .{ .parents = @constCast(&[_]i32{ -1, -1, 0, 1, 2, 2, 3 }), .depths = @constCast(&[_]u8{ 0, 0, 1, 1, 2, 2, 2 }), .ranks = @constCast(&[_]u8{ 0, 1, 0, 1, 0, 1, 0 }), .expected = 0 };
     for (&contexts, &holds, 0..) |*ctx, *it, i| {
         ctx.* = .{ .ring = .{ .d = &driver, .ptr = 0x400000 + i * 0x1000, .len = 1 }, .begin = i, .end = 2048 + i };
         it.* = .{ .stream = @ptrFromInt(0x1000 + i * @alignOf(lanes.Stream)), .pending = @intCast(i), .position = 2049 + i, .depth = @intCast(1 + i % 7), .lanes = if (i % 2 == 0) &shape else null };
+        if (option.active) {
+            real_streams[i].cached = 0; // a cold prompt has no restored cache hits, even at a long context
+            ctx.end = option.cached;
+            it.position = @as(u64, option.cached) + 1;
+            it.stream = &real_streams[i];
+            it.depth = option.depth;
+            it.lanes = null;
+        }
         try d.streams.put(a, it.stream, ctx);
     }
-    for ([_]usize{ 1, 2, 4, 8, 16, 128 }) |count| {
+    const adapter = q.draft.context_hold.adapt(&d, d.drafter(), option.enabled);
+    const single = [_]usize{option.cohort orelse 0};
+    const counts: []const usize = if (option.cohort != null) &single else if (option.active) &.{ 1, 4, 8 } else &.{ 1, 2, 4, 8, 16, 128 };
+    for (counts) |count| {
         Record.counts = @splat(0);
         Record.max_rows = 0;
         Record.uploads = 0;
         Record.downloads = 0;
         Record.waits = 0;
         Record.fail = false;
-        try d.drafter().hold(holds[0..count]);
+        try adapter.hold(holds[0..count]);
+        try std.testing.expectEqual(@as(usize, 0), d.selection_base);
+        try std.testing.expectEqual(@intFromPtr(storage[F.words_at..].ptr), @intFromPtr(d.candidates(1).words.ptr));
+        try std.testing.expectEqual(block, d.c.block);
+        try std.testing.expectEqual(option.active, d.graphs.on);
         try std.testing.expectEqual(@as(usize, 0), Record.counts[11]);
-        try std.testing.expectEqual(@as(u32, @intCast(count * block)), Record.max_rows);
+        try std.testing.expectEqual(@as(u32, @intCast(count * physical)), Record.max_rows);
         for ([_]usize{ 1, 5, 6, 9, 12 }) |id| try std.testing.expectEqual(@as(usize, 1), Record.counts[id]);
         try std.testing.expectEqual(@as(usize, if (count == 1) 0 else 1), Record.counts[4]);
         try std.testing.expectEqual(if (count == 1) d.h + d.c.hidden * 2 else d.h2, Record.last_norm_input);
@@ -279,6 +307,7 @@ fn actualFrame(block: usize) !void {
             const held: usize = if (it.lanes != null) 7 else if (limit > 0) ctx.grown else @min(it.depth, block - 1);
             try std.testing.expectEqual(held, ctx.held_n);
             if (limit > 0 and it.lanes == null and it.depth > 0) try std.testing.expect(ctx.grown > 0);
+            if (option.active) try std.testing.expectEqual(@as(usize, 15), ctx.grown);
             for (ctx.held[0..ctx.held_n], 0..) |token, row| {
                 if (it.lanes == null and ctx.grown > 0) {
                     try std.testing.expect(token == 17 + i or token == 128 + i);
@@ -290,7 +319,10 @@ fn actualFrame(block: usize) !void {
     Record.fail = true;
     for (contexts[0..8]) |*ctx| ctx.grown = 2;
     Record.waits = 0;
-    try std.testing.expectError(error.NotReady, d.drafter().hold(holds[0..8]));
+    try std.testing.expectError(error.NotReady, adapter.hold(holds[0..8]));
+    try std.testing.expectEqual(@as(usize, 0), d.selection_base);
+    try std.testing.expectEqual(block, d.c.block);
+    try std.testing.expectEqual(option.active, d.graphs.on);
     try std.testing.expectEqual(@as(usize, 1), Record.waits);
     for (contexts[0..8]) |ctx| {
         try std.testing.expectEqual(@as(usize, 0), ctx.held_n);
@@ -329,12 +361,17 @@ fn actualFrame(block: usize) !void {
 }
 
 fn traceRounds(d: *q.draft.Draft, contexts: []q.draft.Ctx, source: []lanes.drafter.Hold) !void {
+    const prior_block = Record.block;
+    Record.block = 16;
+    defer Record.block = prior_block;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var first = try lanes.Stream.init(a, .{ .id = "first", .prompt = &.{1}, .max_new = 8 });
     defer first.deinit(a);
     var second = try lanes.Stream.init(a, .{ .id = "second", .prompt = &.{1}, .max_new = 8 });
     defer second.deinit(a);
+    contexts[0].end = 2048;
+    contexts[1].end = 2049;
     try d.streams.put(a, &first, &contexts[0]);
     try d.streams.put(a, &second, &contexts[1]);
     defer {
@@ -347,6 +384,9 @@ fn traceRounds(d: *q.draft.Draft, contexts: []q.draft.Ctx, source: []lanes.draft
     holds[0].lanes = null;
     holds[0].depth = 1;
     holds[1].depth = 1;
+    // The shared trace fixture absorbs at 2048, independent of the context-hold cell.
+    holds[0].position = 2049;
+    holds[1].position = 2050;
     holds[0].sampling = .{ .seed = 0x123456789abcdef, .temperature = 0.75 };
     holds[1].sampling = .{ .seed = 0x76543210, .temperature = 1.25 };
     try @import("qwen35_draft_trace_host.zig").run(Record, d, &holds, tmp);

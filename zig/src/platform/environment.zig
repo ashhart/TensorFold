@@ -102,6 +102,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_Q27_GEMM", .scope = .cuda, .kind = .word, .words = &.{"narrow"}, .forms = "narrow (default: 128x128 tiles)" },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_Q35_DFLASH_CONTEXT_HOLD", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; short-context N15 proposal duration experiment)" },
     .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_DFLASH_TRACE", .scope = .cuda, .kind = .path, .forms = "a JSONL output path without control characters (unset or blank: no DFlash proposal trace)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },

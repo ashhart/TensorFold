@@ -228,6 +228,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const policy = b.createModule(.{ .root_source_file = b.path("zig/src/core/recurrent_workspace.zig"), .target = host, .optimize = .fast });
     const book = b.addExecutable(.{ .name = "recurrent-bookkeeping", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/recurrent_bookkeeping.zig"), .target = host, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "recurrent", .module = policy }} }) });
     b.step("compile-recurrent-bookkeeping-host", "Build the CPU-only lease bookkeeping probe; no automatic run").dependOn(&b.addInstallArtifact(book, .{}).step);
+    const context_hold = b.createModule(.{ .root_source_file = b.path("zig/qwen35_context_hold_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
+    const context_hold_run = b.addRunArtifact(b.addTest(.{ .root_module = context_hold, .filters = &.{"Context hold:"} }));
+    b.step("test-qwen35-context-hold-host", "Context-gated proposal durations, actual CUDA frame launches, N15 and original off callbacks").dependOn(&context_hold_run.step);
+    step.dependOn(&context_hold_run.step);
     const draft_frame = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_frame_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
     b.step("test-qwen35-frame-invalidation-host", "A failed shared frame invalidates held tokens and grown trees").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = draft_frame, .filters = &.{"Draft frames: the real hold adapter"} })).step);
     const frame_run = b.addRunArtifact(b.addTest(.{ .root_module = draft_frame, .filters = &.{"Draft frames:"} }));
