@@ -7,6 +7,14 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
 
 - Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
+- Tests: the CUDA kernel-contract runner takes opt-in `--jobs N` and `--shard I/N`; four jobs run the served suites in 1:11:50 against 3:17:59 one at a time, with identical summaries (#3093). Thanks to @BlivionIaG.
+
+- Tests: the lane host explore test's replay holds under load: once every request sent has ended, the test thread sends the next only once a whole engine turn has run after the one that ended the last (turns counted through the host's activity scope), so each send meets no prompt visit and lands at the same point on every run (#5386, fixes #5367).
+
+- Vulkan on Apple silicon: submits batch dispatches into one command buffer per batch instead of one submission per dispatch, with hazard-tracked barriers between conflicting dispatches and one barrier owed to the previous submission at the next batch's start; the same logits, 2% to 20% less run time on a 13-inch M1 and a 16-inch M1 Max (#2038, part of #1420). Thanks to @joshuaswarren.
+
+- Server: `"kept_probs": true` on `/v1/chat/completions` (with `logprobs: true`) and `/v1/completions` (with a `logprobs` count) adds a `kept_probs` list for each reply token: the tokens left after temperature, `top_k`, `top_p` and `min_p`, renormalized to sum to 1; a sampled request needs `top_k` from 1 to 20, and a nonzero `presence_penalty` or `frequency_penalty` or a grammar returns HTTP 400; the reply's tokens and every other field are the same with the option on or off (#3207, fixes #3182).
+
 - Qwen3.8-27B on Metal: an external drafter's feature reader returns rows retained for its own stream instead of a view into the shared tap buffer, so a parked stream no longer reads another stream's newer rows (refs #2496).
 
 - Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
@@ -35,8 +43,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the prompt-imprint key-index test starts from an empty temporary directory, so a run interrupted on Windows (which reuses process IDs) no longer leaves a later run a stale starting state (#5406).
 
 - CLI: `tensorfold log` also reads the request log `TENSORFOLD_REQUEST_LOG` writes: `list`, `show ID`, `follow` and `--json` show each reply beside its request, and a bare body is numbered by reader order, never keyed by fields inside it (#5246, refs #3666). Thanks to @devopsfortunato.
-
-
 
 - Server: `--confidential` also refuses library search-path variables.
 - Server: `--confidential` also refuses accelerator plugin and kernel library-path variables.

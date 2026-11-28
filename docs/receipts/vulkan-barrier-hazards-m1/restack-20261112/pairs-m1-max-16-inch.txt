@@ -1,0 +1,21 @@
+Apple M1 Max (G13C), 16-inch, Linux 7.3.0-2-20261110.1-lab-ARCH, Honeykrisp. Old arm h2017 = #2017 head cf73ab96, new arm h2038 = this head 240216fe.
+Order old, new, new, old, old, new for each input; all rc 0, gpu-timeouts=0; run2_ms is the prefill plus 63 decode steps plus the logits readback.
+Logits digests, 6 processes per input, all equal: unicode-24 e946185d64ae, document-256 3188aaae7d11, document-1024 82c353787e89.
+tfc unicode-24 h2017-1 rc 0 run1_ms 2466 run2_ms 1438 wall_s 4.2 14:30:57
+tfc unicode-24 h2038-1 rc 0 run1_ms 2179 run2_ms 1153 wall_s 3.6 14:31:00
+tfc unicode-24 h2038-2 rc 0 run1_ms 2147 run2_ms 1186 wall_s 3.6 14:31:04
+tfc unicode-24 h2017-2 rc 0 run1_ms 2430 run2_ms 1434 wall_s 4.1 14:31:08
+tfc unicode-24 h2017-3 rc 0 run1_ms 2450 run2_ms 1443 wall_s 4.2 14:31:12
+tfc unicode-24 h2038-3 rc 0 run1_ms 2191 run2_ms 1155 wall_s 3.6 14:31:16
+tfc document-256 h2017-1 rc 0 run1_ms 3060 run2_ms 2057 wall_s 5.4 14:31:21
+tfc document-256 h2038-1 rc 0 run1_ms 2795 run2_ms 1784 wall_s 4.9 14:31:26
+tfc document-256 h2038-2 rc 0 run1_ms 2771 run2_ms 1790 wall_s 4.9 14:31:31
+tfc document-256 h2017-2 rc 0 run1_ms 3049 run2_ms 2025 wall_s 5.3 14:31:36
+tfc document-256 h2017-3 rc 0 run1_ms 3047 run2_ms 2047 wall_s 5.4 14:31:42
+tfc document-256 h2038-3 rc 0 run1_ms 2925 run2_ms 1860 wall_s 5.1 14:31:47
+tfc document-1024 h2017-1 rc 0 run1_ms 5748 run2_ms 4632 wall_s 10.7 14:31:57
+tfc document-1024 h2038-1 rc 0 run1_ms 5683 run2_ms 4323 wall_s 10.3 14:32:08
+tfc document-1024 h2038-2 rc 0 run1_ms 5379 run2_ms 4169 wall_s 9.8 14:32:18
+tfc document-1024 h2017-2 rc 0 run1_ms 5677 run2_ms 4878 wall_s 10.8 14:32:28
+tfc document-1024 h2017-3 rc 0 run1_ms 5984 run2_ms 4935 wall_s 11.2 14:32:40
+tfc document-1024 h2038-3 rc 0 run1_ms 7210 run2_ms 4193 wall_s 11.7 14:32:51

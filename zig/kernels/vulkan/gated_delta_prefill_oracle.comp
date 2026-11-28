@@ -1,0 +1,185 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Chunked gated-delta recurrence (oracle path). One workgroup of 256 threads
+// owns 32 Dv rows of one head: row = block*32 + lid/8, and lane = lid%8
+// carries the Dk state columns lane*16 + j in registers.
+//   kv    = sum_i (S[row, i] * g[t]) * k[t, i]
+//   delta = (v[t, row] - kv) * beta[t]
+//   S    *= g[t]; S += delta * k[t]
+//   o     = sum_i S[row, i] * q[t, i]
+// Scan pass (flag bit 3 clear) walks all tokens from h0 and writes interior
+// chunk snapshots plus the head-final state; output pass (bit 3 set) seeds
+// from h0 or a snapshot and writes y rows.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+    uint dims;
+    uint shape[4];
+    uint in_strides[4];
+    uint out_strides[4];
+    uint chunk;
+    uint chunks;
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(ACT_F32)
+layout(set = 0, binding = 0, std430) readonly buffer Q { float v[]; } qbuf;
+layout(set = 0, binding = 1, std430) readonly buffer K { float v[]; } kbuf;
+layout(set = 0, binding = 2, std430) readonly buffer V { float v[]; } vbuf;
+layout(set = 0, binding = 4, std430) readonly buffer Beta { float v[]; } bbuf;
+layout(set = 0, binding = 6, std430) writeonly buffer Y { float v[]; } ybuf;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer Q { uint16_t v[]; } qbuf;
+layout(set = 0, binding = 1, std430) readonly buffer K { uint16_t v[]; } kbuf;
+layout(set = 0, binding = 2, std430) readonly buffer V { uint16_t v[]; } vbuf;
+layout(set = 0, binding = 4, std430) readonly buffer Beta { uint16_t v[]; } bbuf;
+layout(set = 0, binding = 6, std430) writeonly buffer Y { uint16_t v[]; } ybuf;
+#endif
+layout(set = 0, binding = 3, std430) readonly buffer GB { uint16_t v[]; } gbbuf;
+layout(set = 0, binding = 5, std430) readonly buffer H0 { float v[]; } h0buf;
+layout(set = 0, binding = 7, std430) writeonly buffer HF { float v[]; } hfbuf;
+layout(set = 0, binding = 8, std430) readonly buffer GF { float v[]; } gfbuf;
+layout(set = 0, binding = 9, std430) buffer Snap { float v[]; } snapbuf;
+
+shared float part[256];
+
+float readActQ(uint i) {
+#if defined(ACT_F32)
+    return qbuf.v[i];
+#else
+    return bf16_to_f32(uint(qbuf.v[i]));
+#endif
+}
+float readActK(uint i) {
+#if defined(ACT_F32)
+    return kbuf.v[i];
+#else
+    return bf16_to_f32(uint(kbuf.v[i]));
+#endif
+}
+float readActV(uint i) {
+#if defined(ACT_F32)
+    return vbuf.v[i];
+#else
+    return bf16_to_f32(uint(vbuf.v[i]));
+#endif
+}
+float readBeta(uint i) {
+#if defined(ACT_F32)
+    return bbuf.v[i];
+#else
+    return bf16_to_f32(uint(bbuf.v[i]));
+#endif
+}
+
+void main() {
+    const uint Dk = params.matrix_m;
+    const uint Dv = params.matrix_n;
+    const uint Hv = params.matrix_k;
+    const uint tokens = params.dims;
+    const uint lid = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x / 4u;
+    const uint row = (gl_WorkGroupID.x % 4u) * 32u + lid / 8u;
+    const uint lane = lid % 8u;
+    const uint state_base = (h * Dv + row) * Dk;
+
+    const bool output_pass = (params.flags & 8u) != 0u;
+    if (!output_pass && gl_WorkGroupID.y != 0u) return;
+
+    float s[16];
+    uint t_start;
+    uint t_end;
+    if (!output_pass) {
+        t_start = 0u;
+        t_end = tokens;
+        for (uint j = 0u; j < 16u; ++j) s[j] = h0buf.v[state_base + lane * 16u + j];
+    } else {
+        uint c = gl_WorkGroupID.y;
+        t_start = c * params.chunk;
+        t_end = min(tokens, t_start + params.chunk);
+        uint seed = (c == 0u) ? 0u : (c - 1u) * Hv * Dv * Dk;
+        if (c == 0u) {
+            for (uint j = 0u; j < 16u; ++j) s[j] = h0buf.v[state_base + lane * 16u + j];
+        } else {
+            for (uint j = 0u; j < 16u; ++j) s[j] = snapbuf.v[seed + state_base + lane * 16u + j];
+        }
+    }
+
+    for (uint t = t_start; t < t_end; ++t) {
+        uint th = t * Hv + h;
+        float g = (params.flags & 4u) != 0u
+            ? gfbuf.v[th]
+            : bf16_to_f32(uint(gbbuf.v[th]));
+        float bta = readBeta(th);
+        uint qk_base = th * Dk + lane * 16u;
+        float kk[16];
+        float qq[16];
+        for (uint j = 0u; j < 16u; ++j) {
+            kk[j] = readActK(qk_base + j);
+            qq[j] = readActQ(qk_base + j);
+        }
+        float p = 0.0;
+        for (uint j = 0u; j < 16u; ++j) p += s[j] * g * kk[j];
+        part[lid] = p;
+        barrier();
+        float kv = 0.0;
+        for (uint l = 0u; l < 8u; ++l) kv += part[(lid / 8u) * 8u + l];
+        float delta = (readActV(th * Dv + row) - kv) * bta;
+        barrier();
+        for (uint j = 0u; j < 16u; ++j) s[j] = s[j] * g + delta * kk[j];
+        float p2 = 0.0;
+        for (uint j = 0u; j < 16u; ++j) p2 += s[j] * qq[j];
+        part[lid] = p2;
+        barrier();
+        float o = 0.0;
+        for (uint l = 0u; l < 8u; ++l) o += part[(lid / 8u) * 8u + l];
+        if (output_pass && lane == 0u) {
+#if defined(ACT_F32)
+            ybuf.v[th * Dv + row] = o;
+#else
+            ybuf.v[th * Dv + row] = f32_to_bf16(o);
+#endif
+        }
+        if (!output_pass) {
+            if ((t + 1u) % params.chunk == 0u && t + 1u < tokens) {
+                uint snap = ((t + 1u) / params.chunk - 1u) * Hv * Dv * Dk;
+                for (uint j = 0u; j < 16u; ++j) snapbuf.v[snap + state_base + lane * 16u + j] = s[j];
+            }
+            if (t + 1u == tokens) {
+                for (uint j = 0u; j < 16u; ++j) hfbuf.v[state_base + lane * 16u + j] = s[j];
+            }
+        } else if (gl_WorkGroupID.y == params.chunks - 1u && t + 1u == t_end) {
+            for (uint j = 0u; j < 16u; ++j) hfbuf.v[state_base + lane * 16u + j] = s[j];
+        }
+        barrier();
+    }
+}

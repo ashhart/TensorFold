@@ -1,0 +1,62 @@
+#version 450
+
+// Greedy argmax combine: one 256-thread workgroup reduces the matrix_n
+// per-chunk (val, idx) partials with the same tie rule as argreduce_chunk —
+// greater val wins, exact ties keep the lowest idx — and writes the winning
+// index to results[output_offset].
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+} params;
+
+struct Partial {
+    float val;
+    uint idx;
+};
+layout(set = 0, binding = 0, std430) readonly buffer Partials { Partial v[]; } pbuf;
+layout(set = 0, binding = 1, std430) writeonly buffer Results { uint v[]; } rbuf;
+
+shared float svals[256];
+shared uint sidxs[256];
+
+void main() {
+    const uint lid = gl_LocalInvocationID.x;
+    if (lid < params.matrix_n) {
+        svals[lid] = pbuf.v[lid].val;
+        sidxs[lid] = pbuf.v[lid].idx;
+    } else {
+        svals[lid] = -3.4028234663852886e38;
+        sidxs[lid] = 0xffffffffu;
+    }
+    barrier();
+    for (uint st = 128u; st > 0u; st >>= 1u) {
+        if (lid < st) {
+            float ov = svals[lid + st];
+            uint oi = sidxs[lid + st];
+            if (ov > svals[lid] || (ov == svals[lid] && oi < sidxs[lid])) {
+                svals[lid] = ov;
+                sidxs[lid] = oi;
+            }
+        }
+        barrier();
+    }
+    if (lid == 0u) {
+        rbuf.v[params.output_offset] = sidxs[0];
+    }
+}
