@@ -33,6 +33,8 @@ const path_names = [_][]const u8{
 pub fn kept(args: cli.Args) ?[]const u8 {
     const checks = [_]struct { []const u8, bool }{
         .{ "--record", args.record != null },
+        .{ "--prompt-cache-gib", (args.prompt_cache_gib orelse 0) > 0 },
+        .{ "--checkpoint-slots", (args.checkpoint_slots orelse 0) > 0 },
         .{ "--prompt-cache-disk or --learn-conversations", args.learn_conversations },
         .{ "--learn", args.learn },
         .{ "--recall", args.recall },

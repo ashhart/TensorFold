@@ -142,7 +142,7 @@ pub fn placeHost(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, a
     return !fits(F, loaded, o, room, window, stream_bytes);
 }
 
-/// A family declaring `keeps_no_prompts = true` has no prompt store: --prompt-cache-gib is refused, no cache planned.
+/// `keeps_no_prompts = true` means no prompt store: a zero cache budget is allowed; a positive one is refused.
 pub fn keepsNoPrompts(comptime F: type) bool {
     return @hasDecl(F, "keeps_no_prompts") and F.keeps_no_prompts;
 }

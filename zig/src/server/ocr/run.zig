@@ -182,13 +182,13 @@ fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: P
     const parsed = reader.parse(pa, got.content, .{ .width = w, .height = h }, got.frame) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
         if (e != error.Unreadable) return fault.fail(a, .internal, "page {d}: the OCR reader failed ({s})", .{ p.index, @errorName(e) });
-        log.line("{s}: page {d}: the model's output does not follow its format: {s}", .{ id, p.index, got.content });
+        if (srv.config.confidential) log.line("{s}: page {d}: the model's output does not follow its format", .{ id, p.index }) else log.line("{s}: page {d}: the model's output does not follow its format: {s}", .{ id, p.index, got.content });
         return fault.fail(a, .unreadable, "page {d}: the model's output does not follow its format", .{p.index});
     };
     const blocks = try a.alloc(api.ocr.OcrBlock, parsed.len);
     for (parsed, blocks) |b, *o| {
         const quad: ?api.ocr.Quad = if (b.quad) |q| geometry.validate(q, w, h) catch {
-            log.line("{s}: page {d}: a box is not finite: {s}", .{ id, p.index, got.content });
+            if (srv.config.confidential) log.line("{s}: page {d}: a box is not finite", .{ id, p.index }) else log.line("{s}: page {d}: a box is not finite: {s}", .{ id, p.index, got.content });
             return fault.fail(a, .unreadable, "page {d}: the model's output has a box that is not finite", .{p.index});
         } else null;
         o.* = .{ .content = try a.dupe(u8, b.content), .quad = quad, .kind = b.kind };
@@ -221,7 +221,7 @@ fn generate(srv: *Server, pcx: *Cx, a: Allocator, reader: api.ocr.Ocr, id: []con
     };
     const reply = chat.generate(srv, pcx, prepared, null, gone) catch |e| return chatFault(a, pcx, fault, e);
     finished(a, fault, reply.finish_reason, p.index, gone) catch |e| {
-        if (e == error.Faulted and fault.class == .unreadable) log.line("{s}: {s}: {s}", .{ id, fault.message, reply.content }); // the message names the page
+        if (e == error.Faulted and fault.class == .unreadable) if (srv.config.confidential) log.line("{s}: {s}", .{ id, fault.message }) else log.line("{s}: {s}: {s}", .{ id, fault.message, reply.content }); // the message names the page
         return e;
     };
     return .{ .content = reply.content, .frame = frame };

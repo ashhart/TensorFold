@@ -58,6 +58,7 @@ pub const Draft = struct {
     io: std.Io,
     e: *E,
     projection_role: precision.Role = .proposal,
+    full_head: bool = false,
     c: Config,
     w: weights.Weights,
     mod: cuda.Module,
@@ -126,11 +127,9 @@ pub const Draft = struct {
 
     /// all: every stream is a pool lane (TF_QWEN_KV_PAGES_ALL), so the drafter keeps no ring of its own.
     pub const RingOf = struct { ctx: *anyopaque, ring: *const fn (*anyopaque, *Stream) ?u64, all: bool = false };
-
     const words_at = frame.words_at;
     const hp_at = frame.hp_at;
     const stagedLen = frame.stagedLen;
-
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft {
         const nodes = try tree.nodes();
         const started = profile.now(io);
@@ -175,6 +174,8 @@ pub const Draft = struct {
         d.startup.warmups += profile.elapsed(io, warm_start);
         d.startup.load = profile.elapsed(io, started) - d.startup.reserve - d.startup.warmups;
         d.graphs.on = c.kind == .dflash2 and graphs.enabled();
+        d.graphs.stats.on = c.kind == .dflash2 and graphs.statsEnabled();
+        d.full_head = c.kind == .dflash2 and (platform.environment.read(bool, "TF_QWEN_DRAFT_FULL_HEAD", false) catch false);
         if (d.trace != null and d.c.kind == .dflash2) {
             const t = d.trace.?;
             t.steps = try gpa.alloc(tree.GrowNode, frame.max_streams * (engine.most_window + 1) * lanes.draft_tree.branch);
@@ -182,7 +183,6 @@ pub const Draft = struct {
         }
         return d;
     }
-
     /// The drafter's taps (the target's layers it reads).
     pub fn taps(d: *const Draft) []const u32 {
         return d.c.taps[0..d.c.n_taps];
@@ -199,7 +199,7 @@ pub const Draft = struct {
 
     pub fn deinit(d: *Draft) void {
         trace.drop(&d.trace);
-        if (graphs.enabled()) d.graphs.deinit(d.gpa);
+        if (graphs.enabled() or d.graphs.stats.on) d.graphs.deinit(d.gpa);
         var it = d.streams.valueIterator();
         while (it.next()) |ctx| d.drop(ctx.*);
         d.streams.deinit(d.gpa);
