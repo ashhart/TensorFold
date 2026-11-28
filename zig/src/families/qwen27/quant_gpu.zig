@@ -3,15 +3,19 @@ const std = @import("std");
 const mtl = @import("metal");
 const lane = @import("core").lane_projection;
 const row = @import("core").row_projection;
-const sources = @import("qwen_runtime_sources");
 const projection = @import("projection.zig");
 const profile = @import("core").gpu_profile;
+const qk = lane.qk;
+const quant_source = @import("quant_source.zig");
 pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true, xs_group: u16 = 64, shift: bool = false };
-pub const Kind = enum { projection, xsum, norm, input_norm, norm_steer, mlp, ane_input, mlp_ane, add_ane };
+/// Whether plain matrices take qk; off, a reg copy takes tf_lane_reg, else tf_lane_pair: every choice, the same words.
+pub var qk_rows: bool = true;
+pub const Key = quant_source.Key;
+pub const Kind = quant_source.Kind;
+pub const steerKey = quant_source.steerKey;
 
 /// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
 pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
@@ -58,6 +62,8 @@ pub const Kernels = struct {
     sn: ?(if (@hasDecl(@import("core"), "sensenova_loop")) @import("core").sensenova_loop.linear_gpu.LinearGpu else void) = null,
     sn_xs128_mode: bool = false,
     sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
+    /// qk's pipelines, made at the first plain matrix's quant.
+    qks: ?qk.Pipelines = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -88,6 +94,7 @@ pub const Kernels = struct {
         var lane_it = k.lanes.valueIterator();
         while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
+        if (k.qks) |*q| q.deinit();
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
         k.cache.deinit(k.allocator);
@@ -108,9 +115,10 @@ pub const Kernels = struct {
             .projection => unreachable,
             .xsum => "custom_kernel_q27_xsum_bfloat16_t_int32_t_float",
             .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
-            .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
             .norm_steer => "custom_kernel_q27_norm_steer_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float_float_float",
+            .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
             .mlp => "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float",
+            .mlp_rows => "q27_mlp_rows",
             .ane_input => "q27_ane_input",
             .mlp_ane => "q27_mlp_ane",
             .add_ane => "q27_add_ane",
@@ -162,18 +170,21 @@ pub const Kernels = struct {
         skip: u32,
         cut: [2]u32,
         long: bool,
+        /// A plain matrix with no reg copy: tf_lane_pair, which reads weight_layout and writes tf_lane_reg's words.
+        cooperative: bool,
     ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
-        const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64;
+        const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64 and !cooperative;
         const key = Key{
             .kind = .projection,
             .n = p.n,
             .k = p.k,
-            .slices = if (reg) sk else p.slices,
+            .slices = if (reg or cooperative) sk else p.slices,
             .skip = skip,
             .cut = cut,
             .bits = p.bits,
             .group = p.group,
             .long = long,
+            .cooperative = cooperative,
         };
         const half = p.n / 64;
         const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
@@ -190,8 +201,9 @@ pub const Kernels = struct {
                 .output = if (cut[1] > 0) .f32 else .bf16,
                 .precompute_sums = reg or (p.bits == 8 and p.group == 64),
                 .reg = reg,
+                .cooperative = cooperative,
                 .row_blocks = long and !reg,
-                .rows = if (long) lane.max_reg_rows else if (reg) lane.reg_rows else 16,
+                .rows = if (long) lane.max_reg_rows else if (reg or cooperative) lane.reg_rows else 16,
             });
             k.joined(entry.value_ptr);
         }
@@ -211,7 +223,12 @@ pub const Kernels = struct {
     pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
         if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
         // decoded rows never take the long key (longKey needs prompt rows)
-        _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false);
+        if (p.plain and qk_rows) {
+            if (k.qks == null) k.qks = qk.Pipelines.init(k.allocator, k.device);
+            for ([_]u32{ 8, 16 }) |block| _ = try k.qks.?.get(p.slices, block);
+            return;
+        }
+        _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false, p.plain and p.reg_copy == null);
     }
 
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
@@ -278,20 +295,35 @@ pub const Kernels = struct {
         }
         const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
-        // Row-block prompt passes at every non-reg width on every tensor-unit chip; Ultras keep their long keys.
-        const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());
-        const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
-        const entry = try k.laneEntry(p, sk, skip, cut, long);
+        if (reg and p.plain and qk_rows and skip == 0 and cut[1] == 0) {
+            try k.quantQk(e, p, x, xs, y, rows, sk);
+            try span.end();
+            return;
+        }
+        // A plain matrix off qk: tf_lane_reg on its reg copy when it has one, else the cooperative kernel.
+        const on_reg = reg and (!p.plain or p.reg_copy != null);
+        const words = if (p.plain) p.reg_copy orelse p.words else p.words;
+        // Long key: reg rows past 128; non-reg prompt row blocks follow main; cooperative never
+        const long = if (on_reg) longKey(k.long_prompt, k.prompt, rows) else !reg and k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());
+        const sums: ?Sums = if (on_reg or (p.bits == 8 and p.group == 64)) xs else null;
+        const entry = try k.laneEntry(p, sk, skip, cut, long, reg and !on_reg);
         const step = entry.value_ptr.max_rows;
         var first: u32 = 0;
         while (first < rows) : (first += step) {
             const xr = lane.Ref{ .buf = x.buffer, .off = x.offset + @as(usize, first) * p.k * 2 };
-            const w = lane.Ref{ .buf = p.words.buffer, .off = p.words.offset };
+            const w = lane.Ref{ .buf = words.buffer, .off = words.offset };
             const sb = lane.Ref{ .buf = p.pairs.buffer, .off = p.pairs.offset };
             const yr = lane.Ref{ .buf = y.buffer, .off = y.offset + @as(usize, first) * p.n * @as(usize, if (cut[1] > 0) 4 else 2) };
             if (sums) |s| try entry.value_ptr.encodeSums(e, xr, w, sb, .{ .ref = .{ .buf = s.ref.buffer, .off = s.ref.offset + @as(usize, first) * 4 }, .stride = s.stride }, yr, @min(rows - first, step)) else try entry.value_ptr.encode(e, xr, w, sb, yr, @min(rows - first, step));
         }
         try span.end();
+    }
+
+    /// qk on a plain matrix, 128 rows a dispatch, on the producer's group sums or else the reg entry's tf_lane_sums.
+    fn quantQk(k: *Kernels, e: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, y: Ref, rows: u32, sk: u32) !void {
+        if (k.qks == null) k.qks = qk.Pipelines.init(k.allocator, k.device);
+        const own = if (xs == null) try k.laneEntry(p, sk, 0, .{ 0, 0 }, false, false) else null;
+        return @import("quant_qk.zig").encode(&k.qks.?, e, p, x, xs, y, rows, sk, own);
     }
 
     /// A mixed stack: each member its own product into its columns; row kernels write the fused rows at a stride.
@@ -421,41 +453,32 @@ pub const Kernels = struct {
     }
 
     pub fn normShift(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32, shift: bool) !void {
-        var span = profile.begin(k.profiler, input_encoder, .norm);
-        errdefer span.cancel();
-        const e = span.encoder;
-
-        const xs_group = k.xsGroup(width);
-        const xs_on = xs_group != 0;
-        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_on, .xs_group = xs_group, .shift = shift }));
-        if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
-        e.dispatchGroups(mtl.Size.of(1, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
-        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
-            k.sn_xs128 = if (xs_group == 128) .{ .x = out, .sums = .{ .ref = .{ .buf = xs.buffer, .off = xs.offset }, .stride = padded(rows) } } else null;
-        }
-        try k.fitsWords(e, out, width, rows);
-        try span.end();
+        return k.normInner(input_encoder, h, residual, weight, eps, dims, combined, out, xs, width, rows, shift, null, 0);
     }
 
     /// The norm with a direction inside it: alpha times the direction is added before the normalisation reads the row.
     pub fn normSteer(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, dir: mtl.Buffer, alpha: f32, width: u32, rows: u32) !void {
+        return k.normInner(input_encoder, h, residual, weight, eps, dims, combined, out, xs, width, rows, false, dir, alpha);
+    }
+
+    fn normInner(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32, shift: bool, dir: ?mtl.Buffer, alpha: f32) !void {
         var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;
-
-        const key = try steerKey(width, k.xsGroup(width));
+        const xs_group = k.xsGroup(width);
+        const key = if (dir != null) try steerKey(width, xs_group) else Key{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_group != 0, .xs_group = xs_group, .shift = shift };
         e.setPipeline(try k.get(key));
-        bind(e, .{ h, residual, weight, eps, dims, combined, out, xs });
-        e.setBuffer(dir, 0, 8);
-        e.setValue(alpha, 9);
+        if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
+        if (dir) |d| {
+            e.setBuffer(d, 0, 8);
+            e.setValue(alpha, 9);
+        }
         e.dispatchGroups(mtl.Size.of(1, if (key.xs) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
-        try k.fitsWords(e, out, width, rows);
-        try span.end();
-    }
-
-    /// tf_sq_fits's words and tf_sq_prep_h's sums for `half_rows` rows or more; a shorter output clears them.
-    fn fitsWords(k: *Kernels, e: mtl.ComputeEncoder, out: Ref, width: u32, rows: u32) !void {
+        if (dir == null) if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            k.sn_xs128 = if (xs_group == 128) .{ .x = out, .sums = .{ .ref = .{ .buf = xs.buffer, .off = xs.offset }, .stride = padded(rows) } } else null;
+        };
         k.fits = null;
+        // tf_sq_fits's words and tf_sq_prep_h's sums and halves for this output: its prompt rows may take half operands
         if (k.raw_tiles and rows >= half_rows) {
             if (k.simd == null) k.simd = try row.simd.Pipelines.load(k.device);
             const bytes = row.simd.fitsBytes(width, rows);
@@ -475,6 +498,7 @@ pub const Kernels = struct {
             e.barrier();
             k.fits = .{ .x = out, .rows = rows, .k = width };
         }
+        try span.end();
     }
 
     /// `m`'s half-operand tiles over x's rows: only on the last norm's output at its rows, where they keep its bits.
@@ -535,6 +559,17 @@ pub const Kernels = struct {
         const xs_group = k.xsGroup(width);
         const xs_on = xs_group != 0;
         const grp_w: u32 = if (xs_group == 128) 128 else 64;
+        if (@import("core_delta").flat_glue) {
+            const pipeline = try k.get(.{ .kind = .mlp_rows, .k = width, .n = width, .xs = xs_on, .xs_group = xs_group });
+            if (pipeline.maxThreads() >= 256) {
+                e.setPipeline(pipeline);
+                bind(e, .{ gate, up, dims, out, xs });
+                e.setValue(width, 5);
+                e.dispatchGroups(mtl.Size.of(width / 64, padded(rows) / 16, 1), mtl.Size.of(256, 1, 1));
+                try span.end();
+                return;
+            }
+        }
         e.setPipeline(try k.get(.{ .kind = .mlp, .k = width, .n = width, .xs = xs_on, .xs_group = xs_group }));
         bind(e, .{ gate, up, dims, out, xs });
         e.dispatchGroups(mtl.Size.of(width / grp_w, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(grp_w, 1, 1));
@@ -544,57 +579,17 @@ pub const Kernels = struct {
         try span.end();
     }
 };
-
 /// A norm's output of this many rows or more gets tf_sq_fits's words: prompt chunks, not decode or verify rows.
 pub const half_rows = 64;
-
 /// A norm's output, its rows and width: the words in `Kernels.fits_words` are its.
 const Fits = struct { x: Ref, rows: u32, k: u32 };
-
-/// The steered norm's key, on the group sums main's norm keys on; norm_steer.metal sums 64-column groups only.
-pub fn steerKey(width: u32, xs_group: u16) error{SteerXsGroup}!Key {
-    if (xs_group == 128) return error.SteerXsGroup;
-    return .{ .kind = .norm_steer, .k = width, .xs = xs_group != 0, .xs_group = xs_group };
-}
-
 pub fn padded(rows: u32) u32 {
     return 16 * ((rows + 15) / 16);
 }
-
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
 }
-
-/// The quantized helper specialization compiled by get.
-pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
-    const template = switch (key.kind) {
-        .projection => unreachable,
-        .xsum => sources.xsum,
-        .norm => sources.norm_xs,
-        .norm_steer => sources.norm_steer,
-        .input_norm => sources.norm_input,
-        .mlp => sources.mlp_xs,
-        .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
-    };
-    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
-    const definitions = switch (key.kind) {
-        .projection => unreachable,
-        .xsum => try std.fmt.allocPrint(a, "constexpr int K={d}, GS=64;", .{key.k}),
-        .norm, .input_norm, .norm_steer => try std.fmt.allocPrint(a, "constexpr int K={d};{s}", .{ key.k, if (key.shift) "\n#define Q27_SHIFT 1" else "" }),
-        .mlp => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
-        .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
-    };
-    defer a.free(definitions);
-    const eff_xs: u16 = if (!key.xs) 0 else key.xs_group;
-    const xs_define = switch (eff_xs) {
-        0 => "#define Q27_XS 0\n",
-        128 => "#define Q27_XS 128\n",
-        else => "#define Q27_XS 64\n",
-    };
-    const source = try std.mem.concat(a, u8, &.{ xs_define, template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
-    return source;
-}
-
+pub const specializedSource = quant_source.specializedSource;
 test {
     _ = @import("quant_gpu_test.zig");
 }

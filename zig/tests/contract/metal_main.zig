@@ -125,9 +125,7 @@ pub fn main(init: std.process.Init) !u8 {
         gemma_list.deinit(a);
     }
     var kernels: std.ArrayList(g.Kernel) = .empty;
-    var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
-    defer lfm3_suite.deinit();
-    try lfm3_suite.collect(o.only);
+    try @import("metal_q27.zig").collectMixed(a, device, queue, o.only, &kernels);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
         if (!@import("metal_support.zig").gemma(tensor, v.kind, v.name)) continue;
@@ -148,9 +146,7 @@ pub fn main(init: std.process.Init) !u8 {
     var mixed = gemma_mixed.Probe.init(a, device, queue);
     defer mixed.deinit();
     if (wanted(o, mixed.kernel().spec.name) and @import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
-    var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
-    defer lfm2.deinit();
-    try lfm2.collect(o.only);
+    try @import("metal_q27.zig").collectStack(a, device, queue, o.only, &kernels);
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
     defer for (rows_list.items) |r| r.deinit();
