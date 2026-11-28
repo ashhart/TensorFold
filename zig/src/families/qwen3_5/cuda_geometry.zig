@@ -154,6 +154,20 @@ pub const Geometry = struct {
     pub fn slots(g: Geometry) usize {
         return g.top_k + 1;
     }
+    /// The output and input widths of a layer projection, shared by loading and memory planning.
+    pub fn projectionShape(g: Geometry, slot: Slot) [2]usize {
+        return switch (slot) {
+            .gate, .up => .{ g.intermediate, g.hidden },
+            .down => .{ g.hidden, g.intermediate },
+            .qkv => .{ g.convWidth(), g.hidden },
+            .z => .{ g.valueWidth(), g.hidden },
+            .a, .b => .{ g.v_heads, g.hidden },
+            .out => .{ g.hidden, g.valueWidth() },
+            .q => .{ 2 * g.attnWidth(), g.hidden },
+            .k, .v => .{ g.kv_heads * head_dim, g.hidden },
+            .o => .{ g.hidden, g.attnWidth() },
+        };
+    }
     /// Value-head width of the gated delta rule's rows (and of z and the out projection's input).
     pub fn valueWidth(g: Geometry) usize {
         return g.v_heads * dk;

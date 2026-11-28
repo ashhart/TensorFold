@@ -63,6 +63,7 @@ test "execution witness: each flag outside the first path names itself, and the 
     // the build-gated flags: set as their parsers set them
     for ([_]struct { []const u8, cli.Args }{ .{ "--spill-gib", .{ .spill_gib = 1 } }, .{ "--mtp-drafts", .{ .mtp_drafts = 2 } }, .{ "--tp", .{ .tp = 2 } }, .{ "--speed-up", .{ .speed_up = "a" } }, .{ "--rope-yarn", .{ .rope_yarn = 4 } } }) |c|
         try t.expectEqualStrings(c[0], witness.excluded(c[1]).?);
+    try t.expectEqualStrings("--embedding-residency", witness.excluded(.{ .embedding_residency = .host }).?);
     try t.expectEqual(@as(?[]const u8, null), witness.excluded(.{ .mtp_drafts = 0, .spill_gib = 0 }));
 }
 

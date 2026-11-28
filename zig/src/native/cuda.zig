@@ -28,7 +28,7 @@ const cuda_witness = @import("cuda_witness.zig");
 pub const registry = cuda_families.registry;
 pub const records = true; // --record opens here (engines.zig refuses it for a backend without this)
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
+pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--embedding-residency", "--policy", "--checkpoint-slots", "--spill-gib" };
 pub const families = cuda_families.families;
 /// `tensorfold device`: the SMs this build's kernels are for, and every GPU the driver lists (cuda_device.zig).
 pub const kernel_sms = cuda_device.kernel_sms;

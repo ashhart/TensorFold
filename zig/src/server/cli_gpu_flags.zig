@@ -51,6 +51,8 @@ pub fn gpuFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Us
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --master-port: invalid port: '{s}'", .{v});
         out.master_port = @intCast(p);
+    } else if (is(name, "--embedding-residency")) {
+        out.embedding_residency = std.meta.stringToEnum(api.EmbeddingResidency, v) orelse return fail(u, a, "argument --embedding-residency: auto, device, or host: '{s}'", .{v});
     } else if (is(name, "--mtp-drafts")) {
         const n = try int(u, a, name, v);
         if (n < 0 or n > 64) return fail(u, a, "argument --mtp-drafts: a count from 0 to 64: '{s}'", .{v});
@@ -95,4 +97,17 @@ test "--tp takes 1 to 64 and marks itself given; --pp takes 1 until stages serve
     const o = try cli.request(a, "d", "t", args);
     try std.testing.expect(o.given.tp and o.given.rank);
     try std.testing.expect(!(try cli.request(a, "d", "t", .{})).given.tp);
+}
+
+test "--embedding-residency accepts only auto, device, or host and reaches the native request" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    var args: Args = .{};
+    try std.testing.expect(try gpuFlag(a, &args, "--embedding-residency", "host", &u));
+    try std.testing.expectEqual(@as(?api.EmbeddingResidency, .host), args.embedding_residency);
+    try std.testing.expectError(error.Usage, gpuFlag(a, &args, "--embedding-residency", "pinned", &u));
+    const request = try cli.request(a, "d", "qwen3_5", args);
+    try std.testing.expectEqual(@as(?api.EmbeddingResidency, .host), request.embedding_residency);
 }

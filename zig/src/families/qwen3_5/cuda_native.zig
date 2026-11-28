@@ -76,8 +76,8 @@ pub const requestStartsOn = starts.on;
 pub const explains_open = true;
 /// The server's reading of the room left now; null if unreadable.
 pub const Room = @import("cuda_mtp.zig").Room;
-/// `room` and `drafter` size an EXL3 checkpoint's load: its embedding rows go to host memory when the card is short.
-pub const Options = struct { context: usize, drafts: bool, mtp_drafts: ?u32 = null, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, rope_yarn: ?f64 = null, room: ?Room = null, drafter: ?[]const u8 = null, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
+/// `room`, speculative mode and embedding residency size EXL3/ModelOpt loads before weights are allocated.
+pub const Options = struct { context: usize, drafts: bool, mtp_drafts: ?u32 = null, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, embedding_residency: @import("cuda_host_embed.zig").Residency = .auto, embedding_residency_explicit: bool = false, rope_yarn: ?f64 = null, room: ?Room = null, drafter: ?[]const u8 = null, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
 /// The window --context may ask for: the config's, or the YaRN window its block or --rope-yarn makes.
 pub const contextCeiling = plan.contextCeiling;
 
@@ -239,11 +239,9 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     };
 }
 
-/// What an EXL3 load must leave room for: one stream at the asked window, and the drafter that loads beside it.
-fn fitOf(o: Options) ?@import("cuda_host_embed.zig").Fit {
-    const r = o.room orelse return null;
-    const room = r.read(r.ctx) orelse return null;
-    return .{ .room = room, .context = o.context, .drafter = if (o.drafts) o.drafter else null, .prompt_int8 = o.prompt_int8 };
+/// What the embedding planner knows before loading: current room, speculative mode, and requested residency.
+fn fitOf(o: Options) @import("cuda_host_embed.zig").Fit {
+    return @import("cuda_host_embed.zig").fromRoom(o.room, o.context, o.drafts, o.drafter, o.mtp_drafts, o.embedding_residency, o.embedding_residency_explicit, o.prompt_int8);
 }
 pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     const l: *Lanes = @ptrCast(@alignCast(p));

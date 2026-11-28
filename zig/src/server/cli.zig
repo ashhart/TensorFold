@@ -146,6 +146,7 @@ pub const flags = [_]Flag{
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },
     .{ .name = "--precision", .choices = &.{ "checkpoint", "full" }, .native = cuda_build },
+    .{ .name = "--embedding-residency", .choices = &.{ "auto", "device", "host" }, .native = served("--embedding-residency") },
     // the CUDA CLI's own: the GPU ordinal, and whole prompt chunks a call runs as staggered segments
     .{ .name = "--device", .native = cuda_build },
     .{ .name = "--segments", .native = cuda_build },
@@ -466,6 +467,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .segments = args.segments,
         .loops = args.loops,
         .precision = args.precision,
+        .embedding_residency = args.embedding_residency,
         .mtp_drafts = args.mtp_drafts,
         .mtp_confidence = args.mtp_confidence,
         .decode_share = args.decode_share,

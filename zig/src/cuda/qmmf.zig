@@ -269,7 +269,7 @@ pub const Lane = struct {
     /// Slice partials a call needs (fp32 [sk][m][n]) when it reduces them, else 0.
     pub fn partBytes(l: Lane, m: usize, w: Weight) usize {
         const p = planFor(m, w, l.clusters);
-        return if (p.reduce) @as(usize, p.sk) * m * w.n * 4 else 0;
+        return @import("qmmf_part_bytes.zig").required(m, w.n, p.sk, p.reduce);
     }
 
     /// y [m, n] bf16 = x [m, k] bf16 (rows `ldx` apart) times the weight, fp32 sums; `part` holds partBytes.

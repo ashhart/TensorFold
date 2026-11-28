@@ -12,6 +12,14 @@ On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
 
+For EXL3 and ModelOpt or compressed-tensors NVFP4 checkpoints (including Unsloth exports),
+the default `auto` policy keeps the BF16 input embedding on the GPU when the one-stream estimate of weight, scratch,
+ModelOpt workspace, and selected DFlash2 or MTP drafter memory fits, and maps it to pinned host RAM when estimated
+device room is short. This is a residency heuristic, not a guarantee that the full startup, optional features, or
+concurrent streams will fit. `device` forces GPU residency; `host` forces mapped host residency on a discrete GPU,
+useful when maximizing context or parallel streams. Explicit `host` requires pinned system RAM and is unavailable on
+integrated GPUs. Explicitly setting any residency mode is rejected for other checkpoint formats.
+
 The Metal dense loader reads aligned hidden, intermediate, layer and head counts from `config.json`.
 It retains the existing attention/DeltaNet head layouts and layer schedule. The untied 9B geometry
 (4096 hidden, 12288 intermediate, 32 layers) uses the same runtime-shaped projections; full checkpoint

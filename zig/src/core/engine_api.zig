@@ -234,6 +234,9 @@ pub const Family = struct {
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
 
+/// Where a supported CUDA family's input embedding rows live while serving.
+pub const EmbeddingResidency = enum { auto, device, host };
+
 /// Which of --tp and --rank the command line named (a CUDA family's rank aliases fill the rest).
 pub const Given = struct { tp: bool = false, rank: bool = false };
 
@@ -298,6 +301,8 @@ pub const Open = struct {
     segments: ?u32 = null,
     /// --precision (CUDA): an NVFP4 checkpoint's math, NVIDIA's own or full precision; null: the family's default.
     precision: ?Precision = null,
+    /// --embedding-residency: where supported CUDA families keep input embedding rows.
+    embedding_residency: ?EmbeddingResidency = null,
     /// --mtp-drafts and --mtp-confidence; null: the engine's defaults.
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,

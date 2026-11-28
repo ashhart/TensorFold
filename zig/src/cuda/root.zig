@@ -37,6 +37,7 @@ pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
 pub const qmmf_shared = @import("qmmf_shared.zig");
 pub const qmmf = @import("qmmf.zig");
+pub const qmmf_part_bytes = @import("qmmf_part_bytes.zig");
 pub const qmmf_group = @import("qmmf_group.zig");
 pub const qmmf_half = @import("qmmf_half.zig");
 pub const fp8 = @import("fp8.zig");

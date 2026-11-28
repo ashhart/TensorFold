@@ -38,17 +38,7 @@ pub fn rawBytes(n: usize, k: usize, bits: u8) usize {
 
 /// A slot's output and input widths.
 fn shape(g: Geometry, slot: Slot) [2]usize {
-    return switch (slot) {
-        .gate, .up => .{ g.intermediate, g.hidden },
-        .down => .{ g.hidden, g.intermediate },
-        .qkv => .{ g.convWidth(), g.hidden },
-        .z => .{ g.valueWidth(), g.hidden },
-        .a, .b => .{ g.v_heads, g.hidden },
-        .out => .{ g.hidden, g.valueWidth() },
-        .q => .{ 2 * g.attnWidth(), g.hidden },
-        .k, .v => .{ g.kv_heads * head_dim, g.hidden },
-        .o => .{ g.hidden, g.attnWidth() },
-    };
+    return g.projectionShape(slot);
 }
 
 /// The slots layer `i` loads: a dense MLP's (routed experts load apart) and its mixer's.
@@ -99,6 +89,13 @@ pub fn total(g: Geometry) usize {
         }
     }
     return t;
+}
+
+/// The weights' device bytes when their token embedding rows live in mapped host memory.
+pub fn totalWithoutEmbedding(g: Geometry) usize {
+    if (!g.embeds) return total(g);
+    const embed = if (g.kinds.modelopt) aligned(g.vocab * g.hidden * 2) else embedBytes(g);
+    return total(g) - embed;
 }
 
 /// The largest projection's bytes as stored: the staging buffer the load packs each one from (and widens through).
@@ -358,7 +355,12 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     const m = if (mo) modelopt.prefix else "language_model.model.";
     if (g.whole != 0) try loadStage(e, ck, stage, m) else if (mo) {
         e.embed_bits = 16; // bf16 rows as stored
-        e.embed_w = try tensor(e, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
+        e.embed_w = if (e.host_embed) |host| blk: {
+            var buf: [160]u8 = undefined;
+            const name = try std.fmt.bufPrint(&buf, "{s}embed_tokens.weight", .{m});
+            const t = try ck.expect(name, .bf16, &.{ g.vocab, g.hidden });
+            break :blk try @import("cuda_host_embed.zig").rows(host, t.bytes);
+        } else try tensor(e, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
         e.embed_s = 0;
         e.embed_b = 0;
         // a tied plain BF16 head is the embedding's rows, packed again into the lane's layout
@@ -444,6 +446,15 @@ test "a uniform 4-bit checkpoint keeps its sizes; other modules take their own w
     g.bits.head = 6;
     try std.testing.expect(total(g) > uniform);
     try std.testing.expectEqual(rawBytes(g.vocab, g.hidden, 6), stageBytes(g));
+}
+
+test "a mapped ModelOpt BF16 embedding subtracts exactly its aligned arena allocation" {
+    var g: Geometry = .{ .hidden = 64, .intermediate = 128, .layers = 0, .vocab = 128, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = false, .context = 128, .linear = @splat(false), .kinds = .{ .modelopt = true, .head = .bf16 } };
+    const with_embedding = total(g);
+    const embed_bytes = aligned(g.vocab * g.hidden * 2);
+    try std.testing.expectEqual(embed_bytes, with_embedding - totalWithoutEmbedding(g));
+    g.embeds = false;
+    try std.testing.expectEqual(total(g), totalWithoutEmbedding(g));
 }
 
 test "Qwen stage: a pipeline's stages load one engine's weights between them, the embedding and the head once" {
