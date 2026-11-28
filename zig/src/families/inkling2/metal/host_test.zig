@@ -7,6 +7,7 @@ test {
     _ = @import("experts_test.zig");
     _ = @import("loop_test.zig");
     _ = @import("runtime_test.zig");
+    _ = @import("conv_stage_test.zig");
     _ = @import("runtime_kernels_test.zig");
     _ = @import("dspark_kernels_test.zig");
     _ = @import("draft_head_q4.zig");
@@ -23,9 +24,11 @@ test {
     _ = @import("dflash2_kernels.zig");
     _ = @import("dflash2.zig");
     _ = @import("backend.zig");
+    _ = @import("commit_failure_test.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
     _ = @import("tree_test.zig");
     _ = @import("tfq3.zig");
     _ = @import("tfq3_test.zig");
+    if (@import("builtin").os.tag.isDarwin()) _ = @import("v5_3_parity_test.zig");
 }

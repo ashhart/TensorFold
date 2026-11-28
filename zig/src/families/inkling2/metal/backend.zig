@@ -1,10 +1,11 @@
 //! Inkling 2 Mini behind the lane engine: independent visit state and exact copy-window rollback.
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
+const fwd_ops = @import("forward_ops.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const img = @import("images.zig");
@@ -14,6 +15,7 @@ const cfg = @import("../config.zig");
 const draws = @import("draw.zig");
 const flight = @import("flight.zig");
 const sample = @import("sample.zig");
+const warm_ops = @import("backend_warm.zig");
 const be = lanes.backend;
 
 const SavedSnap = struct {
@@ -22,7 +24,6 @@ const SavedSnap = struct {
 };
 
 pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null, gpu_tokens: bool = false };
-const shared_widths = [_]usize{ 24, 32, 48, 64 };
 
 /// The prompt cache gets the bytes left by live streams and never evicts the state being restored.
 pub const Room = struct { ctx: *anyopaque, fit: *const fn (ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void };
@@ -51,11 +52,15 @@ pub const Metal = struct {
     /// A forward's ms by window width, timed by `warm` / `measure`: the depth rule prices rounds with them.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
-    shared: [shared_widths.len]lanes.config.Cost = undefined,
+    shared: [warm_ops.shared_widths.len]lanes.config.Cost = undefined,
     shared_timed: usize = 0,
     tap_gen: u64 = 0,
     drafter: ?*dspark.Drafter = null,
     verify_gen: u64 = 0,
+    commit_cb: ?mtl.CommandBuffer = null,
+    commit_seq: u64 = 0,
+    commit_active_seq: u64 = 0,
+    test_fail_commit: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
     pub var fail_first_draw_for_test: if (builtin.is_test) bool else void = if (builtin.is_test) false else {};
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
@@ -73,6 +78,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(self: *Metal) void {
+        self.settleCommit() catch {};
         self.ring.deinit();
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
@@ -117,6 +123,7 @@ pub const Metal = struct {
         try self.ring.drain();
         try validateTaps(&self.model.config, taps);
         if (!self.prepared) return error.UnpreparedInkling2Taps;
+        if (self.commit_cb) |cb| if (cb.status() == .@"error") try self.settleCommit();
         const tp = (try self.cacheOf(stream)).tap;
         const buf = tp.buf orelse return error.Inkling2TapsNotHeld;
         const off = try st.featureOffset(tp, start, count, self.tap_gen);
@@ -137,7 +144,7 @@ pub const Metal = struct {
         return self.tap_gen;
     }
 
-    fn nextVerifyGeneration(self: *Metal) u64 {
+    pub fn nextVerifyGeneration(self: *Metal) u64 {
         self.verify_gen +%= 1;
         return self.verify_gen;
     }
@@ -151,7 +158,9 @@ pub const Metal = struct {
     }
 
     fn cacheOf(self: *Metal, stream: *lanes.Stream) !*st.Cache {
-        return self.caches.get(stream) orelse error.UnknownInklingStream;
+        const cache = self.caches.get(stream) orelse return error.UnknownInklingStream;
+        try cache.ensureUsable();
+        return cache;
     }
 
     fn vocab(self: *const Metal) usize {
@@ -166,7 +175,9 @@ pub const Metal = struct {
         return draws.draw(self.gpa, l, self.values, sampling, position, mask);
     }
 
-    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, pictures: ?*img.Rows) !void {
+    pub fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, pictures: ?*img.Rows) !void {
+        try self.settleCommit();
+        try cache.ensureUsable();
         const base = cache.len;
         var at: usize = 0;
         while (at < ids.len) {
@@ -214,11 +225,51 @@ pub const Metal = struct {
         }
     }
 
+    fn nextCommitSeq(self: *Metal) u64 {
+        self.commit_seq +%= 1;
+        if (self.commit_seq == 0) self.commit_seq = 1;
+        return self.commit_seq;
+    }
+
+    fn latchCommitFailure(self: *Metal, seq: u64) void {
+        if (seq == 0) return;
+        var it = self.caches.valueIterator();
+        while (it.next()) |cache_ptr| {
+            const cache = cache_ptr.*;
+            if (cache.commit_seq == seq) cache.markCommitFailed();
+        }
+    }
+
+    pub fn settleCommit(self: *Metal) !void {
+        const seq = self.commit_active_seq;
+        const cb = self.commit_cb;
+        self.commit_cb = null;
+        self.commit_active_seq = 0;
+        const gpu_err = if (cb) |buf| blk: {
+            defer buf.release();
+            buf.wait();
+            break :blk buf.failure();
+        } else null;
+        const injected = if (comptime builtin.is_test) blk: {
+            if (seq == 0) break :blk false;
+            const fail = self.test_fail_commit;
+            self.test_fail_commit = false;
+            break :blk fail;
+        } else false;
+        if (gpu_err != null or injected) {
+            if (gpu_err) |msg| std.log.err("inkling2_loop keep commit: {s}", .{msg});
+            self.latchCommitFailure(seq);
+            return error.GpuFailed;
+        }
+    }
+
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
+        try self.settleCommit();
         try self.ring.drain();
         const ids = stream.prompt();
-        if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidInklingPrompt;
+        if (self.caches.get(stream)) |existing| return if (existing.commit_failed) error.GpuFailed else error.InvalidInklingPrompt;
+        if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity) return error.InvalidInklingPrompt;
         const min_cap = ids.len + stream.max_new;
         const padded = @min(@as(usize, 1048576), min_cap + st.window_rows);
         const cap = if (self.held + st.cacheBytes(padded) <= self.options.budget) padded else min_cap;
@@ -259,93 +310,12 @@ pub const Metal = struct {
     }
 
     pub fn warm(self: *Metal) !void {
-        try self.ring.drain();
-        var cache = try st.Cache.init(self.model.device, st.prompt_rows + st.window_rows + 4, &self.model.weight_plan);
-        defer cache.deinit();
-        var ids: [st.prompt_rows]u32 = undefined;
-        for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
-        try self.feed(&cache, &ids, null, null);
-        const tree_parents = [_]i32{ -1, 0, 0 };
-        try cache.beginTree(self.model.queue, 3, &tree_parents);
-        errdefer cache.rollback(self.model.queue) catch {};
-        _ = self.nextVerifyGeneration();
-        try fwd.runShared(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = 3, .parents = &tree_parents }}, ids[0..3], .{ .all = true });
-        try cache.commitPath(self.model.queue, &.{ 0, 2 }, &self.model.tree);
-        _ = self.nextVerifyGeneration();
-        var warm_draws: [st.window_rows]?fwd.Draw = @splat(null);
-        warm_draws[0] = .{ .how = .greedy, .out = .{ .buf = self.scratch.picks, .off = 0 } };
-        warm_draws[1] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 1, .temperature = 1.0, .top_k = 0, .top_p = 0.9 }, .position = 1 } }, .out = .{ .buf = self.scratch.picks, .off = 4 } };
-        warm_draws[2] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 2, .temperature = 1.0, .top_k = 20, .top_p = 0.95 }, .position = 2 } }, .out = .{ .buf = self.scratch.picks, .off = 8 } };
-        warm_draws[3] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 3, .temperature = 1.0, .top_k = 100, .top_p = 0.95 }, .position = 3 } }, .out = .{ .buf = self.scratch.picks, .off = 12 } };
-        try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true, .draws = if (self.options.gpu_tokens) &warm_draws else &.{} });
-        // A window of each width after that prompt, the second of two runs timed.
-        for (1..st.window_rows + 1) |rows| {
-            var ms: f64 = 0;
-            for (0..2) |attempt| {
-                const t0 = now();
-                try fwd.run(self.model, &self.scratch, &cache, ids[0..rows], .{ .all = true });
-                if (attempt == 1) ms = now() - t0;
-            }
-            self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
-        }
-        self.timed = st.window_rows;
+        return warm_ops.warm(self);
     }
 
     /// Times 1..window_rows if not timed yet and 4-stream shared batches up to batch_rows.
     pub fn measure(self: *Metal) !void {
-        try self.ring.drain();
-        var ids: [st.batch_rows]u32 = undefined;
-        for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
-        const cap: usize = if (self.options.streams > 1) 4 else 1;
-        var caches: [4]st.Cache = undefined;
-        var made: usize = 0;
-        defer for (caches[0..made]) |*c| c.deinit();
-        for (caches[0..cap]) |*c| {
-            c.* = try st.Cache.init(self.model.device, 64, &self.model.weight_plan);
-            made += 1;
-        }
-        if (self.timed == 0) {
-            for (1..st.window_rows + 1) |rows| {
-                var ms: f64 = 0;
-                for (0..2) |attempt| {
-                    caches[0].len = 0;
-                    const t0 = now();
-                    try fwd.run(self.model, &self.scratch, &caches[0], ids[0..rows], .{ .all = true });
-                    if (attempt == 1) ms = now() - t0;
-                }
-                self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
-            }
-            self.timed = st.window_rows;
-        }
-        self.shared_timed = 0;
-        if (self.options.streams > 1) {
-            for (shared_widths) |rows| {
-                if (rows > st.batch_rows) continue;
-                const seg_rows = rows / 4;
-                const segs = [_]fwd.Segment{
-                    .{ .cache = &caches[0], .rows = seg_rows },
-                    .{ .cache = &caches[1], .rows = seg_rows },
-                    .{ .cache = &caches[2], .rows = seg_rows },
-                    .{ .cache = &caches[3], .rows = seg_rows },
-                };
-                var ms: f64 = 0;
-                for (0..2) |attempt| {
-                    for (caches[0..4]) |*c| c.len = 0;
-                    const t0 = now();
-                    try fwd.runShared(self.model, &self.scratch, &segs, ids[0..rows], .{ .all = true });
-                    if (attempt == 1) ms = now() - t0;
-                }
-                self.shared[self.shared_timed] = .{ .width = @intCast(rows), .ms = ms };
-                self.shared_timed += 1;
-            }
-        }
-    }
-
-    fn now() f64 {
-        if (comptime !builtin.os.tag.isDarwin()) return 0;
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) * 1e-6;
+        return warm_ops.measure(self);
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -365,6 +335,7 @@ pub const Metal = struct {
     fn firstSlot(self: *Metal, stream: *lanes.Stream, position: u64, mask: []const u32) !u64 {
         try self.ring.drain();
         const cache = try self.cacheOf(stream);
+        if (self.commit_active_seq != 0 and cache.commit_seq == self.commit_active_seq) try self.settleCommit();
         if (position != cache.len or cache.pending != null) return error.InvalidInklingPosition;
         if (!self.options.gpu_tokens or mask.len > 0) return self.ring.put(try self.draw(self.logits(cache), stream.sampling, position, mask));
         return self.ring.drawSync(.{ self, cache.logits, sample.drawHow(stream.sampling, position) }, drawFirstSlot);
@@ -373,6 +344,7 @@ pub const Metal = struct {
     fn queueFn(ptr: *anyopaque, stream: *lanes.Stream, what: be.Feed, position: u64) !u64 {
         const self = cast(ptr);
         try self.ring.check();
+        try self.settleCommit();
         const cache = try self.cacheOf(stream);
         if (position != cache.len + 1 or cache.pending != null) return error.InvalidInklingPosition;
         if (cache.len + 1 > cache.capacity) return error.Inkling2ContextFull;
@@ -428,12 +400,15 @@ pub const Metal = struct {
     fn firstRowFn(ptr: *anyopaque, stream: *lanes.Stream) !lanes.LogprobRow {
         const self = cast(ptr);
         try self.ring.drain();
-        const l = self.logits(try self.cacheOf(stream));
+        const cache = try self.cacheOf(stream);
+        if (self.commit_active_seq != 0 and cache.commit_seq == self.commit_active_seq) try self.settleCommit();
+        const l = self.logits(cache);
         return draws.firstLogprobRow(l, self.ring.slice(), self.ring.next, stream.logprobs orelse 0);
     }
 
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
+        try self.settleCommit();
         const words = draws.minMaskWords(self.model.config.text.vocab);
         if (windows.len != out.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
         try self.ring.drain();
@@ -444,7 +419,7 @@ pub const Metal = struct {
         var any_gpu_draw = false;
         var total: usize = 0;
         var begun: usize = 0;
-        errdefer for (segments[0..begun]) |seg| seg.cache.rollback(self.model.queue) catch {};
+        errdefer for (segments[0..begun]) |seg| seg.cache.rollback() catch {};
         for (windows, out, 0..) |w, o, i| {
             const rows = w.rows();
             if (rows == 0 or rows > st.window_rows or total + rows > st.batch_rows or w.held != 0 or o.sampled.len != rows or o.drafts.len != rows - 1 or w.positions.len != rows) return error.UnsupportedInklingWindow;
@@ -470,9 +445,7 @@ pub const Metal = struct {
             total += rows;
         }
         for (segments[0..windows.len]) |seg| {
-            if (seg.parents) |ps| {
-                if (st.isChain(ps)) try seg.cache.beginStage(seg.rows) else try seg.cache.beginTree(self.model.queue, seg.rows, ps);
-            } else try seg.cache.beginStage(seg.rows);
+            try seg.cache.beginTree(seg.rows, seg.parents);
             begun += 1;
         }
         const verify_gen = self.nextVerifyGeneration();
@@ -503,10 +476,18 @@ pub const Metal = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
+        try self.settleCommit();
         try self.ring.drain();
-        if (windows.len != paths.len) return error.InvalidInklingWindows;
-        for (windows, paths) |w, path| {
+        if (windows.len != paths.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
+        var segs: [st.batch_rows]fwd.Segment = undefined;
+        var prefix_segs: [st.batch_rows]fwd.Segment = undefined;
+        var prefix_acc: [st.batch_rows]usize = undefined;
+        var prefix_n: usize = 0;
+        var tree_idx: [st.batch_rows]usize = undefined;
+        var tree_n: usize = 0;
+        for (windows, paths, 0..) |w, path, i| {
             const cache = try self.cacheOf(w.stream);
+            for (segs[0..i]) |prev| if (prev.cache == cache) return error.UnsupportedInklingWindow;
             const rows = w.rows();
             if (cache.pending == null or cache.pending.? != rows) return error.UnsupportedInklingWindow;
             if (w.parents) |ps| {
@@ -515,11 +496,38 @@ pub const Metal = struct {
                     if (!std.mem.eql(i32, ps, cache.pending_parents[0..rows])) return error.UnsupportedInklingWindow;
                 } else if (!st.isChain(ps)) return error.UnsupportedInklingWindow;
             }
-            try cache.commitPath(self.model.queue, path, &self.model.tree);
+            try st.validateKeepPath(rows, if (cache.pending_has_tree) cache.pending_parents[0..rows] else null, path);
+            segs[i] = .{ .cache = cache, .rows = rows };
+            if (st.isPrefixPath(path)) {
+                prefix_segs[prefix_n] = segs[i];
+                prefix_acc[prefix_n] = path.len;
+                prefix_n += 1;
+            } else {
+                tree_idx[tree_n] = i;
+                tree_n += 1;
+            }
+        }
+        if (windows.len == 0) return;
+        const seq = self.nextCommitSeq();
+        {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = self.model.queue.commandBuffer();
+            const e = cb.compute(.concurrent);
+            fwd_ops.commitHistories(self.model, e, prefix_segs[0..prefix_n], prefix_acc[0..prefix_n]);
+            for (tree_idx[0..tree_n]) |i| segs[i].cache.encodeCommitPath(e, paths[i], &self.model.tree);
+            e.end();
+            cb.commit();
+            self.commit_cb = cb.retain();
+            self.commit_active_seq = seq;
+        }
+        for (segs[0..windows.len]) |seg| seg.cache.commit_seq = seq;
+        for (segs[0..windows.len], paths) |seg, path| {
+            try seg.cache.finishCommitPath(path);
             const last = path[path.len - 1];
-            if (cache.logits_gen == self.verify_gen) {
+            if (seg.cache.logits_gen == self.verify_gen) {
                 const all = self.scratch.logits_all.slice(f32, st.batch_rows * self.vocab());
-                @memcpy(cache.logits.slice(f32, self.vocab()), all[(cache.logits_base + last) * self.vocab() ..][0..self.vocab()]);
+                @memcpy(seg.cache.logits.slice(f32, self.vocab()), all[(seg.cache.logits_base + last) * self.vocab() ..][0..self.vocab()]);
             }
         }
     }
@@ -536,9 +544,10 @@ pub const Metal = struct {
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         self.ring.drain() catch |err| if (!builtin.is_test) std.log.err("inkling2_loop flight at release: {s}", .{@errorName(err)});
+        self.settleCommit() catch |err| if (!builtin.is_test) std.log.err("inkling2_loop commit at release: {s}", .{@errorName(err)});
         if (self.caches.fetchRemove(stream)) |entry| {
             const cache = entry.value;
-            if (cache.pending != null) cache.rollback(self.model.queue) catch |err| std.log.err("inkling2_loop rollback at release: {s}", .{@errorName(err)});
+            if (!cache.commit_failed and cache.pending != null) cache.rollback() catch |err| std.log.err("inkling2_loop rollback at release: {s}", .{@errorName(err)});
             self.held -= st.cacheBytes(cache.capacity);
             cache.deinit();
             self.gpa.destroy(cache);
@@ -551,28 +560,14 @@ pub const Metal = struct {
         return snapshot.bytes(at) + if (self.drafter != null) dspark_state.Snap.bytes(at) else 0;
     }
 
-    fn syncQueue(self: *Metal) !void {
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = self.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
-        e.barrier();
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| {
-            std.log.err("inkling2_loop queue barrier: {s}", .{msg});
-            return error.GpuFailed;
-        }
-    }
-
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         const self = cast(ptr);
         try self.ring.drain();
+        try self.settleCommit();
         const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const cache = try self.cacheOf(stream);
         if (cache.len != at or cache.pending != null) return error.SnapshotOutOfStep;
-        if (self.prepared) try self.syncQueue();
+        if (self.prepared) try snapshot.syncQueue(self.model.queue);
         const snap = try self.gpa.create(SavedSnap);
         errdefer self.gpa.destroy(snap);
         snap.* = .{ .target = try snapshot.save(self.model.device, self.model.queue, cache) };

@@ -7,7 +7,7 @@ const flight = @import("flight.zig");
 const backend_ = @import("backend.zig");
 const draws = @import("draw.zig");
 const sample = @import("sample.zig");
-const tree_gpu = @import("tree_gpu_test.zig");
+const synth = @import("synthetic_model_test.zig");
 
 const gpa = std.testing.allocator;
 
@@ -364,7 +364,7 @@ fn checkSyncFirstTokenFailure(m: *@import("model.zig").Model) !void {
 test "Inkling 2 Mini gpu_tokens=true matches gpu_tokens=false across boundaries, drafts, resume, concurrency, and ring 4096" {
     const dev = mtl.Device.init() catch return error.SkipZigTest;
     dev.deinit();
-    const m = try tree_gpu.buildSyntheticModel();
+    const m = try synth.buildSyntheticModel(gpa);
     defer m.deinit();
     const cpu_be = try backend_.Metal.init(gpa, m, .{ .capacity = 256, .streams = 4, .budget = 8 * st.cacheBytes(256), .gpu_tokens = false });
     defer cpu_be.deinit();

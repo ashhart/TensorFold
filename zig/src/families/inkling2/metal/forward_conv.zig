@@ -4,6 +4,8 @@ const mtl = @import("metal");
 const ck = @import("../../../core/checkpoint_metal.zig");
 const layer_plan = @import("../plan.zig");
 const glue = @import("glue.zig");
+const tree = @import("tree.zig");
+const ops = @import("forward_ops.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
 
@@ -24,6 +26,24 @@ fn at(buf: mtl.Buffer, off: usize) Ref {
 
 fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
+}
+
+pub fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
+    const channels = state.convWidth(conv_state);
+    const raw_at = at(raw.buf, raw.off + base * channels * 2);
+    const out_at = at(out.buf, out.off + base * channels * 2);
+    const hist = cache.history(slot, conv_state);
+    if (is_tree) {
+        tree.convStatic(&m.tree, e, hist, raw_at, r(weight), at(s.conv_src, base * 4 * 4), out_at, @intCast(rows), @intCast(channels));
+    } else {
+        glue.convStaticInplace(&m.glue, e, hist, raw_at, r(weight), out_at, @intCast(rows), @intCast(channels));
+    }
+    ops.stageConvRows(m, e, cache, slot, conv_state, raw, base, rows);
+}
+
+pub fn fusedConv(segments: anytype, meta: anytype) bool {
+    for (meta) |sm| if (sm.is_tree) return false;
+    return segments.len > 1 or segments[0].rows <= state.window_rows;
 }
 
 pub fn declareConvResources(e: mtl.ComputeEncoder, s: *state.Scratch, segments: anytype) void {
@@ -58,15 +78,15 @@ pub fn prepareConvTables(m: *const Model, s: *state.Scratch, segments: anytype) 
         seg_bases[si] = base;
         base += seg.rows;
     }
-    const single_scratch = segments.len == 1 and segments[0].cache.pending == null;
     for (0..state.visit_slots) |slot| {
         const is_global = m.weight_plan.at(m.weight_plan.visit(@intCast(slot)).layer).kind == .global;
         for (segments, 0..) |seg, si| {
             const cache = seg.cache;
             const b = seg_bases[si];
             const commit: u32 = @intFromBool(cache.pending == null);
-            const st_k = if (single_scratch) at(s.conv_stage, 0) else cache.staged(slot, 0, 0);
-            const st_v = if (single_scratch) at(s.conv_stage, (3 + seg.rows) * state.kv_width * 2) else cache.staged(slot, 1, 0);
+            const stage_base = state.convStageByteOffset(b, si);
+            const st_k = at(s.conv_stage, stage_base);
+            const st_v = at(s.conv_stage, stage_base + (3 + seg.rows) * state.kv_width * 2);
             conv_segs[(slot * 3 + 0) * state.max_segments + si] = .{
                 .hist0 = addr(cache.history(slot, 0)),
                 .raw0 = addr(at(s.k_raw, b * state.kv_width * 2)),
@@ -94,7 +114,7 @@ pub fn prepareConvTables(m: *const Model, s: *state.Scratch, segments: anytype) 
                 }
             }
             inline for (.{ .{ 1, 2, s.attn_dense, s.attn_conv }, .{ 2, 3, s.mlp_out, s.mlp_conv } }) |entry| {
-                const st_post = if (single_scratch) at(s.conv_stage, 0) else cache.staged(slot, entry[1], 0);
+                const st_post = at(s.conv_stage, stage_base);
                 const h_post = cache.history(slot, entry[1]);
                 conv_segs[(slot * 3 + entry[0]) * state.max_segments + si] = .{
                     .hist0 = addr(h_post),
@@ -148,11 +168,11 @@ pub fn stageConvStatic(m: *const Model, e: mtl.ComputeEncoder, segs: Ref, weight
 pub fn fusedAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: anytype) void {
     const w = &m.weights.layers[v.layer];
     const segs_ref = convSegsRef(s, v.cache_slot, 0);
-    const scratch_stage = segments.len == 1 and segments[0].cache.pending == null;
     if (w.attn.k_conv == .static and w.attn.v_conv == .static) {
         stageConvStatic(m, e, segs_ref, r(w.attn.k_conv.static), r(w.attn.v_conv.static), segments.len, state.kv_width, 2);
     } else {
         stageConvSegs(m, e, segs_ref, segments.len, state.kv_width, 2);
+        e.barrier();
         if (w.attn.k_conv == .dynamic and w.attn.v_conv == .dynamic) {
             var total: usize = 0;
             for (segments) |seg| total += seg.rows;
@@ -162,21 +182,14 @@ pub fn fusedAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch,
             glue.convDynamicSegs(&m.glue, e, convDynSegsRef(s, v.cache_slot, 1), r(vd.static_w), r(vd.projection), @intCast(segments.len), @intCast(total), state.kv_width);
         } else {
             var offset: usize = 0;
-            for (segments) |seg| {
-                convInputForAttention(m, e, s, seg.cache, v, offset, seg.rows, scratch_stage, true);
-                convInputForAttention(m, e, s, seg.cache, v, offset, seg.rows, scratch_stage, false);
+            for (segments, 0..) |seg, si| {
+                const stage_base = state.convStageByteOffset(offset, si);
+                convInputForAttention(m, e, s, v, offset, seg.rows, stage_base, true);
+                convInputForAttention(m, e, s, v, offset, seg.rows, stage_base, false);
                 offset += seg.rows;
             }
         }
     }
-}
-
-pub fn commitHistories(m: *const Model, e: mtl.ComputeEncoder, cache: *const state.Cache, offset: usize) void {
-    e.setPipeline(m.runtime[@backingInt(model_file.RuntimeOp.commit_histories)]);
-    e.setBuffer(cache.taps, 0, 0);
-    e.setBuffer(cache.conv, 0, 1);
-    e.setValue(CommitHistoriesArgs{ .offset = @intCast(offset), .slots = state.visit_slots, .tap_rows = 3 + state.max_rows }, 2);
-    e.dispatchThreads(mtl.Size.of(state.visit_slots * 3 * state.conv_row_values, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 /// Every stream's static convolution of `raw` into `out`: fused stage+conv for decode windows, split for large prefill.
@@ -186,11 +199,21 @@ pub fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segme
         const w = r(weight);
         stageConvStatic(m, e, convSegsRef(s, slot, conv_state - 1), w, w, segments.len, channels, 1);
         e.barrier();
+        var base: usize = 0;
+        var staged = false;
+        for (segments) |seg| {
+            if (seg.cache.pending != null) {
+                ops.stageConvRows(m, e, seg.cache, slot, conv_state, raw, base, seg.rows);
+                staged = true;
+            }
+            base += seg.rows;
+        }
+        if (staged) e.barrier();
         return;
     }
     var base: usize = 0;
-    for (segments) |seg| {
-        const taps = if (segments.len == 1 and seg.cache.pending == null) at(s.conv_stage, 0) else seg.cache.staged(slot, conv_state, 0);
+    for (segments, 0..) |seg, si| {
+        const taps = at(s.conv_stage, state.convStageByteOffset(base, si));
         const h = seg.cache.history(slot, conv_state);
         const raw_ref = at(raw.buf, raw.off + base * channels * 2);
         stageConv(m, e, h, raw_ref, taps, h, raw_ref, taps, seg.rows, channels, seg.cache.pending == null, 1);
@@ -198,8 +221,8 @@ pub fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segme
     }
     e.barrier();
     base = 0;
-    for (segments) |seg| {
-        const taps = if (segments.len == 1 and seg.cache.pending == null) at(s.conv_stage, 0) else seg.cache.staged(slot, conv_state, 0);
+    for (segments, 0..) |seg, si| {
+        const taps = at(s.conv_stage, state.convStageByteOffset(base, si));
         glue.convStatic(&m.glue, e, taps, r(weight), at(out.buf, out.off + base * channels * 2), @intCast(seg.rows), @intCast(channels));
         base += seg.rows;
     }
@@ -208,10 +231,10 @@ pub fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segme
 
 const ConvInput = struct { raw: Ref, projected: Ref, normalized: Ref, taps: Ref, state: usize };
 
-fn convInput(s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, local_ungated: bool, base: usize, rows: usize, scratch_stage: bool, key: bool) ConvInput {
+fn convInput(s: *state.Scratch, local_ungated: bool, base: usize, rows: usize, stage_base: usize, key: bool) ConvInput {
     const cs: usize = if (key) 0 else 1;
     const normalized = if (key) at(s.k_norm, 0) else if (local_ungated) at(s.q_norm, 0) else at(s.v_norm, 0);
-    const taps = if (scratch_stage) at(s.conv_stage, if (key) 0 else (3 + rows) * state.kv_width * 2) else cache.staged(v.cache_slot, cs, 0);
+    const taps = at(s.conv_stage, stage_base + if (key) @as(usize, 0) else (3 + rows) * state.kv_width * 2);
     return .{
         .raw = if (key) at(s.k_conv, base * state.kv_width * 2) else at(s.v_conv, base * state.kv_width * 2),
         .projected = if (key) at(s.k_raw, base * state.kv_width * 2) else at(s.v_raw, base * state.kv_width * 2),
@@ -221,17 +244,9 @@ fn convInput(s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit,
     };
 }
 
-/// Stage both K and V convolution histories and new rows in one launch; updates history in place when not pending.
-pub fn stageConvKv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, scratch_stage: bool) void {
-    const local_ungated = !v.hasMessages() and m.weight_plan.at(v.layer).kind != .global;
-    const kc = convInput(s, cache, v, local_ungated, base, rows, scratch_stage, true);
-    const vc = convInput(s, cache, v, local_ungated, base, rows, scratch_stage, false);
-    stageConv(m, e, cache.history(v.cache_slot, 0), kc.projected, kc.taps, cache.history(v.cache_slot, 1), vc.projected, vc.taps, rows, state.kv_width, cache.pending == null, 2);
-}
-
-pub fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, scratch_stage: bool, key: bool) void {
+pub fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, base: usize, rows: usize, stage_base: usize, key: bool) void {
     const w = &m.weights.layers[v.layer];
-    const c = convInput(s, cache, v, !v.hasMessages() and m.weight_plan.at(v.layer).kind != .global, base, rows, scratch_stage, key);
+    const c = convInput(s, !v.hasMessages() and m.weight_plan.at(v.layer).kind != .global, base, rows, stage_base, key);
     switch (if (key) w.attn.k_conv else w.attn.v_conv) {
         .static => |weight| glue.convStatic(&m.glue, e, c.taps, r(weight), c.raw, @intCast(rows), state.kv_width),
         .dynamic => |d| glue.convDynamic(&m.glue, e, c.taps, c.normalized, r(d.static_w), r(d.projection), c.raw, @intCast(rows), state.kv_width),

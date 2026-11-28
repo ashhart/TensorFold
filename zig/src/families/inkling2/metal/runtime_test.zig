@@ -11,6 +11,8 @@ const model = @import("model.zig");
 const fwd = @import("forward.zig");
 const glue = @import("glue.zig");
 const backend = @import("backend.zig");
+const runtime_plan = @import("runtime_plan.zig");
+const bf16 = @import("bf16_round");
 
 fn mini() cfg.Config {
     return .{
@@ -74,23 +76,28 @@ test "Mini admits only its fixed geometry and expands 24 weights to 48 visits" {
     try std.testing.expect(!(p.visits[17].pass > 1 and p.visits[17].layer == 6));
 }
 
-test "Every visit and convolution role has disjoint persistent and staged bytes" {
+test "Every visit and convolution role has disjoint persistent history and compact taps" {
+    try std.testing.expectEqual(state.visit_slots * state.window_rows * state.conv_row_values * 2, state.taps_bytes);
     var previous_persistent: usize = 0;
+    var previous_compact: usize = 0;
     for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
         const off = state.convByteOffset(slot, cs, 0, 3);
-        const len = 3 * state.convWidth(cs) * 2;
-        if (slot != 0 or cs != 0) try std.testing.expect(off >= previous_persistent);
-        previous_persistent = off + len;
-        for (0..4) |accepted| {
-            const source = state.convByteOffset(slot, cs, accepted, 3 + state.max_rows);
-            try std.testing.expect(source + len <= state.taps_bytes);
+        const persistent_len = 3 * state.convWidth(cs) * 2;
+        const staged0 = state.convByteOffset(slot, cs, 0, state.window_rows);
+        const compact_len = state.window_rows * state.convWidth(cs) * 2;
+        if (slot != 0 or cs != 0) {
+            try std.testing.expect(off >= previous_persistent);
+            try std.testing.expect(staged0 >= previous_compact);
         }
+        previous_persistent = off + persistent_len;
+        previous_compact = staged0 + compact_len;
     };
     try std.testing.expectEqual(state.conv_bytes, previous_persistent);
-    // Decode acceptance k preserves exactly old[k], old[k+1], old[k+2] through raw[k..k+3].
+    try std.testing.expectEqual(state.taps_bytes, previous_compact);
+    // Decode acceptance k preserves old[k..3] and reads taps[0..] starting at row 0 of window_rows.
     for (0..state.window_rows + 1) |accepted| {
-        const old = state.convByteOffset(47, 3, 0, 3 + state.max_rows);
-        const selected = state.convByteOffset(47, 3, accepted, 3 + state.max_rows);
+        const old = state.convByteOffset(47, 3, 0, state.window_rows);
+        const selected = state.convByteOffset(47, 3, accepted, state.window_rows);
         try std.testing.expectEqual(old + accepted * state.hidden * 2, selected);
     }
 }
@@ -357,118 +364,142 @@ test "Mini pre-fusion skips only visit 0 and bankAndReset starts, and fused part
     try std.testing.expectEqualSlices(u8, s_ref.ar.contents()[0 .. 3 * rows * state.hidden * 4], s.ar.contents()[0 .. 3 * rows * state.hidden * 4]);
 }
 
-fn blitFill(queue: mtl.Queue, buf: mtl.Buffer, off: usize, len: usize, byte: u8) !void {
-    const cb = queue.commandBuffer();
-    const e = cb.blit();
-    e.fill(buf, off, len, byte);
-    e.end();
-    cb.commit();
-    cb.wait();
-    if (cb.failure() != null) return error.GpuFailed;
+test "Cache begin, commit, rollback and cacheBytes reflect no backup and 16-row taps" {
+    const cap: usize = 256;
+    const expected = state.kvBytes(cap) + state.conv_bytes + state.taps_bytes + state.vocabulary * 4;
+    try std.testing.expectEqual(expected, state.cacheBytes(cap));
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const p = schedule();
+    var c = try state.Cache.init(device, cap, &p);
+    defer c.deinit();
+    try std.testing.expectError(error.Inkling2NoTransaction, c.rollback());
+    try std.testing.expectError(error.Inkling2NoTransaction, c.commit(1));
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(0));
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(state.window_rows + 1));
+    try c.begin(4);
+    c.tap = .{ .start = 0, .rows = 4 };
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(1));
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.commit(5));
+    try c.rollback();
+    try std.testing.expectEqual(@as(?usize, null), c.pending);
+    try std.testing.expectEqual(@as(usize, 0), c.len);
+    try std.testing.expectEqual(@as(usize, 0), c.tap.rows);
+    try c.begin(4);
+    c.tap = .{ .buf = c.logits, .start = 0, .rows = 4 };
+    try c.commit(3);
+    try std.testing.expectEqual(@as(?usize, null), c.pending);
+    try std.testing.expectEqual(@as(usize, 3), c.len);
+    try std.testing.expectEqual(@as(usize, 3), c.tap.rows);
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(cap - 2));
 }
 
-fn expectConvByte(queue: mtl.Queue, conv: mtl.Buffer, off: usize, len: usize, staging: mtl.Buffer, want: u8) !void {
-    const cb = queue.commandBuffer();
-    const e = cb.blit();
-    e.copy(conv, off, staging, 0, len);
-    e.end();
-    cb.commit();
-    cb.wait();
-    if (cb.failure() != null) return error.GpuFailed;
-    const got = staging.slice(u8, len);
-    try std.testing.expectEqual(want, got[0]);
-    try std.testing.expectEqual(want, got[len - 1]);
+fn fillPatternBf16(dst: []u16, seed: u64) void {
+    var x = seed ^ 0x9e3779b97f4a7c15;
+    for (dst, 0..) |*d, i| {
+        if (i & 3 == 0) {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x *%= 0x2545f4914f6cdd1d;
+        }
+        const raw: u16 = @truncate(x >> @intCast((i & 3) * 16));
+        d.* = (raw & 0x807f) | ((@as(u16, 123) + (raw & 3)) << 7);
+    }
 }
 
-test "3-case GPU conv rollback restores backup or selects staged history (TF_INKLING2_METAL_DIR)" {
-    if (!builtin.os.tag.isDarwin()) return error.SkipZigTest;
-    if (@import("sys").getenv("TF_INKLING2_METAL_DIR") == null) return error.SkipZigTest;
-    try rollbackCases();
+fn bf16ToF32(bits: u16) f32 {
+    return @bitCast(@as(u32, bits) << 16);
 }
 
-pub fn rollbackCases() !void {
-    const pool = mtl.objc.Pool.push();
-    defer pool.pop();
-    const device = try mtl.Device.init();
-    defer device.deinit();
+test "GPU in-place tf_ink2_commit_histories updates all 48x4 histories bit-for-bit across accepted 0..16" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
     const queue = try device.queue();
     defer queue.deinit();
-    const sched = schedule();
-    var cache = try state.Cache.init(device, 32, &sched);
-    defer cache.deinit();
-    const staging = try device.buffer(state.conv_bytes, mtl.ResourceOptions.shared);
-    defer staging.deinit();
-
-    // Case 1: pre-part-0 staged failure clears transaction metadata without copying stale backup into conv.
-    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x11);
-    try blitFill(queue, cache.backup, 0, state.conv_bytes, 0xEE);
-    try cache.beginStage(4);
-    try std.testing.expect(!cache.conv_backed_up);
-    try cache.rollback(queue);
-    try std.testing.expect(cache.pending == null);
-    try std.testing.expect(!cache.conv_backed_up);
-    try expectConvByte(queue, cache.conv, 0, state.conv_bytes, staging, 0x11);
-
-    // Case 2: post-part-0 failure after backupBlit committed restores backup into conv.
-    try cache.beginStage(4);
-    {
+    var lib = try mtl.Library.fromSource(device, model.runtime_source, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    var pipe = try mtl.Pipeline.init(device, lib, "tf_ink2_commit_histories", false);
+    defer pipe.deinit();
+    const p = schedule();
+    const n_conv = state.conv_bytes / 2;
+    const n_taps = state.taps_bytes / 2;
+    const host_conv = try std.testing.allocator.alloc(u16, n_conv);
+    defer std.testing.allocator.free(host_conv);
+    const host_taps = try std.testing.allocator.alloc(u16, n_taps);
+    defer std.testing.allocator.free(host_taps);
+    const stage_conv = try device.buffer(state.conv_bytes, mtl.ResourceOptions.shared);
+    defer stage_conv.deinit();
+    const stage_taps = try device.buffer(state.taps_bytes, mtl.ResourceOptions.shared);
+    defer stage_taps.deinit();
+    const readback = try device.buffer(state.conv_bytes, mtl.ResourceOptions.shared);
+    defer readback.deinit();
+    var c = try state.Cache.init(device, 64, &p);
+    defer c.deinit();
+    for ([_]usize{ 0, 1, 2, 3, 7, 16 }) |acc| {
+        fillPatternBf16(host_conv, acc * 17 + 1);
+        fillPatternBf16(host_taps, acc * 17 + 2);
+        @memcpy(stage_conv.slice(u16, n_conv), host_conv);
+        @memcpy(stage_taps.slice(u16, n_taps), host_taps);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
         const cb = queue.commandBuffer();
-        const b = cb.blit();
-        cache.backupBlit(b);
-        b.end();
+        const blit_in = cb.blit();
+        blit_in.copy(stage_conv, 0, c.conv, 0, state.conv_bytes);
+        blit_in.copy(stage_taps, 0, c.taps, 0, state.taps_bytes);
+        blit_in.end();
+        const enc = cb.compute(.concurrent);
+        enc.setPipeline(pipe);
+        var args = state.CommitArgs{ .segments = 1, .taps_stride = state.window_rows, .accepted = @splat(0) };
+        args.accepted[0] = @intCast(acc);
+        for (0..state.max_commit_segments) |s| {
+            enc.setBuffer(c.conv, 0, s);
+            enc.setBuffer(c.taps, 0, 8 + s);
+            enc.setBuffer(c.conv, 0, 16 + s);
+        }
+        enc.setValue(args, 24);
+        enc.dispatchGroups(mtl.Size.of(state.visit_slots * state.commit_tiles_per_slot, 1, 1), mtl.Size.of(state.commit_threads, 1, 1));
+        enc.end();
+        const blit_out = cb.blit();
+        blit_out.copy(c.conv, 0, readback, 0, state.conv_bytes);
+        blit_out.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.GpuFailed;
-        cache.conv_backed_up = true;
+        try std.testing.expect(cb.failure() == null);
+        const got = readback.slice(u16, n_conv);
+        for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
+            const w = state.convWidth(cs);
+            const h_base = state.convByteOffset(slot, cs, 0, 3) / 2;
+            const t_base = state.convByteOffset(slot, cs, 0, state.window_rows) / 2;
+            for (0..3) |t| {
+                const idx = acc + t;
+                for (0..w) |col| {
+                    const want_bits = if (idx < 3) host_conv[h_base + idx * w + col] else host_taps[t_base + (idx - 3) * w + col];
+                    try std.testing.expectEqual(want_bits, got[h_base + t * w + col]);
+                    if (slot == 0 and col == 0) {
+                        const h3 = [3]f32{ bf16ToF32(host_conv[h_base]), bf16ToF32(host_conv[h_base + w]), bf16ToF32(host_conv[h_base + 2 * w]) };
+                        var tcol: [state.window_rows]f32 = undefined;
+                        for (0..state.window_rows) |r| tcol[r] = bf16ToF32(host_taps[t_base + r * w]);
+                        const ref: f32 = @floatCast(runtime_plan.commitHistory(h3, &tcol, acc, t));
+                        try std.testing.expectEqual(bf16.bits(ref), got[h_base + t * w]);
+                    }
+                }
+            }
+        };
     }
-    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x99);
-    try cache.rollback(queue);
-    try std.testing.expect(cache.pending == null);
-    try expectConvByte(queue, cache.conv, 0, state.conv_bytes, staging, 0x11);
-
-    // Case 3: post-full-CB partial accept selects staged offset; full accept/rollback keep conv exact.
-    try blitFill(queue, cache.taps, 0, state.taps_bytes, 0x44);
-    const sel_off = state.convByteOffset(0, 0, 1, 3 + state.max_rows);
-    const sel_len = 3 * state.convWidth(0) * 2;
-    try blitFill(queue, cache.taps, sel_off, sel_len, 0x55);
-    try cache.beginStage(4);
-    {
-        const cb = queue.commandBuffer();
-        const b = cb.blit();
-        cache.backupBlit(b);
-        b.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure() != null) return error.GpuFailed;
-        cache.conv_backed_up = true;
-    }
-    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x77);
-    try cache.commit(queue, 1);
-    try std.testing.expectEqual(@as(usize, 1), cache.len);
-    try expectConvByte(queue, cache.conv, 0, sel_len, staging, 0x55);
-
-    try cache.beginStage(4);
-    {
-        const cb = queue.commandBuffer();
-        const b = cb.blit();
-        cache.backupBlit(b);
-        b.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure() != null) return error.GpuFailed;
-        cache.conv_backed_up = true;
-    }
-    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x88);
-    try cache.rollback(queue);
-    try expectConvByte(queue, cache.conv, 0, sel_len, staging, 0x55);
-}
-
-test "staged convolution: cancellation before forward leaves the GPU backup untouched" {
-    var cache: state.Cache = .{ .kv = undefined, .conv = undefined, .taps = undefined, .backup = undefined, .logits = undefined, .key_at = undefined, .value_at = undefined, .rings = undefined, .globals = undefined, .capacity = 64 };
-    try cache.beginStage(4);
-    try std.testing.expect(cache.cancelUnsubmitted());
-    try std.testing.expect(cache.pending == null and !cache.conv_backed_up and cache.len == 0);
-    try cache.beginStage(4);
-    try std.testing.expect(cache.cancelUnsubmitted());
-    try std.testing.expect(cache.pending == null and cache.len == 0);
+    var to = try state.Cache.init(device, 128, &p);
+    defer to.deinit();
+    c.len = 16;
+    var snap = try snapshot.save(device, queue, &c);
+    defer snap.deinit();
+    try snapshot.restore(&to, queue, &snap);
+    try std.testing.expectEqual(@as(usize, 16), to.len);
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    e.copy(to.conv, 0, stage_conv, 0, state.conv_bytes);
+    e.end();
+    cb.commit();
+    cb.wait();
+    try std.testing.expect(cb.failure() == null);
+    try std.testing.expect(std.mem.eql(u16, readback.slice(u16, n_conv), stage_conv.slice(u16, n_conv)));
 }
