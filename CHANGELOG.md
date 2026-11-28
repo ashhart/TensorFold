@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA, TP=2: opt-in `TF_GLM_PREFILL_TRACE=PATH` writes a per-rank cold-prefill stage ledger (attention, experts, MTP, exchanges, host gaps); tokens are unchanged, and unset keeps the untraced launches.
+
 - Server: a streamed chat, completion or Responses request with `return_progress: true` receives `tensorfold.progress` counts (prompt tokens done, total and cached) while its prompt pass runs, before the first token; off by default, and a stream without it is byte for byte what it was (#3216).
 
 - CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
