@@ -5,6 +5,7 @@ pub const attention = owner.attention;
 pub const prompt_attention = owner.prompt_attention;
 pub const prompt_attention_pre_m5 = owner.prompt_attention_pre_m5;
 pub const glue = owner.glue;
+pub const affine4 = owner.affine4;
 pub const experts = owner.experts;
 pub const experts_mma = owner.experts_mma;
 pub const dense_mma = owner.dense_mma;

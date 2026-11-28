@@ -96,7 +96,7 @@ fn loadExpert(c: *const ck.Checkpoint, denom: Tensor, layer: u32, comptime role:
             .weight = try get(c, base ++ ".weight", .{layer}, .u32, &.{ e, rows, k / 4 }),
             .scale = try get(c, base ++ ".scales", .{layer}, .u8, &.{ e, rows, k / 32 }),
         },
-        .exl3 => return error.UnsupportedInkling2ExpertFormat,
+        .exl3, .tfq3 => return error.UnsupportedInkling2ExpertFormat,
     }
 }
 
@@ -178,6 +178,7 @@ pub fn loadWeights(c: *ck.Checkpoint, device: mtl.Device, config: *const cfg.Con
         l.router_bias = try get(c, "model.language_model.layers.{d}.mlp.gate.e_score_correction_bias", .{layer}, .f32, &.{128});
         l.gu = try loadExpert(c, denom, layer, "gate_up_proj", p.precision, 2304, 2304);
         l.down = try loadExpert(c, denom, layer, "down_proj", p.precision, 2304, 1152);
+        l.tfq3 = null;
         l.controllers = null;
         if (config.text.loop) |lp| if (layer >= lp.core_start and layer < lp.core_end) {
             var controllers: [4]model.Controller = undefined;

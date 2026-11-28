@@ -290,7 +290,7 @@ pub const Model = struct {
         const has_tables = ink2_tfq3.hasTables(dir);
         const has_tables4 = ink2_tfq3.hasTables4(dir);
         for (&precisions, 0..) |*p, i| {
-            if (ink2_tfq3.hasLayer(dir, i)) {
+            if (m.config.quant != .mlx_affine4 and ink2_tfq3.hasLayer(dir, i)) {
                 if (!has_tables and !has_tables4) return error.MissingTfq3Tables;
                 p.* = .tfq3;
                 has_tfq3 = true;

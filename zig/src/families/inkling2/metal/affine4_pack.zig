@@ -191,7 +191,7 @@ fn checkExpert(c: anytype, layer: u32, comptime role: []const u8, precision: lay
             try checkTensor(c, base ++ ".weight", .{layer}, .u32, &.{ e, rows, k / 4 });
             try checkTensor(c, base ++ ".scales", .{layer}, .u8, &.{ e, rows, k / 32 });
         },
-        .exl3 => return error.UnsupportedInkling2ExpertFormat,
+        .exl3, .tfq3 => return error.UnsupportedInkling2ExpertFormat,
     }
 }
 
