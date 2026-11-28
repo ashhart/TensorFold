@@ -80,6 +80,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_DFLASH_QL_SPAN", .raw = "1", .n = 1 },
     .{ .name = "TF_DFLASH_GRAPH", .raw = "0", .n = 0 },
     .{ .name = "TF_DFLASH_GRAPH", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN_GRAPH_STATS", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN_GRAPH_STATS", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_TREES", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_TREES", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_BATCH", .raw = "0", .n = 0 },
