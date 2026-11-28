@@ -39,7 +39,7 @@ export function EngineChoice({ onOpenModels, onUse, minimal = false }: { onOpenM
           {usable.slice(0, 3).map((model) => (
             <div key={model.repo} className="flex items-center gap-2 rounded-lg border border-line bg-card-2 px-3 py-2">
               <span title={model.title || model.repo} className="min-w-0 flex-1 truncate text-[13px] text-ink-2">{model.title || model.repo}</span>
-              <Button size="xs" variant="primary" icon="check" onClick={() => onUse(model.repo)}>{t("engine.use")}</Button>
+              <Button size="xs" variant="primary" icon="check" aria-label={`${t("engine.use")} ${model.title || model.repo}`} onClick={() => onUse(model.repo)}>{t("engine.use")}</Button>
             </div>
           ))}
         </div>
