@@ -7,12 +7,20 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const exe = b.addExecutable(.{ .name = "tf-h3-image-prompt-host", .root_module = tool(b, target, optimize) });
     tool_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
 
+    const core = @import("h3_host.zig").coreModule(b, target);
+    const decode = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/reference_decode.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} }) }));
+    const options = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/edit_options.zig"), .target = target }) }));
+    const edits = b.step("test-h3-image-edit-inputs", "Transparent reference RGB and zero/one-reference option parsing without Metal");
+    edits.dependOn(&decode.step);
+    edits.dependOn(&options.step);
+    test_step.dependOn(edits);
+
     const run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/families/h3/prompt_case_test.zig"),
         .target = target,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "core", .module = @import("h3_host.zig").coreModule(b, target) },
+            .{ .name = "core", .module = core },
             .{ .name = "moss_noise", .module = noise(b, target, optimize) },
         },
     }) }));
