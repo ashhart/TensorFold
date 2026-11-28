@@ -25,6 +25,7 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, j: 
 /// The same for a block of another shape (a DSpark stage); `fin`: hc mixes whose sums ran beside the first wave.
 pub fn encodeWith(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, sh: Shape, j: Join, fin: ?f.Mix) !void {
     const c = x.c;
+    if (w.x3) |*m| return @import("moe_exl3.zig").encode(x, e, w, m, sh, j, fin);
     const s = x.s;
     const gp = &x.p.glue;
     const R = x.rows;
@@ -73,7 +74,7 @@ pub fn encodeWith(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer,
 }
 
 /// Kimi's combine, the join with the shared expert and hc_post in one launch.
-fn join(x: *const Ctx, e: mtl.ComputeEncoder, sh: Shape, j: Join, call: ex.Call) void {
+pub fn join(x: *const Ctx, e: mtl.ComputeEncoder, sh: Shape, j: Join, call: ex.Call) void {
     const s = x.s;
     const o = pipelines.fold;
     const r: o.Routed = .{ .out = cv(o.Ref, s.eout), .where = cv(o.Ref, s.plan[3]), .weights = cv(o.Ref, s.ones), .ids = cv(o.Ref, s.picks), .sum = cv(o.Ref, s.yr), .topk = sh.topk, .per_group = ex.perGroup(call) };

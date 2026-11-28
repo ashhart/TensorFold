@@ -150,7 +150,7 @@ fn routed(p: *Probe) !void {
             for (0..W) |j| {
                 const want: f64 = ref.bf(q16[j]);
                 up_st.add(ref.bf(act[at * W + j]), want, ref.quantStep(want) + ref.halfUlp(want), r, k * W + j);
-                xa[j] = ref.bf(act[at * W + j]);
+                xa[j] = ref.bf(q16[j]);
             }
             for (0..H) |j| {
                 const d = mxDot(w2, j, xa);

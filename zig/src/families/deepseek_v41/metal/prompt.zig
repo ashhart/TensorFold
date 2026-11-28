@@ -261,7 +261,7 @@ pub const Prompt = struct {
                     // the layers before run while this layer's rows are read and written
                     try p.between(env, ch, l, li, 0, rows);
                 }
-                try p.engram(&x, ch.e, w.engram orelse return error.EngramWeightsMissing, li, bb.streams[at], 0, rows);
+                try p.engram(&x, ch.e, w, li, bb.streams[at], 0, rows);
             }
             try pl.encode(&x, ch.e, w, p.io(at), .{ .k = a, .o = a });
         }
@@ -301,7 +301,7 @@ pub const Prompt = struct {
             try p.between(env, ch, l, li, span[0], span[1]);
             const x = p.px(env, slot, a, a + span[1]);
             const w = &env.model.layers[i];
-            try p.engram(&x, ch.e, w.engram orelse return error.EngramWeightsMissing, li, p.b.streams[i % 2], span[0], span[1] - span[0]);
+            try p.engram(&x, ch.e, w, li, p.b.streams[i % 2], span[0], span[1] - span[0]);
             for (i..end) |j| try pl.encode(&x, ch.e, &env.model.layers[j], p.io(j % 2), .{ .k = a + span[0], .o = a + span[0] });
         }
         return end - 1;
@@ -404,7 +404,7 @@ pub const Prompt = struct {
                 const lg = plus(bb.logits, @as(usize, h0 - (n - p.head)) * c.vocab * 4);
                 cl.hcpre(env.p, e, x.at(bb.streams[last], h0, 8 * H), x.at(bb.pres[last], h0, 16), hr, b - h0, H);
                 g.rmsnorm(&env.p.glue, e, hr, env.model.top.norm, hn, b - h0, H, c.eps);
-                try g.mv(&env.p.glue, e, hn, env.model.top.head, lg, b - h0, H, c.vocab, true);
+                if (env.model.top.head_x3) |m| try x.x3Proj(e, m, hn, lg, b - h0, true) else try g.mv(&env.p.glue, e, hn, env.model.top.head, lg, b - h0, H, c.vocab, true);
             }
         }
     }
@@ -511,15 +511,19 @@ pub const Prompt = struct {
     }
 
     /// forward.zig's step (bf16 rows in, from act_quant), wkv on the prompt MMA, into chunk rows [r0, r0 + rows).
-    fn engram(p: *const Prompt, x: *const pl.Px, e: mtl.ComputeEncoder, w: weights.Engram, li: usize, streams: Ref, r0: u32, rows: u32) !void {
+    fn engram(p: *const Prompt, x: *const pl.Px, e: mtl.ComputeEncoder, l: *const weights.Layer, li: usize, streams: Ref, r0: u32, rows: u32) !void {
+        const w = l.engram orelse return error.EngramWeightsMissing;
         const ep = &x.p.engram;
         const b = &p.b;
         const call = forward.engramCall(x.c, rows);
-        if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
+        // an EXL3 pack's wkv is a trellis group, the release's an FP8 projection
+        const x3: ?weights.X3Matrix = if (l.x3) |*m| m.m.engram_wkv orelse return error.EngramWeightsMissing else null;
+        const kn = if (x3) |v| [2]usize{ v.k, v.n } else [2]usize{ w.wkv.k, w.wkv.n };
+        if (kn[0] != call.cols * eng.head or kn[1] != call.n) return error.BadEngramShape;
         const st = plus(streams, @as(usize, r0) * 8 * x.c.hidden);
-        try eng.encodeAq(ep, e, cv(eng.Ref, plus(b.rows[li], @as(usize, r0) * w.wkv.k * 2)), cv(eng.Ref, b.emb), call);
+        try eng.encodeAq(ep, e, cv(eng.Ref, plus(b.rows[li], @as(usize, r0) * kn[0] * 2)), cv(eng.Ref, b.emb), call);
         const mma = pipelines.fp8_mma;
-        try mma.encode(&x.p.mma, e, cv(mma.Ref, b.emb), cv(mma.Ref, w.wkv.w), cv(mma.Ref, w.wkv.s), cv(mma.Ref, b.ekv), .{ .k = w.wkv.k, .n = w.wkv.n, .rows = rows, .out = .bf16 });
+        if (x3) |v| try x.x3Proj(e, v, b.emb, b.ekv, rows, false) else try mma.encode(&x.p.mma, e, cv(mma.Ref, b.emb), cv(mma.Ref, w.wkv.w), cv(mma.Ref, w.wkv.s), cv(mma.Ref, b.ekv), .{ .k = w.wkv.k, .n = w.wkv.n, .rows = rows, .out = .bf16 });
         try eng.encodeGate(ep, e, cv(eng.Ref, st), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, plus(b.mask, r0)), cv(eng.Ref, b.gate), call);
         try eng.encodeAdd(ep, e, cv(eng.Ref, st), cv(eng.Ref, b.ekv), cv(eng.Ref, b.gate), cv(eng.Ref, st), call);
     }

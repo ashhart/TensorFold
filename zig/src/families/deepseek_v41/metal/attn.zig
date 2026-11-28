@@ -39,8 +39,8 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     // rows of several slots: each slot-bound stage is one dispatch over the layer's slot table
     const tab: ?Ref = if (segs_.many(x)) try segs_.table(x, l) else null;
     // every reader of hq and hn: wq_a, wkv, the compressor's linears, the index weights
-    try x.proj(e, s.hq, w.wq_a, s.qa, false);
-    try x.proj(e, s.hq, w.wkv, s.kv, false);
+    try x.lin(e, s.hq, w, .wq_a, s.qa);
+    try x.lin(e, s.hq, w, .wkv, s.kv);
     if (kv_src) try compressIn(x, e, w, ratio);
     if (ix_src) try g.mv(gp, e, s.hn, w.ix_wp.?, s.ixw, R, c.hidden, c.index_heads, false);
     e.barrier();
@@ -67,8 +67,8 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     }
     e.barrier();
     // wq_b and the index queries' wq_b on the q latent; the compressed latent's norm
-    try x.proj(e, s.qrq, w.wq_b, s.q, false);
-    if (ix_src) try x.proj(e, s.qrq, w.ix_wq_b.?, s.ixq, false);
+    try x.lin(e, s.qrq, w, .wq_b, s.q);
+    if (ix_src) try x.lin(e, s.qrq, w, .ix_wq_b, s.ixq);
     if (kv_src) g.rmsnorm(gp, e, s.lat, w.comp_norm.?, s.latn, R, D, c.eps);
     e.barrier();
     // RoPE on each head's last 64 dims, the index queries' RoPE; the latent's index key and its RoPE
@@ -76,7 +76,7 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     if (ix_src) try g.rope(gp, e, s.ixq, s.ixqr, pos, table, R, c.index_heads, c.index_dim, @intCast(x.tables.positions));
     const cpos = x.byRatio(Meta.cpos, if (ratio > 0) ratio else 1);
     if (kv_src) {
-        try g.mv(gp, e, s.latn, w.ix_wk.?, s.ik, R, D, c.index_dim, false);
+        if (w.x3) |*m| try x.x3Proj(e, m.m.ix_wk orelse return error.MissingProjection, s.latn, s.ik, false) else try g.mv(gp, e, s.latn, w.ix_wk.?, s.ik, R, D, c.index_dim, false);
         try g.rope(gp, e, s.latn, s.latr, cpos, table, R, 1, D, @intCast(x.tables.positions));
     }
     e.barrier();
@@ -125,6 +125,12 @@ fn compressIn(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, rat
     const c = x.c;
     const s = x.s;
     const gp = &x.p.glue;
+    if (w.x3) |*m| {
+        const wkv = m.m.comp_wkv orelse return error.MissingProjection;
+        if (ratio == 1) return x.x3Proj(e, wkv, s.hn, s.lat, false);
+        try x.x3Proj(e, wkv, s.hn, s.cf, true);
+        return x.x3Proj(e, m.m.comp_wgate orelse return error.MissingProjection, s.hn, s.cg, true);
+    }
     if (ratio == 1) return g.mv(gp, e, s.hn, w.comp_wkv.?, s.lat, x.rows, c.hidden, c.head_dim, false);
     try g.mv(gp, e, s.hn, w.comp_wkv.?, s.cf, x.rows, c.hidden, c.head_dim, true);
     try g.mv(gp, e, s.hn, w.comp_wgate.?, s.cg, x.rows, c.hidden, c.head_dim, true);
@@ -158,11 +164,16 @@ pub fn output(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     const ol = c.o_lora;
     try f.actq(&x.p.fused, e, cv(f.Ref, s.o), cv(f.Ref, s.oq), g.Strides{ .k = kg, .nb = R, .na = G, .sa = kg, .sb = c.heads * c.head_dim, .ta = R * kg, .tb = kg });
     e.barrier();
-    // wo_a's groups in one dispatch: group gi's input, weight rows, scales and output a fixed stride on
-    const wg: weights.Fp8 = .{ .w = w.wo_a.w, .s = w.wo_a.s, .k = kg, .n = ol };
-    try x.projBatch(e, s.oq, wg, s.oa, false, .{ .n = G, .xs = R * kg * 2, .ws = ol * kg, .ss = ol / 32 * (kg / 32), .ys = R * ol * 2 });
+    if (w.x3) |*m| {
+        // an EXL3 pack holds each group of wo_a as its own matrix: one launch a group, its input and output R rows on
+        for (m.m.wo_a[0..G], 0..) |o, gi| try x.x3Proj(e, o orelse return error.MissingProjection, plus(s.oq, gi * R * kg * 2), plus(s.oa, gi * R * ol * 2), false);
+    } else {
+        // wo_a's groups in one dispatch: group gi's input, weight rows, scales and output a fixed stride on
+        const wg: weights.Fp8 = .{ .w = w.wo_a.w, .s = w.wo_a.s, .k = kg, .n = ol };
+        try x.projBatch(e, s.oq, wg, s.oa, false, .{ .n = G, .xs = R * kg * 2, .ws = ol * kg, .ss = ol / 32 * (kg / 32), .ys = R * ol * 2 });
+    }
     e.barrier();
     try f.actq(&x.p.fused, e, cv(f.Ref, s.oa), cv(f.Ref, s.ob), g.Strides{ .k = ol, .nb = R, .na = G, .sa = R * ol, .sb = ol, .ta = ol, .tb = G * ol });
     e.barrier();
-    try x.proj(e, s.ob, w.wo_b, s.aout, false);
+    try x.lin(e, s.ob, w, .wo_b, s.aout);
 }

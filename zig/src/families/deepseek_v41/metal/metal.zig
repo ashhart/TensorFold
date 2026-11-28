@@ -47,6 +47,11 @@ pub const vision_rows = @import("vision_rows.zig");
 pub const vision_prepare = @import("vision_prepare.zig");
 pub const boot = @import("boot.zig");
 pub const calib = @import("calib.zig");
+pub const exl3_lane = @import("exl3_lane.zig");
+pub const experts_exl3 = @import("experts_exl3.zig");
+pub const weights_exl3 = @import("weights_exl3.zig");
+pub const moe_exl3 = @import("moe_exl3.zig");
+pub const exl3_fixture = @import("exl3_fixture.zig");
 
 test {
     std.testing.refAllDecls(@This());

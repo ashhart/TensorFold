@@ -96,7 +96,28 @@ template [[host_name("tf_dsv41_x3_down")]] [[kernel]] decltype(tf_x3_slots<1>) t
 inline float tf_x3_clip(float x, float lo, float hi) { return x != x ? x : clamp(x, lo, hi); }
 inline float tf_x3_silu(float g) { return g / (1.0f + precise::exp(-g)); }
 
-// Gate and up of a pair as tf_exl3_rotate_out writes them in bf16, then experts.metal's clamped SwiGLU and weight.
+// experts.metal's act_quant, standalone here: a 32-value block's scale exponent from its amax.
+inline int tf_x3_exp(float amax) {
+  const uint b = as_type<uint>(max(amax, 1e-4f) * (1.0f / 448.0f));
+  return int((b >> 23) & 0xFFu) - 127 + ((b & 0x7FFFFFu) != 0u ? 1 : 0);
+}
+
+inline float tf_x3_pow2(int e) { return as_type<float>(uint(e + 127) << 23); }
+
+// A magnitude of at most 448 as its nearest E4M3 code, ties to even (codes 0..8: subnormals and the first normal).
+inline uint tf_x3_code(float a, bool neg) {
+  uint b = as_type<uint>(a);
+  b += 0x7FFFFu + ((b >> 20) & 1u);
+  const uint c = a < 0.015625f ? uint(rint(a * 512.0f)) : (((b >> 23) - 120u) << 3) | ((b >> 20) & 7u);
+  return neg ? (c | 0x80u) : c;
+}
+
+// An E4M3 code exactly: its magnitude bits placed as a half's exponent and mantissa, then scaled by 2^8.
+inline float tf_x3_val(uint c) {
+  return float(as_type<half>(ushort(((c & 0x7Fu) << 7) | ((c & 0x80u) << 8)))) * 256.0f;
+}
+
+// Gate and up of a pair in bf16, then experts.metal's clamped SwiGLU, route weight and act_quant.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_x3_act(
     const device float* sums [[buffer(0)]], const device TfExl3Expert* gate [[buffer(1)]],
     const device TfExl3Expert* up [[buffer(2)]], const device uint* ids [[buffer(3)]],
@@ -117,9 +138,15 @@ inline float tf_x3_silu(float g) { return g / (1.0f + precise::exp(-g)); }
       y[v][j] = float(bfloat(out));
     }
   }
+  // the 32 lanes hold one block of 32 activation columns, so its scale and finiteness come from the simdgroup
   for (uint j = 0; j < 4; ++j) {
     const float g = tf_x3_clip(y[0][j], -INFINITY, a.limit), u = tf_x3_clip(y[1][j], -a.limit, a.limit);
-    act[ulong(p) * a.n + base + lane + 32 * j] = bfloat(tf_x3_silu(g) * u * wts[p]);
+    const float v = float(bfloat(tf_x3_silu(g) * u * wts[p]));
+    const float amax = simd_max(isfinite(v) ? fabs(v) : 0.0f);
+    const float bad = simd_max(isfinite(v) ? 0.0f : 1.0f);
+    const int s = tf_x3_exp(amax);
+    const float q = tf_x3_val(tf_x3_code(min(fabs(v) * tf_x3_pow2(-s), 448.0f), signbit(v))) * tf_x3_pow2(s);
+    act[ulong(p) * a.n + base + lane + 32 * j] = bfloat(bad != 0.0f ? NAN : q);
   }
 }
 

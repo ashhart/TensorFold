@@ -59,7 +59,21 @@ pub const Px = struct {
 
     /// A dense FP8 projection by the prompt MMA tiles (each row's bits equal the decode row kernel's).
     fn proj(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, rows: u32) !void {
+        // an EXL3 layer's FP8 fields are empty: a launch that reaches one is refused, never run on them
+        if (w.n == 0) return error.UnwiredExl3Projection;
         try mma.encode(&x.p.mma, e, cv(mma.Ref, in), cv(mma.Ref, w.w), cv(mma.Ref, w.s), cv(mma.Ref, out), .{ .k = w.k, .n = w.n, .rows = rows, .out = .bf16 });
+    }
+
+    /// A layer's dense linear `f` of `rows` rows: its EXL3 group on an EXL3 pack, else its FP8 projection.
+    fn lin(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: *const weights.Layer, comptime f: ctx_.Lin, out: Ref, rows: u32) !void {
+        if (w.x3) |*m| return x.x3Proj(e, ctx_.exl3Of(m, f) orelse return error.MissingProjection, in, out, rows, false);
+        return x.proj(e, in, ctx_.fp8Of(w, f) orelse return error.MissingProjection, out, rows);
+    }
+
+    /// An EXL3 pack's linear of `rows` rows, 16 a launch (each row's bits those of the decode launch).
+    pub fn x3Proj(x: *const Px, e: mtl.ComputeEncoder, m: weights.X3Matrix, in: Ref, out: Ref, rows: u32, f32_out: bool) !void {
+        const p = if (x.p.x3) |*q| q else return error.Exl3PipelinesMissing;
+        try pipelines.exl3.proj(p, e, m, in, out, rows, f32_out, x.s.x3);
     }
 
     /// A bf16-weight prompt matvec: MMA tiles at >= 16 rows and K >= 32 (bit-equal to glue.mv), else glue.mv.
@@ -153,7 +167,7 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     const nw = kv.windowSlots(c);
     const g0 = k -| back;
     if (k > g0) g.scatter(gp, e, plus(whole(region.window), @as(usize, g0 % nw) * D * 2), s.lin, s.metaAt(s.rec.iota + back + g0 - x.a), k - g0, D * 2, 1);
-    try x.proj(e, x.at(s.hq, k, 2 * H), w.wkv, x.at(s.kv, k, 2 * D), nk);
+    try x.lin(e, x.at(s.hq, k, 2 * H), w, .wkv, x.at(s.kv, k, 2 * D), nk);
     g.rmsnorm(gp, e, x.at(s.kv, k, 2 * D), w.kv_norm, x.at(s.kvn, k, 2 * D), nk, D, c.eps);
     try g.rope(gp, e, x.at(s.kvn, k, 2 * D), x.at(s.kvr, k, 2 * D), x.rec(pos, k), table, nk, 1, D, @intCast(x.tables.positions));
     const lin = plus(s.lin, @as(usize, back) * D * 2);
@@ -166,10 +180,10 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     try cut(x, .kv);
     if (no == 0) return;
     // q: wq_a, q_norm, wq_b and RoPE on each head's last 64 dims
-    try x.proj(e, x.at(s.hq, o, 2 * H), w.wq_a, x.at(s.qa, o, 2 * c.q_lora), no);
+    try x.lin(e, x.at(s.hq, o, 2 * H), w, .wq_a, x.at(s.qa, o, 2 * c.q_lora), no);
     try cl.normq(x.p, e, x.at(s.qa, o, 2 * c.q_lora), w.q_norm, x.at(s.qr, o, 2 * c.q_lora), x.at(s.qrq, o, 2 * c.q_lora), no, c.q_lora, c.eps);
     const QH = c.heads * D;
-    try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.wq_b, x.at(s.q, o, 2 * QH), no);
+    try x.lin(e, x.at(s.qrq, o, 2 * c.q_lora), w, .wq_b, x.at(s.q, o, 2 * QH), no);
     try g.rope(gp, e, x.at(s.q, o, 2 * QH), x.at(s.qrope, o, 2 * QH), x.rec(pos, o), table, no, c.heads, D, @intCast(x.tables.positions));
     try cut(x, .q);
     if (ratio > 0 and c.isIndexSource(l)) try indexer(x, e, w, ratio, o);
@@ -189,6 +203,12 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     try output(x, e, w, o);
 }
 
+/// The release's bf16 linear `f` (comp_wkv, comp_wgate, ix_wk) of `rows` rows, or an EXL3 pack's trellis group of it.
+fn half(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: *const weights.Layer, comptime f: []const u8, out: Ref, rows: u32, k: u32, n: u32, f32_out: bool) !void {
+    if (w.x3) |*m| return x.x3Proj(e, @field(m.m, f) orelse return error.MissingProjection, in, out, rows, f32_out);
+    return x.mv(e, in, @field(w, f) orelse return error.MissingProjection, out, rows, k, n, f32_out);
+}
+
 /// The KV source's compressor over rows [from, b): pooled latents, the index keys and the FP4 pool rows.
 fn compress(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: u32, from: u32) !void {
     const c = x.c;
@@ -201,10 +221,10 @@ fn compress(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio:
     const hn = x.at(s.hn, from, 2 * H);
     const lat = x.at(s.lat, from, 2 * D);
     if (ratio == 1) {
-        try x.mv(e, hn, w.comp_wkv.?, lat, n, H, D, false);
+        try half(x, e, hn, w, "comp_wkv", lat, n, H, D, false);
     } else {
-        try x.mv(e, hn, w.comp_wkv.?, x.at(s.cf, from, 4 * D), n, H, D, true);
-        try x.mv(e, hn, w.comp_wgate.?, x.at(s.cg, from, 4 * D), n, H, D, true);
+        try half(x, e, hn, w, "comp_wkv", x.at(s.cf, from, 4 * D), n, H, D, true);
+        try half(x, e, hn, w, "comp_wgate", x.at(s.cg, from, 4 * D), n, H, D, true);
         cp.pool2(&x.p.compress, e, x.at(s.cf, from, 4 * D), x.at(s.cg, from, 4 * D), whole(region.carry.?), x.rec(s.rec.pos, from), lat, n, D);
     }
     const latn = x.at(s.latn, from, 2 * D);
@@ -213,7 +233,7 @@ fn compress(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio:
     const dest = x.byRatio(s.rec.dest, ratio, from);
     const table = x.table(w.layer);
     const IXD = c.index_dim;
-    try x.mv(e, latn, w.ix_wk.?, x.at(s.ik, from, 2 * IXD), n, D, IXD, false);
+    try half(x, e, latn, w, "ix_wk", x.at(s.ik, from, 2 * IXD), n, D, IXD, false);
     g.rmsnorm(gp, e, x.at(s.ik, from, 2 * IXD), w.ix_k_norm.?, x.at(s.ikn, from, 2 * IXD), n, IXD, c.eps);
     try g.rope(gp, e, x.at(s.ikn, from, 2 * IXD), x.at(s.ikr, from, 2 * IXD), cpos, table, n, 1, IXD, @intCast(x.tables.positions));
     const keys = kv.keysRef(region);
@@ -229,7 +249,7 @@ fn indexer(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: 
     const gp = &x.p.glue;
     const n = x.b - o;
     const IX = c.index_heads * c.index_dim;
-    try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.ix_wq_b.?, x.at(s.ixq, o, 2 * IX), n);
+    try x.lin(e, x.at(s.qrq, o, 2 * c.q_lora), w, .ix_wq_b, x.at(s.ixq, o, 2 * IX), n);
     try g.rope(gp, e, x.at(s.ixq, o, 2 * IX), x.at(s.ixqr, o, 2 * IX), x.rec(s.rec.pos, o), x.table(w.layer), n, c.index_heads, c.index_dim, @intCast(x.tables.positions));
     cp.fp4pack(&x.p.compress, e, x.at(s.ixqr, o, 2 * IX), x.at(s.ixqc, o, IX / 2), x.at(s.ixqs, o, IX / 32), n, .{ .blocks = IX / 32, .in_stride = IX, .code_row = IX / 2, .scale_row = IX / 32 });
     try x.mv(e, x.at(s.hn, o, 2 * c.hidden), w.ix_wp.?, x.at(s.ixw, o, 2 * c.index_heads), n, c.hidden, c.index_heads, false);
@@ -269,11 +289,18 @@ fn output(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) 
     const ol = c.o_lora;
     try cl.actq(x.p, e, x.at(s.o, o, 2 * c.heads * c.head_dim), s.oq, .{ .k = kg, .nb = R, .na = G, .sa = kg, .sb = c.heads * c.head_dim, .ta = R * kg, .tb = kg });
     for (0..G) |gi| {
+        const in = plus(s.oq, gi * R * kg * 2);
+        const out = plus(s.oa, gi * R * ol * 2);
+        // an EXL3 pack holds each group of wo_a as its own matrix
+        if (w.x3) |*m| {
+            try x.x3Proj(e, m.m.wo_a[gi] orelse return error.MissingProjection, in, out, R, false);
+            continue;
+        }
         const wg: weights.Fp8 = .{ .w = plus(w.wo_a.w, gi * ol * kg), .s = plus(w.wo_a.s, gi * ol / 32 * (kg / 32)), .k = kg, .n = ol };
-        try x.proj(e, plus(s.oq, gi * R * kg * 2), wg, plus(s.oa, gi * R * ol * 2), R);
+        try x.proj(e, in, wg, out, R);
     }
     try cl.actq(x.p, e, s.oa, s.ob, .{ .k = ol, .nb = R, .na = G, .sa = R * ol, .sb = ol, .ta = ol, .tb = G * ol });
-    try x.proj(e, s.ob, w.wo_b, x.at(s.aout, o, 2 * c.hidden), R);
+    try x.lin(e, s.ob, w, .wo_b, x.at(s.aout, o, 2 * c.hidden), R);
     try cut(x, .out);
 }
 
@@ -290,6 +317,7 @@ fn moe(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) !vo
     g.route(x.p.route, e, .{ .logits = x.at(s.logits, o, 4 * c.experts), .bias = w.gate_b, .bias_vl = w.gate_bvl orelse w.gate_b, .image = x.at(s.image, o, 1), .picks = x.at(s.picks, o, 4 * K), .weights = x.at(s.wts, o, 4 * K) }, R, K, c.routed_scale);
     try cut(x, .route);
     ex.use(e, w.backing());
+    if (w.x3) |*m| return moeExl3(x, e, m, o);
     const table: ex.Ref = .{ .buf = w.table };
     if (x.expert_loop) try expertsLoop(x, e, o, table) else try expertsMma(x, e, o, table);
     try cut(x, .experts);
@@ -298,6 +326,33 @@ fn moe(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) !vo
     try x.proj(e, x.at(s.hq2, o, 2 * H), w.shared[2], x.at(s.su, o, 2 * W), R);
     cl.swiglu(x.p, e, x.at(s.sg, o, 2 * W), x.at(s.su, o, 2 * W), x.at(s.sact, o, 2 * W), x.at(s.sactq, o, 2 * W), R * W, c.swiglu_limit);
     try x.proj(e, x.at(s.sactq, o, 2 * W), w.shared[1], x.at(s.sout, o, 2 * H), R);
+    cl.join(x.p, e, x.at(s.yr, o, 4 * H), x.at(s.sout, o, 2 * H), x.at(s.mout, o, 2 * H), R * H);
+    try cut(x, .shared);
+}
+
+/// The routed and shared experts of rows [o, b) on an EXL3 pack, 16 rows a launch: each reads act_quant(hn2).
+fn moeExl3(x: *const Px, e: mtl.ComputeEncoder, m: *const weights.X3, o: u32) !void {
+    const c = x.c;
+    const s = x.s;
+    const R = x.b - o;
+    const H = c.hidden;
+    const W = c.expert_width;
+    const K = c.topk;
+    const p = if (x.p.x3) |*q| q else return error.Exl3PipelinesMissing;
+    try cl.actqRows(x.p, e, x.at(s.hn2, o, 2 * H), x.at(s.hq2, o, 2 * H), R, H);
+    var t = o;
+    while (t < x.b) : (t += pipelines.exl3.max_rows) {
+        const rows = @min(pipelines.exl3.max_rows, x.b - t);
+        const call: ex.Call = .{ .rows = rows, .k = H, .n = W, .experts = c.experts, .topk = K };
+        const route: ex.Route = .{ .ids = cv(ex.Ref, x.at(s.picks, t, 4 * K)), .weights = cv(ex.Ref, x.at(s.wts, t, 4 * K)), .slots = cv(ex.Ref, s.plan[0]), .nslots = cv(ex.Ref, s.plan[1]), .pairs = cv(ex.Ref, s.plan[2]), .where = cv(ex.Ref, s.plan[3]) };
+        ex.plan(&x.p.experts, e, route, call);
+        try pipelines.exl3.experts(p, e, x.at(s.hq2, t, 2 * H), m.experts, route, s.act, s.eout, s.x3, call, c.swiglu_limit);
+        ex.combine(&x.p.experts, e, cv(ex.Ref, s.eout), route, cv(ex.Ref, s.ones), cv(ex.Ref, x.at(s.yr, t, 4 * H)), true, call);
+    }
+    try cut(x, .experts);
+    const sh = m.m.shared;
+    try pipelines.exl3.gateUp(p, e, sh[0], sh[2], x.at(s.hq2, o, 2 * H), x.at(s.sact, o, 2 * W), x.at(s.sactq, o, 2 * W), R, c.swiglu_limit, s.x3);
+    try x.x3Proj(e, sh[1], x.at(s.sactq, o, 2 * W), x.at(s.sout, o, 2 * H), R, false);
     cl.join(x.p, e, x.at(s.yr, o, 4 * H), x.at(s.sout, o, 2 * H), x.at(s.mout, o, 2 * H), R * H);
     try cut(x, .shared);
 }

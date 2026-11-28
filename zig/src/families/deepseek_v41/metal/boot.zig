@@ -96,6 +96,10 @@ pub const Boot = struct {
         const c = &b.c;
         const blocks = try blocksOf(c.dspark_block);
         c.dspark_block = blocks.wide;
+        if (o.drafts and c.mtp_layers > 0 and c.format == .exl3) {
+            std.log.err("dsv41 metal: DSpark drafts run on the release's FP8 blocks only; serve an EXL3 pack with --no-drafts", .{});
+            return error.DsparkOnExl3;
+        }
         const context: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
         var why: []const u8 = pool.name;
         var why_buf: [320]u8 = undefined;

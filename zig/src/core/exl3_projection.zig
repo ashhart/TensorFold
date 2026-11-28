@@ -7,6 +7,8 @@ const sources = @import("kernel_sources");
 pub const format = @import("exl3_format.zig");
 /// An expert's gate and up projections over the same rows, then DeepSeek V4.1's clamped SwiGLU.
 pub const gate_up = @import("exl3_gate_up.zig");
+/// The serial one-row dot the Metal kernels are qualified against.
+pub const row_ref = @import("exl3_projection_row_ref.zig");
 const decoder = @import("exl3_projection_decode.zig");
 
 pub const View = struct {
@@ -219,7 +221,6 @@ pub const row_groups = [_]RowGroup{ .{ .rp = 1, .q = 2 }, .{ .rp = 1, .q = 4 }, 
 pub fn rowsGroup(count: usize) usize {
     return std.math.log2_int_ceil(usize, count) - 1;
 }
-
 pub const Args = extern struct {
     k: u32,
     n: u32,
@@ -470,7 +471,7 @@ test "invalid and overflowing extents fail before storage arithmetic can wrap" {
 test {
     _ = decoder;
     _ = @import("exl3_rect_test.zig");
-    _ = @import("exl3_projection_row_ref.zig");
+    _ = row_ref;
 }
 
 test "2 to 16 rows take the least group of 2, 4, 8 or 16 rows that holds them" {

@@ -459,6 +459,8 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living } },
     });
+    // the DeepSeek V4.1 Metal files shared with its package reach the EXL3 kernels as `@import("core").exl3_projection`
+    engine.addImport("core", engine);
     engine.addImport("inkling2_metal", inkling2_metal);
     engine.addImport("inkling2_metal_ref", inkling2_metal_ref);
     engine.addImport("inkling2_glue_plan", inkling2_glue_plan);

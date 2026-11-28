@@ -19,6 +19,7 @@ pub const fused = @import("fused.zig");
 pub const hc = @import("hc.zig");
 pub const glue_k = @import("glue_k.zig");
 pub const fold = @import("fold.zig");
+pub const exl3 = @import("exl3_lane.zig");
 
 /// Rows a decode launch carries at most (the row kernels' widest tier).
 pub const max_rows = 16;
@@ -37,6 +38,7 @@ pub fn check(c: *const Config) !void {
     if (c.heads % c.o_groups != 0 or (c.heads / c.o_groups * c.head_dim) % 32 != 0) return error.UnsupportedShape;
     const eng_k = c.hashCols() * c.engram_head_dim;
     if (c.engram_layers.len > 0 and (c.engram_head_dim != engram.head or c.engram_gate_clamp != 1e-6 or fp8.tilesOf(eng_k, 1) > fp8.max_tiles)) return error.UnsupportedEngram;
+    try exl3.check(c);
 }
 
 pub const Pipelines = struct {
@@ -64,6 +66,8 @@ pub const Pipelines = struct {
     fused: fused.Pipelines,
     hc: hc.Pipelines,
     glue_k: glue_k.Pipelines,
+    /// an EXL3 pack's projections, gate/up and routed experts; null for the release's format
+    x3: ?exl3.Pipes,
     fold: fold.Pipelines,
 
     pub fn load(a: std.mem.Allocator, device: mtl.Device, c: *const Config) !Pipelines {
@@ -110,6 +114,8 @@ pub const Pipelines = struct {
         p.glue_k = try glue_k.Pipelines.load(device);
         errdefer p.glue_k.deinit();
         p.fold = try fold.Pipelines.load(device);
+        errdefer p.fold.deinit();
+        p.x3 = if (c.format == .exl3) try exl3.Pipes.load(device) else null;
         return p;
     }
 
@@ -133,6 +139,7 @@ pub const Pipelines = struct {
         p.xmma.deinit();
         p.fused.deinit();
         p.hc.deinit();
+        if (p.x3) |*x| x.deinit();
         p.glue_k.deinit();
         p.fold.deinit();
     }

@@ -78,14 +78,16 @@ pub fn read(p: *const pk.Pack, prefix: []const u8) !Projection {
     return readTrellis(p, prefix);
 }
 
+/// The trellis groups take precedence: a pack that keeps a dense sibling of `prefix` is still read as `.exl3`.
+pub fn trellisGroup(p: *const pk.Pack, prefix: []const u8) !Projection {
+    var buf: [256]u8 = undefined;
+    if (p.has(try std.fmt.bufPrint(&buf, "{s}.trellis", .{prefix}))) return readTrellis(p, prefix);
+    return read(p, prefix);
+}
+
 /// CUDA selects its executable trellis even when the pack also keeps a dense sibling.
 pub fn cudaGroup(p: *const pk.Pack, prefix: []const u8) !exl3.Group {
-    var buf: [256]u8 = undefined;
-    const storage = if (p.has(try std.fmt.bufPrint(&buf, "{s}.trellis", .{prefix})))
-        try readTrellis(p, prefix)
-    else
-        try read(p, prefix);
-    return storage.cudaGroup();
+    return (try trellisGroup(p, prefix)).cudaGroup();
 }
 
 fn readTrellis(p: *const pk.Pack, prefix: []const u8) !Projection {
@@ -94,6 +96,8 @@ fn readTrellis(p: *const pk.Pack, prefix: []const u8) !Projection {
     if (trellis.dtype != .i16) return error.BadTrellis;
     const g = try exl3.Group.fromShape(trellis.dims());
     const scale = try scales(p, prefix, g.k(), g.n(), true);
+    // The Metal and CUDA trellis kernels take no bias; refuse a group that carries one rather than drop it.
+    if (p.has(try std.fmt.bufPrint(&buf, "{s}.bias", .{prefix}))) return error.UnsupportedBias;
     const marker_name = try p.marker(prefix, &buf);
     const marker = if (marker_name) |name| p.get(name) else null;
     if (g.k2() % 2 != 0 and (marker_name == null or !std.mem.endsWith(u8, marker_name.?, ".mul1"))) return error.BadMarker;

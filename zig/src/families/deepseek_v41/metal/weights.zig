@@ -1,10 +1,11 @@
-//! A backbone layer's tensors and the model's embed, norm and head from the release's pack into Metal buffers.
+//! A layer's tensors and the model's embed, norm and head from the release's or an EXL3 pack into Metal buffers.
 const std = @import("std");
 const mtl = @import("metal");
 const host = @import("dsv41");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const mapped = @import("mapped.zig");
+const x3w = @import("weights_exl3.zig");
 
 const Config = host.config.Config;
 const Pack = host.pack.Pack;
@@ -14,6 +15,8 @@ const projection = host.projection;
 
 pub const Ref = glue.Ref;
 pub const Map = mapped.Map;
+pub const X3 = x3w.Layer;
+pub const X3Matrix = x3w.Matrix;
 
 /// Kernel load widths: dense FP8 weights are read as uint4, every other raw tensor as uint2 at most.
 const align_fp8: u32 = 16;
@@ -30,8 +33,8 @@ pub const NamedFp8 = struct { name: []const u8, w: Fp8 };
 /// An Engram layer's GPU half: wkv [(hc + 1) * hidden][cols * 256] FP8, q_weight and k_weight [hc][hidden] bf16.
 pub const Engram = struct { wkv: Fp8, q: Ref, k: Ref };
 
-/// How a tensor lands on the device: bytes as stored, widened to fp32, or rounded to bf16 once.
-pub const Into = enum { raw, f32, bf16 };
+/// How a tensor is stored: as read, widened to fp32, rounded to bf16, or narrowed to bf16 only where no bit is lost.
+pub const Into = enum { raw, f32, bf16, bf16_exact };
 const Item = struct { info: Info, into: Into, at: usize };
 
 /// Where a tensor lands: in a mapped shard's own buffer (zero-copy), or at `off` in the layer's arena (buf null).
@@ -86,6 +89,8 @@ pub const Layer = struct {
     gate_bvl: ?Ref = null,
     shared: [3]Fp8,
     engram: ?Engram = null,
+    /// an EXL3 pack's trellises, read in place of the FP8 fields above (left empty); null for the release's format
+    x3: ?x3w.Layer = null,
 
     /// the arena, then each mapped shard buffer a tensor of this layer lives in
     back: [max_backing]mtl.Buffer = undefined,
@@ -158,7 +163,7 @@ pub const Loader = struct {
         const bytes = switch (into) {
             .raw => n,
             .f32 => n / info.dtype.size() * 4,
-            .bf16 => n / info.dtype.size() * 2,
+            .bf16, .bf16_exact => n / info.dtype.size() * 2,
         };
         const off = std.mem.alignForward(usize, l.size, 256);
         l.size = off + bytes;
@@ -174,7 +179,12 @@ pub const Loader = struct {
         const into: Into = switch (spec.store) {
             .norm, .f32, .bias => .f32,
             .half => .bf16,
-            .param => if (info.dtype == .bf16) .raw else return error.UnsupportedNative,
+            // an EXL3 pack widens the release's bf16 parameters to fp32; any other value is refused at the fill
+            .param => switch (info.dtype) {
+                .bf16 => .raw,
+                .f32 => .bf16_exact,
+                else => return error.UnsupportedNative,
+            },
         };
         return l.add(info, into, align_raw);
     }
@@ -224,6 +234,7 @@ pub const Loader = struct {
                     .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, tmp.items[2 * i ..][0..2], .little)))),
                     else => return error.BadNativeTensor,
                 };
+                if (it.into == .bf16_exact and @as(u32, @bitCast(v)) & 0xffff != 0) return error.InexactNative;
                 if (it.into == .f32) std.mem.writeInt(u32, dst[it.at + 4 * i ..][0..4], @bitCast(v), .little) else std.mem.writeInt(u16, dst[it.at + 2 * i ..][0..2], bf16Round(v), .little);
             }
         }
@@ -242,26 +253,15 @@ fn refOpt(arena: mtl.Buffer, p: ?Place) ?Ref {
     return if (p) |v| v.ref(arena) else null;
 }
 
-/// Layer `layer`'s tensors from `pack` (release format; a layer past the backbone is a DSpark block, its heads apart).
+/// Layer `layer`'s tensors from `pack` in the config's format (past the backbone: a DSpark block, its heads apart).
 pub fn load(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *const Pack, c: *const Config, layer: u32) !Layer {
     return loadFrom(a, io, device, pack, c, layer, null);
 }
 
-/// As `load`, with raw tensors wrapped in `map`'s shard buffers where their file offsets allow, the rest copied.
-pub fn loadFrom(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *const Pack, c: *const Config, layer: u32, map: ?*Map) !Layer {
-    if (c.format != .release_fp8) return error.UnsupportedFormat;
+/// The release's FP8 projections and MXFP4 experts of a layer: queued in `l`, filled into `w`'s arena and table.
+fn loadFp8(w: *Layer, l: *Loader, a: std.mem.Allocator, io: std.Io, device: mtl.Device, block: []const u8, c: *const Config, layer: u32) !void {
     const ex = c.expertsOf(layer);
-    var l: Loader = .{ .a = a, .pack = pack, .map = map };
-    defer l.items.deinit(a);
-    var block_buf: [32]u8 = undefined;
-    const block = try names.blockPrefix(c, layer, &block_buf);
-    const nat = try names.blockNatives(c, layer);
-    var off: [24]Place = undefined;
-    for (nat.items(), 0..) |spec, i| off[i] = try l.native(block, spec);
     const per_group_k = c.heads / c.o_groups * c.head_dim;
-    var w: Layer = undefined;
-    w.layer = layer;
-    w.gate_bvl = null;
     const wq_a = try l.fp8(block, "attn.wq_a", c.hidden, c.q_lora);
     const wkv = try l.fp8(block, "attn.wkv", c.hidden, c.head_dim);
     const wq_b = try l.fp8(block, "attn.wq_b", c.q_lora, c.heads * c.head_dim);
@@ -319,8 +319,28 @@ pub fn loadFrom(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *con
     w.ix_k_norm = null;
     w.ix_wp = null;
     w.engram = if (eng_wkv) |v| .{ .wkv = fix(arena, v), .q = undefined, .k = undefined } else null;
+}
+
+/// As `load`, with raw tensors wrapped in `map`'s shard buffers where their file offsets allow, the rest copied.
+pub fn loadFrom(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *const Pack, c: *const Config, layer: u32, map: ?*Map) !Layer {
+    var l: Loader = .{ .a = a, .pack = pack, .map = map };
+    defer l.items.deinit(a);
+    var block_buf: [32]u8 = undefined;
+    const block = try names.blockPrefix(c, layer, &block_buf);
+    const nat = try names.blockNatives(c, layer);
+    var off: [24]Place = undefined;
+    for (nat.items(), 0..) |spec, i| off[i] = try l.native(block, spec);
+    var w: Layer = undefined;
+    w.layer = layer;
+    w.gate_bvl = null;
+    w.x3 = null;
+    // the checkpoint's format picks the projections: the release's FP8 and MXFP4, or an EXL3 pack's trellises
+    switch (c.format) {
+        .release_fp8 => try loadFp8(&w, &l, a, io, device, block, c, layer),
+        .exl3 => try x3w.load(&w, &l, a, io, device, block, c, layer),
+    }
     for (nat.items(), 0..) |spec, i| {
-        const r = off[i].ref(arena);
+        const r = off[i].ref(w.arena);
         const s = spec.suffix;
         if (std.mem.eql(u8, s, "attn_norm.weight")) w.attn_norm = r;
         if (std.mem.eql(u8, s, "ffn_norm.weight")) w.ffn_norm = r;
@@ -349,7 +369,9 @@ pub const Top = struct {
     arena: mtl.Buffer,
     embed: Ref,
     norm: Ref,
+    /// the release's bf16 head; unread when `head_x3` holds an EXL3 pack's head
     head: Ref,
+    head_x3: ?x3w.Matrix = null,
 
     pub fn deinit(t: *Top) void {
         t.arena.deinit();
@@ -366,18 +388,22 @@ pub fn loadTopFrom(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *
     var l: Loader = .{ .a = a, .pack = pack, .map = map };
     defer l.items.deinit(a);
     var off: [3]Place = undefined;
-    for ([_][]const u8{ "embed.weight", "head.weight" }, 0..) |name, i| {
+    // an EXL3 pack keeps embed in bf16 and its head as a trellis group
+    const heads: []const []const u8 = if (c.format == .exl3) &.{"embed.weight"} else &.{ "embed.weight", "head.weight" };
+    for (heads, 0..) |name, i| {
         const info = try pack.need(name);
         if (!info.is(.bf16, &.{ c.vocab, c.hidden })) return error.BadNativeTensor;
         off[i] = try l.add(info, .raw, align_fp8);
     }
+    const head = if (c.format == .exl3) try x3w.group(&l, "head", c.hidden, c.vocab) else null;
     const norm = try pack.need("norm.weight");
     if (!(norm.is(.bf16, &.{c.hidden}) or norm.is(.f32, &.{c.hidden}))) return error.BadNativeTensor;
     off[2] = try l.add(norm, .f32, align_raw);
     const arena = try device.buffer(@max(l.size, 256), mtl.ResourceOptions.shared);
     errdefer arena.deinit();
     try l.fill(io, arena.contents()[0..l.size]);
-    return .{ .arena = arena, .embed = off[0].ref(arena), .head = off[1].ref(arena), .norm = off[2].ref(arena) };
+    if (head) |h| try x3w.checkMarker(h, arena.contents()[0..l.size]);
+    return .{ .arena = arena, .embed = off[0].ref(arena), .head = if (head == null) off[1].ref(arena) else .{ .buf = arena }, .norm = off[2].ref(arena), .head_x3 = if (head) |h| x3w.matrix(h, arena) else null };
 }
 
 test "fp8 projection shapes omit indexer on non-index layers and include it when present" {

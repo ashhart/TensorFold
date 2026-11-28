@@ -1,7 +1,7 @@
 //! DeepSeek V4.1 routed experts over EXL3 trellises on Metal: main's EXL3 rotations around the slots' dots.
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
-const exl3 = @import("../../../core/exl3_projection.zig");
+const exl3 = @import("core").exl3_projection;
 const experts = @import("experts.zig");
 pub const ref = @import("experts_exl3_ref.zig");
 

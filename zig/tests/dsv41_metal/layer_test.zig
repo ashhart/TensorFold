@@ -24,6 +24,7 @@ test {
     _ = @import("multi_test.zig");
     _ = @import("units_test.zig");
     _ = @import("tile_test.zig");
+    _ = @import("exl3_test.zig");
     _ = @import("vision_test.zig");
 }
 

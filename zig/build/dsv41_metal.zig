@@ -13,7 +13,10 @@ pub fn package(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Modu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "dsv41", .module = host } },
     });
-    pkg.addImport("core", host.import_table.get("core").?); // the picture decoder image input reads
+    const core = host.import_table.get("core").?;
+    pkg.addImport("core", core); // the picture decoder image input reads; EXL3 packs, its projection kernels
+    core.addImport("metal", metal);
+    core.addImport("kernel_sources", sources);
     return .{ .pkg = pkg, .host = host };
 }
 
@@ -42,15 +45,16 @@ pub fn hostSteps(b: *std.Build) void {
     }
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("dsv41-profile-empty.zig", "pub const bytes = \"\";\n") });
+    const p = package(b, metal, sources, .Debug);
     const x3_host = b.createModule(.{
         .root_source_file = b.path("zig/src/dsv41_exl3_experts_host_test.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
         .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = p.host.import_table.get("core").? }},
     });
     const x3_host_run = b.addRunArtifact(b.addTest(.{ .root_module = x3_host }));
     b.step("test-dsv41-exl3-experts-host", "DeepSeek-V4.1 EXL3: Metal-free slot, dot and activation bit oracle").dependOn(&x3_host_run.step);
-    const p = package(b, metal, sources, .Debug);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = p.pkg, .filters = &.{ "a branched tree launch books", "drafter timings drained after", "fp8 projection shapes" } }));
     b.step("test-dsv41-round-prof-host", "DeepSeek-V4.1 Metal: deterministic round profile host regressions").dependOn(&run.step);
 }
