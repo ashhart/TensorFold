@@ -8,6 +8,7 @@ test {
     _ = @import("metal_inkling2_logits_controls.zig");
     _ = @import("metal_inkling2_experts_controls.zig");
     _ = @import("metal_inkling2_mma_controls.zig");
+    _ = @import("metal_inkling2_wide_controls.zig");
     _ = @import("metal_inkling2_dense_mma_controls.zig");
     _ = @import("metal_inkling2_dense_tiled_controls.zig");
     _ = @import("metal_inkling2_gates_mma_controls.zig");

@@ -131,7 +131,8 @@ pub fn nvWeight(codes: u8, column: u32, scale: u8, factor: f32) f32 {
 }
 
 pub fn mxWeight(value: u8, scale: u8) f32 {
-    return roundBf16(std.math.ldexp(e4m3(value), @as(i32, scale) - 127));
+    const x = e4m3(value);
+    return if (x == 0) x else roundBf16(std.math.ldexp(x, @as(i32, scale) - 127));
 }
 
 pub fn softcap(x: f32, cap: f32) f32 {
@@ -148,3 +149,33 @@ pub const MatrixArgs = extern struct { k: u32, n: u32, topk: u32, experts: u32 }
 pub const DecodeArgs = extern struct { rows: u32, k: u32 };
 pub const GroupArgs = extern struct { rows: u32, topk: u32, experts: u32, tile_m: u32 = grouped_tile_m };
 pub const GroupedMatrixArgs = extern struct { rows: u32, k: u32, n: u32, topk: u32, experts: u32 };
+
+/// Deterministic host grouping: counts[e] = min(n, cap), members[e * cap ..] in ascending pair order.
+pub fn groupReference(ids: []const i32, experts: u32, cap: u32, counts: []u32, members: []u32) void {
+    const e_len: usize = @intCast(experts);
+    @memset(counts[0..e_len], 0);
+    for (ids, 0..) |raw, p| {
+        if (raw < 0 or raw >= @as(i32, @intCast(experts))) continue;
+        const e: usize = @intCast(raw);
+        const n = counts[e];
+        if (n < cap) members[e * @as(usize, cap) + n] = @intCast(p);
+        counts[e] = n + 1;
+    }
+    for (counts[0..e_len]) |*c| c.* = @min(c.*, cap);
+}
+
+pub fn e4m3Bits(code: u8) u32 {
+    const exp: u32 = (code >> 3) & 15;
+    const mant: u32 = code & 7;
+    if (exp == 15 and mant == 7) return 0x7fc0_0000;
+    const v: f32 = if (exp != 0)
+        @bitCast(((exp + 120) << 23) | (mant << 20))
+    else
+        @as(f32, @floatFromInt(mant)) / 512.0;
+    return @bitCast(if ((code & 0x80) != 0) -v else v);
+}
+
+/// The narrow grouping remains at and below 256 pairs.
+pub fn wideGroup(c: Call) bool {
+    return @as(u64, c.rows) * c.topk > 256;
+}

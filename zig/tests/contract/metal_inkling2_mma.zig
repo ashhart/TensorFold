@@ -13,6 +13,14 @@ pub const Kind = enum { nv_gu, nv_down, mx_gu, mx_down };
 
 const experts = 128;
 const topk = 2;
+const edge_scales = [_]u8{ 0, 1, 9, 10, 254, 255 };
+const edge_names = blk: {
+    var names: [2][edge_scales.len][]const u8 = undefined;
+    for ([_][]const u8{ "gate-up", "down" }, 0..) |kind, i| for (edge_scales, 0..) |scale, j| {
+        names[i][j] = std.fmt.comptimePrint("metal inkling2 mma MXFP8 {s} scale {d} edge", .{ kind, scale });
+    };
+    break :blk names;
+};
 
 fn symbol(k: Kind) []const u8 {
     return switch (k) {
@@ -81,6 +89,7 @@ pub const Probe = struct {
     ids: []i32 = &.{},
     refs: [7]rig_.Ref = undefined,
     baseline: rig_.Ref = undefined,
+    edge: ?u8 = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, control: bool) !Probe {
         const text = try controls.apply(a, if (control) mutation(kind) else .none);
@@ -114,7 +123,12 @@ pub const Probe = struct {
     }
 
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .spec = spec(p.kind, p.ctl != .none), .ctx = p, .vt = &vt, .control = p.ctl.gate() };
+        var declared = spec(p.kind, p.ctl != .none);
+        if (p.edge) |i| {
+            declared.name = edge_names[if (isGu(p.kind)) 0 else 1][i];
+            declared.served = if (isGu(p.kind)) &.{ .{ .rows = 16, .n = 32, .k = 2304 }, .{ .rows = 32, .n = 32, .k = 2304 }, .{ .rows = 64, .n = 32, .k = 2304 } } else &.{ .{ .rows = 16, .n = 64, .k = 1152 }, .{ .rows = 32, .n = 64, .k = 1152 }, .{ .rows = 64, .n = 64, .k = 1152 } };
+        }
+        return .{ .spec = declared, .ctx = p, .vt = &vt, .control = p.ctl.gate() };
     }
     const vt = g.hooks(Probe);
 
@@ -152,6 +166,15 @@ pub const Probe = struct {
             for (p.amax, 0..) |*v, i| v.* = 2688.125 + @as(f32, @floatFromInt(i % 4)) * 0.375;
             p.denominator = try p.a.alloc(f32, 1);
             p.denominator[0] = 2695.75 * 64;
+        }
+        if (p.edge) |index| {
+            const scale = edge_scales[index];
+            @memset(p.w, 0);
+            @memset(p.scales, scale);
+            @memset(p.x, 0);
+            const input: f32 = if (scale >= 254) 0x1p-126 else 0x1p126;
+            for (0..p.x.len / shape.k) |row| p.x[row * shape.k] = c.toBf16(input);
+            for (0..matrices) |row| p.w[row * shape.k] = 0x28;
         }
         if (fill == .nonfinite and p.x.len >= 3) {
             p.x[0] = c.toBf16(std.math.nan(f32));
@@ -269,7 +292,7 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
-    probes: [8]Probe = undefined,
+    probes: [20]Probe = undefined,
     made: usize = 0,
 
     pub fn deinit(s: *Suite) void {
@@ -282,6 +305,13 @@ pub const Suite = struct {
             const label = if (control) mutation(kind).name() else spec(kind, false).name;
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
             s.probes[s.made] = try Probe.init(s.a, s.device, s.queue, kind, control);
+            s.made += 1;
+            try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
+        };
+        for ([_]Kind{ .mx_gu, .mx_down }, 0..) |kind, ki| for (edge_scales, 0..) |_, i| {
+            if (only) |needle| if (std.mem.indexOf(u8, edge_names[ki][i], needle) == null) continue;
+            s.probes[s.made] = try Probe.init(s.a, s.device, s.queue, kind, false);
+            s.probes[s.made].edge = @intCast(i);
             s.made += 1;
             try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
         };

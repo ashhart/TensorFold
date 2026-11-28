@@ -72,7 +72,8 @@ test "NVFP4 globals round to BF16 before one FP32 division" {
 test "every MXFP8 value and UE8M0 exponent is exactly BF16 decoded" {
     for ([_]u8{ 0, 1, 126, 127, 128, 129, 254, 255 }) |scale| for (0..256) |raw| {
         const code: u8 = @intCast(raw);
-        const want = std.math.ldexp(p.e4m3(code), @as(i32, scale) - 127);
+        const x = p.e4m3(code);
+        const want = if (x == 0) x else std.math.ldexp(x, @as(i32, scale) - 127);
         if (std.math.isNan(want)) {
             try std.testing.expect(std.math.isNan(p.mxWeight(code, scale)));
         } else try std.testing.expectEqual(p.roundBf16(want), p.mxWeight(code, scale));
@@ -165,4 +166,114 @@ test "grouped expert tile upper bound, buffer sizing and ABI layouts hold across
     try std.testing.expectError(error.BadExpertShape, p.checkGrouped(.{ .rows = 65, .k = 2304, .n = 1152, .format = .nvfp4 }));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(p.GroupArgs));
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(p.GroupedMatrixArgs));
+}
+
+const metal_src = @import("inkling2_metal");
+
+fn parseLut() ![256]u32 {
+    const marker = "ink2_e4m3_lut[256] = {";
+    const start = (std.mem.indexOf(u8, metal_src.experts, marker) orelse return error.MissingLut) + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, metal_src.experts, start, '}') orelse return error.MissingLut;
+    var lut: [256]u32 = undefined;
+    var n: usize = 0;
+    var it = std.mem.tokenizeAny(u8, metal_src.experts[start..end], " \r\n\t,");
+    while (it.next()) |tok| {
+        if (!std.mem.startsWith(u8, tok, "0x") or !std.mem.endsWith(u8, tok, "u")) return error.BadLutToken;
+        if (n >= lut.len) return error.BadLutCount;
+        lut[n] = try std.fmt.parseInt(u32, tok[2 .. tok.len - 1], 16);
+        n += 1;
+    }
+    if (n != 256) return error.BadLutCount;
+    return lut;
+}
+
+fn bfRound(v: f32) u16 {
+    const bits: u32 = @bitCast(v);
+    if (std.math.isNan(v)) return @truncate((bits >> 16) | 0x40);
+    return @truncate((bits +% 0x7fff +% ((bits >> 16) & 1)) >> 16);
+}
+
+fn simMxEdgeBf(lut: *const [256]u32, code: u8, scale: u8) u16 {
+    const x: f32 = @bitCast(lut[code]);
+    if (scale == 255) return bfRound((x * 2.0) * @as(f32, @bitCast(@as(u32, 254) << 23)));
+    const u: u32 = @bitCast(x * @as(f32, @bitCast((@as(u32, scale) + 16) << 23)));
+    if ((u & 0x7fff_ffff) == 0 or (u & 0x7f80_0000) == 0x7f80_0000) return @truncate(u >> 16);
+    const sign16: u32 = (u >> 16) & 0x8000;
+    const e: i32 = @as(i32, @intCast((u >> 23) & 0xff)) - 16;
+    if (e >= 1) {
+        const un = (u & 0x807f_ffff) | (@as(u32, @intCast(e)) << 23);
+        return @truncate((un +% 0x7fff +% ((un >> 16) & 1)) >> 16);
+    }
+    if (17 - e > 25) return @truncate(sign16);
+    const shift: u5 = @intCast(17 - e);
+    const sig: u32 = 0x80_0000 | (u & 0x7f_ffff);
+    const half_bit: u32 = @as(u32, 1) << (shift - 1);
+    const rem: u32 = sig & ((@as(u32, 1) << shift) - 1);
+    var q: u32 = sig >> shift;
+    if (rem > half_bit or (rem == half_bit and (q & 1) != 0)) q += 1;
+    return @truncate(sign16 | q);
+}
+
+fn simMxBf(lut: *const [256]u32, code: u8, scale: u8) u16 {
+    const s: u32 = scale;
+    if (s -% 10 < 245) return bfRound(@as(f32, @bitCast(lut[code])) * @as(f32, @bitCast(s << 23)));
+    return simMxEdgeBf(lut, code, scale);
+}
+
+test "every MXFP8 value and UE8M0 exponent is exactly BF16 decoded across all 65536 pairs" {
+    const lut = try parseLut();
+    for (0..256) |raw| {
+        const code: u8 = @intCast(raw);
+        try std.testing.expectEqual(p.e4m3Bits(code), lut[raw]);
+    }
+    for (0..256) |s_raw| {
+        const scale: u8 = @intCast(s_raw);
+        for (0..256) |raw| {
+            const code: u8 = @intCast(raw);
+            const base = p.e4m3(code);
+            const want = if (base == 0) base else std.math.ldexp(base, @as(i32, scale) - 127);
+            const got = p.mxWeight(code, scale);
+            const sim_bits = simMxBf(&lut, code, scale);
+            if (std.math.isNan(want)) {
+                try std.testing.expect(std.math.isNan(got));
+                try std.testing.expect((sim_bits & 0x7fff) > 0x7f80);
+            } else {
+                const want_bits: u16 = @truncate(@as(u32, @bitCast(p.roundBf16(want))) >> 16);
+                try std.testing.expectEqual(@as(u32, @bitCast(p.roundBf16(want))), @as(u32, @bitCast(got)));
+                try std.testing.expectEqual(want_bits, sim_bits);
+            }
+        }
+    }
+}
+
+test "wide dispatch keeps the 256-pair cutoff and serial grouping clamps counts without touching tails" {
+    var call = p.Call{ .rows = 32, .topk = 8, .k = 64, .n = 64, .format = .mxfp8 };
+    try std.testing.expect(!p.wideGroup(call));
+    call.rows = 33;
+    try std.testing.expect(p.wideGroup(call));
+    const ids = [_]i32{ -1, 2, 0, 2, 3, 128, 2, 0, 127, 2 };
+    var counts: [128]u32 = undefined;
+    var members: [128 * 3]u32 = @splat(0xffff_ffff);
+    p.groupReference(&ids, 128, 3, &counts, &members);
+    try std.testing.expectEqual(@as(u32, 3), counts[2]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3, 6 }, members[6..9]);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 7, 0xffff_ffff }, members[0..3]);
+    try std.testing.expectEqual(@as(u32, 8), members[127 * 3]);
+    try std.testing.expectEqual(@as(u32, 0xffff_ffff), members[127 * 3 + 1]);
+    for (counts, 0..) |n, e| if (e != 0 and e != 2 and e != 3 and e != 127) {
+        try std.testing.expectEqual(@as(u32, 0), n);
+        try std.testing.expectEqualSlices(u32, &.{ 0xffff_ffff, 0xffff_ffff, 0xffff_ffff }, members[e * 3 ..][0..3]);
+    };
+}
+
+test "MMA MXFP8 edges: packed decode uses the exact helper for all sixteen bytes" {
+    const text = metal_src.experts_mma;
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "as_type<ushort>(ink2_mx_bf("));
+    try std.testing.expect(std.mem.indexOf(u8, text, "max(raw.code, 1u) << 23u") == null);
+    const old_scale: f32 = @bitCast(@as(u32, 255) << 23);
+    const old_result = p.roundBf16(p.e4m3(0x28) * old_scale);
+    try std.testing.expect(std.math.isInf(old_result));
+    const exact = p.mxWeight(0x28, 255);
+    try std.testing.expectEqual(@as(u32, 0x7e80_0000), @as(u32, @bitCast(exact)));
+    try std.testing.expectEqual(@as(u32, 0x0010_0000), @as(u32, @bitCast(p.mxWeight(0x28, 0))));
 }

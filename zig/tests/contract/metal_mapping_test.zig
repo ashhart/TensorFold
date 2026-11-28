@@ -89,5 +89,5 @@ test "Metal launch map: Inkling2 MMA launches resolve and support all Metal GPUs
         try std.testing.expect(launches.supported(.{ .units = false }, d));
         try std.testing.expect(launches.supported(.{ .units = true }, d));
     }
-    try std.testing.expectEqual(@as(usize, 7), count);
+    try std.testing.expectEqual(@as(usize, 8), count);
 }
