@@ -100,7 +100,7 @@ pub const Engine = struct {
         defer gpa.free(layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .d = d, .c = c, .share = share, .m = m, .stream = stream, .w = undefined, .bp = undefined, .bd = undefined, .bs = undefined, .capacity = o.capacity, .picks = undefined, .picks_host = &.{}, .smp = undefined, .spans = &.{} };
-        e.w = try weights.load(gpa, io, m.tools(d, stream), dir, c, share, layers);
+        e.w = try weights.load(gpa, io, m.tools(d, stream), dir, c, share, layers, o.layers == 0);
         errdefer e.w.deinit();
         var extra: std.ArrayList(weights.Mx) = .empty;
         defer extra.deinit(gpa);

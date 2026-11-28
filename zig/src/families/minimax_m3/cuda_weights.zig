@@ -208,11 +208,11 @@ pub const Loader = struct {
     }
 };
 
-/// The rank's weights of `layers` (a prefix for a thin check), the embeddings whole, its vocabulary's head rows.
-pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: Tools, dir: []const u8, c: cfg.Config, share: shard.Share, layers: []const u32) !Weights {
+/// Load a rank's weights; layers is a thin-check prefix and full audits leftovers.
+pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: Tools, dir: []const u8, c: cfg.Config, share: shard.Share, layers: []const u32, full: bool) !Weights {
     var w: Weights = .{ .gpa = gpa, .config = c, .share = share };
     errdefer w.deinit();
-    var ck = try core.Checkpoint.openModel(gpa, io, dir);
+    var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, prefix); // the vision tower's and drafters' names are not the LM's
     defer core.checkpoint.cache.close(&ck);
     var L: Loader = .{ .gpa = gpa, .t = tools, .w = &w, .ck = &ck };
     w.layers = try gpa.alloc(Layer, layers.len);
@@ -230,5 +230,46 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: Tools, dir: []const u8, c
     w.norm = try L.vector(prefix ++ "model.norm.weight", .{}, c.hidden);
     w.head = try exl3.linear(&L, prefix ++ "lm_head", c.vocab, c.hidden, .{ .cols = .{ .lo = share.vocab.lo, .hi = share.vocab.hi } });
     try tools.stream.synchronize();
+    // only a whole-model load refuses leftovers: a thin check leaves deeper layers unbound on purpose
+    try refuseLeftovers(&ck, full);
     return w;
+}
+
+/// `ck` with names `get` never took, refused; `full` is false for a thin layer-prefix check.
+pub fn refuseLeftovers(ck: *const core.Checkpoint, full: bool) !void {
+    if (!full) return;
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return error.UnusedMinimaxTensors;
+}
+
+test "a stray high-index language_model layer tensor refuses a full load; a thin load and other towers do not trip" {
+    const fixture = core.checkpoint_fixture;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data: [4]u16 = @splat(0x3f80);
+    const entries = [_]fixture.Entry{
+        .{ .name = "language_model.model.embed_tokens.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = "language_model.model.layers.0.self_attn.q_proj.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = "vision_tower.patch_embed.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = "drafter.model.layers.0.self_attn.q_proj.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = "language_model.model.layers.99.self_attn.q_proj.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+    };
+    try fixture.write(a, io, tmp.dir, "model.safetensors", &entries);
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    var ck = try core.Checkpoint.openModelPrefix(a, io, dir, prefix);
+    defer ck.close();
+    _ = try ck.expect(prefix ++ "model.embed_tokens.weight", .bf16, &.{4});
+    _ = try ck.expect(prefix ++ "model.layers.0.self_attn.q_proj.weight", .bf16, &.{4});
+    try std.testing.expectError(error.UnusedMinimaxTensors, refuseLeftovers(&ck, true));
+    try refuseLeftovers(&ck, false); // a thin check leaves the same names unbound on purpose
+    _ = try ck.expect(prefix ++ "model.layers.99.self_attn.q_proj.weight", .bf16, &.{4});
+    try refuseLeftovers(&ck, true); // tower and drafter names never entered the index: nothing left over
 }

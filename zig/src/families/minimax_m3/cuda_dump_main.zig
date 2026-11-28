@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !u8 {
     const which = try a.alloc(u32, layers);
     for (which, 0..) |*l, i| l.* = @intCast(i);
     var t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-    var w = try mm3.weights.load(gpa, io, m.tools(&driver, stream), args[1], c, share, which);
+    var w = try mm3.weights.load(gpa, io, m.tools(&driver, stream), args[1], c, share, which, false);
     defer w.deinit();
     std.debug.print("loaded {d} layers, {d:.2} GiB in {d:.1} s\n", .{ layers, @as(f64, @floatFromInt(w.bytes)) / (1 << 30), @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) * 1e-9 });
     const context = std.mem.alignForward(usize, ids.len, 128); // the prompt in chunks, its caches whole
@@ -134,7 +134,7 @@ fn everyRow(gpa: std.mem.Allocator, io: std.Io, driver: *const cuda.Driver, stre
     const which = try gpa.alloc(u32, c.layers);
     defer gpa.free(which);
     for (which, 0..) |*l, i| l.* = @intCast(i);
-    var w = try mm3.weights.load(gpa, io, m.tools(driver, stream), dir, c, share, which);
+    var w = try mm3.weights.load(gpa, io, m.tools(driver, stream), dir, c, share, which, true);
     defer w.deinit();
     const window = mm3.state.window_rows;
     const context = std.mem.alignForward(usize, ids.len + window, 128);
