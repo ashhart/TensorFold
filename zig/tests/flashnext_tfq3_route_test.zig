@@ -20,11 +20,17 @@ const RouteRig = struct {
     fn init(dev: mtl.Device) !RouteRig {
         var rig: RouteRig = undefined;
         rig.lg = try dev.buffer(16 * 513 * 4, opt);
+        errdefer rig.lg.deinit();
         rig.x = try dev.buffer(16 * D * 2, opt);
+        errdefer rig.x.deinit();
         @memset(rig.x.contents()[0 .. 16 * D * 2], 0);
         rig.rows = try dev.buffer(16, opt);
+        errdefer rig.rows.deinit();
+        var made: usize = 0;
+        errdefer for (0..made) |k| rig.out[k / 5][k % 5].deinit();
         for (&rig.out) |*side| for (side, sizes) |*b, n| {
             b.* = try dev.buffer(n, opt);
+            made += 1;
         };
         return rig;
     }
