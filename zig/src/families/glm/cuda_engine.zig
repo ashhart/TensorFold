@@ -24,28 +24,25 @@ const tp = @import("tp");
 const held_shares = @import("cuda_engine_shares.zig");
 const mesh_mod = @import("mesh");
 pub const Options = @import("cuda_engine_types.zig").Options;
-
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
 pub const max_drafts = 15;
 /// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
 const pair_bytes = 16;
 const pick_rows = @import("cuda_engine_pick.zig").pick_rows;
-
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
 pub const solo_rows = fw.solo_rows;
 pub const max_together = @import("cuda_state.zig").prompt_heads;
 pub const Prompt = struct { slot: u32, ids: []const u32 };
-
 /// A shared verify's max rows and streams: under hc_pre's 64-row block change; 16 streams take 2 rows each.
 pub const shared_rows = 32;
 pub const max_shared = 16;
-
 const types = @import("cuda_engine_types.zig");
 const snapshots = @import("cuda_snapshots.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const prompt_cuts = @import("cuda_prompt_cuts.zig"); // cuda_lanes' resume check too
 pub const Part = types.Part;
+pub const DraftPart = @import("cuda_mtp_shared.zig").DraftPart;
 pub const Kept = types.Kept;
 const Seq = types.Seq;
 const Snap = types.Snap;
@@ -569,6 +566,9 @@ pub const Engine = struct {
             }
         }
     }
+
+    /// Batched shared-round MTP: one segmented absorb, then one head pass and one draw per chained level.
+    pub const draftShared = @import("cuda_mtp_shared.zig").draftShared;
 
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
     pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {

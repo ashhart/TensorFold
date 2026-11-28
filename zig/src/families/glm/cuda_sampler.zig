@@ -54,9 +54,9 @@ pub const Sampler = struct {
         errdefer full.free();
         var stage = try cuda.DeviceBuffer.alloc(d, stagingBytes(vocab, rows));
         errdefer stage.free();
-        var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
+        var r = try cuda.DeviceBuffer.alloc(d, @max(1, rows) * @sizeOf(Rule));
         errdefer r.free();
-        var meta = try cuda.DeviceBuffer.alloc(d, 16);
+        var meta = try cuda.DeviceBuffer.alloc(d, @max(1, rows) * 16);
         errdefer meta.free();
         var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
         errdefer tok.free();
@@ -115,6 +115,50 @@ pub const Sampler = struct {
     fn place(s: *const Sampler, stream: cuda.Stream, full: u64, src: u64, span: Span, rows: usize) !void {
         const p: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = span.len() * 2, .dst = full + span.lo * 2, .dst_pitch = s.vocab * 2, .width = span.len() * 2, .height = rows };
         try s.d.check(s.d.api.cuMemcpy2DAsync_v2(&p, stream.handle), "cuMemcpy2DAsync");
+    }
+
+    /// `indices.len` selected rows of `logits` made whole in `full` (bf16 [indices.len][vocab]) on every rank.
+    pub fn gatherIndexed(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, rank: usize, logits: u64, indices: []const usize, full: u64) !void {
+        const n = indices.len;
+        if (n > s.rows or rank >= spans.len) return error.IndexedGatherExtent;
+        if (n == 0) return;
+        const span = spans[rank];
+        const staged = s.stage.ptr + n * span.lo * 2;
+        for (indices, 0..) |src, row| try s.copy(stream, staged + row * span.len() * 2, logits + src * span.len() * 2, span.len() * 2);
+        switch (exchange) {
+            .local => try s.place(stream, full, staged, span, n),
+            .nccl => |x| {
+                try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .stage = s.stage.ptr, .spans = spans, .mine = &.{}, .rows = n }, Spread.post);
+                for (spans) |part| try s.place(stream, full, s.stage.ptr + n * part.lo * 2, part, n);
+            },
+        }
+    }
+
+    /// Launches `tf_draw` for `rules.len` whole rows in `full`, each row under its own rule and position `firsts[i]`.
+    pub fn launchMany(s: *Sampler, stream: cuda.Stream, rules: []const Rule, firsts: []const u64) !void {
+        std.debug.assert(rules.len == firsts.len and rules.len <= s.rows);
+        const n = rules.len;
+        if (n == 0) return;
+        try s.rule.uploadAsync(0, std.mem.sliceAsBytes(rules), stream.handle);
+        var metas: [32][4]i32 = undefined;
+        std.debug.assert(n <= metas.len);
+        for (firsts, 0..) |f, i| {
+            std.debug.assert(f >= 1);
+            metas[i] = .{ @intCast(f - 1), 0, 0, 0 };
+        }
+        try s.meta.uploadAsync(0, std.mem.sliceAsBytes(metas[0..n]), stream.handle);
+        const V = s.vocab;
+        for (0..n) |i| {
+            var args: cuda.Args = .{};
+            args.add(s.full.ptr + i * V * 2);
+            args.add(@as(u32, @intCast(V)));
+            args.add(s.rule.ptr + i * @sizeOf(Rule));
+            args.add(s.meta.ptr + i * 16);
+            args.add(@as(i32, 0));
+            args.add(s.tok.ptr + i * 4);
+            args.add(s.prob.ptr + i * 4);
+            try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, stream, &args);
+        }
     }
 
     /// Structured output: each of `rows` whole rows in `full` keeps its allowed tokens (`words` u32 a row at `bits`).
