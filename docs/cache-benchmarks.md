@@ -138,6 +138,10 @@ is true only when every reply's `token_sha256` equals its run alone; the tool ex
 
 `tools/bench_cache_agents.py` measures one trace with one request in flight at a time.
 Use `agent_loops` for stable conversations or `agent_cohorts` to replace every conversation halfway through.
+Use `agent_edits` to replay the `agent_loops` workload with a history edit at round `rounds // 2`, counting from zero.
+The system message and conversation ID stay the same. The trace rewrites the first user message, drops all later
+messages, and starts growing the conversation again from the regenerated reply. Turn numbering restarts at zero.
+Use at least two rounds for either midpoint trace. Compare the same trace across runs to check token equality.
 Each agent turn is followed by two unique one-off prompts. Histories grow through public user messages and
 the measured assistant replies, including reasoning when present. One-off replies are discarded.
 Matching token replies preserve identical A/B histories; request fingerprints detect later divergence if replies differ.
@@ -155,6 +159,7 @@ context, generation settings and idle-machine conditions. Run A with `TF_CACHE_E
 `TF_CACHE_EVICT=decayed_resume`. Repeat separately for `agent_cohorts`. The client does not restart the server,
 clear caches, warm up, retry, or change any policy. Persistent state must not make the two starting caches differ.
 As with the other clients, a first request's observed reuse is recorded rather than presumed cold.
+For an edited-history run, replace `--trace agent_loops` with `--trace agent_edits` in both arms.
 
 `--prefix-tokens` sizes the standalone system text through authenticated `/tokenize` and `/detokenize` calls,
 including a token-ID roundtrip check. It is not a claim about the rendered chat prompt length. Initial user

@@ -208,7 +208,8 @@ class AgentTests(unittest.TestCase):
 
     def test_invalid_arguments_fail_before_http(self):
         for extra in (("--conversations", "0"), ("--prefix-tokens", "-1"), ("--timeout", "nan"),
-                      ("--seed", "-1"), ("--trace", "agent_cohorts", "--rounds", "1")):
+                      ("--seed", "-1"), ("--trace", "agent_cohorts", "--rounds", "1"),
+                      ("--trace", "agent_edits", "--rounds", "1")):
             with self.subTest(extra=extra):
                 fixture = Fixture()
                 code, _, _ = invoke(fixture, extra)
@@ -297,6 +298,18 @@ class CompareTests(unittest.TestCase):
         self.assertTrue(result["qualified"])
         self.assertEqual(set(result["traces"]), {"agent_cohorts"})
 
+    def test_edited_trace_requires_two_rounds_in_the_runner_and_receipt(self):
+        code, report, _ = invoke(Fixture(), ("--trace", "agent_edits", "--rounds", "2"))
+        self.assertEqual(code, 0)
+        self.assertTrue(compare.compare(report, report)["qualified"])
+
+        report["settings"]["rounds"] = 1
+        report["expected_requests"] = 6
+        report["rows"] = report["rows"][:6]
+        report["fixture_sha256"] = bench.digest([row["request_sha256"] for row in report["rows"]])
+        with self.assertRaisesRegex(ValueError, "^invalid_settings$"):
+            compare.validate(report)
+
     def test_compare_cli_returns_one_for_a_mismatch_and_two_for_invalid_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
             a, b, out = [Path(directory) / name for name in ("a.json", "b.json", "out.json")]
@@ -323,6 +336,44 @@ class LoopbackTests(unittest.TestCase):
         code, report, _ = self.check("normal")
         self.assertEqual(code, 0)
         self.assertEqual(len(report["rows"]), 24)
+
+    def test_edited_replay_replaces_the_first_user_turn_and_regrows_history(self):
+        fixture = Fixture()
+        options = ("--trace", "agent_edits", "--rounds", "5")
+        try:
+            with loopback(fixture) as base:
+                code, report, output = invoke(fixture, options, base=base, memory=False)
+        except PermissionError:
+            self.skipTest("loopback socket creation denied by host")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(report["rows"]), 30)
+        self.assertEqual(len(report["system_prefixes"]), 1)
+        self.assertEqual([row["turn"] for row in report["rows"] if row["kind"] == "agent"],
+                         [0, 0, 1, 1, 0, 0, 1, 1, 2, 2])
+        for slot in range(2):
+            histories = [request["messages"] for request in fixture.chat[slot * 3::6]]
+            self.assertEqual([len(history) for history in histories], [2, 4, 2, 4, 6])
+            self.assertTrue(all(history[0] == histories[0][0] for history in histories))
+            self.assertEqual(histories[1][1], histories[0][1])
+            self.assertNotEqual(histories[2][1]["content"], histories[0][1]["content"])
+            self.assertEqual(histories[2][1]["role"], "user")
+            self.assertEqual(histories[3][:2], histories[2])
+            self.assertEqual(histories[3][2], {"role": "assistant", "content": "MODEL-PRIVATE-REPLY"})
+            self.assertEqual(histories[4][:4], histories[3])
+
+        replay = Fixture(cached=8)
+        other_code, other, _ = invoke(replay, options)
+        self.assertEqual(other_code, 0)
+        self.assertEqual(replay.chat, fixture.chat)
+        self.assertTrue(compare.compare(report, other)["qualified"])
+
+        unedited = Fixture()
+        unedited_code, _, _ = invoke(unedited, ("--rounds", "5"))
+        self.assertEqual(unedited_code, 0)
+        self.assertEqual(fixture.chat[:12], unedited.chat[:12])
+        for offset in (1, 2):
+            self.assertEqual(fixture.chat[offset::3], unedited.chat[offset::3])
 
     def test_real_http_missing_usage(self):
         code, report, _ = self.check("missing_usage")

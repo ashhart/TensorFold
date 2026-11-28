@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 import bench_agent_compare as comparison
-from bench_agent_trace import SHAPES, Texts, digest, prepare, requests
+from bench_agent_trace import MIDPOINT_TRACES, SHAPES, Texts, digest, prepare, requests
 from bench_auth import authorize, read_api_key, redact
 from bench_evidence import Evidence
 import bench_stream
@@ -139,8 +139,8 @@ def main(argv=None):
     if args.command == "run":
         if min(args.conversations, args.rounds, args.prefix_tokens, args.tokens) < 1:
             runner.error("conversations, rounds, prefix tokens and reply tokens must be positive")
-        if args.trace == "agent_cohorts" and args.rounds < 2:
-            runner.error("agent_cohorts requires at least two rounds")
+        if args.trace in MIDPOINT_TRACES and args.rounds < 2:
+            runner.error(f"{args.trace} requires at least two rounds")
         if args.seed < 0 or args.seed + args.conversations * args.rounds * 3 - 1 > 0xffffffffffffffff:
             runner.error("request seeds must fit unsigned 64-bit integers")
         if not math.isfinite(args.timeout) or args.timeout <= 0:
