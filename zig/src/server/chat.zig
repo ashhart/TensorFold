@@ -93,6 +93,7 @@ pub const Reply = struct {
     native_tool_format: bool = false,
     native_calls: ?[]Value = null,
     native_cut_calls: bool = false, // a native parser's calls were cut by the token cap: finish_reason stays length
+    native_cut_call: ?*json.Object = null, // a native bare parser's last call came from open-envelope cap recovery
     finish_reason: []const u8,
     prompt_tokens: usize,
     cached_tokens: usize,

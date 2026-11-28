@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { connect } from 'node:net'
 import { createRemoteControlServer } from './remote-control'
 import { freePort, ok2, remoteDeps, settings } from './remote-control-test-fixture'
+import { createPairingRegistry } from './pairing-sessions'
 
 // --- unauthenticated request-body caps ---
 await (async () => {
@@ -51,5 +52,43 @@ await (async () => {
     ok2('unauthenticated pairing bodies are capped before JSON parsing or token redemption')
   } finally {
     await s.stop()
+  }
+})()
+
+await (async () => {
+  const s = { ...settings, port: await freePort() }
+  const registry = createPairingRegistry({ linkTtlMs: 600_000 })
+  const starts: any[] = []
+  const server = createRemoteControlServer(remoteDeps(s, {
+    startThread: async (payload) => { starts.push(payload); return { runId: 'attachment-run' } },
+    pairing: {
+      issuePairingLink: (label: string) => registry.issuePairingLink(label),
+      authorizeSessionToken: (token: string) => registry.authorizeSessionToken(token),
+      redeemPairingLink: (credential: string, clientInfo?: string | null) => registry.redeemPairingLink(credential, clientInfo),
+      listSessions: () => registry.listSessions(),
+      revokeSession: (id: string) => registry.revokeSession(id),
+    },
+  }))
+  await server.syncFromSettings()
+  try {
+    const link = registry.issuePairingLink('Attachment fixture')
+    const device = registry.redeemPairingLink(link.credential).session!
+    const headers = { Authorization: `Bearer ${device.token}`, 'content-type': 'application/json' }
+    const document = { kind: 'document', name: '../../plan.md', mime: 'NOT A MIME', text: 'safe plan', bytes: 999_999 }
+    const accepted = await fetch(`${server.status().url}/v1/threads/t1/start`, {
+      method: 'POST', headers, body: JSON.stringify({ userText: '', attachments: [document] }),
+    })
+    assert.equal(accepted.status, 202, 'a paired start accepts a ready attachment without typed text')
+    assert.equal(starts[0].userText, '', 'empty user text reaches the start callback')
+    assert.equal(starts[0].attachments[0].name, 'plan.md', 'the normalized attachment reaches the same callback')
+    const empty = await fetch(`${server.status().url}/v1/threads/t1/start`, {
+      method: 'POST', headers, body: JSON.stringify({ userText: '  ', attachments: [] }),
+    })
+    assert.equal(empty.status, 400, 'blank text with no attachment remains invalid')
+    assert.deepEqual(await empty.json(), { error: 'userText_required' })
+    assert.equal(starts.length, 1, 'an empty submission never invokes the start callback')
+    ok2('paired thread starts admit attachment-only work and reject truly empty work')
+  } finally {
+    await server.stop()
   }
 })()

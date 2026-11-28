@@ -41,9 +41,10 @@ class Fake:
     """A server keeping one prompt state, so two long sessions in turn evict each other, as in #2346."""
 
     def __init__(self, stats=True, cache=True, delay=0.0, corrupt=(), fail=(), pad=0, metrics=None, labels=False,
-                 partial=False):
+                 partial=False, capped=None):
         self.stats, self.cache, self.delay, self.corrupt, self.fail = stats, cache, delay, set(corrupt), set(fail)
         self.pad, self.metrics, self.labels, self.partial = pad, metrics, labels, partial
+        self.capped = capped  # complete; cut inside arguments; envelope open after complete JSON arguments
         self.state, self.hits, self.misses, self.evictions, self.running, self.chats = [], 0, 0, 0, 0, 0
         self.restored, self.seen, self.lock = 0, [], threading.Lock()
 
@@ -78,7 +79,9 @@ class Fake:
                                         "function": {"name": "read_file", "arguments": ""}}]},
                        {"tool_calls": [{"index": 0, "function": {"arguments": '{"path": '}}]},
                        {"tool_calls": [{"index": 0, "function": {"arguments": f'"{h[:6]}.txt"}}'}}]}]
-            finish = "tool_calls"
+            finish = "tool_calls" if self.capped is None else "length"
+            if self.capped == "cut":
+                deltas.pop()
         else:
             deltas += [{"content": f"Done {h[:8]}"}, {"content": " and checked."}]
             finish = "stop"
@@ -87,7 +90,8 @@ class Fake:
                  "prompt_tokens_details": {"cached_tokens": cached},
                  "completion_tokens_details": {"reasoning_tokens": 3 if thinking else 0}}
         runtime = {"engine": "fake", "time_to_first_token": 0.01, "prefill_seconds": 0.005, "seconds": 0.002,
-                   "queue_seconds": 0.001, "token_sha": sha[:12], "token_sha256": sha, "token_ids": [1, 2, 3]}
+                   "queue_seconds": 0.001, "token_sha": sha[:12], "token_sha256": sha, "token_ids": [1, 2, 3],
+                   "complete_tool_calls": [0] if self.capped == "complete" else []}
         chunks = [{"choices": [{"index": 0, "delta": d, "finish_reason": None}]} for d in deltas]
         chunks.append({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
         chunks.append({"choices": [], "usage": usage, "tensorfold": runtime, "speculative": {"rounds": 3}})
@@ -511,6 +515,45 @@ class ReplayTests(Base):
         code, lines = self.run_bench(Fake(), "--pattern", "alt", ref=Fake(cache=False, fail={0}))
         self.assertEqual(code, 1)
         self.assertEqual(lines[-1]["replay"], {"session": "A", "equal": 2, "unequal": 0, "unverified": 1})
+
+
+class CappedCallTests(Base):
+    def test_a_complete_call_the_cap_ends_on_is_kept_and_answered_next_turn(self):
+        fake = Fake(capped="complete")
+        code, lines = self.run_bench(fake, "--turns", "1")
+        self.assertEqual(code, 0)
+        capped = [r for r in self.requests(lines) if r["finish_reason"] == "length"]
+        self.assertTrue(capped)
+        self.assertTrue(all(r["tool_calls"] == 1 for r in capped), capped)
+        answered = [b for b in fake.chat_bodies() if b["messages"][-1]["role"] == "tool"
+                    and b["messages"][-2].get("tool_calls")
+                    and b["messages"][-2]["tool_calls"][0]["function"]["arguments"].endswith('.txt"}')]
+        self.assertTrue(answered)
+
+    def test_complete_arguments_in_an_open_envelope_are_cut_not_answered(self):
+        fake = Fake(capped="envelope")
+        code, lines = self.run_bench(fake, "--turns", "1")
+        self.assertEqual(code, 0)
+        capped = [r for r in self.requests(lines) if r["finish_reason"] == "length"]
+        self.assertTrue(capped)
+        self.assertTrue(all(r["tool_calls"] == 0 for r in capped), capped)
+        continuations = [b for b in fake.chat_bodies() if len(b["messages"]) >= 2
+                         and b["messages"][-2]["role"] == "assistant"
+                         and str(b["messages"][-2].get("content") or "").startswith("Reading ")
+                         and b["messages"][-1]["role"] == "user"]
+        self.assertTrue(continuations)
+        self.assertTrue(all("tool_calls" not in b["messages"][-2] for b in continuations), continuations)
+
+
+    def test_a_call_the_cap_cuts_is_still_dropped_and_the_turn_goes_on_as_a_user_message(self):
+        fake = Fake(capped="cut")
+        code, lines = self.run_bench(fake, "--turns", "1")
+        self.assertEqual(code, 0)
+        capped = [r for r in self.requests(lines) if r["finish_reason"] == "length"]
+        self.assertTrue(capped)
+        self.assertTrue(all(r["tool_calls"] == 0 for r in capped), capped)
+        self.assertFalse([b for b in fake.chat_bodies() if any(
+            m.get("tool_calls") and m["tool_calls"][0]["function"]["arguments"] == '{"path": ' for m in b["messages"])])
 
 
 class FlagTests(Base):

@@ -283,17 +283,19 @@ function NoticeToast() {
   const notice = useStore((s) => s.notice)
   const dismiss = useStore((s) => s.dismissNotice)
   useEffect(() => {
-    if (!notice) return
+    if (!notice || notice.persistent) return
     // Errors linger; routine "saved" confirmations clear quickly (#48).
     const t = setTimeout(dismiss, notice.kind === 'info' ? 2500 : 9000)
     return () => clearTimeout(t)
   }, [notice, dismiss])
-  if (!notice) return null
   return (
-    <div className="fixed bottom-4 right-4 z-[100] flex max-w-sm items-start gap-2.5 rounded-xl border border-line bg-card px-4 py-3 text-[13px] shadow-pop fade-in">
-      <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${notice.kind === 'error' ? 'bg-danger' : 'bg-accent'}`} />
-      <span className="min-w-0 flex-1 text-ink">{notice.authored ? tx(notice.message) : notice.kind === 'error' ? <><span className="block">{tx("This action could not be completed.")}</span><OriginalDiagnostic>{notice.message}</OriginalDiagnostic></> : notice.message}</span>
-      <button onClick={dismiss} aria-label={tx("Dismiss")} className="shrink-0 text-ink-3 transition-colors hover:text-ink">×</button>
-    </div>
+    <>
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">{notice?.persistent ? notice.authored ? tx(notice.message) : notice.message : null}</div>
+      {notice && <div className="fixed bottom-4 right-4 z-[100] flex max-w-sm items-start gap-2.5 rounded-xl border border-line bg-card px-4 py-3 text-[13px] shadow-pop fade-in">
+        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${notice.kind === 'error' ? 'bg-danger' : 'bg-accent'}`} />
+        <span className="min-w-0 flex-1 text-ink">{notice.authored ? tx(notice.message) : notice.kind === 'error' ? <><span className="block">{tx("This action could not be completed.")}</span><OriginalDiagnostic>{notice.message}</OriginalDiagnostic></> : notice.message}</span>
+        <button onClick={dismiss} aria-label={tx("Dismiss")} className="shrink-0 text-ink-3 transition-colors hover:text-ink">×</button>
+      </div>}
+    </>
   )
 }

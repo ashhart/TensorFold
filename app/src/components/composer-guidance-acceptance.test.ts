@@ -5,7 +5,7 @@ import path from 'node:path'
 import ts from 'typescript'
 
 // Execute the production handler without loading the app or rendering a browser.
-const source = ts.createSourceFile('Composer.tsx', readFileSync(path.join(__dirname, 'Composer.tsx'), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const source = ts.createSourceFile('Composer.tsx', ['composer/useComposerState.ts', 'composer/useComposerSubmit.tsx'].map(file => readFileSync(path.join(__dirname, file), 'utf8')).join('\n'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
 let declaration: ts.VariableDeclaration | undefined
 const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'guideNow') declaration = node; ts.forEachChild(node, visit) }
 visit(source); assert.ok(declaration)

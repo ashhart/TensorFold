@@ -1,6 +1,7 @@
 import { reviewedLanguageImport } from '../preferences/language-test-fixture'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import React from 'react'
 import ts from 'typescript'
 import clsx from 'clsx'
@@ -23,8 +24,20 @@ import { find, harness, jsx, load as loadComponent, settle } from '../reading/re
 
 function load(file: string, overrides: Record<string, any>) {
   const source = readFileSync(file, 'utf8'), ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true), imports: Record<string, any> = {}
+  const wrapper = 'src/components/Composer.tsx'
+  const resolve = (from: string, name: string) => path.posix.normalize(path.posix.join(path.posix.dirname(from), name))
+  const supplied = new Map(Object.entries(overrides).map(([name, value]) => [name.startsWith('.') ? resolve(wrapper, name) : name, value]))
+  const extracted: Record<string, string> = {
+    'src/components/composer/useComposerState': 'src/components/composer/useComposerState.ts',
+    'src/components/composer/useComposerWorkspace': 'src/components/composer/useComposerWorkspace.ts',
+    'src/components/composer/useComposerSubmit': 'src/components/composer/useComposerSubmit.tsx',
+    'src/components/composer/ComposerView': 'src/components/composer/ComposerView.tsx',
+  }
   for (const node of ast.statements) if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-    const name = node.moduleSpecifier.text
+    const name = node.moduleSpecifier.text, resolved = name.startsWith('.') ? resolve(file, name) : name
+    if (supplied.has(resolved)) { imports[name] = supplied.get(resolved); continue }
+    const production = extracted[resolved]
+    if (production) { imports[name] = load(production, overrides); continue }
     const reviewed = reviewedLanguageImport(name)
     if (reviewed.matched) { imports[name] = reviewed.value; continue }
     imports[name] = new Proxy({ __esModule: true }, { get(object, key) { if (key in object) return (object as any)[key]; return () => { throw new Error(`Unexpected Composer adapter: ${name}.${String(key)}`) } } })
@@ -61,13 +74,17 @@ async function scenario(provider: any, attached: any[], visionState = 'failed', 
     '../lib/composer-budget': composerBudgetModule, '../lib/composer-keyboard': composerKeyboard, '../lib/bot-labels': botLabels,
     '../lib/recent-models': { loadRecentModels: () => [], pushRecentModel: () => [] }, '../lib/capabilities': { BUILTIN_CAPABILITIES: [] }, './composer/ModelPickerMenu': { ModelPickerMenu: 'model-picker-fixture' }, './composer/ApprovalMenu': { ApprovalMenu: 'approval-fixture' }, './composer/TaskStarters': { TASK_STARTERS: [], TaskStarters: 'task-starters-fixture' },
   })
-  const tree = hooks.render(() => Composer({ mode: 'thread', thread }))
+  const render = () => {
+    const root = hooks.render(() => Composer({ mode: 'thread', thread }))
+    return typeof root.type === 'function' ? root.type(root.props) : root
+  }
+  const tree = render()
   const picker = find(tree, (node) => node.type === 'model-picker-fixture')
   assert.equal(picker.props.model, 'selected'); assert.equal(picker.props.provider.id, provider.id)
   const choices = modelPickerChoices([provider], null, { requirements: picker.props.requirements, qualifications: reports })
   find(tree, (node) => node.type === 'button' && node.props['aria-label'] === 'Send').props.onClick()
   await settle()
-  return { sends, cleared, notices, picker: picker.props, choice: choices[0], state, thread, render: () => hooks.render(() => Composer({ mode: 'thread', thread })) }
+  return { sends, cleared, notices, picker: picker.props, choice: choices[0], state, thread, render }
 }
 const failedImage = await scenario(local, [image])
 assert.match(failedImage.choice.disabledReason!, /vision check/, 'The real picker already rejects this exact active provider/account/model for the attached image')
