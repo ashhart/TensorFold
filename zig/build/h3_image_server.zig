@@ -21,6 +21,7 @@ pub fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         .{ .name = "h3", .module = image },
         .{ .name = "h3_prompt", .module = image },
         .{ .name = "h3_image_decoder", .module = image },
+        .{ .name = "h3_edit_options", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/edit_options.zig"), .target = target, .optimize = optimize }) },
         .{ .name = "keepalive", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/keepalive.zig"), .target = target, .optimize = optimize }) },
         .{ .name = "tokenizer", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true }) },
         .{ .name = "moss_noise", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target, .optimize = optimize }) },
