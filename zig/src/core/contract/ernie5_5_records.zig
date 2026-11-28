@@ -1,9 +1,11 @@
-//! ERNIE 5.5's CUDA launches (ernie5_5/head.cu): MultiMax on the head's fp32 logits.
+//! ERNIE 5.5's CUDA launches: MultiMax on the head's fp32 logits (ernie5_5/head.cu), the DSA keys and lists (index.cu).
 const registry = @import("registry.zig");
 
 /// nvcc 13.0's usage (nvcc -cubin per SM at the image's flags), the compiler of the release fatbins.
 pub const cuda = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "ernie5_5 head tf_ernie55_multimax", .symbol = "tf_ernie55_multimax", .image = "ernie5_5_head", .threads = 256 }, .usage = .{ .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "ernie5_5 index tf_ernie55_index_key", .symbol = "tf_ernie55_index_key", .image = "ernie5_5_index", .threads = 32 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 32 }, .{ .regs = 34, .static = 0, .bound = 32 }, .{ .regs = 32, .static = 0, .bound = 32 }, .{ .regs = 34, .static = 0, .bound = 32 }, .{ .regs = 34, .static = 0, .bound = 32 } } },
+    .{ .launch = .{ .name = "ernie5_5 index tf_ernie55_window_merge", .symbol = "tf_ernie55_window_merge", .image = "ernie5_5_index", .threads = 256 }, .usage = .{ .{ .regs = 22, .static = 0, .bound = 256 }, .{ .regs = 22, .static = 0, .bound = 256 }, .{ .regs = 22, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
 };
 
 test "ERNIE 5.5 CUDA: every launch is in the live registry and fits every SM" {
