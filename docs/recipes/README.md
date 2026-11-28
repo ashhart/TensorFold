@@ -16,6 +16,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nemotron 3.5 Transcribe | [Native CUDA on one GB10, the bf16 release, audio input](nemotron-3.5-transcribe.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3-Embedding | [Native Metal](qwen3-embedding-metal.md), [HIP](qwen3-embedding-hip.md) |
+| Qwen3.5-27B BF16 | [Native CUDA prompt-scoring candidate](qwen35-bf16-scoring.md) |
 | Qwen3.5-2B | [Native Metal preview and CUDA, tied affine 4-bit](qwen3.5-2b-native.md) |
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [native HIP](flash-next-hip.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
 | Qwen4 dense | [Native preparation, device qualification pending](qwen4-dense.md) |

@@ -68,7 +68,8 @@ pub const Kernels = struct {
         k.round = try cuda.tree_round.Kernels.resolve(m[5]);
         k.experts = try cuda.experts.Affine4Experts.resolve(m[8], m[9], m[10], sms);
         k.plan = try cuda.grouped.Router.resolve(m[8]);
-        k.moe = try cuda.moe.Fns.resolve(m[11]);
+        // Qwen owns the expert-first experiment; LFM2 retains its existing row-first router schedule.
+        k.moe = try cuda.moe.Fns.resolveMode(m[11], false);
         k.pattn = try m[12].function(pattn_sym);
         try k.pattn.allowDynamicShared(pattn_smem);
         k.kv_write = try m[13].function("tf_nemo_kv_write_segs");

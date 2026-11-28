@@ -59,3 +59,7 @@ test {
     _ = @import("experts_mxfp4_records.zig");
     _ = @import("nemo_audio_cuda_records.zig");
 }
+
+test {
+    _ = @import("qwen_glue_receipts_test.zig");
+}

@@ -41,7 +41,7 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (std.mem.eql(u8, name, "h3_image_prompt")) return &h3_image_prompt.bytes;
     inline for (.{ "qwen4_projection", "qwen4_hc", "qwen4_gdn", "qwen4_ple", "gemma4_ple" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "qmm_prefill", "lane_gemv", "prompt16", "qmmf", "ck_experts", "nvfp4_experts", "nvfp4_experts_tile", "nvfp4_experts32", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "glm_ops", "glm_index", "nemotron_mamba", "sample", "qwen35", "qwen35_bf16_rows", "qwen35_keep", "qwen35_kv8", "w4a8_prefill", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "topk_rows", "sparse_index", "window_attention", "window_pages", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows", "nemotron_ops", "minimax_m3", "minimax_m3_attn", "experts_bf16", "experts_mxfp4", "nemo_audio", "moss_image", "glm_vision", "idol", "idol_decoder", "lfm3", "lfm2_moe", "lfm2", "dots_mocr", "muse_glue", "muse_attention", "muse_linear", "muse_experts2", "muse_dflash", "muse_dflash2", "ricursive", "ricursive_prep" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "gdn_prefill", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "qmm_prefill", "lane_gemv", "prompt16", "qmmf", "ck_experts", "nvfp4_experts", "nvfp4_experts_tile", "nvfp4_experts32", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "glm_ops", "glm_index", "nemotron_mamba", "sample", "qwen35", "qwen35_bf16_rows", "qwen35_keep", "qwen35_kv8", "w4a8_prefill", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "topk_rows", "sparse_index", "window_attention", "window_pages", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows", "nemotron_ops", "minimax_m3", "minimax_m3_attn", "experts_bf16", "experts_mxfp4", "nemo_audio", "moss_image", "glm_vision", "idol", "idol_decoder", "lfm3", "lfm2_moe", "lfm2", "dots_mocr", "muse_glue", "muse_attention", "muse_linear", "muse_experts2", "muse_dflash", "muse_dflash2", "ricursive", "ricursive_prep" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "inkling2_attn", "inkling2_pattn", "inkling2_ops", "inkling2_rows", "inkling2_experts", "inkling2_modelopt", "inkling2_loop_math", "inkling2_vision", "inkling2_dspark" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "moss_image_decoder", "moss_image_encoder", "sparse_attention" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "zonos3", "zonos3_codec", "zonos3_encoder", "zonos3_teacher" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
@@ -182,12 +182,16 @@ fn keep(a: std.mem.Allocator, line: *std.ArrayList(u8), r: registry.CudaRecord, 
 }
 
 pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
-    const a = gpu.gpa;
+    return fatbinsHost(gpu.gpa, gpu.io, dir);
+}
+
+/// Inspect compiled images without opening a CUDA driver or creating a context.
+pub fn fatbinsHost(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     var n: usize = 0;
     var said: ?limits.Nvcc = null;
     const mode_path = try std.fmt.allocPrint(a, "{s}/norms.fatbin", .{dir});
     defer a.free(mode_path);
-    const mode_bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, mode_path, a, .limited(1 << 28));
+    const mode_bytes = try std.Io.Dir.cwd().readFileAlloc(io, mode_path, a, .limited(1 << 28));
     defer a.free(mode_bytes);
     const mode_images = try contract.cubin.images(a, mode_bytes);
     defer contract.cubin.freeImages(a, mode_images);
@@ -210,7 +214,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         }
         const path = try std.fmt.allocPrint(a, "{s}/{s}.fatbin", .{ dir, r.launch.image });
         defer a.free(path);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, a, .limited(1 << 28));
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28));
         defer a.free(bytes);
         const imgs = try contract.cubin.images(a, bytes);
         defer contract.cubin.freeImages(a, imgs);

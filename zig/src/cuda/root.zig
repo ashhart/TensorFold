@@ -207,6 +207,7 @@ test {
 
 test {
     _ = @import("context_health.zig");
+    _ = @import("prompt_bf16_host_test.zig");
 }
 
 test {
@@ -216,4 +217,12 @@ pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");
 
 test {
     _ = @import("tfq3_lifecycle_test.zig");
+}
+pub const gdn_chain = @import("gdn_chain.zig");
+test {
+    _ = @import("gdn_chain_host_test.zig");
+}
+
+test {
+    _ = @import("moe_router_host_test.zig");
 }

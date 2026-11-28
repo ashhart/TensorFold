@@ -123,13 +123,20 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("{s}", .{usage});
         return 2;
     }
+    const cmd = args[1];
+    const rest = args[2..];
+    if (std.mem.eql(u8, cmd, "kernel-contract-limits")) {
+        @import("contract_limits.zig").fatbinsHost(init.gpa, init.io, try arg(rest, 0)) catch |err| {
+            std.debug.print("FAIL {s}: {t}\n", .{ cmd, err });
+            return 1;
+        };
+        return 0;
+    }
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
     const gpu: check.Gpu = .{ .d = &driver, .ctx = &ctx, .gpa = init.gpa, .io = init.io };
-    const cmd = args[1];
-    const rest = args[2..];
 
     try dump.begin(init.gpa, cmd);
     run(gpu, cmd, rest) catch |e| {
@@ -390,6 +397,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (try ripple.run(gpu, cmd)) return;
     if (std.mem.eql(u8, cmd, "qwen-pdl-stress")) return @import("contract_qwen_pdl.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qwen-f32-norm-contract")) return @import("contract_rows.zig").f32Weights(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return @import("contract_limits.zig").fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-modelopt-contract")) return @import("contract_flashnext_modelopt.zig").run(gpu);

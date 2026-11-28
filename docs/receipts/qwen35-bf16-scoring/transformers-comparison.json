@@ -1,0 +1,315 @@
+{
+  "schema": 2,
+  "scope": "historical native captures against the earlier auto-dtype reference; superseded for stored-value fidelity",
+  "complete": true,
+  "native_comparison": {
+    "fp32_available": true,
+    "headline": {
+      "rows": 18,
+      "prompt_rows": 6,
+      "decode_rows": 12,
+      "max_abs_native_minus_tf_bf16": 0.8304557800292969,
+      "mean_abs_native_minus_tf_bf16": 0.047856648763020836,
+      "max_abs_native_minus_tf_fp32": 2.3814449310302734,
+      "mean_abs_native_minus_tf_fp32": 0.13392225901285806,
+      "max_abs_tf_bf16_minus_tf_fp32": 1.5509891510009766,
+      "max_bound": 15.82931025909827,
+      "max_bound_ratio": 0.16945145241883677,
+      "all_rows_within_bound": true,
+      "rows_outside_bound": [],
+      "max_measured_tf_bf16_minus_tf_fp32": 1.5509891510009766,
+      "max_tf_bf16_vs_fp32_delta_bound": 1.5519912599534182,
+      "all_deltas_within_their_bound": true,
+      "delta_rows_outside_their_bound": [],
+      "all_rows_within_receipt_style_bound": false,
+      "receipt_style_rows_outside": [
+        13
+      ],
+      "by_phase": {
+        "prompt": {
+          "rows": 6,
+          "max_abs_native_minus_tf_bf16": 0.8304557800292969,
+          "max_bound": 14.911864323035335,
+          "max_bound_ratio": 0.16945145241883677,
+          "all_within_bound": true,
+          "max_measured_tf_bf16_minus_tf_fp32": 1.5509891510009766,
+          "max_abs_native_minus_tf_fp32": 2.3814449310302734,
+          "max_abs_tf_bf16_minus_tf_fp32": 1.5509891510009766,
+          "max_tf_bf16_vs_fp32_delta_bound": 1.5519912599534182,
+          "max_delta_bound_ratio": 0.9993543076057839,
+          "all_deltas_within_their_bound": true
+        },
+        "decode": {
+          "rows": 12,
+          "max_abs_native_minus_tf_bf16": 0.017923355102539062,
+          "max_bound": 15.82931025909827,
+          "max_bound_ratio": 0.08519922453662859,
+          "all_within_bound": true,
+          "max_measured_tf_bf16_minus_tf_fp32": 0.020626068115234375,
+          "max_abs_native_minus_tf_fp32": 0.0077800750732421875,
+          "max_abs_tf_bf16_minus_tf_fp32": 0.020626068115234375,
+          "max_tf_bf16_vs_fp32_delta_bound": 0.02162716564036888,
+          "max_delta_bound_ratio": 0.95371110843735,
+          "all_deltas_within_their_bound": true
+        }
+      },
+      "fp32_available": true
+    },
+    "rows": [
+      {
+        "capture": 0,
+        "phase": "prompt",
+        "fixture": 1,
+        "position": 30,
+        "token_id": 321,
+        "native_logprob": -0.0037326812744140625,
+        "transformers_bf16_logprob": -0.0037021636962890625,
+        "transformers_fp32_logprob": -0.0037708282470703125,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0004711123773902811,
+          "rounding_slack": 6.004779606882948e-08
+        }
+      },
+      {
+        "capture": 0,
+        "phase": "prompt",
+        "fixture": 1,
+        "position": 31,
+        "token_id": 7890,
+        "native_logprob": -0.0036869049072265625,
+        "transformers_bf16_logprob": -0.0035533905029296875,
+        "transformers_fp32_logprob": -0.0035762786865234375,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005198102673285347,
+          "rounding_slack": 6.003620001138188e-08
+        }
+      },
+      {
+        "capture": 1,
+        "phase": "decode",
+        "fixture": 1,
+        "position": 33,
+        "token_id": 271,
+        "native_logprob": -0.3671150207519531,
+        "transformers_bf16_logprob": -0.3638191223144531,
+        "transformers_fp32_logprob": -0.3717536926269531,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005649988161208885,
+          "rounding_slack": 1.0317171472706832e-07
+        }
+      },
+      {
+        "capture": 2,
+        "phase": "decode",
+        "fixture": 1,
+        "position": 34,
+        "token_id": 248068,
+        "native_logprob": -0.2910041809082031,
+        "transformers_bf16_logprob": -0.27308082580566406,
+        "transformers_fp32_logprob": -0.29370689392089844,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0004999397389879573,
+          "rounding_slack": 9.322673122369451e-08
+        }
+      },
+      {
+        "capture": 3,
+        "phase": "decode",
+        "fixture": 1,
+        "position": 35,
+        "token_id": 271,
+        "native_logprob": -0.5642585754394531,
+        "transformers_bf16_logprob": -0.5612220764160156,
+        "transformers_fp32_logprob": -0.5684814453125,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.000500198467205109,
+          "rounding_slack": 1.2668851923081093e-07
+        }
+      },
+      {
+        "capture": 4,
+        "phase": "decode",
+        "fixture": 1,
+        "position": 36,
+        "token_id": 248069,
+        "native_logprob": -1.71661376953125e-05,
+        "transformers_bf16_logprob": -1.9073486328125e-05,
+        "transformers_fp32_logprob": -1.71661376953125e-05,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0006334390847267063,
+          "rounding_slack": 5.960680482530734e-08
+        }
+      },
+      {
+        "capture": 5,
+        "phase": "prompt",
+        "fixture": 2,
+        "position": 127,
+        "token_id": 220,
+        "native_logprob": -7.2479248046875e-05,
+        "transformers_bf16_logprob": -7.43865966796875e-05,
+        "transformers_fp32_logprob": -7.43865966796875e-05,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005855008841151655,
+          "rounding_slack": 5.961339866189519e-08
+        }
+      },
+      {
+        "capture": 5,
+        "phase": "prompt",
+        "fixture": 2,
+        "position": 128,
+        "token_id": 15,
+        "native_logprob": -0.0004425048828125,
+        "transformers_bf16_logprob": -0.0005092620849609375,
+        "transformers_fp32_logprob": -0.000499725341796875,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005433394865248978,
+          "rounding_slack": 5.966137450741371e-08
+        }
+      },
+      {
+        "capture": 6,
+        "phase": "decode",
+        "fixture": 2,
+        "position": 130,
+        "token_id": 220,
+        "native_logprob": -0.000240325927734375,
+        "transformers_bf16_logprob": -0.0002269744873046875,
+        "transformers_fp32_logprob": -0.00020599365234375,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005188825960463048,
+          "rounding_slack": 5.963249805063242e-08
+        }
+      },
+      {
+        "capture": 7,
+        "phase": "decode",
+        "fixture": 2,
+        "position": 131,
+        "token_id": 16,
+        "native_logprob": -4.57763671875e-05,
+        "transformers_bf16_logprob": -4.38690185546875e-05,
+        "transformers_fp32_logprob": -5.14984130859375e-05,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005097849893889542,
+          "rounding_slack": 5.960998805676354e-08
+        }
+      },
+      {
+        "capture": 8,
+        "phase": "decode",
+        "fixture": 2,
+        "position": 132,
+        "token_id": 198,
+        "native_logprob": -0.000560760498046875,
+        "transformers_bf16_logprob": -0.0005817413330078125,
+        "transformers_fp32_logprob": -0.0005588531494140625,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.000591440425044383,
+          "rounding_slack": 5.967274319118587e-08
+        }
+      },
+      {
+        "capture": 9,
+        "phase": "decode",
+        "fixture": 2,
+        "position": 133,
+        "token_id": 262,
+        "native_logprob": -8.392333984375e-05,
+        "transformers_bf16_logprob": -8.58306884765625e-05,
+        "transformers_fp32_logprob": -8.20159912109375e-05,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.000520839231402274,
+          "rounding_slack": 5.961476290394785e-08
+        }
+      },
+      {
+        "capture": 10,
+        "phase": "prompt",
+        "fixture": 3,
+        "position": 255,
+        "token_id": 814,
+        "native_logprob": -6.881475448608398,
+        "transformers_bf16_logprob": -6.051019668579102,
+        "transformers_fp32_logprob": -4.500030517578125,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005152899658687074,
+          "rounding_slack": 8.304414222948253e-07
+        }
+      },
+      {
+        "capture": 10,
+        "phase": "prompt",
+        "fixture": 3,
+        "position": 256,
+        "token_id": 20139,
+        "native_logprob": -0.00370025634765625,
+        "transformers_bf16_logprob": -0.00067901611328125,
+        "transformers_fp32_logprob": -0.0011138916015625,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005714226359110744,
+          "rounding_slack": 5.986566975479946e-08
+        }
+      },
+      {
+        "capture": 11,
+        "phase": "decode",
+        "fixture": 3,
+        "position": 258,
+        "token_id": 5979,
+        "native_logprob": -0.0009613037109375,
+        "transformers_bf16_logprob": -0.0006618499755859375,
+        "transformers_fp32_logprob": -0.0008258819580078125,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005581834893530966,
+          "rounding_slack": 5.970139227429172e-08
+        }
+      },
+      {
+        "capture": 12,
+        "phase": "decode",
+        "fixture": 3,
+        "position": 259,
+        "token_id": 44896,
+        "native_logprob": -0.00078582763671875,
+        "transformers_bf16_logprob": -0.000896453857421875,
+        "transformers_fp32_logprob": -0.0030651092529296875,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005770248218731999,
+          "rounding_slack": 5.970491656626109e-08
+        }
+      },
+      {
+        "capture": 13,
+        "phase": "decode",
+        "fixture": 3,
+        "position": 260,
+        "token_id": 5533,
+        "native_logprob": -0.008687973022460938,
+        "transformers_bf16_logprob": -0.006145477294921875,
+        "transformers_fp32_logprob": -0.00090789794921875,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0005525972406551837,
+          "rounding_slack": 6.048878731235163e-08
+        }
+      },
+      {
+        "capture": 14,
+        "phase": "decode",
+        "fixture": 3,
+        "position": 261,
+        "token_id": 264,
+        "native_logprob": -0.00661468505859375,
+        "transformers_bf16_logprob": -0.007076263427734375,
+        "transformers_fp32_logprob": -0.002056121826171875,
+        "bound_terms": {
+          "native_vs_fp64_box": 0.0004898323789205979,
+          "rounding_slack": 6.042068889655638e-08
+        }
+      }
+    ]
+  },
+  "superseded_reason": "Transformers auto-dtype downcast96 storedFP32 A_log/norm tensors. The corrected full reference restores their exact storedFP32 values and covers4097 in both arms.",
+  "full_payload_sha256": "4427fea8e216dc587b7a8f3870ca1718e98e47e238905303c4d1dd4559426085"
+}

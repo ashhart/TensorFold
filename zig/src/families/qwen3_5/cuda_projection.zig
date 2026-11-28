@@ -54,7 +54,7 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
         else
             e.tfq3.?.kernels.dense(e.stream, q, x, q.k, out, q.n, rows, false),
         .bf => |q| {
-            const b16 = if (e.kit) |kit| &kit.b16 else &e.tfq3.?.b16;
+            const b16 = if (e.bf16) |b| &b.kernels else if (e.kit) |kit| &kit.b16 else &e.tfq3.?.b16;
             // The small BF16 row kernel accepts at most 128 rows, including during a full prompt pass.
             var at: usize = 0;
             while (at < rows) : (at += 128) {
@@ -101,4 +101,14 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
 fn qwen38LargePromptTile(e: *const Engine, n: usize, k: usize, rows: usize) bool {
     const big = @import("cuda_geometry.zig").dense27(e.g.model()) and e.g.intermediate == 17408;
     return e.affine.pdl and big and projection_many.qwen38LargePromptShape(n, k, rows);
+}
+
+/// The stored embedding uses the same BF16 copy operator as its family projections.
+pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
+    if (e.bf16) |b| return b.kernels.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
+    if (e.kit) |kit| return kit.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
+    if (e.g.tfq3 and e.embed_bits == 16) return e.tfq3.?.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
+    if (e.embed_bits == 16) return @import("cuda_modelopt.zig").embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
+    const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
+    try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
 }

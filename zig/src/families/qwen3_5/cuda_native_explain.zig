@@ -6,6 +6,8 @@ const sm110_modes = @import("cuda_sm110_modes.zig");
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) if (decide.explain(err)) |why| return why;
     if (ctx == null) return switch (err) {
+        error.QwenBf16VisionUnqualified => "--vision: dense BF16 Qwen accepts text inputs only; its vision path is unqualified",
+        error.UnsupportedQwenBf16Mode => "dense BF16 Qwen requires BF16 prompts and does not support learning",
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
         error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
         error.QwenRequestStartsWithSharedKv => "TF_QWEN_REQUEST_STARTS=1 cannot be used with TF_QWEN_KV_SHARE above 0; unset request starts or disable shared KV",

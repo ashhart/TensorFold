@@ -1,0 +1,91 @@
+{
+  "kind": "public-Qwen-BF16-layer-diagnostic",
+  "status": "failed",
+  "rule": "per boundary, max |native-FP32| <= max |Transformers BF16-FP32|; no added tolerance",
+  "shape": {
+    "rows": 32,
+    "hidden": 5120,
+    "layers": 64,
+    "boundaries": 66
+  },
+  "compared_rows": 31,
+  "row_scope": "hidden rows 0..N-2 predict the served prompt IDs 1..N-1",
+  "first_exceeding_layer_zero_based": 0,
+  "residual_layers_exceeding": 18,
+  "embedding_exact": true,
+  "first_exceeding_boundary": {
+    "native_fp32_max_abs": 0.07647705078125,
+    "bf16_fp32_max_abs": 0.056326866149902344,
+    "native_fp32_median_abs": 7.019576150923967e-05,
+    "bf16_fp32_median_abs": 6.481166929006577e-05,
+    "native_fp32_rms": 0.0005021040918941921,
+    "bf16_fp32_rms": 0.0004253591354658401,
+    "native_bf16_max_abs": 0.0625,
+    "elements_exceeding_own_distance": 59355,
+    "worst_native_row": 21,
+    "worst_native_column": 3994,
+    "native_at_worst": 15.5625,
+    "fp32_at_worst": 15.63897705078125,
+    "bf16_at_worst": 15.625,
+    "within_bf16_max_distance": false,
+    "boundary": 1,
+    "layer": 0,
+    "kind": "residual"
+  },
+  "final_normalization": {
+    "native_fp32_max_abs": 0.31170082092285156,
+    "bf16_fp32_max_abs": 0.4594573974609375,
+    "native_fp32_median_abs": 0.011119425296783447,
+    "bf16_fp32_median_abs": 0.011873185634613037,
+    "native_fp32_rms": 0.021408769515065724,
+    "bf16_fp32_rms": 0.021956164994282882,
+    "native_bf16_max_abs": 0.5,
+    "elements_exceeding_own_distance": 66838,
+    "worst_native_row": 30,
+    "worst_native_column": 671,
+    "native_at_worst": -9.8125,
+    "fp32_at_worst": -10.124200820922852,
+    "bf16_at_worst": -10.0,
+    "within_bf16_max_distance": true,
+    "boundary": 65,
+    "layer": null,
+    "kind": "final_norm"
+  },
+  "native_source": "9416f0cf94bddbea49becb4c14047d0c16d08faf",
+  "reference_source": "b54d8ff7691385fe420399e72272c932a881e29e",
+  "comparison_source": "c6930073d5192663bd5726ff74a8fa426f7a06aa",
+  "main_base": "002c9e03eecf9b10b83a73b9149dc7f49d50368a",
+  "capture_binary": {
+    "sha256": "ed07aa525035f50686b54e18fc2e54d68da8324445d33cea40147f56917bb513",
+    "bytes": 99093608
+  },
+  "trace_plain_logits_equal": true,
+  "reference_checks": {
+    "BF16_public_library_final_hidden_equal": true,
+    "FP32_independent_cloned_layers": [
+      0,
+      3,
+      63
+    ],
+    "stored_FP32_parameters_preserved": 96,
+    "public_checkpoint_shard_hashes_verified": 11
+  },
+  "comparison_member": {
+    "archive": "qwen35-bf16-layers-native-20261105.tar.gz",
+    "file": "comparison.json",
+    "sha256": "e009014319c580246514c01bf54027368b23e254287f9b4d065cb6bd2c8ddfe9"
+  },
+  "external_member_manifest": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json",
+  "limitations": [
+    "This locates the first observed excess; it does not prove an isolated accumulation bug or an unavoidable format floor.",
+    "Global hidden-state maxima do not waive the separately failed served-logprob rule.",
+    "One public 32-ID fixture, one sm_120 GPU/rank, CPU references. No new performance or whole-model-equivalence qualification.",
+    "The full CUDA run at b168b36d remains historical; a complete device suite was not rerun on the rebased head."
+  ],
+  "subsequent_integration": {
+    "main": "9200a3064153b8041930f61f5ba92102d4bea692",
+    "parent": "d19ff3f075eb144870af1af159de1eccafd0b69b",
+    "qwen_cuda_family_and_kernel_sources_byte_equal_to_native_producer": true,
+    "coverage": "source identity plus new host/CI checks; no relabeling of the actual device producer"
+  }
+}

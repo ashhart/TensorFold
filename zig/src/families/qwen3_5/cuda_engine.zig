@@ -69,6 +69,7 @@ pub const Engine = struct {
     dir: []const u8,
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
+    hidden_trace: ?@import("cuda_hidden_trace.zig").Trace = null,
     mlp: ?hooks.MlpAdd = null,
     taught: u64 = 0,
     d: *const cuda.Driver,
@@ -106,6 +107,7 @@ pub const Engine = struct {
     embed_b: u64,
     embed_bits: u8, // 4, 8, or 16 (bf16 rows: EXL3/ModelOpt/TFQ3)
     host_embed: ?cuda.HostBuffer = null, // mapped host memory when discrete VRAM is short
+    bf16: ?*@import("cuda_prompt_logprobs.zig").Scores = null,
     kit: ?*x3w.Kit = null, // EXL3 checkpoint kernels (g.exl3)
     tfq3: ?*tfq3w.Kit = null, // TFQ3 checkpoint kernels and shards (g.tfq3)
     head: Proj,
@@ -186,11 +188,13 @@ pub const Engine = struct {
         errdefer gpa.free(e.dir);
         e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
         errdefer e.pockets.deinit();
+        e.hidden_trace = null;
         e.learning = null;
         e.mlp = null;
         e.taught = 0;
         e.kit = null;
         e.tfq3 = null;
+        e.bf16 = null;
         e.d = d;
         e.g = g;
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
@@ -259,6 +263,8 @@ pub const Engine = struct {
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
         try e.int8.resolve(e.mods[18]);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_rows_join = try e.mods[9].function("tf_q35_attn_rows8_join"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
+        if (g.bf16) e.bf16 = try @import("cuda_prompt_logprobs.zig").Scores.init(gpa, d, g.vocab);
+        errdefer if (e.bf16) |b| b.deinit(gpa);
         try @import("cuda_pdl.zig").bind(ctx);
         e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
         errdefer if (e.mo) |*m| m.unload();
@@ -308,10 +314,10 @@ pub const Engine = struct {
         try e.stream.synchronize();
         recurrent.completed(e);
     }
-
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
+        if (e.bf16) |b| b.deinit(e.gpa);
         if (e.kit) |k| k.deinit(e.gpa);
         if (e.g.tfq3) if (e.tfq3) |t| t.deinit(e.gpa);
         e.pockets.deinit();
@@ -337,7 +343,6 @@ pub const Engine = struct {
         e.stream.deinit();
         e.gpa.destroy(e);
     }
-
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         return e.streamBytesWithTaps(cap, e.n_taps);
@@ -416,11 +421,7 @@ pub const Engine = struct {
 
     /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
     pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
-        if (e.kit) |kit| return kit.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
-        if (e.g.tfq3 and e.embed_bits == 16) return e.tfq3.?.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
-        if (e.embed_bits == 16) return modelopt.embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
-        const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
-        try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
+        return @import("cuda_projection.zig").embed(e, ids, out, rows, params);
     }
 
     /// Logits rows first..first + n's greedy tokens into toks: the highest logit, ties to the lower id.
@@ -472,6 +473,7 @@ pub const Engine = struct {
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const total = ids.len;
         try e.admit(parts, ids, keep);
+        if (keep != .last and e.hidden_trace != null) return error.TraceRequiresPrompt;
         try scratch_memory.requireCapacity(e.scratch_capacity, total);
         if (!keep.verifies() and e.int8.on and total > e.int8.capacity) return error.PromptInt8CapacityExceeded;
         e.mtp_prompt.epoch +%= 1;
