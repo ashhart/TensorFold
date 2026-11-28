@@ -2,6 +2,7 @@
 const std = @import("std");
 const unicode = @import("unicode.zig");
 const regex = @import("regex.zig");
+const fast_split = @import("fast_split.zig");
 const Value = std.json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -231,7 +232,7 @@ fn scheme(v: Value) Error!Scheme {
 
 pub const PreTokenizer = union(enum) {
     sequence: []const PreTokenizer,
-    split: struct { pattern: Pattern, behavior: Behavior, invert: bool },
+    split: struct { pattern: Pattern, behavior: Behavior, invert: bool, fast_split: ?fast_split.Kind = null },
     byte_level: struct { add_prefix_space: bool, regex: ?regex.Regex },
     metaspace: struct { replacement: []const u8, scheme: Scheme, split: bool },
     whitespace_split,
@@ -245,7 +246,9 @@ pub const PreTokenizer = union(enum) {
             const index = for (names, 0..) |n, i| {
                 if (std.mem.eql(u8, n, name)) break i;
             } else return error.InvalidTokenizer;
-            return .{ .split = .{ .pattern = try Pattern.parse(a, field(v, "pattern")), .behavior = @fromBackingInt(@intCast(index)), .invert = flag(v, "invert", false) } };
+            const pat_val = field(v, "pattern");
+            const split_kind = if (pat_val) |pv| (if (string(pv, "Regex")) |rs| fast_split.detect(rs) else null) else null;
+            return .{ .split = .{ .pattern = try Pattern.parse(a, pat_val), .behavior = @fromBackingInt(@intCast(index)), .invert = flag(v, "invert", false), .fast_split = split_kind } };
         }
         if (std.mem.eql(u8, kind, "ByteLevel"))
             return .{ .byte_level = .{ .add_prefix_space = flag(v, "add_prefix_space", true), .regex = if (flag(v, "use_regex", true)) try regex.Regex.compile(a, gpt2_pattern) else null } };

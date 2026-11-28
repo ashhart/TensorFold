@@ -5,7 +5,11 @@ pub const unicode = @import("unicode.zig");
 const steps = @import("steps.zig");
 const regex = @import("regex.zig");
 const models = @import("model.zig");
-const qwen2_slow = @import("qwen2_slow.zig");
+pub const qwen2_slow = @import("qwen2_slow.zig");
+pub const fast_bpe = @import("fast_bpe.zig");
+pub const fast_bpe_parallel = @import("fast_bpe_parallel.zig");
+const fast_split = @import("fast_split.zig");
+const trie_mod = @import("trie.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
 pub const eos = @import("checkpoint_eos"); // a shared module: std-only families read it too
@@ -14,7 +18,8 @@ pub const identity = @import("identity.zig").identity; // what ids mean as loade
 pub const Kind = models.Kind;
 pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{ UnsupportedAddedToken, BadRequestSpans, UnsafeNormalizedAddedTokenMask, UnsafeAddedTokenMask };
 pub const Span = [2]usize;
-pub const MaskWork = struct { spans: usize = 0, matcher: usize = 0, masked: usize = 0 };
+pub const MaskWork = trie_mod.MaskWork;
+const Trie = trie_mod.Trie;
 const Pre = struct { text: []const u8, zero: usize }; // a gap already normalized, and its first-piece offset
 const scratch_stack_bytes = 4096; // small calls keep their scratch on the stack before spilling to the allocator
 
@@ -47,54 +52,6 @@ pub const IdTable = struct {
     }
 };
 
-/// Byte trie over added-token contents for leftmost-longest matching, like tokenizers' Aho-Corasick split.
-const Trie = struct {
-    first: [256]u32 = @splat(0),
-    edges: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    ends: std.ArrayList(?u32) = .empty,
-
-    const Match = struct { start: usize, end: usize, token: u32 };
-
-    fn insert(t: *Trie, a: Allocator, s: []const u8, token: u32) Allocator.Error!void {
-        if (s.len == 0) return;
-        if (t.ends.items.len == 0) try t.ends.append(a, null);
-        var node: u32 = 0;
-        for (s, 0..) |b, i| {
-            const slot = if (i == 0) &t.first[b] else (try t.edges.getOrPutValue(a, @as(u64, node) << 8 | b, 0)).value_ptr;
-            if (slot.* == 0) {
-                try t.ends.append(a, null);
-                slot.* = @intCast(t.ends.items.len - 1);
-            }
-            node = slot.*;
-        }
-        if (t.ends.items[node] == null) t.ends.items[node] = token;
-    }
-
-    fn next(t: *const Trie, s: []const u8, from: usize) ?Match {
-        return t.nextCounted(s, from, null);
-    }
-
-    fn nextCounted(t: *const Trie, s: []const u8, from: usize, work: ?*MaskWork) ?Match {
-        if (t.ends.items.len == 0) return null;
-        for (from..s.len) |i| {
-            if (work) |w| w.matcher += 1;
-            var node = t.first[s[i]];
-            if (node == 0) continue;
-            var best: ?Match = null;
-            var j = i + 1;
-            while (true) {
-                if (t.ends.items[node]) |token| best = .{ .start = i, .end = j, .token = token };
-                if (j == s.len) break;
-                if (work) |w| w.matcher += 1;
-                node = t.edges.get(@as(u64, node) << 8 | s[j]) orelse break;
-                j += 1;
-            }
-            if (best) |b| return b;
-        }
-        return null;
-    }
-};
-
 /// Lossy UTF-8 replacement keeps unchanged byte offsets and marks replacements that consume request bytes.
 fn validMasked(a: Allocator, text: []const u8, spans: []const Span) Allocator.Error!struct { text: []const u8, spans: []const Span } {
     if (std.unicode.utf8ValidateSlice(text)) return .{ .text = text, .spans = spans };
@@ -121,7 +78,7 @@ fn validMasked(a: Allocator, text: []const u8, spans: []const Span) Allocator.Er
     return .{ .text = out.items, .spans = mapped.items };
 }
 
-const Segment = struct { start: usize, end: usize, id: ?u32 };
+const Segment = fast_bpe.Segment;
 
 pub const Tokenizer = struct {
     /// Owns the loaded tables and backs each call's scratch, so concurrent calls need it thread-safe.
@@ -142,6 +99,7 @@ pub const Tokenizer = struct {
     normalized: Trie = .{},
     specials: std.StringHashMapUnmanaged(void) = .empty,
     memo: ?*Memo = null, // long segments' ids kept between encodes (null: each encode tokenizes everything)
+    fast: ?fast_bpe.FastPath = null,
 
     pub fn deinit(t: *Tokenizer) void {
         t.vocab.deinit();
@@ -159,6 +117,8 @@ pub const Tokenizer = struct {
         const pre = if (t.pre_tokenizer) |*p| p else return error.NoSplitRegex;
         const split = firstSplit(pre) orelse return error.NoSplitRegex;
         split.pattern = .{ .regex = try regex.Regex.compile(t.arena.?.allocator(), pattern) };
+        split.fast_split = fast_split.detect(pattern);
+        t.fast = fast_bpe.detect(&t.model, &t.vocab, t.normalizer, t.pre_tokenizer);
         if (t.memo) |m| {
             const gpa = m.gpa;
             const cap = m.cap;
@@ -192,7 +152,12 @@ pub const Tokenizer = struct {
             valid = fixed.items;
         }
         var ids: std.ArrayList(u32) = .empty;
-        for (try t.splitAdded(&ctx, &t.raw, valid)) |seg| {
+        const segs = try t.splitAdded(&ctx, &t.raw, valid);
+        if (t.fast) |*fp| if (t.normalized.ends.items.len == 0 and t.memo == null) {
+            try fast_bpe_parallel.encodeSegments(fp, &t.model, &t.vocab, t.allocator, ctx.a, valid, segs, &ids);
+            return a.dupe(u32, ids.items);
+        };
+        for (segs) |seg| {
             if (seg.id) |id| try ids.append(ctx.a, id) else if (seg.end > seg.start) try t.encodeSegment(&ctx, valid[seg.start..seg.end], seg.start == 0, &ids, null);
         }
         return a.dupe(u32, ids.items);
@@ -296,6 +261,12 @@ pub const Tokenizer = struct {
     }
 
     fn encodeTextMasked(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool, spans: []const Span, pre: ?Pre) Error!void {
+        if (t.fast) |*fp| if (!added or t.normalized.ends.items.len == 0) {
+            const from = ids.items.len;
+            try fast_bpe_parallel.encode(fp, &t.model, &t.vocab, t.allocator, ctx.a, text, ids);
+            if (spans.len > 0) try t.refuseAdded(ids.items[from..]);
+            return;
+        };
         var zero: usize = if (pre) |p| p.zero else if (first) unicode.decodeAt(text, 0).len else 0;
         const normalized = if (pre) |p| p.text else if (t.normalizer) |*n| try n.apply(ctx, text, &zero) else text;
         const whole = [_]Segment{.{ .start = 0, .end = normalized.len, .id = null }};
@@ -335,27 +306,7 @@ pub const Tokenizer = struct {
         var at: usize = 0;
         while (trie.next(s, at)) |hit| {
             at = hit.end;
-            const token = t.added[hit.token];
-            var start = hit.start;
-            var stop = hit.end;
-            if (token.lstrip) {
-                var k = start;
-                while (k > done) {
-                    var c = k - 1;
-                    while (s[c] & 0xC0 == 0x80) c -= 1;
-                    if (!unicode.isSpace(unicode.decodeAt(s, c).cp)) break;
-                    k = c;
-                }
-                start = k;
-            }
-            if (token.rstrip) while (stop < s.len) {
-                const d = unicode.decodeAt(s, stop);
-                if (!unicode.isSpace(d.cp)) break;
-                stop += d.len;
-            };
-            if (start > done) try out.append(ctx.a, .{ .start = done, .end = start, .id = null });
-            try out.append(ctx.a, .{ .start = start, .end = stop, .id = token.id });
-            done = stop;
+            done = try t.pushAdded(ctx.a, s, &out, hit, done);
         }
         if (done < s.len) try out.append(ctx.a, .{ .start = done, .end = s.len, .id = null });
         return out.items;
@@ -376,31 +327,33 @@ pub const Tokenizer = struct {
         }
         var out: std.ArrayList(Segment) = .empty;
         var done: usize = 0;
-        for (hits.items) |hit| {
-            const token = t.added[hit.token];
-            var start = hit.start;
-            var stop = hit.end;
-            if (token.lstrip) {
-                var k = start;
-                while (k > done) {
-                    var c = k - 1;
-                    while (s[c] & 0xC0 == 0x80) c -= 1;
-                    if (!unicode.isSpace(unicode.decodeAt(s, c).cp)) break;
-                    k = c;
-                }
-                start = k;
-            }
-            if (token.rstrip) while (stop < s.len) {
-                const d = unicode.decodeAt(s, stop);
-                if (!unicode.isSpace(d.cp)) break;
-                stop += d.len;
-            };
-            if (start > done) try out.append(ctx.a, .{ .start = done, .end = start, .id = null });
-            try out.append(ctx.a, .{ .start = start, .end = stop, .id = token.id });
-            done = stop;
-        }
+        for (hits.items) |hit| done = try t.pushAdded(ctx.a, s, &out, hit, done);
         if (done < s.len) try out.append(ctx.a, .{ .start = done, .end = s.len, .id = null });
         return out.items;
+    }
+
+    fn pushAdded(t: *const Tokenizer, a: Allocator, s: []const u8, out: *std.ArrayList(Segment), hit: Trie.Match, done: usize) Error!usize {
+        const token = t.added[hit.token];
+        var start = hit.start;
+        var stop = hit.end;
+        if (token.lstrip) {
+            var k = start;
+            while (k > done) {
+                var c = k - 1;
+                while (s[c] & 0xC0 == 0x80) c -= 1;
+                if (!unicode.isSpace(unicode.decodeAt(s, c).cp)) break;
+                k = c;
+            }
+            start = k;
+        }
+        if (token.rstrip) while (stop < s.len) {
+            const d = unicode.decodeAt(s, stop);
+            if (!unicode.isSpace(d.cp)) break;
+            stop += d.len;
+        };
+        if (start > done) try out.append(a, .{ .start = done, .end = start, .id = null });
+        try out.append(a, .{ .start = start, .end = stop, .id = token.id });
+        return stop;
     }
 
     /// Text for `ids` through the decoder chain; unknown ids are skipped. Caller frees with `a`.
@@ -492,6 +445,7 @@ pub fn parse(a: Allocator, json: []const u8) Error!Tokenizer {
         return error.UnsupportedPreTokenizer;
     try addTokens(&t, keep, scratch, added);
     t.unk_id = if (t.model.unk_token) |u| t.model.id(&t.vocab, u) else null;
+    t.fast = fast_bpe.detect(&t.model, &t.vocab, t.normalizer, t.pre_tokenizer);
     return t;
 }
 
@@ -583,6 +537,7 @@ test {
     _ = @import("tokenizer_test.zig");
     _ = @import("masked_test.zig");
     _ = @import("unicode_nfkc_test.zig");
+    _ = @import("fast_bpe_test.zig");
 }
 
 /// The first Split whose pattern is a regex, in a pre-tokenizer or its sequence.
