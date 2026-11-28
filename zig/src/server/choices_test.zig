@@ -166,6 +166,23 @@ test "n choices: n=3 streams one head, every choice's chunks indexed, one usage 
     try expectSeeds(&script, 3);
 }
 
+test "prompt progress: streamed chat n choices are refused before any submission" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var script: Script = .{};
+    var got: Capture = .{ .a = a };
+    const request = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":4,\"n\":2,\"stream\":true,\"return_progress\":true}";
+    try ask(a, &script, true, request, &got, false);
+    try t.expectEqual(@as(?u16, 400), got.status);
+    try t.expectEqual(@as(u32, 0), got.opens);
+    try t.expectEqual(@as(usize, 0), got.events.items.len);
+    const err = (try json.parse(a, got.whole)).ok.get("error").?;
+    try t.expectEqualStrings("invalid_request_error", err.strField("type").?);
+    try t.expectEqualStrings("return_progress cannot be served with n above 1 or a list of prompts", err.strField("message").?);
+    try t.expectEqual(@as(usize, 0), script.count.load(.monotonic));
+}
+
 test "n choices: logprobs over several choices are refused before any submission" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();

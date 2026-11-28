@@ -70,10 +70,14 @@ pub const Reason = enum { stop, length, cancelled, failed, silence };
 pub const speech_guard = @import("speech_guard.zig");
 
 pub const Stats = @import("engine_stats.zig").Stats;
+/// ``done`` of a prompt's ``total`` rows are in the cache, ``cached`` of them restored from a kept prefix.
+pub const Progress = struct { done: u32, total: u32, cached: u32 };
 
 pub const Event = union(enum) {
     /// The prompt is in the cache: ``cached`` of its tokens came from a kept prefix.
     prefilled: u32,
+    /// A ``return_progress`` prompt's rows so far, each higher; the last, ``done == total``, precedes ``prefilled``.
+    progress: Progress,
     /// The next ``tokens`` event's logprob rows, one a token (``logprobs`` requests); valid only during the call.
     logprobs: []const LogprobRow,
     /// The prompt's rows, one a prompt token after the first, right after ``prefilled`` (``prompt_logprobs`` requests).

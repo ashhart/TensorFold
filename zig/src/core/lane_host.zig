@@ -23,7 +23,6 @@ const Engine = api.Engine;
 const Info = api.Info;
 const Reason = api.Reason;
 const Stats = api.Stats;
-
 pub const Rounds = rounds.Rounds;
 pub const Proposers = rounds.Proposers;
 const rounds = @import("lane_rounds.zig");
@@ -488,6 +487,7 @@ pub const LaneHost = struct {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
             }
         };
+        @import("lane_host_progress.zig").filled(job); // a progress stream's last count, before its prefilled event
         emit(job, .{ .prefilled = if (job.memory_snap != null) 0 else job.stream.cached });
         if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
         recalls.prompted(h, job);

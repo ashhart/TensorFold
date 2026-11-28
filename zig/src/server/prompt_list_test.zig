@@ -65,6 +65,7 @@ const Echo = struct {
         defer _ = e.active.fetchSub(1, .acq_rel);
         if (e.hold_ms > 0) std.Io.sleep(t.io, .fromMilliseconds(e.hold_ms), .awake) catch {};
         const p = request.prompt;
+        if (request.return_progress) sink.event(sink.ctx, id, &.{ .progress = .{ .done = @intCast(p.len), .total = @intCast(p.len), .cached = 0 } });
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{ p[0], p[p.len - 1] } });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
@@ -206,6 +207,29 @@ test "a streamed prompt list: one head, every prompt's chunks by index, one usag
     }
 }
 
+test "prompt progress: streamed n choices and prompt lists are refused before any submission" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { prompt: []const u8, choice: []const u8 }{
+        .{ .prompt = "\"ab\"", .choice = ",\"n\":2" },
+        .{ .prompt = list, .choice = "" },
+    };
+    for (cases) |case| {
+        var echo: Echo = .{};
+        var got: Capture = .{ .a = a };
+        const extra = two ++ ",\"stream\":true,\"return_progress\":true,\"stream_options\":{\"include_usage\":true}";
+        try complete(a, &echo, case.prompt, try std.mem.concat(a, u8, &.{ extra, case.choice }), &got);
+        try t.expectEqual(@as(?u16, 400), got.status);
+        try t.expectEqual(@as(u32, 0), got.opens);
+        try t.expectEqual(@as(usize, 0), got.events.items.len);
+        const err = (try json.parse(a, got.whole)).ok.get("error").?;
+        try t.expectEqualStrings("invalid_request_error", err.strField("type").?);
+        try t.expectEqualStrings("return_progress cannot be served with n above 1 or a list of prompts", err.strField("message").?);
+        try t.expectEqual(@as(usize, 0), echo.calls.load(.monotonic));
+    }
+}
+
 test "a token-id list, a list of token-id lists and a one-string list keep their one-prompt meaning" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -289,13 +313,15 @@ test "a prompt's stop string is its own choice's, not the merged reply's" {
     try t.expect(body.get("stop_sequence") == null); // choice 0's stop is not the request's
 }
 
-test "under --max-inflight a prompt list takes turns in its one place" {
+test "prompt progress: under --max-inflight a prompt list takes turns in its one place" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var echo: Echo = .{ .hold_ms = 20 };
+    const started = std.Io.Timestamp.now(t.io, .awake);
     var got: Capture = .{ .a = a };
     try serve(a, &echo, .{ .max_inflight = 4 }, "[\"a\",\"b\",\"c\",\"d\"]", two, &got);
+    try t.expect(started.durationTo(std.Io.Timestamp.now(t.io, .awake)).nanoseconds >= 4 * echo.hold_ms * std.time.ns_per_ms);
     try t.expectEqual(@as(?u16, 200), got.status);
     try t.expectEqual(@as(usize, 4), (try json.parse(a, got.whole)).ok.get("choices").?.array.len);
     try t.expectEqual(@as(usize, 1), echo.peak.load(.acquire)); // not its four prompts in the engine at once
