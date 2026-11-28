@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on HIP (groundwork, not yet served): CUDA's text-weight loader becomes generic, so one HIP rank can load the text weights through it; CUDA's loading is unchanged (#5031, part of #4274). Thanks to @AbrahamCete.
+
 - Server: preserve a tool reply's real finish reason and identify completed calls at the token limit, so session benchmarks never answer an open-envelope call even when its arguments are valid JSON (#4830)
 
 - Tests: the lane host explore test's replay holds under load: once every request sent has ended, the test thread sends the next only once a whole engine turn has run after the one that ended the last (turns counted through the host's activity scope), so each send meets no prompt visit and lands at the same point on every run (#5386, fixes #5367).
