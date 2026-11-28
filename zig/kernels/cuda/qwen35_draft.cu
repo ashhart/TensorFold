@@ -17,9 +17,27 @@ using tf_common::warp_sum;
 
 using namespace tf_q35d;
 
+// A full-block sum: warp reduce, then one shared cross-warp round (warp_sum alone leaves every
+
+// non-first warp's partial on the floor — the S4 writer bug class). blockDim <= 32 warps.
+__device__ __forceinline__ float tf_lilicorr_block_sum(float v, float* red) {
+    v = warp_sum(v);
+    const int lane = threadIdx.x & 31;
+    const int wid = threadIdx.x >> 5;
+    if (lane == 0) red[wid] = v;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float total = 0.f;
+        for (int w = 0; w < (int)(blockDim.x / 32); ++w) total += red[w];
+        red[0] = total;
+    }
+    __syncthreads();
+    return red[0];
+}
+
 // Tap rows (start + i) of a stream's ring of R rows, `width` bf16 each, into OUT rows 0..n. Grid (n), 256 threads.
 extern "C" __global__ void tf_q35d_gather_taps(const __nv_bfloat16* __restrict__ RING, int R, long long start, int width,
-                                                 __nv_bfloat16* __restrict__ OUT) {
+                                                  __nv_bfloat16* __restrict__ OUT) {
     const long long row = start + blockIdx.x;
     const __nv_bfloat16* src = RING + (size_t)(row % R) * width;
     __nv_bfloat16* dst = OUT + (size_t)blockIdx.x * width;
@@ -34,7 +52,7 @@ struct TapRows {
 
 // Tap rows (start + rows.rows[i]) of a stream's ring into OUT rows 0..n: a kept path's rows in order. Grid (n).
 extern "C" __global__ void tf_q35d_gather_rows(const __nv_bfloat16* __restrict__ RING, int R, long long start, TapRows rows, int width,
-                                                 __nv_bfloat16* __restrict__ OUT) {
+                                                  __nv_bfloat16* __restrict__ OUT) {
     const long long row = start + rows.rows[blockIdx.x];
     const __nv_bfloat16* src = RING + (size_t)(row % R) * width;
     __nv_bfloat16* dst = OUT + (size_t)blockIdx.x * width;
@@ -43,8 +61,8 @@ extern "C" __global__ void tf_q35d_gather_rows(const __nv_bfloat16* __restrict__
 
 // y[t, c] = sum over lags l of (BASE[l, c] + DYN[t, l, c / group]) * x[t - l, c] in bf16 steps; x[-1] = 0; RES last.
 extern "C" __global__ void tf_q35d_dyn_conv(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ DYN,
-                                              const __nv_bfloat16* __restrict__ BASE, const __nv_bfloat16* __restrict__ RES,
-                                              __nv_bfloat16* __restrict__ OUT, int D, int group, int branch) {
+                                               const __nv_bfloat16* __restrict__ BASE, const __nv_bfloat16* __restrict__ RES,
+                                               __nv_bfloat16* __restrict__ OUT, int D, int group, int branch) {
     const int t = blockIdx.x;
     const int groups = D / group;
     for (int c = threadIdx.x; c < D; c += blockDim.x) {
@@ -64,8 +82,8 @@ extern "C" __global__ void tf_q35d_dyn_conv(const __nv_bfloat16* __restrict__ X,
 
 // Per-head RMSNorm then rotate-half RoPE at position pos0 + row; OUT packed (rows, heads, HD), grid (rows * heads).
 extern "C" __global__ void __launch_bounds__(32) tf_q35d_norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
-                                                                     __nv_bfloat16* __restrict__ OUT, int heads, int stride, long long pos0,
-                                                                     float eps, float theta) {
+                                                                      __nv_bfloat16* __restrict__ OUT, int heads, int stride, long long pos0,
+                                                                      float eps, float theta) {
     const int head = blockIdx.x % heads;
     const size_t m = blockIdx.x / heads;
     const int t = threadIdx.x;
@@ -98,7 +116,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_norm_rope(const __nv_bf
 
 // Rows of packed (kv_heads, HD) keys and values at positions pos0 + i into a layer's rings (slot pos % W).
 extern "C" __global__ void tf_q35d_ring_put(const __nv_bfloat16* __restrict__ K, const __nv_bfloat16* __restrict__ V,
-                                              __nv_bfloat16* __restrict__ RK, __nv_bfloat16* __restrict__ RV, int width, long long pos0, int W) {
+                                               __nv_bfloat16* __restrict__ RK, __nv_bfloat16* __restrict__ RV, int width, long long pos0, int W) {
     const int i = blockIdx.x;
     const size_t slot = (size_t)((pos0 + i) % W);
     for (int c = threadIdx.x; c < width; c += blockDim.x) {
@@ -109,9 +127,9 @@ extern "C" __global__ void tf_q35d_ring_put(const __nv_bfloat16* __restrict__ K,
 
 // Block attention: a row sees ring positions [max(begin, p - window + 1), pos0) and every block row; a warp a row.
 extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KB,
-                                                                const __nv_bfloat16* __restrict__ VB, const __nv_bfloat16* __restrict__ RK,
-                                                                const __nv_bfloat16* __restrict__ RV, int rows, int heads, int kv_heads, int W,
-                                                                long long begin, long long pos0, int window, __nv_bfloat16* __restrict__ OUT) {
+                                                                 const __nv_bfloat16* __restrict__ VB, const __nv_bfloat16* __restrict__ RK,
+                                                                 const __nv_bfloat16* __restrict__ RV, int rows, int heads, int kv_heads, int W,
+                                                                 long long begin, long long pos0, int window, __nv_bfloat16* __restrict__ OUT) {
     constexpr int DPL = HD / 32;
     const int lane = threadIdx.x;
     const int m = blockIdx.x, h = blockIdx.y;
@@ -162,3 +180,22 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat1
 
 #include "qwen35_draft_frame.cuh"
 #include "qwen35_dspine.cuh"
+
+// token_states[r, t] = sum_i bf(EMB[r, i]) * W[t, i] + B[t]: the LiLiCorr head's first
+
+// projection on device (W row-major [out_dim, in_dim] f32; EMB bf16 widened in-kernel).
+
+// Grid (rows), block (out_dim) — one thread per output element (naive dot; S2 prices correctness).
+extern "C" __global__ void tf_token_proj(const __nv_bfloat16* __restrict__ EMB, const float* __restrict__ W,
+                                          const float* __restrict__ B, float* __restrict__ OUT,
+                                          int in_dim, int out_dim) {
+    const int t = threadIdx.x;
+    if (t >= out_dim) return;
+    const float* w = W + (size_t)t * in_dim;
+    float acc = 0.f;
+    const __nv_bfloat16* row = EMB + (size_t)blockIdx.x * in_dim;
+    for (int i = 0; i < in_dim; ++i) acc += bf(row[i]) * w[i];
+    OUT[(size_t)blockIdx.x * out_dim + t] = acc + B[t];
+}
+
+#include "qwen35_draft_lilicorr.cuh"

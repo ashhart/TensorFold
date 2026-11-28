@@ -35,6 +35,12 @@ pub const linked = native.linked;
 pub const plainShared = native.plainShared;
 pub const slideRefusal = @import("cuda_omni_slide.zig").refusal;
 
+/// The external drafter surface (tf#3715): Bolt's omni type serves --drafter through the same engine.
+pub const takes_drafter = native.takes_drafter;
+pub const Opened = native.Opened;
+pub const openDrafter = native.openDrafter;
+pub const finishDrafterOpen = native.finishDrafterOpen;
+
 /// NVFP4 bytes a parameter takes: a 4-bit code and an e4m3 scale a 16.
 const nvfp4_bytes: f64 = 0.5625;
 

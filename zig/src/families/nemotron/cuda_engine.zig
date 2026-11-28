@@ -59,21 +59,21 @@ pub const lookahead = 4;
 pub const max_streams = @import("cuda_wide.zig").wide_streams;
 
 // pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then a shared window's streams
-const pin_meta = 0;
-const pin_ids = 4;
+pub const pin_meta = 0;
+pub const pin_ids = 4;
 pub const pin_sampled = pin_ids + state.max_rows;
-const window_words = pin_sampled + state.max_rows; // a window's words, as a shared window's stream lays its own out
+pub const window_words = pin_sampled + state.max_rows; // a window's words, as a shared window's stream lays its own out
 pub const pin_prompt = window_words;
-const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
+pub const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
 /// Where a shared window's batched draw (a Rule a row, a position a row, its tokens) begins: past the switch's streams.
 pub fn pinDraw(c: Config) usize {
     return pin_shared + @import("cuda_wide.zig").streams(c) * window_words;
 }
-const draw_rules_words = state.max_rows * 8;
-const draw_meta_words = state.max_rows;
+pub const draw_rules_words = state.max_rows * 8;
+pub const draw_meta_words = state.max_rows;
 const draw_tokens_words = state.max_rows;
 /// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
-const masked_ids = 4000;
+pub const masked_ids = 4000;
 
 /// One stream's part of a shared window: its sequence, the ids its first rows take from the host, and its rows.
 pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize, mask: Mask = .{} };
@@ -123,6 +123,10 @@ pub const Engine = struct {
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
     prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
     taps: ?Taps = null, // a prompt pass's hidden rows for a recorder (serial chunks)
+    draft_taps: [8]u32 = @splat(0), // the drafter's tapped layers (setTaps), each forward filling their ring
+    n_draft_taps: usize = 0,
+    tap_rows: usize = 0, // the drafter ring's rows (the draft config's window and a block more)
+    tap_ring: u64 = 0, // the drafter's ring (it owns the bytes; stable before the graphs capture)
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
     spares: marks.Spares = .{},
     snaps_configured: bool = false,
@@ -288,7 +292,7 @@ pub const Engine = struct {
     }
 
     /// Step `id` from the bound sequence's own capture of `body`, made the first time (and again after a recapture).
-    fn launchCaptured(e: *Engine, id: u32, body: Body) !void {
+    pub fn launchCaptured(e: *Engine, id: u32, body: Body) !void {
         if (e.bound.epoch != e.epoch) {
             seq_graphs.free(e.gpa, &e.bound.graphs);
             e.bound.epoch = e.epoch;
@@ -412,8 +416,51 @@ pub const Engine = struct {
         f.tp = if (e.tp) |*g| g else null;
         f.vision = e.vision;
         f.audio = e.audio;
+        f.draft_taps = e.draft_taps;
+        f.n_draft_taps = e.n_draft_taps;
+        f.tap_rows = e.tap_rows;
+        f.tap_ring = e.tap_ring;
         if (dump == null and (e.c.latent > 0 or (e.c.experts <= 128 and e.c.slots() <= 8))) f.side = e.side; // tf_plan_routed's bounds; a latent MoE plans without it
         return f;
+    }
+
+    /// The layers a drafter taps, its ring told before the streams exist; one segment (a staggered prompt shares it).
+    pub fn setTaps(e: *Engine, taps: []const u32, ring: u64, ring_rows: usize) !void {
+        if (e.n_draft_taps != 0 or e.tap_ring != 0) return error.TapsSet;
+        if (e.segments > 1) return error.TapsNeedOneSegment;
+        if (taps.len == 0 or taps.len > e.draft_taps.len) return error.BadTap;
+        for (taps) |t| {
+            if (t >= e.c.layers) return error.BadTap;
+            if (e.c.kinds[t] == .moe and e.w.blocks[t].moe.bolt == null) return error.BadTap; // Bolt's MoE adds its delta on the bf16 plane (forward: delta = .dense), so its residual taps fine; any other MoE reads fp32 slots
+        }
+        @memcpy(e.draft_taps[0..taps.len], taps);
+        e.n_draft_taps = taps.len;
+        e.tap_ring = ring;
+        e.tap_rows = ring_rows;
+        // The engine's graphs are captured at init, BEFORE any drafter exists: their recordings
+
+        // hold no tap kernels, and every replayed verify would leave the ring's decode rows at
+
+        // zero (the 0%-acceptance class). When the taps arm after that capture, re-record every
+
+        // captured graph with the tap writes inside.
+        if (e.serial != null or e.windows[0][1] != null) {
+            if (e.serial) |*g| g.deinit();
+            e.serial = null;
+            for (&e.windows) |*set| for (set) |*g| {
+                if (g.*) |*x| x.deinit();
+                g.* = null;
+            };
+            try e.reset();
+            try e.stream.synchronize();
+            e.serial = try e.record(.{ .window = .{ .rows = 1, .feed = true } });
+            try e.captureWindows();
+        }
+    }
+
+    /// The drafter ring's bytes: ring_rows rows, n_taps slots a row, hidden bf16 a slot.
+    pub fn tapBytes(e: *const Engine) usize {
+        return if (e.n_draft_taps == 0) 0 else e.tap_rows * e.n_draft_taps * e.c.hidden * 2;
     }
 
     /// Engine.reset: zeroed caches and state, position 0.
@@ -442,106 +489,15 @@ pub const Engine = struct {
         return .{ .k = &e.k.train, .s = e.stream };
     }
 
-    /// Engine.forward: a window of `rows` rows at pos, its first `ids.len` inputs from the host (drafts on the device).
-    pub fn verify(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump) !void {
-        return e.verifyMasked(ids, rows, dump, .{});
-    }
+    const evf = @import("cuda_engine_verify.zig");
 
-    /// verify with a grammar's bits for each row: its logits masked before its draws, a graph each row count once made.
-    pub fn verifyMasked(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump, mask: Mask) !void {
-        if (rows < 1 or rows > state.windowRows(e.c) or ids.len > rows) return error.BadWindow;
-        if (e.pos + rows > e.cap()) return error.ContextFull;
-        try e.copied.synchronize();
-        const host = e.pinned.slice(u32);
-        host[pin_meta..][0..4].* = e.metaRow();
-        @memcpy(host[pin_ids..][0..ids.len], ids);
-        try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(host[pin_ids..][0..ids.len]));
-        try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(host[pin_meta..][0..4]));
-        try e.copied.record(e.stream);
-        const m: usize = @intFromBool(e.sampling != null);
-        if (dump == null and mask.bits == 0 and e.windows[m][rows] != null) {
-            try e.launchGraph(e.windows[m][rows].?, @intCast(1 + m * (state.max_rows + 1) + rows), .{ .window = .{ .rows = rows, .feed = false } });
-        } else if (dump == null and e.windows[m][rows] != null and e.maskGraphs(mask)) {
-            try e.launchCaptured(@intCast(masked_ids + m * (state.max_rows + 1) + rows), .{ .window = .{ .rows = rows, .feed = false, .mask = mask } });
-        } else {
-            e.stats.eager += 1;
-            const f = e.forward(dump);
-            try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .mask = mask, .slot = f.slot, .untaught = f.untaught }});
-            try e.ops().download(std.mem.sliceAsBytes(host[pin_sampled..][0..rows]), e.b.sampled);
-        }
-        try e.sampled_ready.record(e.stream);
-        e.parity ^= 1;
-        e.rows = rows;
-    }
-
-    /// Whether masked windows replay graphs: their bits stay where the first one read them (the host rewrites them).
-    fn maskGraphs(e: *Engine, mask: Mask) bool {
-        if (e.mask_bits == 0) e.mask_bits = mask.bits;
-        return mask.bits == e.mask_bits;
-    }
-
-    /// Several streams' windows in one forward (eager): each stream's rows read its own caches, state and rule.
-    pub fn verifyShared(e: *Engine, parts: []const Shared) !void {
-        if (parts.len < 1 or parts.len > @import("cuda_wide.zig").streams(e.c)) return error.BadWindow;
-        var total: usize = 0;
-        for (parts) |p| {
-            // a stream's rows stride at windowRows in its own buffers (ids, hidden, Mamba rows), however wide the round
-            if (p.rows < 1 or p.rows > state.windowRows(e.c) or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
-            total += p.rows;
-        }
-        if (total > state.sharedRows(e.c)) return error.WindowTooWide;
-        try e.copied.synchronize();
-        const host = e.pinned.slice(u32)[pin_shared..][0 .. parts.len * window_words];
-        var views: [max_streams]state.Buffers = undefined;
-        var parts_f: [max_streams]Seg = undefined;
-        var row0: usize = 0;
-        for (parts, 0..) |p, k| {
-            e.bind(p.seq);
-            if (e.pos + p.rows > e.cap()) return error.ContextFull;
-            const slot = host[k * window_words ..][0..window_words];
-            slot[pin_meta..][0..4].* = e.metaRow();
-            @memcpy(slot[pin_ids..][0..p.ids.len], p.ids);
-            try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[pin_ids..][0..p.ids.len]));
-            try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[pin_meta..][0..4]));
-            views[k] = e.b; // the bound sequence's own fields beside the shared scratch
-            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask, .slot = p.seq.slot, .untaught = p.seq.untaught };
-            row0 += p.rows;
-        }
-        var sd: [max_streams]@import("cuda_shared_draw.zig").SharedDraw = undefined;
-        var draw_row: usize = 0;
-        for (parts, 0..) |p, k| {
-            sd[k] = .{ .sampling = p.seq.sampling, .pos = p.seq.pos, .rows = p.rows };
-            e.draw_at[k] = @intCast(draw_row);
-            draw_row += p.rows;
-        }
-        var batch = if (parts.len > 1) @import("cuda_shared_draw.zig").batch(sd[0..parts.len], e.pinned, e.b.draw_rules, e.b.draw_meta, e.b.draw_tokens, pinDraw(e.c), pinDraw(e.c) + draw_rules_words) else null;
-        if (batch) |b| try @import("cuda_shared_draw.zig").upload(b, e.ops());
-        try e.copied.record(e.stream);
-        var f = e.forward(null);
-        f.batch = if (batch) |*b| b else null;
-        try f.windowSegs(parts_f[0..parts.len]);
-        const slab = e.pinned.slice(u32)[pinDraw(e.c) + draw_rules_words + draw_meta_words ..][0..draw_row];
-        if (batch != null) {
-            try e.ops().download(std.mem.sliceAsBytes(slab), e.b.draw_tokens);
-        } else for (parts, 0..) |p, k| {
-            try e.ops().download(std.mem.sliceAsBytes(slab[e.draw_at[k]..][0..p.rows]), views[k].sampled);
-        }
-        try e.sampled_ready.record(e.stream);
-        for (parts) |p| {
-            e.bind(p.seq);
-            e.parity ^= 1;
-            e.rows = p.rows;
-        }
-    }
-
-    /// Part k's drawn ids from the last shared window (row r: the token at its position + r + 1).
-    pub fn sharedTokens(e: *Engine, k: usize, rows: usize) ![]const u32 {
-        try e.sampled_ready.synchronize();
-        return e.pinned.slice(u32)[pinDraw(e.c) + draw_rules_words + draw_meta_words + e.draw_at[k] ..][0..rows];
-    }
+    pub const verify = evf.verify;
+    pub const verifyMasked = evf.verifyMasked;
+    pub const verifyShared = evf.verifyShared;
+    pub const sharedTokens = evf.sharedTokens;
 
     /// The window's meta row as the kernels read it: position, buffer parity, previous keep, a spare word.
-    fn metaRow(e: *const Engine) [4]u32 {
+    pub fn metaRow(e: *const Engine) [4]u32 {
         return .{ @intCast(e.pos), @intCast(e.parity), @intCast(e.prev_keep), 0 };
     }
 

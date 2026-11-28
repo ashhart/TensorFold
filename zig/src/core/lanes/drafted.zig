@@ -7,6 +7,15 @@ const Stream = @import("stream.zig").Stream;
 const Held = @import("stream.zig").Held;
 const dr = @import("drafter.zig");
 
+const dp = @import("drafted_profile.zig");
+const profileOn = dp.profileOn;
+const profileNow = dp.profileNow;
+const profStart = dp.profStart; // a gated section's start: the clock is read only when TF_ROUND_PROFILE is set
+const draft_stats = &dp.draft_stats;
+const profile = &dp.profile;
+const profile_depths = &dp.profile_depths;
+const profile_offers_at = &dp.profile_offers_at;
+
 /// What the wrapper knows of a drafting stream.
 const Lane = struct {
     rows: bool = false, // the drafter has absorbed the row before the next draft (it can draft)
@@ -21,6 +30,7 @@ pub const Drafted = struct {
     target: be.Backend,
     drafter: dr.Drafter,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty, // streams the drafter has opened
+    others: std.AutoHashMapUnmanaged(*Stream, void) = .empty, // live undrafted streams for the mixture test
     // scratch kept between rounds, so a steady round allocates nothing
     windows: std.ArrayList(be.Window) = .empty, // the last verify's windows, held drafts swapped for host tokens
     tokens: std.ArrayList(u32) = .empty, // their drafts, back to back
@@ -41,6 +51,7 @@ pub const Drafted = struct {
 
     pub fn deinit(x: *Drafted) void {
         x.lanes.deinit(x.gpa);
+        x.others.deinit(x.gpa);
         x.windows.deinit(x.gpa);
         x.tokens.deinit(x.gpa);
         x.streams.deinit(x.gpa);
@@ -159,6 +170,7 @@ pub const Drafted = struct {
     /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
+        try refuseBusy(x, s); // admission, before any target launch: the second stream fails whole
         if (s.drafts) if (x.target.vtable.prefill_features) |streamed| { // chunk by chunk: no whole prompt's taps held
             try x.lanes.ensureUnusedCapacity(x.gpa, 1);
             try x.drafter.open(s);
@@ -183,6 +195,7 @@ pub const Drafted = struct {
     /// A step of the target's prompt pass, then the drafter absorbs its rows (as `take`); it opens at the first step.
     fn prefillStep(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
         const x = self(ptr);
+        try refuseBusy(x, s); // admission, before the target's first step runs
         const step = x.target.vtable.prefill_step.?;
         if (!s.drafts) return step(x.target.ptr, s, max_rows);
         errdefer x.dropStream(s);
@@ -236,6 +249,10 @@ pub const Drafted = struct {
     /// Held drafts reach the target as host tokens, all streams read back in one call (fillers: the pending token).
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
+        if (windows.len > 0 and profileOn()) {
+            profile.rows = windows[0].rows();
+            profile.offers = windows[0].held;
+        }
         x.windows.clearRetainingCapacity();
         try x.windows.appendSlice(x.gpa, windows);
         // a window carrying the stream's grown tree (allocation may keep only its first nodes): how many it offers
@@ -251,7 +268,12 @@ pub const Drafted = struct {
             total += w.held;
             if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
-        if (total == 0 or through) return x.target.verify(x.windows.items, out);
+        if (total == 0 or through) {
+            const t0 = profStart();
+            const got = x.target.verify(x.windows.items, out);
+            if (profileOn()) profile.fwd += profileNow() - t0;
+            return got;
+        }
         try x.tokens.resize(x.gpa, total);
         x.streams.clearRetainingCapacity();
         x.outs.clearRetainingCapacity();
@@ -271,8 +293,14 @@ pub const Drafted = struct {
             try x.streams.append(x.gpa, w.stream);
             try x.outs.append(x.gpa, slot);
         }
-        if (x.streams.items.len > 0) try x.drafter.held(x.streams.items, x.outs.items);
-        return x.target.verify(x.windows.items, out);
+        if (x.streams.items.len > 0) {
+            const t0 = profStart();
+            try x.drafter.held(x.streams.items, x.outs.items);
+            if (profileOn()) profile.held += profileNow() - t0;
+        }
+        const t_fwd = profStart();
+        try x.target.verify(x.windows.items, out);
+        if (profileOn()) profile.fwd += profileNow() - t_fwd;
     }
 
     /// One stream's held drafts as host tokens for a grammar to walk (fillers: the pending token, kept for the verify).
@@ -291,7 +319,82 @@ pub const Drafted = struct {
         const x = self(ptr);
         if (windows.len != x.windows.items.len) return error.WindowMismatch;
         for (windows, x.windows.items) |w, v| if (w.stream != v.stream) return error.WindowMismatch;
-        return x.target.keep(x.windows.items, paths);
+
+        // Count draft statistics if enabled (the gate reads the env ONCE, lazily)
+        if (dp.draft_stats_env == null) dp.draft_stats_env = (@import("sys").environment.read(bool, "TF_DRAFT_STATS", false) catch false);
+        if (dp.draft_stats_env.?) {
+            // Only count when lengths match (same as existing error handling)
+            if (windows.len == paths.len) {
+                _ = draft_stats.rounds.fetchAdd(1, .monotonic);
+                var draft_rounds_inc: u64 = 0;
+
+                var offered_sum: u64 = 0;
+                var kept_sum: u64 = 0;
+                var held_max: u64 = 0;
+                var kept_max: u64 = 0;
+
+                for (windows, paths) |w, p| {
+                    if (w.held > 0) {
+                        draft_rounds_inc = 1;
+                        offered_sum += w.held;
+                        // p.len includes the pending row (row 0): only rows > 0 are kept drafts, worth p.len - 1
+                        kept_sum += if (p.len > 0) p.len - 1 else 0;
+                        held_max = @max(held_max, w.held);
+                        kept_max = @max(kept_max, if (p.len > 0) p.len - 1 else 0);
+                    }
+                }
+
+                _ = draft_stats.draft_rounds.fetchAdd(draft_rounds_inc, .monotonic);
+                _ = draft_stats.offered.fetchAdd(offered_sum, .monotonic);
+                _ = draft_stats.kept.fetchAdd(kept_sum, .monotonic);
+                if (held_max > 0) {
+                    _ = draft_stats.held_max.store(held_max, .monotonic);
+                    _ = draft_stats.kept_max.store(kept_max, .monotonic);
+                }
+
+                // Print stats every 64 rounds
+                const rounds_now = draft_stats.rounds.load(.monotonic);
+                if (rounds_now % 64 == 0) {
+                    const draft_rounds_now = draft_stats.draft_rounds.load(.monotonic);
+                    const offered_now = draft_stats.offered.load(.monotonic);
+                    const kept_now = draft_stats.kept.load(.monotonic);
+                    const held_max_now = draft_stats.held_max.load(.monotonic);
+                    const kept_max_now = draft_stats.kept_max.load(.monotonic);
+                    const acceptance = if (offered_now > 0) @as(f64, @floatFromInt(kept_now)) / @as(f64, @floatFromInt(offered_now)) else 0.0;
+                    const per_cycle = @as(f64, @floatFromInt(kept_now)) / @as(f64, @floatFromInt(rounds_now));
+                    std.debug.print("[draft-stats] rounds={d} draft_rounds={d} offered={d} kept={d} held_max={d} kept_max={d} acceptance={d:.3} per_cycle={d:.2}\n", .{ rounds_now, draft_rounds_now, offered_now, kept_now, held_max_now, kept_max_now, acceptance, per_cycle });
+                }
+            }
+        }
+
+        // Debug prints for draft proposals
+        if (dp.draft_debug_env == null) dp.draft_debug_env = (@import("sys").environment.read(bool, "TF_DRAFT_DEBUG", false) catch false);
+        if (dp.draft_debug_env.?) {
+            for (windows, paths) |w, p| {
+                if (w.held > 0) {
+                    const kept_n = p.len;
+                    const max_print: usize = @min(4, kept_n);
+                    std.debug.print("[draft-debug-t] pending={d} kept_n={d} kept[0..{d}]=", .{ w.pending, kept_n, max_print });
+                    for (0..max_print) |ki| std.debug.print("{d} ", .{p[ki]});
+                    std.debug.print("\n", .{});
+                }
+            }
+        }
+
+        const t_keep = profStart();
+        const kept_r = x.target.keep(x.windows.items, paths);
+        if (profileOn() and windows.len == paths.len and windows.len > 0) {
+            profile.keep += profileNow() - t_keep;
+            const w0 = windows[0];
+            if (w0.held > 0) {
+                const d: usize = @min(w0.held, 8);
+                const k: u64 = if (paths[0].len > 0) paths[0].len - 1 else 0;
+                profile.kept = @intCast(k);
+                profile_offers_at[d] += w0.held;
+                profile_depths[d] += k;
+            }
+        }
+        return kept_r;
     }
 
     /// One absorb for every request's kept rows, then one hold for every request that wants drafts and can draft.
@@ -344,8 +447,26 @@ pub const Drafted = struct {
                 return f(x.drafter.ptr, x.absorbs.items, x.holds.items);
             }
         }
-        if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
-        if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
+        if (x.absorbs.items.len > 0) {
+            const t0 = profStart();
+            try x.drafter.absorb(x.absorbs.items);
+            if (profileOn()) profile.absorb += profileNow() - t0;
+        }
+        if (x.holds.items.len > 0) {
+            const t0 = profStart();
+            try x.drafter.hold(x.holds.items);
+            if (profileOn()) profile.hold += profileNow() - t0;
+        }
+        if (profileOn()) {
+            dp.profile_round += 1;
+            std.debug.print("[round-profile] n={d} rows={d} offers={d} kept={d} held={d:.2} fwd={d:.2} keep={d:.2} absorb={d:.2} hold={d:.2}\n", .{ dp.profile_round, profile.rows, profile.offers, profile.kept, profile.held, profile.fwd, profile.keep, profile.absorb, profile.hold });
+            if (dp.profile_round % 128 == 0) {
+                std.debug.print("[round-profile-depths] at={d}", .{dp.profile_round});
+                for (profile_offers_at, 0..) |o, i| std.debug.print(" d{d}:{d}/{d}", .{ i, profile_depths[i], o });
+                std.debug.print("\n", .{});
+            }
+            dp.profile = .{};
+        }
     }
 
     /// A drafter-grown tree's node chances (false: none, so the rule's per-depth rates price it).
@@ -374,7 +495,21 @@ pub const Drafted = struct {
         x.lanes.putAssumeCapacity(s, .{ .rows = true });
     }
 
+    /// A one-stream drafter refuses any second live stream at admission, before a target launch; drafted or undrafted.
+    fn refuseBusy(x: *Drafted, s: *Stream) !void {
+        if (!x.drafter.facts().one_stream) return;
+        if (s.drafts) {
+            if (x.lanes.contains(s)) return; // the stream's own pass continues (a resumed prompt)
+            if (x.lanes.count() + x.others.count() != 0) return error.DrafterBusy;
+            return;
+        }
+        if (x.lanes.count() != 0) return error.DrafterBusy; // a drafted walk is live: the pair is the mixture
+        const got = try x.others.getOrPut(x.gpa, s); // counted so a drafted newcomer refuses the same way
+        got.value_ptr.* = {};
+    }
+
     fn dropStream(x: *Drafted, s: *Stream) void {
+        _ = x.others.remove(s);
         if (x.lanes.remove(s)) x.drafter.release(s);
         x.target.release(s);
     }

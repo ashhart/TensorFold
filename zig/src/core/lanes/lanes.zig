@@ -86,6 +86,7 @@ test {
     _ = @import("gpu_launch_test.zig");
     _ = @import("gpu_top_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("drafted_admission_test.zig"); // ask 3: the admission refusal of concurrent drafting (PR 5102)
     _ = @import("drafter_depth_sweep_test.zig");
     _ = @import("drafted_chances_test.zig");
     _ = @import("drafted_copy_test.zig");

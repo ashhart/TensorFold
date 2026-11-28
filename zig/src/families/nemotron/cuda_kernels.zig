@@ -80,6 +80,7 @@ pub const Kernels = struct {
     scatter_rows: cuda.Function, // a level's tokens and probabilities to each part's buffers
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
+    draft_tap: cuda.Function, // the drafter's tap ring: a tapped layer's residual rows at their positions
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
@@ -130,6 +131,7 @@ pub const Kernels = struct {
         k.moe = try cuda.moe_glue.MoeGlue.load(d);
         errdefer k.moe.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
+        k.draft_tap = try k.mods[7].function("tf_nem_tap");
         k.modelopt = null;
         k.latent = null;
         k.ck = null;
@@ -264,6 +266,23 @@ pub const Ops = struct {
     /// sample.cu's keyed draw on this stream (cuda/sample.zig, the launch unchanged).
     pub fn draw(o: Ops, logits: u64, vocab: usize, rule: u64, meta: u64, offset: usize, out: u64, rows: usize, ids: ?u64, prob: ?u64) !void {
         return o.k.draws.draw(o.s, logits, vocab, rule, meta, offset, out, rows, ids, prob);
+    }
+
+    /// The drafter's tap ring (tf_nem_tap): residual rows land at their ring positions; keep_rows bounds the writes.
+    pub fn draftTap(o: Ops, h: u64, r: u64, ring: u64, meta: u64, ring_rows: usize, taps: usize, tap: usize, row0: usize, rows: usize, keep_rows: usize, d: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(h);
+        a.add(r);
+        a.add(ring);
+        a.add(meta);
+        a.add(@as(i64, @intCast(ring_rows)));
+        a.add(@as(i32, @intCast(taps)));
+        a.add(@as(i32, @intCast(tap)));
+        a.add(@as(i32, @intCast(row0)));
+        a.add(@as(i32, @intCast(rows)));
+        a.add(@as(i32, @intCast(keep_rows)));
+        a.add(@as(i32, @intCast(d)));
+        try o.go(o.k.draft_tap, .{ rows, (d / 8 + 255) / 256, 1 }, 256, 0, &a);
     }
 
     /// sample.cu's rows draw: row r under rule[r] at position meta[r] + 1, one launch (or a row a launch).

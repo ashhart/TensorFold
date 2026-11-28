@@ -6,6 +6,11 @@ const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const glue = @import("cuda_glue.zig");
 const max_streams = @import("cuda_engine.zig").max_streams;
+
+// Lazy TF_TAP_DEBUG gate for observation-only instrumentation (module scope: this Zig forbids
+
+// declarations between container fields)
+pub var tap_debug_env: ?bool = null;
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
@@ -47,6 +52,10 @@ pub const Forward = struct {
     sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
     batch: ?*const Batch = null, // a shared window's batched draw (null: a stream at a time)
     dump: ?*Dump = null,
+    draft_taps: [8]u32 = @splat(0), // the drafter's tapped layers (the engine's setTaps; 0: no drafter)
+    n_draft_taps: usize = 0,
+    tap_rows: usize = 0, // the drafter ring's rows
+    tap_ring: u64 = 0, // the drafter's ring
     side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
@@ -93,7 +102,7 @@ pub const Forward = struct {
         if (f.marks) |m| try m.add(f.ops.s, c);
     }
 
-    fn mshape(f: *const Forward) glue.Shape {
+    pub fn mshape(f: *const Forward) glue.Shape {
         const c = f.c;
         return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = state.windowRows(c) };
     }
@@ -103,7 +112,7 @@ pub const Forward = struct {
     }
 
     /// Attention layer `layer`'s plane in `b`'s cache at `base`: max_len rows a layer, or a page's K and V a layer.
-    fn cache(f: *const Forward, b: *const state.Buffers, base: u64, layer: usize) u64 {
+    pub fn cache(f: *const Forward, b: *const state.Buffers, base: u64, layer: usize) u64 {
         const row: u64 = state.kvRowBytes(f.c);
         return base + layer * (if (b.table != 0) 2 * state.chunk_keys else f.max_len) * row;
     }
@@ -163,6 +172,12 @@ pub const Forward = struct {
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
         // the lesson route holds 8 streams (train.cu's too): lessons past it would be dropped, never silently
         if (segs.len > lesson_route.max_segments and @import("cuda_lesson_trace.zig").adapterOf(f.w) != null) return error.LessonsPastRoute;
+        // The drafter's taps ride one segment's window alone (the wrapper refuses a second drafted
+
+        // stream at admission). This guard stands at the window's mouth, before any launch: a
+
+        // breached gate ends the whole window without a partial pass, the active request untouched.
+        if (f.n_draft_taps > 0 and segs.len != 1) return error.TapsNeedOneSegment;
         var routed = f.routedWindow(segs);
         var flight: worker.Flight = .{ .jobs = if (routed.pass) |p| p.jobs else 0 };
         routed.flight = &flight;
@@ -204,7 +219,7 @@ pub const Forward = struct {
         var delta: Delta = .none;
         var mj: usize = 0;
         var aj: usize = 0;
-        for (f.w.blocks) |blk| {
+        for (f.w.blocks, 0..) |blk, i| {
             try f.norm(&x, delta, blk.norm, rows, true);
             switch (blk.kind) {
                 .mamba => {
@@ -266,6 +281,15 @@ pub const Forward = struct {
                     delta = if (blk.moe.bolt != null) .dense else .moe;
                 },
             }
+            // the drafter's taps: layer i's residual (x + this block's delta) into its ring slot.
+
+            // setTaps admits a tap only where the delta is the bf16 plane (dense blocks; Bolt's MoE).
+            if (f.n_draft_taps > 0 and delta == .dense) for (f.draft_taps[0..f.n_draft_taps], 0..) |tp, ti| if (tp == i) {
+                if (tap_debug_env == null) tap_debug_env = (@import("sys").environment.read(bool, "TF_TAP_DEBUG", false) catch false);
+                if (tap_debug_env.?) std.debug.print("[tap-write-w] layer={d} tap_idx={d} seg_pos={d} rows={d}\n", .{ i, ti, segs[0].b.meta, segs[0].rows });
+                const s = segs[0];
+                try o.draftTap(x, b.delta, f.tap_ring, s.b.meta, f.tap_rows, f.n_draft_taps, ti, s.row0, s.rows, @min(s.rows, f.tap_rows), c.hidden);
+            };
         }
         try f.norm(&x, delta, f.w.norm_f, rows, true);
         for (segs) |s| try o.copy(s.b.hidden, b.y + s.row0 * D * 2, s.rows * c.hidden * 2);
@@ -447,142 +471,15 @@ pub const Forward = struct {
         try f.mark(.shared_wait);
     }
 
-    /// Engine.prefill_chunk: `rows` tokens in p_ids at positions pos..; commits them and samples the next token.
-    pub fn chunk(f: *const Forward, rows: usize, pos: usize) !void {
-        var w: Walk = .{ .rows = rows, .pos = pos };
-        try f.chunkBegin(&w);
-        for (0..f.w.blocks.len) |i| {
-            try f.chunkPre(&w, i);
-            try f.chunkMixer(&w, i);
-            if (f.unread and i == lastState(f.w.blocks)) return;
-            try f.chunkPost(&w, i);
-        }
-        try f.chunkFinish(&w);
-    }
+    /// The prompt-chunk path (chunk and its stages) moved to cuda_forward_chunk.zig, re-exported here.
+    const chf = @import("cuda_forward_chunk.zig");
 
-    /// The last block that writes state: every block past it reads and writes its rows alone.
-    fn lastState(blocks: anytype) usize {
-        var i = blocks.len - 1;
-        while (i > 0 and blocks[i].kind == .moe) i -= 1;
-        return i;
-    }
-
-    /// A chunk's embedding, from p_ids.
-    pub fn chunkBegin(f: *const Forward, w: *Walk) !void {
-        const b = f.b;
-        try f.embed(b.p_ids, b.emb, w.rows);
-        if (f.vision) |v| try v.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
-        if (f.audio) |a| try a.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
-        w.x = b.emb;
-    }
-
-    /// Block i up to its mixer: the norm, then the Mamba input projection or attention's q, k and v.
-    pub fn chunkPre(f: *const Forward, w: *Walk, i: usize) !void {
-        const blk = f.w.blocks[i];
-        const b = f.b;
-        try f.norm(&w.x, w.delta, blk.norm, w.rows, false);
-        switch (blk.kind) {
-            .mamba => try f.ops.prefillDense(b.y, blk.mamba.in_proj, b.proj, w.rows),
-            .attention => {
-                try f.ops.prefillDense(b.y, blk.attn.qkv, b.qkv, w.rows);
-                try f.ops.fill32(b.p_meta, @intCast(w.pos), 4);
-            },
-            .moe => {},
-        }
-    }
-
-    /// A block mixer reads its Mamba state or attention cache from earlier rows.
-    pub fn chunkMixer(f: *const Forward, w: *Walk, i: usize) !void {
-        const c = f.c;
-        const b = f.b;
-        const o = f.ops;
-        switch (f.w.blocks[i].kind) {
-            .mamba => {
-                const m = f.w.blocks[i].mamba;
-                const layer: u64 = c.mamba_heads * c.mamba_head_dim * c.state * 4;
-                const base = b.conv_base + @as(u64, w.mj) * 3 * c.convDim() * 2;
-                var snaps: kern.Snaps = .{}; // the scan stores its state at each mark too, the bits a chunk ending there stores
-                for (f.captures, 0..) |cap, k| {
-                    try f.keepTaps(cap, w, base); // before the commit below moves BASE on
-                    snaps.p[k] = cap.ssm + w.mj * layer;
-                    snaps.r[k] = @intCast(cap.at - w.pos);
-                }
-                try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape());
-                try o.scanRows(b.proj, b.p_xc, b.ssm + w.mj * layer, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max, snaps);
-            },
-            .attention => {
-                const kc = f.cache(b, b.k_cache, w.aj);
-                const vc = f.cache(b, b.v_cache, w.aj);
-                const qd = c.heads * c.head_dim;
-                try f.glue.kvWrite(b.qkv, kc, vc, b.p_meta, w.rows, f.ashape());
-                try o.torch().copyRows(b.qkv, c.qkvDim() * 2, b.q, qd * 2, qd * 2, w.rows);
-                const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(c.head_dim), -0.5));
-                try o.prefillAttention(b.q, kc, vc, b.att, w.pos, w.rows, c.heads, c.kv_heads, scale, b.table, f.page_elems);
-            },
-            .moe => {},
-        }
-    }
-
-    /// A mark's conv taps in this layer: the raw inputs of the three rows before it, BASE's last rows then the chunk's.
-    fn keepTaps(f: *const Forward, cap: kept.Mark, w: *const Walk, base: u64) !void {
-        const cd: u64 = f.c.convDim();
-        const dst = cap.conv + w.mj * 3 * cd * 2;
-        const old = 3 -| (cap.at - w.pos); // taps from before the chunk; a mark inside it has at least one row
-        try f.ops.copy(dst, base + (3 - old) * cd * 2, old * cd * 2);
-        const first = f.b.proj + (cap.at - w.pos - (3 - old)) * f.c.projDim() * 2 + f.c.inner() * 2;
-        try f.ops.copyRows(dst + old * cd * 2, cd * 2, first, f.c.projDim() * 2, cd * 2, 3 - old);
-    }
-
-    /// Block i after its mixer: Mamba gate norm and out projection, attention's out projection, or the experts.
-    pub fn chunkPost(f: *const Forward, w: *Walk, i: usize) !void {
-        const c = f.c;
-        const b = f.b;
-        const blk = f.w.blocks[i];
-        switch (blk.kind) {
-            .mamba => {
-                try f.glue.groupRmsnorm(b.sy, blk.mamba.gnorm, b.g, b.gxs, w.rows, c.inner(), c.groups, c.eps);
-                if (f.dump) |d| try d.input(f.ops, "g", b.g, w.rows * c.inner() * 2);
-                try f.ops.prefillDense(b.g, blk.mamba.out_proj, b.delta, w.rows);
-                if (blk.mamba.out_rest != 0) try f.ops.restRows(b.g, c.inner(), blk.mamba.out_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, c.inner());
-                if (blk.mamba.adapter) |ad| try adapt(f.ops, ad, b.g, c.inner(), b.delta, c.hidden, false, w.rows, &f.route);
-                w.delta = .dense;
-                w.mj += 1;
-            },
-            .attention => {
-                if (f.dump) |d| try d.input(f.ops, "att", b.att, w.rows * c.heads * c.head_dim * 2);
-                try f.ops.prefillDense(b.att, blk.attn.o, b.delta, w.rows);
-                const qd = c.heads * c.head_dim;
-                if (blk.attn.o_rest != 0) try f.ops.restRows(b.att, qd, blk.attn.o_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, qd);
-                if (blk.attn.adapter) |ad| try adapt(f.ops, ad, b.att, qd, b.delta, c.hidden, false, w.rows, &f.route);
-                w.delta = .dense;
-                w.aj += 1;
-            },
-            .moe => if (blk.moe.latent != null) {
-                try latent.run(f, blk.moe, w.rows);
-                w.delta = .dense;
-            } else {
-                try f.experts(blk.moe, w.rows, true);
-                w.delta = if (blk.moe.bolt != null) .dense else .moe;
-            },
-        }
-    }
-
-    /// The chunk's last norm alone: w.x then holds the residual it read, b.y every row's normed hidden state.
-    pub fn finalNorm(f: *const Forward, w: *Walk) !void {
-        try f.norm(&w.x, w.delta, f.w.norm_f, w.rows, false);
-    }
-
-    /// The chunk's last norm, its rows' hidden states for the MTP head, and the token after its last row.
-    pub fn chunkFinish(f: *const Forward, w: *Walk) !void {
-        const c = f.c;
-        const b = f.b;
-        const o = f.ops;
-        const rows = w.rows;
-        try f.norm(&w.x, w.delta, f.w.norm_f, rows, false);
-        try o.copy(b.p_hidden, b.y, @as(usize, rows) * c.hidden * 2);
-        try o.prefillDense(b.y + @as(u64, rows - 1) * c.hidden * 2, f.w.head, b.p_logits, 1);
-        try o.fill32(b.p_meta, @intCast(w.pos + rows - 1), 4); // sample_last: the chunk's last row is at pos + rows - 1
-        try f.sample(b.p_logits, 1, b.p_meta, b.p_sampled, f.sampled, b.rule);
-        if (f.dump) |d| try d.tail(f.ops, b.p_logits, b.p_sampled, 1, c.vocab);
-    }
+    pub const chunk = chf.chunk;
+    pub const chunkBegin = chf.chunkBegin;
+    pub const chunkPre = chf.chunkPre;
+    pub const chunkMixer = chf.chunkMixer;
+    pub const chunkPost = chf.chunkPost;
+    pub const finalNorm = chf.finalNorm;
+    pub const chunkFinish = chf.chunkFinish;
+    pub const keepTaps = chf.keepTaps;
 };

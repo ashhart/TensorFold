@@ -62,6 +62,20 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | A positive finite GiB amount whose byte count fits a 64-bit size |
 | `TF_DSPINE_WINDOW` | Qwen3.8-27B on CUDA with a DSpine `--drafter`: whole row count 16 through 8192 that narrows the drafter's sliding window; it must be at least the block (16) and at most the checkpoint's own `sliding_window`, else the drafter is refused when it opens; unset or blank keeps the checkpoint's (8192 for tencent/Qwen3.8-27B-DSpine-b16) |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
+| `TF_DRAFT_STATS` | Exactly `0` or `1`; default off. `1` logs the external drafter's offer/keep counters a round |
+| `TF_DRAFT_DEBUG` | Exactly `0` or `1`; default off. `1` logs the external drafter's per-round decisions |
+| `TF_ROUND_PROFILE` | Exactly `0` or `1`; default off. `1` prints the drafted round's phase timings a round |
+| `TF_HOLD_PROFILE` | Exactly `0` or `1`; default off. `1` prints the drafter hold's phase timings a hold |
+| `TF_TAP_DEBUG` | Exactly `0` or `1`; default off. `1` dumps the first absorbed tap rows for the drafter probe |
+| `TF_STAGE_DUMP` | Exactly `0` or `1`; default off. `1` dumps the staged frame conditioning at the first staged rounds |
+| `TF_SURGERY_DUMP` | Exactly `0` or `1`; default off. `1` dumps the drafter head's surgery buffers once |
+| `TF_BODY_GATE_DUMP` | Exactly `0` or `1`; default off. `1` dumps the body fixture gate's A/B inputs and outputs |
+| `TF_RING_POISON` | Exactly `0` or `1`; default off. `1` poisons the tap ring's free slots for the ring probe |
+| `TF_WORDS_DUMP` | Exactly `0` or `1`; default off. `1` dumps the target's staged words buffer once |
+| `TF_DRAFT_F32ACC` | Exactly `0` or `1`; default off. `1` runs the drafter module staging's width-mate accumulator face |
+| `TF_LILICORR_DEVICE` | Exactly `0` or `1`; default off. `1` runs the lilicorr hold's score chain on the device |
+| `TF_LILICORR_FIXTURE` | A path without control characters: the LiLiCorr golden battery's fixture directory |
+| `TF_BODY_FIXTURE` | A path without control characters: the body fixture gate's fixture directory |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96, or two blocks per SM with `TF_QMMF_HALF_BN=1` |
 | `TF_QMMF_HALF_BN` | Exactly `0` or `1`, read when a CUDA lane loads; default off. `1` also gives FP4, FP8 and FP8G decode calls of 16 rows or fewer the 32-column half tile, below `TF_QMMF_HALF_BELOW` blocks (default two per SM, so 340 on 170 SMs and 96 on 48). Columns split, never K, so every output keeps its bits |
 | `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
