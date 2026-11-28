@@ -27,12 +27,12 @@ test "TF_DSV41_PF_4K: 0 / 1 only, refused without TF_DSV41_PF_4K_MEMORY_OK=1, 4,
     Fake.pairs = &.{.{ "TF_DSV41_PF_4K", "0" }};
     try testing.expect(!try pk.pf4k(&Fake.get));
     Fake.pairs = &.{.{ "TF_DSV41_PF_4K", "2" }};
-    try testing.expectError(error.BadKnob, pk.pf4k(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.pf4k(&Fake.get));
     Fake.pairs = &.{on};
-    try testing.expectError(error.BadKnob, pk.pf4k(&Fake.get));
-    try testing.expectError(error.BadKnob, pk.prefillRows(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.pf4k(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.prefillRows(&Fake.get));
     Fake.pairs = &.{ on, .{ "TF_DSV41_PF_4K_MEMORY_OK", "0" } };
-    try testing.expectError(error.BadKnob, pk.pf4k(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.pf4k(&Fake.get));
     Fake.pairs = &.{ on, ok };
     try testing.expect(try pk.pf4k(&Fake.get));
     try testing.expectEqual(@as(?u32, 4096), try pk.prefillRows(&Fake.get));
@@ -40,14 +40,14 @@ test "TF_DSV41_PF_4K: 0 / 1 only, refused without TF_DSV41_PF_4K_MEMORY_OK=1, 4,
     try testing.expectEqual(@as(?u32, 4096), try pk.prefillRows(&Fake.get));
     // the default words (2,048 both) with 4K on: refused, not 2,048-row segments under a 4K label
     Fake.pairs = &.{ on, ok, .{ "TF_DSV41_PREFILL_CHUNK", "2048" } };
-    try testing.expectError(error.BadKnob, pk.prefillRows(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.prefillRows(&Fake.get));
     Fake.pairs = &.{ on, ok, .{ "TF_DSV41_PREFILL_ROWS", "2048" } };
-    try testing.expectError(error.BadKnob, pk.prefillRows(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.prefillRows(&Fake.get));
     Fake.pairs = &.{ on, ok, .{ "TF_DSV41_PREFILL_ROWS", "4112" } };
-    try testing.expectError(error.BadKnob, pk.prefillRows(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.prefillRows(&Fake.get));
     // without 4K the 2,048 limit stands
     Fake.pairs = &.{.{ "TF_DSV41_PREFILL_CHUNK", "4096" }};
-    try testing.expectError(error.BadKnob, pk.prefillRows(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.prefillRows(&Fake.get));
 }
 
 fn widths(a: std.mem.Allocator) !block.Widths {
@@ -327,7 +327,7 @@ test "TF_DSV41_GM_GU2: 0 / 1, and a 4,096-row segment's gate / up at GU2 over it
     Fake.pairs = &.{.{ "TF_DSV41_GM_GU2", "1" }};
     try testing.expect(try pk.gmGu2(&Fake.get));
     Fake.pairs = &.{.{ "TF_DSV41_GM_GU2", "2" }};
-    try testing.expectError(error.BadKnob, pk.gmGu2(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.gmGu2(&Fake.get));
     Fake.pairs = &.{};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

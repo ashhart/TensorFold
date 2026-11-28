@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const env = @import("sys").environment;
 const calls = @import("block_calls.zig");
 const block = @import("block.zig");
 const check = @import("calls_check.zig");
@@ -252,22 +253,35 @@ fn expectDeferred(a: std.mem.Allocator, off: []const Call, on: []const Call) !vo
     }
 }
 
-test "TF_DSV41_MHC_PFDEC reader: unset / 0 off, 1..64 the fewest rows, anything else refused" {
+test "TF_DSV41_MHC_PFDEC reader: 0..64 rows; bad values refused by the validator by name, and by the reader" {
     const Fake = struct {
         var v: ?[]const u8 = null;
         fn get(name: []const u8) ?[]const u8 {
             return if (eq(name, "TF_DSV41_MHC_PFDEC")) v else null;
         }
     };
+    const Bad = struct {
+        raw: []const u8,
+        pub fn get(b: @This(), name: []const u8) ?[]const u8 {
+            return if (eq(name, "TF_DSV41_MHC_PFDEC")) b.raw else null;
+        }
+    };
     Fake.v = null;
     try testing.expectEqual(@as(i64, 0), try pk.mhcPfRows(&Fake.get));
-    for ([_][]const u8{ "0", "1", "17", " 64 " }, [_]i64{ 0, 1, 17, 64 }) |s, want| {
+    // blank reads as unset, as for every setting the shared validator holds
+    for ([_][]const u8{ "", "0", "1", "17", " 64 " }, [_]i64{ 0, 0, 1, 17, 64 }) |s, want| {
         Fake.v = s;
         try testing.expectEqual(want, try pk.mhcPfRows(&Fake.get));
     }
-    for ([_][]const u8{ "65", "-1", "on", "" }) |s| {
+    for ([_][]const u8{ "65", "-1", "on" }) |s| {
+        const bad = Bad{ .raw = s };
+        try testing.expectError(error.InvalidEnvironment, env.checkScope(.dsv41, bad));
+        const why = try env.refusal(testing.allocator, bad, .{ .dsv41 = true });
+        defer if (why) |text| testing.allocator.free(text);
+        try testing.expect(why != null);
+        try testing.expect(std.mem.startsWith(u8, why.?, "TF_DSV41_MHC_PFDEC="));
         Fake.v = s;
-        try testing.expectError(error.BadKnob, pk.mhcPfRows(&Fake.get));
+        try testing.expectError(error.InvalidEnvironment, pk.mhcPfRows(&Fake.get));
     }
 }
 
@@ -360,7 +374,7 @@ fn expectHeld(a: std.mem.Allocator, cs: []const Call, held: []const Call) !usize
 test "TF_DSV41_MHC_DEFER_AT reader: unset / empty / 0 / off the reference's, exchange the hold, anything else refused" {
     for ([_]?[]const u8{ null, "", "0", "off", " OFF " }) |v| try testing.expect(!try branches.deferAt(v));
     for ([_][]const u8{ "exchange", "Exchange", " exchange\n" }) |v| try testing.expect(try branches.deferAt(v));
-    for ([_][]const u8{ "1", "on", "experts", "exchanges" }) |v| try testing.expectError(error.BadDeferAt, branches.deferAt(v));
+    for ([_][]const u8{ "1", "on", "experts", "exchanges" }) |v| try testing.expectError(error.InvalidEnvironment, branches.deferAt(v));
 }
 
 test "TF_DSV41_MHC_DEFER_AT=exchange: decode windows' coefficient launches each move to just before their sublayer's exchange, nothing else changes" {
@@ -439,7 +453,7 @@ test "TF_DSV41_MHC_DEFER_AT_ROWS: the reader; programs over the threshold keep t
     try testing.expectEqual(@as(i64, 0), try branches.deferAtRows(null));
     try testing.expectEqual(@as(i64, 0), try branches.deferAtRows(" "));
     try testing.expectEqual(@as(i64, 16), try branches.deferAtRows("16"));
-    for ([_][]const u8{ "-1", "65", "x" }) |v| try testing.expectError(error.BadDeferAt, branches.deferAtRows(v));
+    for ([_][]const u8{ "-1", "65", "x" }) |v| try testing.expectError(error.InvalidEnvironment, branches.deferAtRows(v));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

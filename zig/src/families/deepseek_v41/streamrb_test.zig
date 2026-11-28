@@ -27,7 +27,7 @@ test "TF_DSV41_STREAM_RB: 0 / 1 / 2 / 4" {
     Fake.pairs = &.{.{ "TF_DSV41_STREAM_RB", "4" }};
     try testing.expectEqual(@as(i64, 4), try pk.streamRb(&Fake.get));
     Fake.pairs = &.{.{ "TF_DSV41_STREAM_RB", "3" }};
-    try testing.expectError(error.BadKnob, pk.streamRb(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.streamRb(&Fake.get));
 }
 
 fn arg(c: calls.Call, name: []const u8) ?calls.Arg {

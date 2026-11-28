@@ -17,6 +17,7 @@ const Env = struct {
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
+        if (r.word_fallback != null) continue;
         const bad: []const []const u8 = if (r.kind == .path) &.{ "key\nfile", "key\x1b[2Kfile", "\x7f" } else if (r.kind == .names) &.{ "a,b,c", ",", "1\nwrong" } else if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
         for (bad) |raw| {
             try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
@@ -45,7 +46,7 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
     }
     for (e.rules) |r| {
         for ([_][]const u8{ "", " ", "\t \n" }) |raw| {
-            if (r.blank_default) try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw)) else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
+            if (r.blank_default and (!r.empty_default_only or raw.len == 0)) try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw)) else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
         }
         // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
         if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;
@@ -322,8 +323,8 @@ test "environment: TENSORFOLD_PARALLEL takes the flag over the setting, blank ke
     }
 }
 
-test "environment: a malformed calibration setting stops a Metal start naming the setting, its text and the accepted forms" {
-    const metal: e.Flags = .{ .metal = true };
+test "environment: a malformed calibration setting stops a DeepSeek Metal start naming the setting, its text and the accepted forms" {
+    const metal: e.Flags = .{ .metal = true, .dsv41 = true };
     const bad = [_]struct { name: []const u8, raw: []const u8 }{
         .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "abc" },
         .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "600001" },
@@ -338,7 +339,7 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         try t.expect(std.mem.indexOf(u8, why, c.name) != null);
         try t.expect(std.mem.indexOf(u8, why, c.raw) != null);
         try t.expect(std.mem.indexOf(u8, why, e.rule(c.name).forms) != null);
-        // a CUDA start does not check these rows: the engine's own reader refuses them when it measures
+        // Other families do not check the DeepSeek rows.
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
     }
 }

@@ -75,7 +75,7 @@ pub const Phases = struct {
         const mode: Mode = @fromBackingInt(@intCast(@import("sys").environment.read(u8, "TF_DSV41_PHASES", 0) catch return error.BadPhasesMode));
         if (mode == .off) return null;
         const p = try gpa.create(Phases);
-        p.* = .{ .mode = mode, .t0 = nowNs(), .path = if (std.c.getenv("TF_DSV41_PHASES_OUT")) |v| std.mem.span(v) else null };
+        p.* = .{ .mode = mode, .t0 = nowNs(), .path = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_PHASES_OUT")) |v| v else null };
         return p;
     }
 

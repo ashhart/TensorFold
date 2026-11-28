@@ -56,7 +56,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     // TF_DSV41_DECODE_TP_LANES (lanes checks, below): 1 drafts off, 2 the oracle's drafts, 3 DSpark's GPU pass
     const lanes_mode: u32 = try environment.read(u32, "TF_DSV41_DECODE_TP_LANES", 0);
     // TF_DSV41_DECODE_TP_PREFILL=1: our prefill runs the reference's prompt from an empty slot; state equals its
-    const own_prefill = if (std.c.getenv("TF_DSV41_DECODE_TP_PREFILL")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    const own_prefill = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_DECODE_TP_PREFILL")) |v| std.mem.eql(u8, v, "1") else false;
 
     var driver = try cuda.Driver.open();
     defer driver.close();
@@ -70,8 +70,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     const session = try gpa.create(tp.Session);
     defer gpa.destroy(session);
     // TF_TP_KERNEL_IMAGE: tp_mailbox.fatbin; TF_COMM_BACKEND=roce then takes small exchanges over RoCE; unset: NCCL
-    const image: []const u8 = if (std.c.getenv("TF_TP_KERNEL_IMAGE")) |p|
-        try cwd.readFileAllocOptions(io, std.mem.span(p), a, .limited(1 << 26), .@"16", null)
+    const image: []const u8 = if (@import("sys").environment.Process.get(.{}, "TF_TP_KERNEL_IMAGE")) |p|
+        try cwd.readFileAllocOptions(io, p, a, .limited(1 << 26), .@"16", null)
     else
         &.{};
     try session.open(&driver, tcfg, image);
@@ -115,7 +115,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     runner.prof = if (try @import("profile.zig").Profile.fromEnv(gpa, &driver)) |p| p.timer() else null;
     defer if (runner.prof) |p| p.close(io);
     // TF_DSV41_DECODE_TP_TOPP (the reference's TF_DSV41_EXPERT_TOPP): unset = no top-p prune, else prune at that mass
-    const topp: ?f64 = if (std.c.getenv("TF_DSV41_DECODE_TP_TOPP")) |v| try std.fmt.parseFloat(f64, std.mem.span(v)) else null;
+    const topp: ?f64 = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_DECODE_TP_TOPP")) |v| try std.fmt.parseFloat(f64, v) else null;
     // R1 when the reference ran its knobs (ref.json's env)
     const r1 = blk: {
         const env = meta.object.get("env") orelse break :blk false;

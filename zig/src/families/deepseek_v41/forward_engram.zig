@@ -77,10 +77,10 @@ pub fn engramSource(f: *Forward, h: *const eh.Host) !?eh.Source {
     if (!f.engram_opened) {
         f.engram_opened = true;
         f.engram_prefetch = try @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_PREFETCH", f.engram_prefetch);
-        if (std.c.getenv("TF_DSV41_ENGRAM_DIR")) |dir| {
-            const cap: u32 = if (std.c.getenv("TF_DSV41_ENGRAM_CACHE")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 65536;
-            f.engram_rows = try er.Rows.open(f.gpa, std.mem.span(dir), f.comm.rank(), f.comm.world(), h.layer_ids, cap);
-            std.log.scoped(.dsv41).info("engram: rows from {s} (io_uring {s}, {d} records a layer cached)", .{ std.mem.span(dir), if (@hasField(er.Rows, "ring") and f.engram_rows.?.ring != null) "on" else "off", cap });
+        if (try @import("sys").environment.path("TF_DSV41_ENGRAM_DIR", @import("sys").environment.Process.get(.{}, "TF_DSV41_ENGRAM_DIR"))) |dir| {
+            const cap = try @import("env_validate.zig").engramCache(@import("sys").environment.rawText("TF_DSV41_ENGRAM_CACHE"));
+            f.engram_rows = try er.Rows.open(f.gpa, dir, f.comm.rank(), f.comm.world(), h.layer_ids, cap);
+            std.log.scoped(.dsv41).info("engram: rows from {s} (io_uring {s}, {d} records a layer cached)", .{ dir, if (@hasField(er.Rows, "ring") and f.engram_rows.?.ring != null) "on" else "off", cap });
         } else if (!quiet) std.log.scoped(.dsv41).warn("engram: TF_DSV41_ENGRAM_DIR unset: synthetic index rows (the forward gate's), not the model's table", .{});
         try (try hooks.gate()).open(f, h);
     }

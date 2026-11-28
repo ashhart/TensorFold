@@ -51,6 +51,12 @@ pub fn stallTimeoutNs() !u64 {
     return std.math.mul(u64, seconds, std.time.ns_per_s) catch return error.BadStallTimeout;
 }
 
+/// Engram's present blank cache count was invalid whenever its directory reader opened it; unset keeps 65536.
+pub fn engramCache(raw: ?[]const u8) !u32 {
+    if (raw != null and std.mem.trim(u8, raw.?, " \t\r\n").len == 0) return error.InvalidEnvironment;
+    return environment.value(u32, "TF_DSV41_ENGRAM_CACHE", raw, 65536);
+}
+
 /// Empty and spaces-only profiling rows stay no-ops; other whitespace-only text keeps the legacy parse refusal.
 pub fn profilingRows(raw: ?[]const u8) !?[]const u8 {
     if (raw) |text| {

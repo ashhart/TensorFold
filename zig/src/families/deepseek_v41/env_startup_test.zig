@@ -8,7 +8,7 @@ const model = @import("cuda_model.zig");
 const t = std.testing;
 
 fn preservesWhitespaceRefusal(name: []const u8) bool {
-    for ([_][]const u8{ "TF_DSV41_DRAFT_GRAPHS", "TF_DSV41_DRAFT_CHAIN", "TF_DSV41_DRAFT_OVERLAP", "TF_DSV41_DRAFT_CAPTURE", "TF_DSV41_DRAFT_BATCH_PROJ", "TF_DSV41_GRAPH_FLOOR", "TF_DSV41_PHASES", "TF_DSV41_SAMP_STATS", "TF_DSV41_SAMP_BATCH" }) |candidate|
+    for ([_][]const u8{ "TF_DSV41_DRAFT_GRAPHS", "TF_DSV41_DRAFT_CHAIN", "TF_DSV41_DRAFT_OVERLAP", "TF_DSV41_DRAFT_CAPTURE", "TF_DSV41_DRAFT_BATCH_PROJ", "TF_DSV41_GRAPH_FLOOR", "TF_DSV41_GRAPH_BUCKET", "TF_DSV41_GRAPH_ROWS_MAX", "TF_DSV41_PHASES", "TF_DSV41_SAMP_STATS", "TF_DSV41_SAMP_BATCH" }) |candidate|
         if (std.mem.eql(u8, name, candidate)) return true;
     return false;
 }
@@ -33,8 +33,12 @@ fn blank(r: sys.environment.Rule) !void {
         try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
         _ = try @import("aot_needs.zig").Served.fromEnv();
     } else if (r.blank_default) {
-        try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
-        if (!preservesWhitespaceRefusal(r.name)) _ = try @import("aot_needs.zig").Served.fromEnv();
+        if (r.empty_default_only) {
+            try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
+        } else {
+            try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
+        }
+        if (!preservesWhitespaceRefusal(r.name) and !r.empty_default_only) _ = try @import("aot_needs.zig").Served.fromEnv();
     } else {
         try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
         try t.expectError(error.InvalidEnvironment, @import("aot_needs.zig").Served.fromEnv());
@@ -47,9 +51,17 @@ fn whitespaceError(name: [:0]const u8, expected: anyerror, read: anytype) !void 
     try t.expectError(expected, read());
 }
 
+fn graphNumberError(name: [:0]const u8) !void {
+    for ([_][:0]const u8{ "", " ", " 64 " }) |raw| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, raw, 1));
+        defer _ = env.unsetenv(name);
+        try t.expectError(error.InvalidEnvironment, @import("graphs.zig").Settings.fromEnv());
+    }
+}
+
 test "DeepSeek strict env: every malformed setting stops the real loader before resources" {
     _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
-    for (rules) |r| if (r.scope == .dsv41) try refused(r);
+    for (rules) |r| if (r.scope == .dsv41 and sys.environment.rule(r.name).word_fallback == null) try refused(r);
 }
 
 test "DeepSeek strict env: each rule's permitted blank setting passes startup" {
@@ -65,11 +77,52 @@ test "DeepSeek strict env: migrated exact-string readers still reject whitespace
     try whitespaceError("TF_DSV41_DRAFT_CAPTURE", error.BadDraftCapture, @import("dspark_slots.zig").captureFromEnv);
     try whitespaceError("TF_DSV41_DRAFT_BATCH_PROJ", error.BadDraftBatchProj, @import("dspark_slots.zig").batchProjFromEnv);
     try whitespaceError("TF_DSV41_GRAPH_FLOOR", error.BadGraphFloor, @import("graphs.zig").Settings.fromEnv);
+    try graphNumberError("TF_DSV41_GRAPH_BUCKET");
+    try graphNumberError("TF_DSV41_GRAPH_ROWS_MAX");
     try whitespaceError("TF_DSV41_SAMP_STATS", error.BadSampStats, @import("sampling_dev.zig").Gpu.rowStats);
     try whitespaceError("TF_DSV41_SAMP_BATCH", error.BadSampBatch, @import("sampling_gpu.zig").GpuSampler.batchEnv);
     try t.expectEqual(@as(c_int, 0), env.setenv("TF_DSV41_PHASES", " ", 1));
     defer _ = env.unsetenv("TF_DSV41_PHASES");
     try t.expectError(error.BadPhasesMode, @import("phases.zig").Phases.fromEnv(t.allocator));
+}
+
+test "DeepSeek strict env: graph constraints stay at their existing settings reader" {
+    const name = "TF_DSV41_GRAPH_ROWS_MAX";
+    try t.expectEqual(@as(c_int, 0), env.setenv(name, "65", 1));
+    defer _ = env.unsetenv(name);
+    try v.startup();
+    try t.expectError(error.InvalidEnvironment, @import("graphs.zig").Settings.fromEnv());
+}
+
+test "DeepSeek strict env: lookup and session readers preserve exact-empty defaults" {
+    const lookup = @import("draft/lookup.zig");
+    for ([_][:0]const u8{ "TF_DSV41_LOOKUP_MIN", "TF_DSV41_MAX_ROWS" }) |name| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, "", 1));
+        defer _ = env.unsetenv(name);
+        const defaults = try lookup.Settings.fromEnv();
+        try t.expectEqual(@as(i64, 4), defaults.min_match);
+        try t.expectEqual(@as(i64, 16), defaults.max_rows);
+    }
+    for ([_][:0]const u8{ "TF_DSV41_LOOKUP_MIN", "TF_DSV41_MAX_ROWS" }) |name| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, " ", 1));
+        defer _ = env.unsetenv(name);
+        try t.expectError(error.InvalidEnvironment, lookup.Settings.fromEnv());
+    }
+    const sg = @import("sessions_gpu.zig");
+    for ([_][:0]const u8{ "TF_DSV41_SESSION_DISK_GIB", "TF_DSV41_SESSION_DISK_MIN", "TF_DSV41_SESSION_RAM_MIB" }) |name| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, "", 1));
+        defer _ = env.unsetenv(name);
+        const got = try sg.optionsFromEnv();
+        const defaults: sg.Options = .{};
+        try t.expectEqual(defaults.disk_budget, got.disk_budget);
+        try t.expectEqual(defaults.disk_min_tokens, got.disk_min_tokens);
+        try t.expectEqual(defaults.ram_bytes, got.ram_bytes);
+    }
+    for ([_][:0]const u8{ "TF_DSV41_SESSION_DISK_GIB", "TF_DSV41_SESSION_DISK_MIN", "TF_DSV41_SESSION_RAM_MIB" }) |name| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, " ", 1));
+        defer _ = env.unsetenv(name);
+        try t.expectError(error.InvalidEnvironment, sg.optionsFromEnv());
+    }
 }
 
 test "DeepSeek strict env: empty served-knob reads retain their local defaults" {

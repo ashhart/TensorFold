@@ -82,9 +82,9 @@ pub const Profile = struct {
     }
 
     pub fn fromEnv(gpa: std.mem.Allocator, d: *const cuda.Driver) !?*Profile {
-        const p = std.c.getenv("TF_DSV41_PROFILE") orelse return null;
+        const p = @import("sys").environment.Process.get(.{}, "TF_DSV41_PROFILE") orelse return null;
         const x = try gpa.create(Profile);
-        x.* = .{ .gpa = gpa, .d = d, .path = std.mem.span(p) };
+        x.* = .{ .gpa = gpa, .d = d, .path = p };
         return x;
     }
 

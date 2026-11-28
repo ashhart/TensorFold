@@ -37,15 +37,8 @@ pub const Cache = struct {
 
     /// The cache TF_DSV41_PREPARED names, or null when unset.
     pub fn fromEnv(gpa: Allocator, io: Io, p: *const pack_mod.Pack, key: Key) !?Cache {
-        const dir = std.mem.span(std.c.getenv("TF_DSV41_PREPARED") orelse return null);
-        if (std.mem.trim(u8, dir, " ").len == 0) return null;
-        const flag = struct {
-            fn on(name: [*:0]const u8) bool {
-                const v = std.c.getenv(name) orelse return false;
-                return std.mem.eql(u8, std.mem.span(v), "1");
-            }
-        }.on;
-        return try open(gpa, io, dir, try packDigest(io, p), key, flag("TF_DSV41_PREPARED_WRITE"), flag("TF_DSV41_PREPARED_VERIFY"));
+        const dir = (try @import("sys").environment.path("TF_DSV41_PREPARED", @import("sys").environment.Process.get(.{}, "TF_DSV41_PREPARED"))) orelse return null;
+        return try open(gpa, io, dir, try packDigest(io, p), key, try @import("sys").environment.read(bool, "TF_DSV41_PREPARED_WRITE", false), try @import("sys").environment.read(bool, "TF_DSV41_PREPARED_VERIFY", false));
     }
 
     pub fn open(gpa: Allocator, io: Io, dir: []const u8, pack_digest: [32]u8, key: Key, write: bool, verify: bool) !Cache {

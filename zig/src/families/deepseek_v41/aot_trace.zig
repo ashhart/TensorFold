@@ -5,7 +5,7 @@ const aot = cuda.aot;
 
 /// The trace file TF_DSV41_AOT_TRACE names, or null when unset or empty.
 pub fn pathFromEnv() ?[]const u8 {
-    const p = std.mem.span(std.c.getenv("TF_DSV41_AOT_TRACE") orelse return null);
+    const p = @import("sys").environment.Process.get(.{}, "TF_DSV41_AOT_TRACE") orelse return null;
     return if (p.len == 0) null else p;
 }
 

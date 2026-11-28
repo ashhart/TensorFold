@@ -1,10 +1,11 @@
 //! Named environment validation before model, driver and transport work; successful values keep their old semantics.
 const std = @import("std");
 const sys = @import("sys.zig");
+const words = @import("environment_words.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names, word_set, pair };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
 pub const alias_retire = "1.4.0";
 pub const Rule = struct {
@@ -16,6 +17,8 @@ pub const Rule = struct {
     trim: []const u8 = "",
     first_digit: bool = false,
     blank_default: bool = true,
+    /// True where only exact empty defaults; other whitespace-only text is malformed.
+    empty_default_only: bool = false,
     /// A whole number's own bounds inside its kind's; a real kind applies `max` too when it is set.
     min: u64 = 0,
     max: u64 = std.math.maxInt(u64),
@@ -36,6 +39,16 @@ pub const Rule = struct {
     flag: ?[]const u8 = null,
     /// The release from which the server refuses this alias, naming `flag`.
     retire: ?[]const u8 = null,
+    yes_word: bool = true,
+    fold: bool = false,
+    word_values: []const u64 = &.{},
+    word_fallback: ?u64 = null,
+    split: []const u8 = ", ",
+    items: usize = 0,
+    set_switch: bool = false,
+    pair_default: u32 = 8,
+    zero_ok: bool = false,
+    step: u64 = 1,
 
     pub fn matches(r: Rule, scope: Scope) bool {
         return r.scope == scope or r.also == scope;
@@ -148,23 +161,12 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_INKLING2_DRAFT_HEAD_Q4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 quantizes Inkling 2 Mini's draft head to 4-bit affine groups of 64 at load when memory allows; target verification keeps BF16; default 0)" },
     .{ .name = "TF_QWEN35_CHUNK", .scope = .metal, .kind = .size, .min = 1, .forms = "whole prompt rows a prefill pass, 1 to the served context window (default 128)" },
     .{ .name = "TF_DSV41_SMALL", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 reads a DeepSeek-V4.1 Metal checkpoint's config at its own small shapes)" },
-    .{ .name = "TF_DSV41_ASSETS", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's Engram token map" },
-    .{ .name = "TF_DSV41_ENGRAM_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's packed Engram tables" },
+    .{ .name = "TF_DSV41_ASSETS", .scope = .dsv41, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's Engram token map" },
+    .{ .name = "TF_DSV41_ENGRAM_DIR", .scope = .dsv41, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's packed Engram tables" },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .scope = .metal, .kind = .word, .words = &.{ "sample", "full" }, .forms = "sample or full (full also checks every byte of the Engram tables at boot)" },
-    .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 4194304)" },
+    .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .dsv41, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 4194304)" },
     .{ .name = "TF_DSV41_MARKOV_GPU", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 draws DSpark drafts on the host from each row's 64 best logits; default 1)" },
     .{ .name = "TF_DSV41_DSPARK_BLOCK", .scope = .metal, .kind = .u32, .forms = "a whole DSpark block of 1 to 15 drafts, 0 for the checkpoint's (default 7)" },
-    .{ .name = "TF_DSV41_CALIB", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "cached", "default", "real", "measure", "zig" }, .forms = "cached, default, real, measure or zig, in any case (unset or blank: default on Metal)" },
-    .{ .name = "TF_DSV41_CALIB_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding stored cost tables" },
-    .{ .name = "TF_DSV41_CALIB_FILE", .scope = .metal, .kind = .path, .forms = "a path without control characters to one stored cost table" },
-    .{ .name = "TF_DSV41_CALIB_SHAPE", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "raw", "fit" }, .forms = "raw or fit, in any case (naming it times every row 1 to 16)" },
-    .{ .name = "TF_DSV41_CALIB_STAT", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "median", "min" }, .forms = "median or min, in any case" },
-    .{ .name = "TF_DSV41_CALIB_REPS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 50, .forms = "a whole number of timed runs from 1 to 50" },
-    .{ .name = "TF_DSV41_CALIB_WARM", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 20, .forms = "a whole number of untimed runs from 0 to 20" },
-    .{ .name = "TF_DSV41_CALIB_RECHECK", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
-    .{ .name = "TF_DSV41_CALIB_CYCLE", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
-    .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 50, .forms = "a whole number of timed runs from 1 to 50" },
-    .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 600000, .forms = "whole milliseconds from 0 to 600000 (0: no limit)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "XPU_TP", .scope = .xpu, .kind = .u32, .only = &.{ 1, 2, 4 }, .forms = "1, 2 or 4" },
     .{ .name = "XPU_DUMP_H", .scope = .xpu, .kind = .path, .forms = "a file path without control characters" },
@@ -351,10 +353,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
-};
-
+} ++ @import("environment_deepseek.zig").rules(Rule);
 pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
-
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
@@ -364,28 +364,37 @@ pub fn retired(name: []const u8, version: []const u8) ?Rule {
     };
     return null;
 }
-
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
     @panic("unregistered strict environment parser");
 }
-
 /// A compile error unless `name` has a row, so a strict read can never reach `rule`'s panic at run time.
 pub fn registered(comptime name: []const u8) void {
     @setEvalBranchQuota(20 * rules.len * 64);
     for (rules) |r| if (std.mem.eql(u8, r.name, name)) return;
     @compileError(name ++ " has no row in platform/environment.zig");
 }
-
 /// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
-    if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return if (r.blank_default) null else error.InvalidEnvironment;
-    const text = std.mem.trim(u8, raw.?, r.trim);
+    const raw_text = raw orelse return null;
+    if (std.mem.trim(u8, raw_text, " \t\r\n").len == 0) {
+        if (!r.blank_default or (r.empty_default_only and raw_text.len != 0)) return error.InvalidEnvironment;
+        return null;
+    }
+    const text = std.mem.trim(u8, raw_text, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
     if (r.kind == .word) {
-        for (r.words, 0..) |v, i| if (if (r.ignore_case) std.ascii.eqlIgnoreCase(text, v) else std.mem.eql(u8, text, v)) return i;
-        return error.InvalidEnvironment;
+        for (r.words, 0..) |v, i| if (words.equal(r, text, v)) return if (r.word_values.len == 0) i else r.word_values[i];
+        return r.word_fallback orelse error.InvalidEnvironment;
+    }
+    if (r.kind == .word_set) return try words.wordSet(r, text);
+    if (r.kind == .pair) {
+        var it = std.mem.tokenizeScalar(u8, text, ',');
+        const id = std.fmt.parseInt(u32, std.mem.trim(u8, it.next() orelse "", " "), 10) catch return error.InvalidEnvironment;
+        const g = if (it.next()) |v| std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch return error.InvalidEnvironment else r.pair_default;
+        if (it.next() != null or id > r.max or g < 1 or g > 1024) return error.InvalidEnvironment;
+        return @as(u64, id) << 32 | g;
     }
     // "auto" travels as 0: the caller reads it back through `parallel`, never the raw number
     if (r.kind == .parallel) {
@@ -422,7 +431,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         .segments => 4,
         else => std.math.maxInt(u64),
     };
-    if (n > max or n < r.min or n > r.max) return error.InvalidEnvironment;
+    if (n > max or (n < r.min and !(r.zero_ok and n == 0)) or n > r.max or n % r.step != 0) return error.InvalidEnvironment;
     if (r.only.len > 0 and std.mem.indexOfScalar(u64, r.only, n) == null) return error.InvalidEnvironment;
     if (n % r.multiple != 0) return error.InvalidEnvironment;
     if ((r.kind == .positive or r.kind == .segments or r.kind == .mib) and n == 0) return error.InvalidEnvironment;
@@ -431,7 +440,6 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
     return n;
 }
-
 /// A comma-separated list's nonblank entries, from one to the row's `max`, without control characters: their count.
 fn nameCount(r: Rule, text: []const u8) Error!u64 {
     for (text) |ch| if (ch < 0x20 or ch == 0x7f) return error.InvalidEnvironment;
@@ -440,15 +448,14 @@ fn nameCount(r: Rule, text: []const u8) Error!u64 {
     while (it.next()) |w| n += @intFromBool(std.mem.trim(u8, w, " ").len != 0);
     return if (n == 0 or n > r.max) error.InvalidEnvironment else n;
 }
-
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
 fn toggle(r: Rule, text: []const u8) ?u64 {
+    if (!r.yes_word and std.ascii.eqlIgnoreCase(text, "yes")) return null;
     if (!r.no_word and std.ascii.eqlIgnoreCase(text, "no")) return null;
     for ([_][]const u8{ "0", "false", "off", "no", "1", "true", "on", "yes" }, 0..) |v, i|
         if (std.ascii.eqlIgnoreCase(text, v)) return i / 4;
     return null;
 }
-
 /// Finite only; `.real` is at least 0, `.positive_real` above 0, and a set `max` caps either.
 fn real(r: Rule, text: []const u8) Error!f64 {
     const x = std.fmt.parseFloat(f64, text) catch return error.InvalidEnvironment;
@@ -458,21 +465,19 @@ fn real(r: Rule, text: []const u8) Error!f64 {
         else => true,
     };
     if (!std.math.isFinite(x) or !low) return error.InvalidEnvironment;
+    if (r.min != 0 and x < @as(f64, @floatFromInt(r.min))) return error.InvalidEnvironment;
     if (r.max != std.math.maxInt(u64) and x > @as(f64, @floatFromInt(r.max))) return error.InvalidEnvironment;
     return x;
 }
-
 /// A `.path` setting's text is never shown: a key pasted into it by mistake would reach the log.
 pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]const u8 {
     if (rule(name).kind == .path) return std.fmt.allocPrint(a, "{s}: expected {s}", .{ name, rule(name).forms });
     return std.fmt.allocPrint(a, "{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw), rule(name).forms });
 }
-
 /// A registered setting's raw text, for readers that parse it against runtime bounds the table cannot name.
 pub fn rawText(name: [:0]const u8) ?[]const u8 {
     return sys.getenv(name);
 }
-
 /// A direct family/tool entry point gets the same refusal even when it has no server problem buffer.
 fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
     return parse(name, raw) catch {
@@ -480,21 +485,17 @@ fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
         return error.InvalidEnvironment;
     };
 }
-
 pub fn check(name: [:0]const u8, raw: ?[]const u8) Error!void {
     _ = try checked(name, raw);
 }
-
 /// One setting in its reader's type: a switch as bool, a real as a float, any other kind as its whole number.
 pub fn value(comptime T: type, name: [:0]const u8, raw: ?[]const u8, default: T) Error!T {
-    std.debug.assert(isReal(rule(name).kind) == (@typeInfo(Plain(T)) == .float) and rule(name).kind != .range and rule(name).kind != .path);
+    std.debug.assert(isReal(rule(name).kind) == (@typeInfo(Plain(T)) == .float) and rule(name).kind != .range and rule(name).kind != .path and rule(name).kind != .pair);
     return decode(T, (try checked(name, raw)) orelse return default);
 }
-
 fn Plain(comptime T: type) type {
     return if (@typeInfo(T) == .optional) @typeInfo(T).optional.child else T;
 }
-
 fn decode(comptime T: type, n: u64) T {
     return switch (@typeInfo(T)) {
         .optional => |o| decode(o.child, n),
@@ -503,24 +504,24 @@ fn decode(comptime T: type, n: u64) T {
         else => @intCast(n),
     };
 }
-
 pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {
     return value(T, name, sys.getenv(name), default);
 }
-
 /// A `.range` setting's lo and hi, or null when unset or blank.
 pub fn range(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
     const n = (try checked(name, raw)) orelse return null;
     return .{ @intCast(n >> 32), @truncate(n) };
 }
-
+pub fn pair(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
+    std.debug.assert(rule(name).kind == .pair);
+    return range(name, raw);
+}
 /// A `.path` setting's text, or null when unset or blank; nothing is logged, so the caller words the refusal.
 pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
     std.debug.assert(rule(name).kind == .path);
     _ = (try parse(name, raw)) orelse return null;
     return std.mem.trim(u8, raw.?, rule(name).trim);
 }
-
 /// A `.names` setting's text from the process, or null when unset or blank; a malformed list is logged and refused.
 pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
     std.debug.assert(rule(name).kind == .names);
@@ -528,24 +529,20 @@ pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
     _ = (try checked(name, raw)) orelse return null;
     return raw;
 }
-
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.
 pub fn checkScope(scope: Scope, environment: anytype) Error!void {
     for (rules) |r| if (r.matches(scope) and !masked(r, environment)) {
         _ = try checked(r.name, environment.get(r.name));
     };
 }
-
 fn masked(r: Rule, environment: anytype) bool {
     return if (r.alias_of) |canonical| environment.get(canonical) != null else false;
 }
-
 /// Every CUDA entry point shares flag precedence, accepted text and diagnostics.
 pub fn device(flag: ?u32, raw: ?[]const u8) Error!u32 {
     if (flag) |n| return n;
     return @intCast((try checked("TF_CUDA_DEVICE", raw)) orelse 0);
 }
-
 /// TENSORFOLD_PARALLEL's text: the flag wins, else the trimmed setting, else null; bad values are refused by name.
 pub fn parallel(flag: ?[]const u8, raw: ?[]const u8) Error!?[]const u8 {
     if (flag) |f| return f;
@@ -574,13 +571,14 @@ pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]con
 }
 
 pub const Process = struct {
-    pub fn get(_: Process, name: [:0]const u8) ?[]const u8 {
+    pub fn get(_: Process, name: [:0]const u8) ?[:0]const u8 {
         return sys.getenv(name);
     }
 };
 
 test {
     _ = @import("environment_test.zig");
+    _ = @import("environment_deepseek_test.zig");
     _ = @import("environment_flashnext_test.zig");
     _ = @import("environment_kv_test.zig");
     _ = @import("environment_kolibri_test.zig");

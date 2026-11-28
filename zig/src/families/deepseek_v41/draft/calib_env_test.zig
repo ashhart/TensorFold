@@ -92,7 +92,7 @@ test "no entry for this engine: the defaults; more slots fit; a named file wins;
     var served = try calib_env.load(gpa, io, .{ .mode = "real", .dir = root }, want, 16);
     defer served.deinit(gpa);
     try std.testing.expectEqualStrings("calib-p.json", std.fs.path.basename(served.path.?));
-    try std.testing.expectError(error.CalibMode, calib_env.load(gpa, io, .{ .mode = "measured" }, want, 16));
+    try std.testing.expectError(error.InvalidEnvironment, calib_env.load(gpa, io, .{ .mode = "measured" }, want, 16));
 }
 
 test "code acceptance is default off and rejects invalid flags" {
@@ -101,7 +101,7 @@ test "code acceptance is default off and rejects invalid flags" {
     Env.pairs = &.{.{ "TF_DSV41_CODE_ACCEPT", "on" }};
     try std.testing.expect((try calib_env.depthSettings(&Env.get)).code_accept);
     Env.pairs = &.{.{ "TF_DSV41_CODE_ACCEPT", "maybe" }};
-    try std.testing.expectError(error.CodeAccept, calib_env.depthSettings(&Env.get));
+    try std.testing.expectError(error.InvalidEnvironment, calib_env.depthSettings(&Env.get));
     Env.pairs = &.{};
 }
 
@@ -121,9 +121,23 @@ test "the depth's knobs read as Python's" {
     const s = try calib_env.depthSettings(&Env.get);
     try std.testing.expect(s.mode == .static and s.cap == 3 and !s.skip and s.joint == 2 and s.fair == 1.5 and s.max_rows == 32);
     Env.pairs = &.{.{ "TF_DSV41_DRAFT_DEPTH", "16" }};
-    try std.testing.expectError(error.DraftDepth, calib_env.depthSettings(&Env.get));
+    try std.testing.expectError(error.InvalidEnvironment, calib_env.depthSettings(&Env.get));
     Env.pairs = &.{.{ "TF_DSV41_DEPTH_JOINT", "3" }};
-    try std.testing.expectError(error.DepthJoint, calib_env.depthSettings(&Env.get));
+    try std.testing.expectError(error.InvalidEnvironment, calib_env.depthSettings(&Env.get));
+}
+
+test "draft graph knobs retain blank defaults, trimming and row clamps" {
+    Env.pairs = &.{ .{ "TF_DSV41_CODE_ACCEPT", "on" }, .{ "TF_DSV41_GRAPH_BUCKET", " 1024 " }, .{ "TF_DSV41_GRAPH_ROWS_MAX", "0" } };
+    const low = try calib_env.depthSettings(&Env.get);
+    try std.testing.expectEqual(@as(u64, 1024), low.context_bucket);
+    try std.testing.expectEqual(@as(u64, 1), low.max_rows);
+    Env.pairs = &.{.{ "TF_DSV41_GRAPH_ROWS_MAX", "128" }};
+    try std.testing.expectEqual(@as(u64, 64), (try calib_env.depthSettings(&Env.get)).max_rows);
+    Env.pairs = &.{ .{ "TF_DSV41_CODE_ACCEPT", "on" }, .{ "TF_DSV41_GRAPH_BUCKET", " " }, .{ "TF_DSV41_GRAPH_ROWS_MAX", "\t" } };
+    const blank = try calib_env.depthSettings(&Env.get);
+    try std.testing.expectEqual(@as(u64, 2048), blank.context_bucket);
+    try std.testing.expectEqual(@as(u64, 64), blank.max_rows);
+    Env.pairs = &.{};
 }
 
 test "a block past 5 raises the cost depth's default cap to it; a set depth or the static mode keep theirs" {

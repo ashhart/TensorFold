@@ -35,7 +35,11 @@ pub fn steps(b: *std.Build) void {
             const sampler = b.addExecutable(.{ .name = "tf-dsv41-samp", .root_module = @import("dsv41_cuda.zig").module(b, target, "sampling_check.zig", true) });
             _ = sampler.getEmittedBin();
             b.step("compile-dsv41-sampler", "Emit the actual Linux sampler check, never execute").dependOn(&sampler.step);
-        } else b.step("test-dsv41-device-host", "Host checks of actual row and device plans, no device work").dependOn(&b.addRunArtifact(tests).step);
+        } else {
+            b.step("test-dsv41-device-host", "Host checks of actual row and device plans, no device work").dependOn(&b.addRunArtifact(tests).step);
+            const startup = b.addTest(.{ .root_module = root, .filters = &.{"DeepSeek strict env:"} });
+            b.step("test-dsv41-startup-env-host", "Actual DeepSeek startup environment checks before resources").dependOn(&b.addRunArtifact(startup).step);
+        }
     }
     inline for (.{ false, true }) |cross| {
         const target = if (cross) b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }) else b.graph.host;

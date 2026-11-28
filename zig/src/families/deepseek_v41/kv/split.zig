@@ -407,22 +407,13 @@ pub const Compact = enum { off, on, force };
 
 pub const compact_env = "TF_DSV41_KV_SPLIT_COMPACT";
 
-pub fn parseCompact(text: []const u8) error{BadCompactMode}!Compact {
-    const v = std.mem.trim(u8, text, " \t");
-    const eq = std.ascii.eqlIgnoreCase;
-    if (v.len == 0 or eq(v, "0") or eq(v, "off") or eq(v, "no") or eq(v, "false")) return .off;
-    if (eq(v, "1") or eq(v, "on") or eq(v, "yes") or eq(v, "true")) return .on;
-    if (eq(v, "force")) return .force;
-    return error.BadCompactMode;
+pub fn parseCompact(text: []const u8) error{InvalidEnvironment}!Compact {
+    return @fromBackingInt(@intCast(try @import("sys").environment.value(u8, compact_env, text, 0)));
 }
 
 /// The knob from the environment (unset: off).
-pub fn compactMode() error{BadCompactMode}!Compact {
-    const raw = std.mem.span(std.c.getenv(compact_env) orelse return .off);
-    return parseCompact(raw) catch |e| {
-        std.log.err("[tensorfold] {s}={s}: 0 / 1 / force", .{ compact_env, raw });
-        return e;
-    };
+pub fn compactMode() error{InvalidEnvironment}!Compact {
+    return parseCompact(@import("sys").environment.Process.get(.{}, compact_env) orelse "");
 }
 
 /// The exchange itself: kernels to fill the send buffer, the communicator's all-gather to fill the receive buffer.

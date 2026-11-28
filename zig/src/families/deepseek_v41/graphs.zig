@@ -17,6 +17,14 @@ fn invalidLegacyBlank(raw: ?[]const u8) bool {
     return raw != null and raw.?.len != 0 and std.mem.trim(u8, raw.?, " \t\r\n").len == 0;
 }
 
+/// Graph capture keeps its strict unset-only default while draft pricing trims the same settings.
+fn canonicalNumber(name: [:0]const u8) !void {
+    const raw = @import("sys").environment.rawText(name) orelse return;
+    if (raw.len != 0 and std.mem.eql(u8, raw, std.mem.trim(u8, raw, " \t\r\n"))) return;
+    if (!@import("builtin").is_test) std.log.err("{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw), @import("sys").environment.rule(name).forms });
+    return error.InvalidEnvironment;
+}
+
 pub const Settings = struct {
     on: bool = false,
     max: u32 = 48,
@@ -44,9 +52,16 @@ pub const Settings = struct {
         var s: Settings = .{ .on = on_default };
         s.on = try @import("sys").environment.read(bool, "TF_DSV41_GRAPHS", on_default);
         s.max = try @import("sys").environment.read(u32, "TF_DSV41_GRAPHS_MAX", 48);
+        try canonicalNumber("TF_DSV41_GRAPH_BUCKET");
         s.bucket = try @import("sys").environment.read(u32, "TF_DSV41_GRAPH_BUCKET", 2048);
         s.grow = try @import("sys").environment.read(f64, "TF_DSV41_GRAPH_BUCKET_GROW", 1.25);
-        s.rows_max = try @import("sys").environment.read(u32, "TF_DSV41_GRAPH_ROWS_MAX", 64);
+        try canonicalNumber("TF_DSV41_GRAPH_ROWS_MAX");
+        const rows = try @import("sys").environment.read(u64, "TF_DSV41_GRAPH_ROWS_MAX", 64);
+        if (rows == 0 or rows > 64) {
+            if (!@import("builtin").is_test) std.log.err("TF_DSV41_GRAPH_ROWS_MAX={d}: graph capture requires 1..64", .{rows});
+            return error.InvalidEnvironment;
+        }
+        s.rows_max = @intCast(rows);
         s.room = try Room.fromEnv();
         if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_GRAPH_FLOOR"))) return error.BadGraphFloor;
         s.floor_hold = @import("sys").environment.read(bool, "TF_DSV41_GRAPH_FLOOR", false) catch return error.BadGraphFloor;

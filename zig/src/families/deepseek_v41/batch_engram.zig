@@ -80,7 +80,7 @@ pub fn stageEngram(b: *Batch, mix: []const rowtab.Seg, ids: []const u32, R: u32)
     const h = f.engram orelse return;
     if (b.stages.items.len == 0) return;
     // the table opens on the forward's first Engram window (a prompt always comes first); never index rows instead
-    if (std.c.getenv("TF_DSV41_ENGRAM_DIR") != null and f.engram_rows == null) return error.EngramNotOpen;
+    if (@import("sys").environment.Process.get(.{}, "TF_DSV41_ENGRAM_DIR") != null and f.engram_rows == null) return error.EngramNotOpen;
     const src: ?eh.Source = try f.engramSource(h); // the gate's locked table while it lives
     const n = rowtab.totalRows(mix);
     const dim: usize = f.cfg.engram_head_dim;

@@ -181,3 +181,40 @@ test "the calibration prompt: ids past the vocabulary dropped, at most 256, fall
     try std.testing.expectEqual(@as(usize, 20), cm.cutOf(20, 2)); // 20 > 14 + 8 fails: the whole prompt
     try std.testing.expect(std.mem.endsWith(u8, cm.text, "and the") and std.mem.startsWith(u8, cm.text, "The committee"));
 }
+
+test "calibration validation keeps backend defaults, named shapes and the launch budget" {
+    const Local = struct {
+        var shape: ?[]const u8 = null;
+        var stat: ?[]const u8 = null;
+        var budget: ?[]const u8 = null;
+        fn get(name: [*:0]const u8) ?[]const u8 {
+            const n = std.mem.span(name);
+            if (std.mem.eql(u8, n, "TF_DSV41_CALIB_SHAPE")) return shape;
+            if (std.mem.eql(u8, n, "TF_DSV41_CALIB_STAT")) return stat;
+            if (std.mem.eql(u8, n, "TF_DSV41_CALIB_BUDGET_MS")) return budget;
+            return null;
+        }
+    };
+    defer {
+        Local.shape = null;
+        Local.stat = null;
+        Local.budget = null;
+    }
+    try std.testing.expectEqualDeep(cm.launch_bound, try cm.methodFrom(&Local.get, cm.launch_bound));
+    Local.shape = " \t\r\n";
+    try std.testing.expectEqualDeep(cm.launch_bound, try cm.methodFrom(&Local.get, cm.launch_bound));
+    Local.shape = " RAW ";
+    try std.testing.expectEqualDeep(cm.Method{}, try cm.methodFrom(&Local.get, cm.launch_bound));
+    Local.shape = "FIT";
+    const fitted = try cm.methodFrom(&Local.get, cm.launch_bound);
+    try std.testing.expect(fitted.shape == .fit and fitted.warm == 2 and fitted.stat == .median);
+    try std.testing.expect(fitted.recheck == 2 and fitted.cycle == 0 and fitted.deep == 3);
+    try std.testing.expect(!fitted.sparse and fitted.budget_ms == 0 and fitted.reps == 5);
+    Local.shape = null;
+    Local.stat = " Median ";
+    Local.budget = " 600000 ";
+    const named = try cm.methodFrom(&Local.get, cm.launch_bound);
+    try std.testing.expect(named.stat == .median and named.budget_ms == 600000 and named.reps == 3 and named.sparse);
+    Local.budget = "600001";
+    try std.testing.expectError(error.InvalidEnvironment, cm.methodFrom(&Local.get, cm.launch_bound));
+}

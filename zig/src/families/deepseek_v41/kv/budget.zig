@@ -137,7 +137,7 @@ pub const Serve = struct {
     /// The rank's terms overridden by TF_DSV41_BOOT_GROWTH_GIB / TF_DSV41_SERVE_DIP_GIB (null or blank: measured).
     pub fn withOverrides(rank: u32, growth: ?[]const u8, dip: ?[]const u8) !Serve {
         const m = measured(rank);
-        return .{ .growth = try gibEnv(growth, m.growth), .dip = try gibEnv(dip, m.dip) };
+        return .{ .growth = try @import("sys").environment.value(f64, growth_env, growth, m.growth), .dip = try @import("sys").environment.value(f64, dip_env, dip, m.dip) };
     }
 
     pub fn fromEnv(rank: u32) !Serve {
@@ -150,7 +150,7 @@ pub const zig_dip_gib: f64 = 3.0;
 
 /// Zig's terms before the pool: TF_DSV41_BOOT_GROWTH_GIB (unset 0: measured at boot's end), TF_DSV41_SERVE_DIP_GIB.
 pub fn zigFromEnv() !Serve {
-    return .{ .growth = try gibEnv(env(growth_env), 0), .dip = try gibEnv(env(dip_env), zig_dip_gib) };
+    return .{ .growth = try @import("sys").environment.read(f64, growth_env, 0), .dip = try @import("sys").environment.read(f64, dip_env, zig_dip_gib) };
 }
 
 /// The measured check at the end of boot (GiB): whether the worst point keeps the floor, and what the boot took.
@@ -176,7 +176,7 @@ pub fn afterBoot(at_check: f64, pool_gib: f64, idle: f64, reserve: f64, dip: f64
 pub const reserve_env = "TF_DSV41_POST_BOOT_GIB";
 
 pub fn reserveFromEnv() !f64 {
-    return gibEnv(env(reserve_env), 0);
+    return @import("sys").environment.read(f64, reserve_env, 0);
 }
 
 pub const growth_env = "TF_DSV41_BOOT_GROWTH_GIB";
@@ -184,31 +184,14 @@ pub const dip_env = "TF_DSV41_SERVE_DIP_GIB";
 pub const measured_env = "TF_DSV41_BOOT_MEASURED";
 
 fn env(name: [*:0]const u8) ?[]const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
-}
-
-/// A GiB knob: blank is the default, a negative figure an error.
-fn gibEnv(raw: ?[]const u8, default: f64) !f64 {
-    const s = std.mem.trim(u8, raw orelse "", " \t\r\n");
-    if (s.len == 0) return default;
-    const v = std.fmt.parseFloat(f64, s) catch return error.BadGiBEnv;
-    if (v < 0) return error.BadGiBEnv;
-    return v;
+    return if (@import("sys").environment.Process.get(.{}, std.mem.span(name))) |v| v else null;
 }
 
 /// TF_DSV41_BOOT_MEASURED: 0 / off / no / false, 1 / on / yes / true, anything else auto.
 pub const Mode = enum { auto, on, off };
 
 pub fn parseMode(raw: ?[]const u8) Mode {
-    var buf: [8]u8 = undefined;
-    const s = std.mem.trim(u8, raw orelse "", " \t\r\n");
-    if (s.len > buf.len) return .auto;
-    const l = std.ascii.lowerString(&buf, s);
-    const offs = [_][]const u8{ "0", "off", "no", "false" };
-    const ons = [_][]const u8{ "1", "on", "yes", "true" };
-    for (offs) |o| if (std.mem.eql(u8, l, o)) return .off;
-    for (ons) |o| if (std.mem.eql(u8, l, o)) return .on;
-    return .auto;
+    return @fromBackingInt(@intCast((@import("sys").environment.value(u8, measured_env, raw, 0)) catch unreachable));
 }
 
 pub fn modeFromEnv() Mode {
@@ -461,9 +444,9 @@ test "the measured check's knobs: growth / dip overrides, TF_DSV41_BOOT_MEASURED
     // worst = 12.9 - 2.0 - 1.7 - 3.0 (rank 1, 1060 bytes a token, hard 4)
     try std.testing.expectApproxEqAbs(@as(f64, 12.9 - 2.0 - 1.7 - 3.0), worstAt(12.9, 2.0, t), 1e-12);
     try std.testing.expectEqual(Serve{ .growth = 2.5, .dip = 4.9 }, try Serve.withOverrides(0, " 2.5 ", ""));
-    try std.testing.expectEqual(Serve.measured(7), try Serve.withOverrides(7, null, null)); // any rank past 0: the worker's
-    try std.testing.expectError(error.BadGiBEnv, Serve.withOverrides(1, "-1", null));
-    try std.testing.expectError(error.BadGiBEnv, Serve.withOverrides(1, null, "lots"));
+    try std.testing.expectEqual(Serve.measured(7), try Serve.withOverrides(7, null, null));
+    try std.testing.expectError(error.InvalidEnvironment, Serve.withOverrides(1, "-1", null));
+    try std.testing.expectError(error.InvalidEnvironment, Serve.withOverrides(1, null, "lots"));
     // when it applies: forced, integrated, or device memory within 15 % of the host's
     try std.testing.expectEqual(Mode.off, parseMode(" OFF"));
     try std.testing.expectEqual(Mode.on, parseMode("True"));

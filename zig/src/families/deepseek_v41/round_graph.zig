@@ -7,26 +7,17 @@ pub const Settings = @import("forward_types.zig").RoundGraph;
 pub const Get = *const fn ([:0]const u8) ?[]const u8;
 
 pub fn env(name: [:0]const u8) ?[]const u8 {
-    const v = std.mem.trim(u8, std.mem.span(std.c.getenv(name) orelse return null), " \t");
+    const v = std.mem.trim(u8, @import("sys").environment.Process.get(.{}, name) orelse return null, " \t");
     return if (v.len == 0) null else v;
 }
 
 /// TF_DSV41_ROUND_GRAPH = 0 | 1 | words from {split, gate} (comma separated); TF_DSV41_ROUND_GRAPH_HEAD = layers >= 1.
 pub fn settings(get: Get) !Settings {
     var s: Settings = .{};
-    if (get("TF_DSV41_ROUND_GRAPH")) |raw| {
-        if (std.mem.eql(u8, raw, "1")) {
-            s.split = true;
-            s.gate = true;
-        } else if (!std.mem.eql(u8, raw, "0")) {
-            var it = std.mem.tokenizeAny(u8, raw, ", ");
-            while (it.next()) |w| {
-                if (std.mem.eql(u8, w, "split")) s.split = true else if (std.mem.eql(u8, w, "gate")) s.gate = true else return error.BadRoundGraph;
-            }
-        }
-    }
-    if (get("TF_DSV41_ROUND_GRAPH_HEAD")) |v| s.head = std.fmt.parseInt(u32, v, 10) catch return error.BadRoundGraph;
-    if (s.head == 0) return error.BadRoundGraph;
+    const bits = try @import("sys").environment.value(u64, "TF_DSV41_ROUND_GRAPH", get("TF_DSV41_ROUND_GRAPH"), 0);
+    s.split = bits & 1 != 0;
+    s.gate = bits & 2 != 0;
+    s.head = try @import("sys").environment.value(u32, "TF_DSV41_ROUND_GRAPH_HEAD", get("TF_DSV41_ROUND_GRAPH_HEAD"), s.head);
     return s;
 }
 
@@ -84,10 +75,10 @@ test "the knob's words" {
     T.h = null;
     try std.testing.expectEqual(Settings{}, try settings(T.get));
     T.v = "chain";
-    try std.testing.expectError(error.BadRoundGraph, settings(T.get));
+    try std.testing.expectError(error.InvalidEnvironment, settings(T.get));
     T.v = "1";
     T.h = "0";
-    try std.testing.expectError(error.BadRoundGraph, settings(T.get));
+    try std.testing.expectError(error.InvalidEnvironment, settings(T.get));
 }
 
 test "the split: the head's layers, never inside an open side or deferred fork" {
