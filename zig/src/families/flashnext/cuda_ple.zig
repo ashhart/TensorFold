@@ -593,13 +593,7 @@ test {
     _ = @import("exl3/model/cuda_exl3_ple.zig");
     _ = @import("cuda_ple_pool.zig");
     _ = @import("cuda_ple_pool_gather_test.zig");
-}
-
-test {
     _ = @import("cuda_ple_gather.zig");
-}
-
-test {
     _ = ple_reader;
     _ = ple_fp8;
     _ = @import("cuda_ple_ahead.zig");

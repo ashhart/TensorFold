@@ -46,7 +46,7 @@ pub fn isReal(kind: Kind) bool {
     return kind == .real or kind == .positive_real or kind == .signed_real;
 }
 
-const stock_rules = [_]Rule{
+const stock_prefix_rules = [_]Rule{
     .{ .name = "TF_CUDA_PREFILL_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; one CUDA Qwen prompt stage ledger)" },
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
@@ -115,19 +115,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
     .{ .name = "TF_ROCE_HCA", .scope = .cuda, .kind = .names, .max = 2, .forms = "one or two RDMA device names, comma-separated (the RoCE all-gather stripes over at most two)" },
-    .{ .name = "TF_FLASHNEXT_CACHE_TELEMETRY", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 logs EXL3-CACHE expert-cache counters, with a sync at each boundary)" },
-    .{ .name = "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 adds per-layer counters when TF_FLASHNEXT_CACHE_TELEMETRY is 1)" },
-    .{ .name = "TF_FLASHNEXT_SNAP_HOST", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (kept prompt-cache states in pinned host memory; unset: 1 above 32768 tokens of context on an EXL3 pack, else 0)" },
-    .{ .name = "TF_FLASHNEXT_EXL3_ARCH", .scope = .cuda, .kind = .word, .words = &.{"unqualified"}, .forms = "unqualified (serves an EXL3 pack on a device that is not sm_120, without a claim)" },
-    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .trim = " ", .forms = "a finite GiB count of at least 0.5 (2 on unified memory) and at most the memory's size" },
-    .{ .name = "TF_FLASHNEXT_EXL3_LINE_DELTAS", .scope = .cuda, .kind = .path, .forms = "POOL:+N,POOL:-N entries without control characters that move expert lines between decoder pools, as many added as removed" },
-    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_SIZING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 sizes the expert pools from the stored profile)" },
-    .{ .name = "TF_FLASHNEXT_EXL3_STREAMS", .scope = .cuda, .kind = .size, .min = 1, .forms = "a positive whole stream count the expert pools leave room for (default 1; --parallel wins)" },
-    .{ .name = "TF_FLASHNEXT_EXPERT_LINES", .scope = .cuda, .kind = .size, .forms = "a whole count of expert lines a layer keeps on the device (the pool refuses fewer than 10)" },
-    .{ .name = "TF_FLASHNEXT_EXPERT_RESERVE_MB", .scope = .cuda, .kind = .u64, .max = std.math.maxInt(u64) >> 20, .forms = "a whole MiB count from 0 to 17592186044415 left free after the expert pools" },
-    .{ .name = "TF_FLASHNEXT_PLE_READ", .scope = .cuda, .kind = .word, .words = &.{ "map", "pread" }, .forms = "map or pread (default map; pread reads the n-gram rows by positional read)" },
-    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_DIR", .scope = .cuda, .kind = .path, .forms = "a directory path without control characters where expert-use profiles persist" },
-    .{ .name = "TF_FLASHNEXT_EXL3_ROUTED", .scope = .cuda, .kind = .word, .words = &.{ "host", "device" }, .forms = "host or device (default host; device keeps every routed expert on the device)" },
+};
+const stock_suffix_rules = [_]Rule{
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_GEMMA4_ARGMAX_GRAPH", .scope = .gemma4, .kind = .flag, .forms = "0 or 1 (1 puts a greedy round's argmax in the target graph; default 0)" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
@@ -371,7 +360,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 };
 
-pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
+pub const rules = stock_prefix_rules ++ @import("environment_exl3_rules.zig").rules ++ stock_suffix_rules ++ @import("environment_safe_rules.zig").rules;
 
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
