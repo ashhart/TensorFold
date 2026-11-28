@@ -5,7 +5,6 @@ const kv = @import("core").kv_pool;
 const prompt = @import("cuda_prompt.zig");
 const pages = @import("cuda_pages.zig");
 const mtp = @import("cuda_mtp.zig");
-const snap = @import("cuda_snap.zig");
 const wt = @import("cuda_prompt_wt.zig");
 
 /// Rows past a request's prompt and reply its pages hold: one drafted window's, as many as the load's buffers hold.
@@ -51,11 +50,11 @@ fn seqRunBytes() usize {
 /// The MTP head a drafting lane runs: its draft vocabulary and the widest prompt chunk whose streams it keeps.
 pub const Head = struct { draft_n: usize, rows: usize };
 
-/// Fixed: a lane's table and `extra` (image rows); paged: the attention caches (the head's too); a run: the states.
+/// Fixed: lane table and `extra` (image rows); paged: attention caches (head's too); run: states; no snapshot slots.
 pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) kv.Layout {
     const layers = wt.attn_n + @intFromBool(head != null);
     const run = seqRunBytes() + if (head) |h| mtp.Draft.runBytes(h.draft_n, h.rows) else 0;
-    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run };
+    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = 0, .run_bytes = run };
 }
 
 /// Where a stream's caches came from: no pool, the one stream on its own caches beside a pool, or a pool lane.
@@ -418,6 +417,17 @@ test "a stream's pages: its rows and a drafted window, no more than a full windo
     try std.testing.expect(h.run_bytes >= seqRunBytes() + mtp.Draft.runBytes(32768, 1536));
     try std.testing.expectEqual(@as(usize, 161), mostPages(40960, 256));
     try std.testing.expect(l.pages(40960 + windowRows()) <= mostPages(40960, 256));
+}
+
+test "TF_FLASHNEXT_KV_PAGES: the layout asks for no snapshot slots, so a named prompt cache is planned whole" {
+    const cache: u64 = 20 << 30;
+    for ([_]?Head{ null, .{ .draft_n = 32768, .rows = 1536 } }) |head| {
+        const l = layout(262144, 256, head, 0);
+        const room: u64 = 64 << 30;
+        const p = try kv.plan(l, .{ .room = room, .engine = 0, .lanes = 3, .cache = cache, .window = 262144 + windowRows(), .asked = true });
+        try std.testing.expectEqual(@as(usize, 0), p.snaps);
+        try std.testing.expectEqual(cache, p.copied + p.kept); // what native/cuda_kv_pool.zig's kept() gives the store
+    }
 }
 
 test {
