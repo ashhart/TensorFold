@@ -360,3 +360,18 @@ test "inkling2 hip weights: a failed allocation uploads nothing and a failed upl
     try t.expectEqual(@as(usize, 1), Device.sizes.items.len);
     try t.expectEqual(@as(usize, 1), Device.frees); // and std.testing.allocator sees no host leak
 }
+
+test "inkling2 hip weights: CUDA-only expert formats refuse before allocation" {
+    defer Device.reset();
+    var rel: Release = undefined;
+    try rel.open();
+    defer rel.close();
+    var r = Device.runtime();
+    for ([_]plan.Precision{ .tfq3, .exl3 }) |precision| {
+        var changed = rel.p;
+        changed.layers[0].precision = precision;
+        try t.expectError(error.UnsupportedExpertFormat, hw.load(t.allocator, &r, &rel.ck, &rel.c, changed));
+        try t.expectEqual(@as(usize, 0), Device.sizes.items.len);
+        try t.expectEqual(@as(usize, 0), Device.copies.items.len);
+    }
+}
