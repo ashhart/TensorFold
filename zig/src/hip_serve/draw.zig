@@ -167,6 +167,7 @@ pub const Drawer = struct {
             if (id >= row.len) return error.BadForcedToken;
             if (lanes.logit_bias.find(r.logit_bias, id)) |b| if (b.ban) return error.NoAllowedToken;
             if (r.mask.len > 0 and (id / 32 >= r.mask.len or (r.mask[id / 32] >> @intCast(id % 32)) & 1 == 0)) return error.NoAllowedToken;
+            try lanes.logit_bias.validate(row.len, r.logit_bias);
             return id;
         }
         if (r.mask.len > 0) sample.mask(row, w.dtype, r.mask);
@@ -236,4 +237,11 @@ test "logit_bias draws ban a token at every seed and shift greedy picks without 
     }
     try std.testing.expectEqual(@as(u32, 0), try drawer.drawHost(&words, .{ .sampling = null, .position = 0 }));
     try std.testing.expectError(error.NoAllowedToken, drawer.drawHost(&words, .{ .sampling = null, .position = 0, .logit_bias = &bias, .forced = 0 }));
+}
+
+test "logit_bias forced draws validate every entry" {
+    const drawer: Drawer = .{ .gpa = std.testing.allocator, .d = undefined, .dtype = .bf16, .vocab = 3, .rows = 1, .host = undefined, .dev = undefined, .row = undefined };
+    var words = [_]u16{ 0, 0, 0 };
+    const bias = [_]lanes.logit_bias.Entry{.{ .token = 9, .value = 0 }};
+    try std.testing.expectError(error.BadLogitBiasToken, drawer.drawHost(&words, .{ .sampling = null, .position = 0, .forced = 1, .logit_bias = &bias }));
 }

@@ -38,9 +38,14 @@ pub fn subtract(penalty: f32, value: ?Entry) f32 {
     return if (b.ban) std.math.inf(f32) else penalty - b.value;
 }
 
+/// Every entry must address the row before any scoring or forced-token return.
+pub fn validate(vocab: usize, entries: []const Entry) !void {
+    for (entries) |e| if (e.token >= vocab) return error.BadLogitBiasToken;
+}
+
 pub fn apply(values: []f32, entries: []const Entry) !void {
+    try validate(values.len, entries);
     for (entries) |e| {
-        if (e.token >= values.len) return error.BadLogitBiasToken;
         const x = &values[e.token];
         x.* = if (e.ban) -std.math.inf(f32) else x.* - subtract(0, e);
     }
@@ -48,7 +53,7 @@ pub fn apply(values: []f32, entries: []const Entry) !void {
 
 /// Host draws of raw BF16 rows apply a bias and round as the CUDA sparse launch does, without editing cached logits.
 pub fn draw(a: std.mem.Allocator, words: []const u16, settings: ?sampling.Sampling, position: u64, mask: []const u32, entries: []const Entry) !u32 {
-    for (entries) |e| if (e.token >= words.len) return error.BadLogitBiasToken;
+    try validate(words.len, entries);
     const values = try a.alloc(f64, words.len);
     defer a.free(values);
     const ids = try a.alloc(u64, words.len);
