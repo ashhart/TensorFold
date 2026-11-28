@@ -93,7 +93,6 @@ pub fn keysForward(ptr: *anyopaque, e: mtl.ComputeEncoder, attn_block: usize, we
     if (!looped) {
         try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
         e.barrier();
-    }
     } else {
         try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
         e.barrier();
