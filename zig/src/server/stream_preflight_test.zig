@@ -91,6 +91,7 @@ pub const CallEngine = struct {
     };
     tokens: []const u32 = &ids,
     batched: bool = false,
+    stride: usize = 0, // tokens a round; 0: one character's tokens a round
 
     pub fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
@@ -105,6 +106,9 @@ pub const CallEngine = struct {
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         if (e.batched) {
             sink.event(sink.ctx, id, &.{ .tokens = e.tokens });
+        } else if (e.stride > 0) {
+            var at: usize = 0;
+            while (at < e.tokens.len) : (at += e.stride) sink.event(sink.ctx, id, &.{ .tokens = e.tokens[at..@min(at + e.stride, e.tokens.len)] });
         } else {
             var at: usize = 0;
             while (at < e.tokens.len) {

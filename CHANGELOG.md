@@ -4,11 +4,56 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
+
+- Desktop: a ready attachment can start a local or remote conversation without typed text, and folder guidance clears after a successful selection or launch (#4836). Thanks @taylorarndt for the report.
+
+
+
+- Inkling 2 Mini on HIP (groundwork, not yet served): CUDA's text-weight loader becomes generic, so one HIP rank can load the text weights through it; CUDA's loading is unchanged (#5031, part of #4274). Thanks to @AbrahamCete.
+
+- Server: preserve a tool reply's real finish reason and identify completed calls at the token limit, so session benchmarks never answer an open-envelope call even when its arguments are valid JSON (#4830)
+
+
+
+- Core: a chat template's content.N index counts only the code points up to the requested index instead of the whole string; rendered text and token ids are unchanged (#5396). Thanks to @BadAd84.
+
+- Tests: the CUDA kernel-contract runner takes opt-in `--jobs N` and `--shard I/N`; four jobs run the served suites in 1:11:50 against 3:17:59 one at a time, with identical summaries (#3093). Thanks to @BlivionIaG.
+
+- Tests: the lane host explore test's replay holds under load: once every request sent has ended, the test thread sends the next only once a whole engine turn has run after the one that ended the last (turns counted through the host's activity scope), so each send meets no prompt visit and lands at the same point on every run (#5386, fixes #5367).
+
+- Vulkan on Apple silicon: submits batch dispatches into one command buffer per batch instead of one submission per dispatch, with hazard-tracked barriers between conflicting dispatches and one barrier owed to the previous submission at the next batch's start; the same logits, 2% to 20% less run time on a 13-inch M1 and a 16-inch M1 Max (#2038, part of #1420). Thanks to @joshuaswarren.
+
+- Server: `"kept_probs": true` on `/v1/chat/completions` (with `logprobs: true`) and `/v1/completions` (with a `logprobs` count) adds a `kept_probs` list for each reply token: the tokens left after temperature, `top_k`, `top_p` and `min_p`, renormalized to sum to 1; a sampled request needs `top_k` from 1 to 20, and a nonzero `presence_penalty` or `frequency_penalty` or a grammar returns HTTP 400; the reply's tokens and every other field are the same with the option on or off (#3207, fixes #3182).
+
+- Qwen3.8-27B on Metal: an external drafter's feature reader returns rows retained for its own stream instead of a view into the shared tap buffer, so a parked stream no longer reads another stream's newer rows (refs #2496).
+
+- Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
+
+- Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
+
+
+
+- Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
+
+- GLM on CUDA: the DFlash2 draft selector skips candidate ids outside the vocabulary and treats an invalid anchor as token 0 instead of reading past the table; in-range drafts are unchanged (#5449). Thanks to @kelchm.
+
+- Kolibri 1.1: the cache-cap comments now say K and V are rounded to NVFP4 as the reference does, not kept in bf16; comments only (#5445). Thanks to @jschmied.
+
+- CUDA kernels: the MXFP4 experts' SiTU up (`tf_mxfp4_experts_up_situ` and `tf_mxfp4_experts_prompt_up_situ`, in the `experts_mxfp4` image): an expert's gate and up matrices read as stored, each sum rounded to bf16, then ERNIE 5.5's SiTU (beta tanh(g/beta) sigmoid(g) times linear beta tanh(u/linear beta), at 4 and 25) into bf16 rows, from a new `situ` epilogue in `experts.cuh`; under the kernel contract against float64; the four downs' SASS is unchanged and nothing serves through the up yet (#5385, part of #4926).
+- The New Project Folder row keeps **Browse** on one line while the folder input shrinks. (#4824) Thanks @jamesadcock for the report.
+
+- Inkling 2 CUDA gains grouped-expert and vision kernels, shared core attention/gamma operations, explicit orientation handling and exact arithmetic comparisons (#4127). Thanks to @ajensenwaud.
+
+- Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.
+
+- Metal: the Qwen4 QSA, Flash Next hybrid HC and Qwen4 PLE source rewrites validate threadgroup reservations across the whole original declaration and refuse conflicts and duplicates; generated shader bytes are unchanged (#5441).
+- Metal: Qwen4 QSA, HC and PLE source rewrites validate reservations across the whole original declaration, refusing conflicts and duplicates without changing generated shader bytes.
+- HIP: Inkling 2 Mini's HIP family refuses the serve options it does not support before any load, with host tests; nothing serves Inkling 2 Mini on HIP yet (#5034). Thanks to @AbrahamCete.
+
 - Tests: the prompt-imprint key-index test starts from an empty temporary directory, so a run interrupted on Windows (which reuses process IDs) no longer leaves a later run a stale starting state (#5406).
 
 - CLI: `tensorfold log` also reads the request log `TENSORFOLD_REQUEST_LOG` writes: `list`, `show ID`, `follow` and `--json` show each reply beside its request, and a bare body is numbered by reader order, never keyed by fields inside it (#5246, refs #3666). Thanks to @devopsfortunato.
-
-
 
 - Server: `--confidential` also refuses library search-path variables.
 - Server: `--confidential` also refuses accelerator plugin and kernel library-path variables.
@@ -133,6 +178,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA sparse attention contract: a third case covers one query head per key head, a negative key count, a duplicate across a tile edge and unnamed entries in a nonfinite replay; test only (#5242, follow-up to #5166). Thanks to @jschmied.
 
 - Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251). Thanks to @jschmied.
+
+- Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251).
 
 - Changelog: Unreleased is tidied for 1.3.6: #4907's line moves out of 1.3.5 into Unreleased with its number, three bullets that repeated another PR's line are removed (#4918, #4931, #5003), and #5042's line thanks its author (#5196).
 

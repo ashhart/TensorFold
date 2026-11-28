@@ -144,8 +144,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-responses-background-host", "Background response completion, cancellation and ownership without sockets").dependOn(&background.step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
-    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:", "completions echo:" } }));
-    b.step("test-logprob-offers-host", "Logprob refusals before submission, entries with tools, stops, reasoning and Responses, and echo").dependOn(&logprobs.step);
+    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "kept_probs", "logprob combinations:", "completions echo:" } }));
+    b.step("test-logprob-offers-host", "Logprob and kept-set refusals, entries across reply channels, and echo").dependOn(&logprobs.step);
     const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
     b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
     const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));
@@ -184,6 +184,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const http = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool visibility HTTP:"} }));
     http.has_side_effects = true;
     b.step("test-tool-visibility-http-host", "Rejected tool envelopes survive actual chat JSON and SSE replies").dependOn(&http.step);
+    const finish = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool finish:"} }));
+    b.step("test-tool-finish-host", "A capped tool reply's finish_reason, whole and streamed, without devices").dependOn(&finish.step);
     const windows = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Nemotron window:", "model discovery", "thinking reserve" } }));
     b.step("test-nemotron-window-host", "Nemotron advertised capacity and unchanged chat admission without devices").dependOn(&windows.step);
     b.step("test-thinking-request-host", "Client refusals and internal note and lesson requests without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking request:"} })).step);

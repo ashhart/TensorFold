@@ -102,7 +102,7 @@ pub const usage =
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
     \\  bf16-experts [contract]   grouped bf16 experts against float64 (repack, up, downs, rows, forms); contract: gates 1-4, controls red
-    \\  mxfp4-experts [contract]  grouped MXFP4 experts' downs: bf16 experts' bytes on the decoded weights; contract: gates 1-4, controls red
+    \\  mxfp4-experts [contract]  grouped MXFP4 experts' downs: bf16 experts' bytes on the decoded weights; contract: SiTU's up and the downs, gates 1-4, controls red
     \\  ernie5_5-head             ERNIE 5.5's MultiMax on the head's fp32 logits: contract gates 1-4, controls red
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance
@@ -144,7 +144,7 @@ pub const usage =
     \\  qwen35-tp-cut PACK [STEP]  the 27B's EXL3 weights cut for two ranks at the whole plan: each rank's columns, one run's bytes
     \\  exl3-prompt-k6 [DIR|none] [BASE]  EXL3 prompt kernels at 3 and 4 bits, GLM's shapes: runSlots, FP64, row bytes, time; DIR adds a real layer, BASE (an earlier exl3_experts fatbin) its 4-bit bytes
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
-    \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so, -WORDs: all but those
+    \\  kernel-contract [WORD...] [--jobs N | --shard K/N [--device D]]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so, -WORDs: all but those; --help
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
     \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes

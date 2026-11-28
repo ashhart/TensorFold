@@ -8,7 +8,7 @@ export function ContextBudget({ budget }: { budget: ComposerBudget }) {
   const format = (value: number) => Math.ceil(value).toLocaleString(currentIntlLocale())
   const warning = budget.remaining !== null && budget.remaining < 0
   return <div className="px-4 pb-1 text-[11px] text-ink-3">
-    <button type="button" aria-expanded={open} aria-label={tx('Context budget before sending')} onClick={() => setOpen(value => !value)} className={`rounded-md py-1 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${warning ? 'text-warn' : 'hover:text-ink'}`}>
+    <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)} className={`rounded-md py-1 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${warning ? 'text-warn' : 'hover:text-ink'}`}>
       {budget.window === null ? tx('Estimated context: {tokens} tokens; model limit unavailable', { tokens: format(budget.total) }) : tx('Estimated context: {tokens} of {limit} tokens', { tokens: format(budget.total), limit: format(budget.window) })}{budget.partial ? ' · ' + tx('Partial') : ' · ' + tx('Approximate')}
     </button>
     {open && <section aria-label={tx('Context budget breakdown')} className="mb-2 rounded-lg border border-line bg-card-2 p-3 text-[12px]">

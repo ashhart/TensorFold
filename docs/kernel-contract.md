@@ -101,6 +101,34 @@ On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of stat
 Only their sm_110 audit uses the opt-in limit already raised by their loaders (`allowDynamicShared`).
 For a mixed release and sm_110 set, each planted control must go red on each target separately.
 
+`tf-cuda-test kernel-contract` alone is the full serial run in one process. Two opt-in modes change that, each apart
+from the other, and they compose:
+
+- Filter: `tf-cuda-test kernel-contract WORD...` runs the kernels, controls and launches whose name holds a WORD. It
+  skips the standalone suites and the offline limits audit, and marks its `SUMMARY` `(filtered)`.
+- Parallel: `tf-cuda-test kernel-contract --jobs N` (N from 1 to 16) starts N child processes of the same binary,
+  each a shard `K/N`: every N-th kernel, control, standalone suite and launch record, on the visible GPUs in turn.
+  The shares are equal in count; a kernel's cost is not known when they are cut, so one shard can finish before
+  another. It prints the children's logs and one merged `SUMMARY`, and exits 1 if any child crashed or printed no
+  `TALLY` line, or the merged counts show a problem. N never rises by itself.
+  A process is planned for 28 GiB of host memory for a full run and 8 GiB when WORDs filter it, and 7 GiB of GPU
+  memory. The run is refused when N processes do not fit the host's available memory (`MemAvailable` in
+  `/proc/meminfo`, so Linux only), or when `ceil(N / GPUs)` processes do not fit the smallest GPU's total memory
+  (not its free memory); several processes share a GPU only when they fit. On an integrated GPU, which shares the
+  host's memory, N times both plans must fit the host's available memory and no GPU total is checked. GPUs that
+  differ in compute capability, multiprocessor count or name are refused, since registration reads those to pick
+  kernel configurations and their shards would not list the same kernels.
+  A shard stops when the process that started it does (`PR_SET_PDEATHSIG`), SIGINT and SIGTERM sent to that process
+  are forwarded to its shards, and once one shard fails to finish the others are stopped.
+  `--shard K/N [--device D]` runs one shard alone and prints its `TALLY` line (the machine-readable counts the
+  parent merges) in place of a `SUMMARY`; `--device` goes with `--shard` only, and so does `--parent PID`, which
+  the `--jobs` process passes so that a shard refuses to run once that process is gone.
+  With words the filter applies first and each shard takes its share of what is left.
+  `kernel-contract --help` prints these options.
+  The standalone suites of a full run are the entries of `list` in `contract_back_suites.zig` and of `served` in
+  `contract_after.zig`; the serial run and every shard read that one table, so a new suite is listed in one of them
+  and a suite called from anywhere else runs in neither.
+
 On an AMD machine, run `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=...` on a GPU of that chip (the
 controls are built with the kernels). For the limits of every served chip, `zig build hip-kernel-contract-limits
 -Dhipcc=...` compiles every kernel group and the controls for gfx1030, gfx1100, gfx1151 and gfx1201 and checks each
@@ -640,9 +668,11 @@ and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and promp
 the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
 decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
 CUDA also checks the MXFP4 experts (`experts_mxfp4.cu`, E2M1 codes and E8M0 scales read as stored, each weight decoded
-to bf16 in registers, then the bf16 experts' chain): fp32 down and bf16 down, in the decode and prompt forms, against
-float64 on ERNIE 5.5's routed down (two controls: the fp32 down launched one 32-input group short, and each group's
-scale read from the next). Its records are nvcc 13.0's.
+to bf16 in registers, then the bf16 experts' chain): SiTU's up (an expert's gate and up matrices, each sum rounded to
+bf16, then ERNIE 5.5's SiTU at beta 4 and linear beta 25), fp32 down and bf16 down, in the decode and prompt forms,
+against float64 on ERNIE 5.5's routed shapes (four controls: the fp32 down launched one 32-input group short, each
+group's scale read from the next, the up's gate and up matrices swapped, and SiTU's up unclamped). The up's bound adds
+SiTU's slopes times how far each sum's bf16 can move within the sum's error. Its records are nvcc 13.0's.
 CUDA also checks GLM's NVFP4_NZ5 block 32 experts (`tf_nvfp4_nz5_*`), each bit-equal to the block 16 instance it
 replaces on the same values: a planted +5 is a 4 there under its scale two e4m3 steps up (x1.25), and the E2M1
 entry reading NVFP4_NZ5's codes, each +5 as -0, is the planted control. Gate 4's stress fill holds +5s among its 4s

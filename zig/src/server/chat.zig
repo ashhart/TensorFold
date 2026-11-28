@@ -57,6 +57,8 @@ pub const Input = struct {
     echo: bool = false,
     /// ``echo`` with ``max_tokens: 0``: the engine draws one token the reply drops, so the reply is the prompt alone.
     prompt_only: bool = false,
+    /// ``kept_probs``: each logprob entry also gives the sampler's kept set and its probabilities (kept_probs.zig).
+    kept_probs: bool = false,
     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
     format: ?[]const u8 = null,
     /// The encoded image bytes the request may send; chat's limits unless a route (OCR) sets its own.
@@ -91,6 +93,7 @@ pub const Reply = struct {
     native_tool_format: bool = false,
     native_calls: ?[]Value = null,
     native_cut_calls: bool = false, // a native parser's calls were cut by the token cap: finish_reason stays length
+    native_cut_call: ?*json.Object = null, // a native bare parser's last call came from open-envelope cap recovery
     finish_reason: []const u8,
     prompt_tokens: usize,
     cached_tokens: usize,
@@ -342,6 +345,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     }
     request.logprobs = input.logprobs;
     request.prompt_logprobs = input.promptRows();
+    if (input.kept_probs) request.logprobs = try @import("kept_probs.zig").admit(cx, &request);
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
     const deadline: ?i96 = if (f.get("deadline_s")) |v| blk: {
         const s = (if (v == .bool) null else v.float64()) orelse return cx.refuse("deadline_s must be a number of seconds");
@@ -394,7 +398,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .report_seed = input.choices > 1, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .grammar = if (request.structure) |st| (if (st.after) |t| .{ .after = t } else .on) else .none, .max_tokens = if (input.prompt_only) 0 else request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = fields_mod.flag(input.fields, "tool_call_single") orelse false, .required = fields_mod.flag(input.fields, "tool_call_required") orelse false, .recover = input.prompt == null and request.structure == null, .deadline_ns = prepared.deadline_ns };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .report_seed = input.choices > 1, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .grammar = if (request.structure) |st| (if (st.after) |t| .{ .after = t } else .on) else .none, .max_tokens = if (input.prompt_only) 0 else request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false, .opts = @import("kept_probs.zig").opts(input.logprobs, input.kept_probs, &request) } else null, .loop_stop = request.loop_stop, .single = fields_mod.flag(input.fields, "tool_call_single") orelse false, .required = fields_mod.flag(input.fields, "tool_call_required") orelse false, .recover = input.prompt == null and request.structure == null, .deadline_ns = prepared.deadline_ns };
     gen.call_end = @import("chat_inkling2.zig").callEnd(srv, gen.required, request.structure);
     defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished

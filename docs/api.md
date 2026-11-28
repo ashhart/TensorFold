@@ -625,6 +625,19 @@ and `function_call` items. A stream sends them in the `response.output_text.delt
 text, and each item's done events wait for them. `include` alone on an engine without logprobs answers without them;
 `top_logprobs` there returns HTTP 400.
 
+`"kept_probs": true` (chat with `logprobs: true`, or `/v1/completions` with `logprobs`) adds, for each reply token,
+the probabilities the sampler drew it from: the tokens left after temperature, `top_k`, `top_p` and `min_p`, in the
+rows' order, renormalized to sum to 1. Chat puts them in each `logprobs.content` entry as `kept_probs`, a list of
+`{token, prob}`; `/v1/completions` adds a `kept_probs` list beside `top_logprobs`, one such list per token (with
+`echo`, `null` at each prompt position, since only generated reply tokens have kept sets). A greedy request keeps
+one token, the best, at probability 1. The server computes them from each token's logprob row with the sampler's
+own cut, so they cost no engine work beyond asking for all 20 alternatives; `top_logprobs` still shows the count
+asked for, and the reply's tokens and every other field are the same with the option on or off. A sampled request
+needs `top_k` from 1 to 20, so the kept set always fits inside the 20 alternatives a row carries; other `top_k`
+values (including none), a grammar, or a nonzero `presence_penalty` or `frequency_penalty` return HTTP 400.
+The kept set is computed from the rows' 32-bit values, so a token whose cumulative `top_p` sum or `min_p` floor falls
+within about 1e-6 of its cut can be listed on the other side of it, and a GPU sampler may skip a kept token more than
+24 below the best in logit over temperature, whose listed probability is under 4e-11.
 Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine
 and on GLM-5.3-Flash's CUDA engine.
 `choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
@@ -1313,7 +1326,8 @@ model with Matryoshka (MRL) widths takes any width in its declared range (32 to 
 ## Responses
 
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or
-`delta.reasoning_content` while streaming. Tools use `tool_calls` and `finish_reason: "tool_calls"`.
+`delta.reasoning_content` while streaming. Tools use `tool_calls` and `finish_reason: "tool_calls"`; a reply that
+`max_tokens` ended keeps `finish_reason: "length"` with its calls, finished or cut, since it may have gone on.
 When a template supplies no think opener, a reply-written leading `<think>` tag is removed from
 `reasoning_content`; the streamed and finished forms use the same split. Both strip the reasoning's leading and
 trailing whitespace, so the joined `delta.reasoning_content` pieces equal the finished field byte for byte; a stream
@@ -1334,6 +1348,9 @@ When a reply keeps tool-call envelopes as text instead of returning them as call
 `kept_tool_calls`: `unoffered` and `malformed` counts, and `unoffered_names`, the names the model wrote for the
 kept unoffered calls, in order, without duplicates, at most 8 names of 64 bytes each. The whole reply and the
 streamed finish event carry the same object; a reply that kept none has no `kept_tool_calls` field.
+When `max_tokens` ends a reply with tool calls, the block also carries `complete_tool_calls`: the zero-based indices
+of calls whose envelopes closed. Any other returned call was cut, even if its arguments already form complete JSON.
+The whole reply and streamed finish event carry the same array; a reply the token limit did not end omits the field.
 A request that sends `return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
 `token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
 `runtime.loop.period`, and `runtime.loop.stopped` when `--loop-guard-stop` ended it; these fields describe the native

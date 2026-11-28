@@ -6,7 +6,7 @@ zig/kernels/cuda/embed_rows.cu	c3cad38db6576728a15e048a45f2c1a571233fc3fedc83d04
 zig/kernels/cuda/exlr8.cu	0eb19c8965aeb8188efd2b15a5844da860d9bf75364b12b62dd3a2589a89178c	raw
 zig/kernels/cuda/exlr8_dense.cu	7616e7a3bb35a2bb64b53a1ca84ce8be98442a36394dad945b844219f72ec671	raw
 zig/kernels/cuda/experts.cu	adc0f015f08b49e65df25fe17ef2489dd924d8ba6cfccd1f008be5cd1edbd464	raw
-zig/kernels/cuda/experts.cuh	017728fef063d45f06240a88002f80ec931f967edc5fa44c31b10673d43872f9	raw
+zig/kernels/cuda/experts.cuh	1e8a747ac27e925a3ea1f4385574ac10554ac3fb1b2f7707255e193191a2a4be	raw
 zig/kernels/cuda/experts_pack.cu	578e9a607f678f0547aaeb312d18252ea0608bad7fe71bb2d5241d28adf31bac	raw
 zig/kernels/cuda/experts_prefill.cu	5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc	raw
 zig/kernels/cuda/experts_rows.cu	714b76ad72ff45715c5ebf6b57365f0f41789ad301871f07168a016412df13a7	raw
@@ -91,7 +91,7 @@ zig/src/cuda/cublaslt.zig	d87f865fc03cf94bdcbe83504f74a6e569d70c10ca792b675122e9
 zig/src/cuda/driver.zig	f20856bd06afe9365ab9ca1bc39800ccb260ade2704197c033e1344a0c8dd742	raw	commits e9bf05ffd, b923e554c, b2c75a98a; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/embed_rows.zig	3fa5e28ab46b4daef2c820b3ad3f7d331bc77f55ea340a7a3cac64b21584c5f4	raw	#3471: Gemma 4 holds its tied embedding once; token rows read the head's 4-bit tiles; replies unchanged
 zig/src/cuda/exlr8.zig	1e2164096ae949a8a9a4903df82c7c0c184a6f5e1ba5ba4423038a42b0633fc6	raw
-zig/src/cuda/experts.zig	53d05dc33e2c793ef5e867e4e699d74595005c7aca6f1c441aececb21e2570e3	raw	main 3768bc0168 (#2843: grouped EXL3 experts launched and sized at the caller's tile and pair count; no kernel source change), #1630 (a bf16 format: its Grouped member, decode and prompt arms and prompt tile; other formats unchanged); #4493 (opt-in paired prompt experts, 128-row items); #5042 (an mxfp4 format: its Grouped member, decode and prompt arms, prompt tile and Layer notes; other formats unchanged)
+zig/src/cuda/experts.zig	5d2cd5aa511b267f7a0800e0c3fd0bb7492ca0e50ed8558c0ee342fb680cc320	raw	main 3768bc0168 (#2843: grouped EXL3 experts launched and sized at the caller's tile and pair count; no kernel source change), #1630 (a bf16 format: its Grouped member, decode and prompt arms and prompt tile; other formats unchanged); #4493 (opt-in paired prompt experts, 128-row items); #5042 (an mxfp4 format: its Grouped member, decode and prompt arms, prompt tile and Layer notes; other formats unchanged)
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/graph.zig	17639aaef0298c934b3f5ad3511925169c096ae57ede8ebee655faa838844f7b	raw
 zig/src/cuda/grouped.zig	5fa1f39394b701eab59383bc7ed214ea3e17652a1229236df49f5281e6e764b5	raw	commits e1be0806d; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate

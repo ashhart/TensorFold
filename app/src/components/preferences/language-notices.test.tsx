@@ -27,5 +27,8 @@ assert.ok(html.includes(authoredText(locale, 'This action could not be completed
 assert.ok(html.includes(authoredText(locale, 'Original diagnostic')))
 assert.ok(html.includes('Settings saved &lt;script&gt;provider content&lt;/script&gt;'))
 assert.doesNotMatch(html, /<script>/)
-state.notice = null; assert.equal(NoticeToast(), null)
+state.notice = null
+const emptyHtml = render()
+assert.equal(emptyHtml, '<div role="status" aria-live="polite" aria-atomic="true" class="sr-only"></div>', 'An empty notice retains its polite live region')
+assert.doesNotMatch(emptyHtml, /fixed bottom-4|Dismiss/, 'An empty notice has no visible toast')
 console.log('Actual app notice view reactively translates only proven authored text and retains escaped raw provider diagnostics under a localized explanation')

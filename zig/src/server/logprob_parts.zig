@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const rt = @import("reply_text.zig");
 const lp = @import("logprobs.zig");
+const Options = @import("kept_probs.zig").Opts;
 const tp = @import("tool_parse.zig");
 const mm = @import("tool_minimax.zig");
 const errors = @import("errors.zig");
@@ -17,7 +18,7 @@ const Error = error{ Failed, OutOfMemory };
 pub const Sent = struct { content: usize = 0, reasoning: usize = 0 };
 
 /// A finished reply's tokens and rows, projected once its text and calls are final; `closer` ends a call EOS cut.
-pub const Capture = struct { tokens: []const u32, rows: []const api.LogprobRow, thinking: bool, stops: rt.Stops, closer: []const u8 = "", sent: Sent = .{}, positions: bool = false };
+pub const Capture = struct { tokens: []const u32, rows: []const api.LogprobRow, thinking: bool, stops: rt.Stops, closer: []const u8 = "", sent: Sent = .{}, positions: bool = false, opts: Options = .{} };
 
 /// What a projection lists: the entries, or each entry's raw token position (a token stream's anchor).
 pub const Form = enum { entries, positions };
@@ -53,6 +54,7 @@ pub const Live = struct {
     spelled: Spelled = .{},
     sent: Sent = .{},
     positions: bool = false, // a token stream: settled entries also name their raw token positions
+    opts: Options = .{},
 
     pub fn add(l: *Live, srv: *Server, a: A, tokens: []const u32) Error!void {
         return l.spelled.add(srv, a, tokens);
@@ -66,12 +68,12 @@ pub const Live = struct {
         const thought = try fresh(a, &l.spelled, ranges, .reasoning, &l.sent.reasoning);
         if (prose.len == 0 and thought.len == 0) return null;
         const out = try json.newObject(a);
-        try out.put(a, "content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, prose, .entries) });
-        if (thought.len > 0) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, thought, .entries) });
+        try out.put(a, "content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, prose, .entries, l.opts) });
+        if (thought.len > 0) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, thought, .entries, l.opts) });
         if (l.positions) {
             const at = try json.newObject(a);
-            try at.put(a, "content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, prose, .positions) });
-            if (thought.len > 0) try at.put(a, "reasoning_content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, thought, .positions) });
+            try at.put(a, "content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, prose, .positions, l.opts) });
+            if (thought.len > 0) try at.put(a, "reasoning_content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, thought, .positions, l.opts) });
             try out.put(a, "positions", .{ .object = at });
         }
         return .{ .object = out };
@@ -106,14 +108,14 @@ fn whole(srv: *Server, a: A, c: Capture, shown: Shown, form: Form) Error!V {
     const text = if (c.closer.len > 0) try std.mem.concat(a, u8, &.{ visible, c.closer }) else visible;
     const ranges = try layout(srv, a, text, c.tokens, c.thinking, true, shown);
     const out = try json.newObject(a);
-    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0), form) });
-    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0), form) });
+    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0), form, c.opts) });
+    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0), form, c.opts) });
     const count = shown.calls orelse return .{ .object = out };
     const groups = try a.alloc(V, count);
     for (groups, 0..) |*slot, i| {
         const o = try json.newObject(a);
         try o.put(a, "index", try json.intValue(a, i));
-        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i), form) });
+        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i), form, c.opts) });
         slot.* = .{ .object = o };
     }
     try out.put(a, "tool_calls", .{ .array = groups });
@@ -147,7 +149,7 @@ pub fn restDelta(a: A, reply: *const @import("chat.zig").Reply) A.Error!?V {
     return .{ .object = out };
 }
 
-fn values(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, list: []const Piece, form: Form) Error![]V {
+fn values(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, list: []const Piece, form: Form, opts: Options) Error![]V {
     const out = try a.alloc(V, list.len);
     for (list, out) |p, *slot| {
         if (form == .positions) {
@@ -155,7 +157,7 @@ fn values(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []co
             continue;
         }
         const cropped = p.lo != s.from(p.token) or p.hi != s.ends.items[p.token];
-        slot.* = try lp.rowValue(srv, a, tokens[p.token], rows[p.token], s.raw.items[p.lo..p.hi], cropped);
+        slot.* = try lp.rowValue(srv, a, tokens[p.token], rows[p.token], s.raw.items[p.lo..p.hi], cropped, opts);
     }
     return out;
 }

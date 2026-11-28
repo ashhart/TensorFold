@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const options = @import("contract_options");
 const check = @import("check.zig");
+const shard = @import("contract_shard.zig");
 
 const contract = core.contract;
 const limits = contract.limits;
@@ -57,13 +58,14 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     return error.UnknownContractImage;
 }
 
-/// Gate 5 on this GPU, each record against the loaded function; plain words in `only` pick launches, `-word`s keep all.
-pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
+/// Gate 5 on this GPU, each record of `sh`'s share against its loaded function; plain words pick, `-word`s keep all.
+pub fn live(gpu: check.Gpu, only: []const []const u8, sh: shard.Shard, coverage: *shard.Coverage) !usize {
     const after = @import("contract_after.zig");
     const full = !after.filtered(only);
     var n: usize = 0;
-    if (full) n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
-    if (full) std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
+    const audits = full and sh.index == 0;
+    if (audits) n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
+    if (audits) std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
     const sm: u32 = @intCast(try gpu.ctx.capability());
     const t = limits.target(sm) orelse {
         std.debug.print("N/A  limits live: sm_{d} is not a target the records cover\n", .{sm});
@@ -76,15 +78,18 @@ pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
         .{ "most shared bytes a block (opt-in)", .max_shared_memory_per_block_optin, t.smem_optin },
         .{ "threads a block", .max_threads_per_block, t.threads },
     };
-    for (dev) |d| {
+    if (sh.index == 0) for (dev) |d| {
         const got: u32 = @intCast(try gpu.ctx.attribute(d[1]));
         if (got != d[2]) n += 1;
         std.debug.print("{s} limits live sm_{d} {s}: the driver says {d}, the table {d}\n", .{ if (got == d[2]) "PASS" else "FAIL", sm, d[0], got, d[2] });
-    }
+    };
     var said: ?limits.Nvcc = null;
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         if (!full and !after.wanted(r.launch.name, only)) continue;
+        coverage.of += 1;
+        if (!sh.owns(coverage.of - 1)) continue;
+        coverage.ran += 1;
         if (!control and t.sm < r.launch.min_sm) continue;
         if (!control and at != null and registry.targetDecision(r, t, r.usage[at.?]) != .applicable) continue;
         const bytes = image(r.launch.image) catch |err| {
