@@ -178,7 +178,9 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
     } else if (glp_keys > 0) {
         return refuse(why, "the file carries glp keys but no glp.spec_version", .{});
     }
-
+    for ([_][]const u8{ "glp.dir_scales", "glp.layer_scales" }) |k| {
+        if (file.find(k) != null) return refuse(why, "the file carries {s}: per-direction and per-layer scales are not implemented", .{k});
+    }
     if (glp_keys > 0) {
         const rank = file.num("glp.rank") orelse value: {
             if (file.find("glp.rank") != null) return refuse(why, "glp.rank is not an integer", .{});
@@ -253,10 +255,8 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
 
     const hook = file.str("glp.hook_point") orelse residual_site;
     const derived = file.str("glp.derived_at") orelse hook;
-
     var file_sha256: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &file_sha256, .{});
-
     return .{
         .file_sha256 = file_sha256,
         .spec_version = residual_version,

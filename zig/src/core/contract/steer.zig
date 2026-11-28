@@ -119,7 +119,8 @@ pub const Steer = struct {
         for (0..s.p.rows) |r| {
             for (0..k) |i| {
                 const x = c.fromBf16(s.x[r * k + i]);
-                const v: f32 = x + s.p.alpha * s.dir[i];
+                const step: f32 = s.p.alpha * s.dir[i];
+                const v: f32 = if (step == 0) x else x + step;
                 out[r * k + i] = bf16.round32(v);
             }
         }
@@ -147,7 +148,8 @@ pub const Steer = struct {
 
 /// The kernel's sum as bf16 bits: the product rounded to fp32, then the sum, then the stream's rounding.
 pub fn bits(x: f32, alpha: f32, d: f32) u16 {
-    return c.toBf16(x + alpha * d);
+    const step: f32 = alpha * d;
+    return c.toBf16(if (step == 0) x else x + step);
 }
 
 /// The same sum contracted into one fused multiply-add: the form the reference ordering must tell apart.
@@ -267,4 +269,10 @@ test "ordered rows tell the separately rounded add from a fused multiply-add in 
     var s = try Steer.init(a, .{ .alpha = 1, .rows = 1, .hidden = 4 });
     defer s.deinit();
     try std.testing.expectError(error.OrderInvisible, s.fillOrdered(7));
+}
+
+test "zero scaled step preserves negative-zero residual" {
+    const neg_zero: u16 = 0x8000;
+    try std.testing.expectEqual(neg_zero, bits(c.fromBf16(neg_zero), 1.0, 0.0));
+    try std.testing.expectEqual(neg_zero, bits(c.fromBf16(neg_zero), 1e-25, 1e-25));
 }

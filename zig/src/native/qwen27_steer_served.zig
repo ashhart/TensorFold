@@ -4,6 +4,16 @@ const api = @import("engine_api");
 const q = @import("tensorfold").qwen27;
 const Allocator = std.mem.Allocator;
 
+/// Check whether a control vector matches the Qwen3.8-27B model's geometry, repo, and snapshot revision.
+pub fn checkFit(vector: api.glp.Vector, hidden: usize, dir: []const u8, a: Allocator, reason: *api.glp.Why) !void {
+    const source = try api.glp.checkpoint.source(a, dir);
+    const repo = if (source) |s| s.repo else "";
+    try api.glp.checkModel(vector, hidden, api.glp.residual_site, repo, reason);
+    if (source) |s| if (vector.base_model.len > 0 and std.ascii.eqlIgnoreCase(api.glp.repoId(vector.base_model), api.glp.repoId(s.repo))) {
+        try api.glp.checkPairedRevision(vector, s.revision, reason);
+    };
+}
+
 /// Check the vector against the model that loaded, then put its directions on the device.
 pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.Glp, a: Allocator, why: *[]const u8) !void {
     if (shiftRefusal(model.config.shift_norms)) |r| {
@@ -13,7 +23,7 @@ pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var reason: api.glp.Why = .{};
-    api.glp.checkModel(g.vector, model.config.hidden, api.glp.residual_site, try repoId(arena.allocator(), dir), &reason) catch |err| {
+    checkFit(g.vector, model.config.hidden, dir, arena.allocator(), &reason) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the control vector does not fit {s}: {s}", .{ dir, reason.text() });
         return err;
     };
@@ -51,12 +61,6 @@ pub fn report(g: api.glp.Glp) void {
         file_sha[0..],
     });
     if (v.transferred) std.log.warn("Qwen3.8-27B: the control vector was derived at {f}, not at {f}: it is applied at the residual stream", .{ std.zig.fmtString(v.derived_at), std.zig.fmtString(v.hook_point) });
-}
-
-/// The repo id a cached checkpoint came from ("Org/Name"); empty when the folder is not a cache snapshot.
-fn repoId(a: Allocator, dir: []const u8) ![]const u8 {
-    const source = (try api.glp.checkpoint.source(a, dir)) orelse return "";
-    return source.repo;
 }
 
 /// Why a vector's directions cannot be prepared, as the operator reads it.
@@ -109,4 +113,30 @@ test "--glp is refused where neither the Qwen3.8-27B-class nor the Inkling 2 Min
 test "--glp is refused by name on a checkpoint whose norms are shifted" {
     try std.testing.expect(shiftRefusal(false) == null);
     try std.testing.expectStringStartsWith(shiftRefusal(true) orelse "", "--glp: SenseNova checkpoints shift their norms");
+}
+
+test "checkFit rejects a mismatched snapshot revision on the same Qwen repo while keeping conversions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = [_]f32{ 1, 0, 0, 0, 0, 0, 0, 0 };
+    const vector: api.glp.Vector = .{
+        .alpha = 1,
+        .hook_point = api.glp.residual_site,
+        .derived_at = api.glp.residual_site,
+        .base_model = "Qwen/Qwen3.8-27B",
+        .base_revision = "aaaa1111bbbb",
+        .method = "",
+        .contrast = "",
+        .width = 8,
+        .layers = &.{.{ .id = 1, .dir = &dir }},
+        .sha256 = @splat(0),
+        .file_sha256 = @splat(0),
+        .transferred = false,
+    };
+    var why: api.glp.Why = .{};
+    try checkFit(vector, 8, "/cache/models--Qwen--Qwen3.8-27B/snapshots/aaaa1111bbbb", a, &why);
+    try checkFit(vector, 8, "/cache/models--mlx-community--Qwen3.8-27B-4bit/snapshots/cccc2222dddd", a, &why);
+    try std.testing.expectError(error.BadGlpVector, checkFit(vector, 8, "/cache/models--Qwen--Qwen3.8-27B/snapshots/cccc2222dddd", a, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "revision") != null);
 }

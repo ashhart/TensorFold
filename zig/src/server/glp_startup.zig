@@ -139,6 +139,9 @@ fn because(a: std.mem.Allocator, why: *const glp.Why) error{OutOfMemory}![]const
 fn residualRefusal(a: std.mem.Allocator, backend: []const u8, v: Vec, vector: glp.Vector, model: Model) error{OutOfMemory}!?[]const u8 {
     var why: glp.Why = .{};
     glp.checkModel(vector, model.hidden orelse vector.width, glp.residual_site, model.repo, &why) catch return try because(a, &why);
+    if (model.repo.len > 0 and vector.base_model.len > 0 and std.ascii.eqlIgnoreCase(glp.repoId(vector.base_model), glp.repoId(model.repo))) {
+        glp.checkPairedRevision(vector, model.revision, &why) catch return try because(a, &why);
+    }
     if (model.layers) |layers| {
         for (vector.layers) |l| {
             if (l.id >= layers) return try std.fmt.allocPrint(a, "--glp: the vector steers layer {d} of a model with {d} layers: its deepest layer is {d}", .{ l.id, layers, layers - 1 });
@@ -242,9 +245,9 @@ fn metal(backend: []const u8) bool {
     return std.mem.eql(u8, backend, "auto") or std.mem.eql(u8, backend, "mlx");
 }
 
-/// The backend that steers DeepSeek-V4.1: the CUDA engine, which `auto` names on Linux; Metal and ROCm carry no vector.
+/// The backend that steers DeepSeek-V4.1: the CUDA engine, which `auto` names on Linux; Metal, ROCm and Vulkan do not.
 fn cuda(backend: []const u8) bool {
-    return std.mem.eql(u8, backend, "cuda") or (builtin.os.tag == .linux and std.mem.eql(u8, backend, "auto"));
+    return std.mem.eql(u8, backend, "cuda") or (builtin.os.tag == .linux and std.mem.eql(u8, backend, "auto") and cli.steers());
 }
 
 /// The engine a backend names, as the operator reads it.
@@ -253,6 +256,7 @@ fn backendName(backend: []const u8) []const u8 {
     if (std.mem.eql(u8, backend, "mlx")) return "Metal";
     if (std.mem.eql(u8, backend, "cuda")) return "CUDA";
     if (std.mem.eql(u8, backend, "rocm")) return "ROCm";
+    if (std.mem.eql(u8, backend, "vulkan")) return "Vulkan";
     return backend;
 }
 

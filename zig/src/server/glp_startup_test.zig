@@ -306,10 +306,45 @@ test "a vector derived at another site is not refused where the engine steers" {
 test "the control vector's flags are listed only where this build can apply one" {
     // A build that honours the flag but refuses every valid use is not advertised (cli_capabilities.zig's listing).
     try std.testing.expectEqual(@as(usize, 2), serve.flags.len);
-    const steers_here = @import("cli.zig").steers();
+    const cli = @import("cli.zig");
+    const steers_here = cli.steers();
     for (serve.flags) |flag| {
         try std.testing.expect(flag.native);
         try std.testing.expectEqual(steers_here, flag.advertised);
+    }
+    try std.testing.expect(cli.steersFor(.macos, &.{}));
+    try std.testing.expect(cli.steersFor(.linux, &.{}));
+    try std.testing.expect(!cli.steersFor(.linux, &.{"--backend=rocm"}));
+    try std.testing.expect(!cli.steersFor(.linux, &.{"--backend=vulkan"}));
+    try std.testing.expect(!cli.steersFor(.windows, &.{}));
+}
+
+test "Qwen3.8-27B rejects a different snapshot revision on the same cached repo while accepting conversions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .base_model = "Qwen/Qwen3.8-27B", .base_revision = "aaaa1111bbbb", .layers = &.{} }, 1.0);
+    defer f.tmp.cleanup();
+    const cfg_bytes = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120,\"num_hidden_layers\":64,\"text_config\":{\"hidden_size\":5120}}";
+    const sub_dirs = [_]struct { path: []const u8, expect_mismatch: bool }{
+        .{ .path = "cache/models--Qwen--Qwen3.8-27B/snapshots/aaaa1111bbbb", .expect_mismatch = false },
+        .{ .path = "cache/models--Qwen--Qwen3.8-27B/snapshots/cccc2222dddd", .expect_mismatch = true },
+        .{ .path = "cache/models--mlx-community--Qwen3.8-27B-4bit/snapshots/cccc2222dddd", .expect_mismatch = false },
+    };
+    for (sub_dirs) |case| {
+        try f.tmp.dir.createDirPath(io, case.path);
+        var sub = try f.tmp.dir.openDir(io, case.path, .{});
+        defer sub.close(io);
+        try sub.writeFile(io, .{ .sub_path = "config.json", .data = cfg_bytes });
+        const full = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", f.tmp.sub_path[0..], case.path });
+        const why = try serve.refusal(a, full, "qwen3_5", "auto", f.g.?);
+        if (steers and case.expect_mismatch) {
+            try std.testing.expect(why != null and std.mem.indexOf(u8, why.?, "revision") != null);
+        } else if (steers) {
+            try std.testing.expect(why == null);
+        } else {
+            try std.testing.expect(why != null);
+        }
     }
 }
 
