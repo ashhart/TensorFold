@@ -38,7 +38,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
         rows += p.ids.len;
     }
     const trace = @import("cuda_prefill_trace.zig");
-    const ledger = trace.enter(e.prefill_trace, e.stream, parts[0].slot, 0, segs[0].rows, parts[0].ids.len, false);
+    const ledger: trace.Chunk = if (comptime @hasField(@TypeOf(e.*), "prefill_trace")) trace.enter(e.prefill_trace, e.stream, parts[0].slot, 0, segs[0].rows, parts[0].ids.len, false) else .{};
     defer ledger.end();
     errdefer ledger.fail();
     try e.gate(null);
