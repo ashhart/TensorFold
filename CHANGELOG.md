@@ -7,6 +7,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek-V4.1 on Metal: an EXL3 group that also keeps a dense sibling is read as its trellis, and the routed
   experts quantize each 32-value activation block to E4M3 before the down projection, as the FP8 path does, so a
   routed activation's down inputs match the reference bit for bit (#5113, refs #5063). Thanks to @BlivionIaG.
+- Qwen3.8-27B on Metal: an external drafter's feature reader returns rows retained for its own stream instead of a view into the shared tap buffer, so a parked stream no longer reads another stream's newer rows (refs #2496).
+
 - Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
 
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
