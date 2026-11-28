@@ -82,7 +82,6 @@ const Ready = struct {
     policy_line: []const u8,
 
     const Options = serve.Options;
-
     fn deinit(r: Ready, gpa: Allocator) void {
         gpa.free(r.policy_line);
         if (r.dev.group) |g| g.close(gpa);
@@ -332,6 +331,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .rerank = offer.rerank,
         .readouts = offer.readouts,
         .penalties = loaded.backend.penalties,
+        .logit_bias = loaded.backend.logit_bias,
         .reasoning = reasoning(F),
         .vision = offer.vision,
         .ocr = offer.ocr,

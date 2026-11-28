@@ -23,7 +23,6 @@ pub const Reason = enum {
         return if (r == .none) "" else @tagName(r);
     }
 };
-
 pub const Mode = enum { pipe, drain, verify, exit };
 pub const loop_max_period: usize = 8;
 pub const loop_min_run: usize = 256;
@@ -50,7 +49,6 @@ fn cycleAt(head: []const u32, tail: []const u32, n: usize) ?u32 {
     }
     return null;
 }
-
 /// Return the first token index in a candidate batch that would fire the guard.
 pub fn loopCut(s: *const Stream, tokens: []const u32) ?usize {
     if (!s.loop_guard or !s.think_open or s.think_end < 0 or s.loop_period != null) return null;
@@ -61,7 +59,6 @@ pub fn loopCut(s: *const Stream, tokens: []const u32) ?usize {
     }
     return null;
 }
-
 /// Return the detected period at the end of committed tokens, or null.
 pub fn detectLoop(emitted: []const u32) ?u32 {
     return cycleAt(emitted, &.{}, emitted.len);
@@ -124,6 +121,7 @@ pub const Spec = struct {
     max_new: u32,
     eos: []const u32 = &.{},
     sampling: ?Sampling = null,
+    logit_bias: []const @import("logit_bias.zig").Entry = &.{},
     penalties: Penalties = .{}, // where the backend applies them (Backend.VTable.penalties)
     drafts: bool = true,
     proposer: ?Proposer = null,
@@ -164,6 +162,7 @@ pub const Stream = struct {
     max_new: u32,
     eos: []const u32,
     sampling: ?Sampling,
+    logit_bias: []const @import("logit_bias.zig").Entry = &.{},
     penalties: Penalties = .{},
     drafts: bool,
     proposer: ?Proposer,
@@ -268,6 +267,7 @@ pub const Stream = struct {
             .eos = spec.eos,
             .sampling = spec.sampling,
             .penalties = spec.penalties,
+            .logit_bias = spec.logit_bias,
             .drafts = spec.drafts,
             .proposer = if (spec.drafts) spec.proposer else null,
             .recall = if (spec.drafts) spec.recall else null,

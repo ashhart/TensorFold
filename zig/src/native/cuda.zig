@@ -149,7 +149,7 @@ pub const Host = struct { // One loaded model behind the lane host: everything t
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant, .warm_images = h.inner.warm_images };
+        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .logit_bias = h.inner.logit_bias, .chunk_invariant = h.inner.chunk_invariant, .warm_images = h.inner.warm_images };
     }
 };
 pub const refusals = @import("cuda_refusal.zig");
@@ -482,6 +482,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,
+        .logit_bias = served.backend.logit_bias,
         .structures = served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .audio = if (@hasField(@TypeOf(loaded), "audio")) vision_offer.audio(loaded.audio) else null,

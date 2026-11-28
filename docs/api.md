@@ -176,9 +176,9 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, prompt_logprobs,
-prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only,
-slide_conversations and folded_memory. folded_memory is true when `--slide` has attached the engine's folded memory
+thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, logit_bias,
+prompt_logprobs, prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures,
+greedy_only, slide_conversations and folded_memory. folded_memory is true when `--slide` has attached the engine's folded memory
 weights (living weights), and false when learning is off. The vision, speech, embeddings, readouts and rerank fields
 report whether that user feature is present. The last two fields, thinking_switch and thinking_applicable, are the
 loaded chat template's and tokenizer's thinking facts (see
@@ -563,6 +563,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
 | `presence_penalty`, `frequency_penalty` | OpenAI's, from -2 to 2: before each draw, greedy or sampled, a token the reply already holds loses `presence_penalty` from its logit and `frequency_penalty` once for each time it holds it; the prompt's tokens do not count. Drafted replies equal undrafted ones with them. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA, and Qwen3.8-27B and Qwen3.8-Flash-Next on Metal; other engines refuse nonzero values with 400; zero, null and omitted values keep working | Native |
+| `logit_bias` | OpenAI's: an object of decimal token IDs (within the tokenizer's vocabulary) to numbers from -100 to 100, at most 300 entries. Before each draw, greedy or sampled, a listed token's logit gains its number; exactly -100 bans the token, so it is never drawn. Drafted replies equal undrafted ones with it. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA (a kernel set built with `tf_bias_rows`), Qwen3.5-2B on Metal and Nemotron Parse on HIP; other engines refuse a non-empty object, even one of zeros, with 400; `{}`, null and omitted keep working | Native |
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
@@ -1820,7 +1821,7 @@ key may always ask. Only these two routes carry the binding: `/v1/responses`, `/
 | `prompt_sha256` | The prompt's token ids after the template, hashed as `tensorfold.token_sha256` hashes the reply's |
 | `token_sha256` | The reply's token ids, equal to `tensorfold.token_sha256` |
 | `finish_reason` | The reply's |
-| `request` | The resolved request the engine read: `max_tokens` after the window's clamp; `sampling` (null when greedy, else the `seed` actually used, `temperature`, `top_k`, `top_p` and `min_p`); `presence_penalty`, `frequency_penalty`; `eos` and `stop`; `drafts`; `think_budget`, `think_close`, `think_end`, `answer_max`; `loop_guard`, `loop_stop`; `call` (a required tool call's gate); `structure` (the grammar's `kind`, `text_sha256`, `after`, `budget`); `logprobs`, `prompt_logprobs`, `decide` and `untaught` |
+| `request` | The resolved request the engine read: `max_tokens` after the window's clamp; `sampling` (null when greedy, else the `seed` actually used, `temperature`, `top_k`, `top_p` and `min_p`); `presence_penalty`, `frequency_penalty`; `eos` and `stop`; `logit_bias` (nonempty requests only: each entry's `token`, `value` and `ban`); `drafts`; `think_budget`, `think_close`, `think_end`, `answer_max`; `loop_guard`, `loop_stop`; `call` (a required tool call's gate); `structure` (the grammar's `kind`, `text_sha256`, `after`, `budget`); `logprobs`, `prompt_logprobs`, `decide` and `untaught` |
 | `request_sha256` | SHA-256 over `request`, walked in order as below |
 
 Every field is length-prefixed: its byte length as a little-endian u64, then its bytes. `request_sha256` hashes the field

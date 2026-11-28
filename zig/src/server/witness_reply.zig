@@ -38,6 +38,7 @@ fn resolvedOf(a: Allocator, r: *const api.Request, stops: []const []const u8) Al
     try o.put(a, "frequency_penalty", .{ .float = r.penalties.frequency });
     try o.put(a, "eos", try idsOf(a, r.eos));
     try o.put(a, "stop", try stringsOf(a, stops));
+    if (r.logit_bias.len > 0) try o.put(a, "logit_bias", try biasOf(a, r.logit_bias));
     try o.put(a, "drafts", .{ .bool = r.drafts });
     try o.put(a, "think_budget", try json.intValue(a, r.think_budget));
     try o.put(a, "think_close", try idsOf(a, r.think_close));
@@ -52,6 +53,18 @@ fn resolvedOf(a: Allocator, r: *const api.Request, stops: []const []const u8) Al
     try o.put(a, "decide", if (r.decide) |d| try json.intValue(a, d) else .null);
     try o.put(a, "untaught", .{ .bool = r.untaught });
     return .{ .object = o };
+}
+
+fn biasOf(a: Allocator, entries: []const api.LogitBias) Allocator.Error!Value {
+    const out = try a.alloc(Value, entries.len);
+    for (entries, out) |e, *slot| {
+        const o = try json.newObject(a);
+        try o.put(a, "token", try json.intValue(a, e.token));
+        try o.put(a, "value", .{ .float = e.value });
+        try o.put(a, "ban", .{ .bool = e.ban });
+        slot.* = .{ .object = o };
+    }
+    return .{ .array = out };
 }
 
 fn samplingOf(a: Allocator, s: api.Sampling) Allocator.Error!Value {

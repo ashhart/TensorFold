@@ -11,6 +11,7 @@ pub const Id = u64;
 pub const Sampling = lanes.Sampling;
 /// presence_penalty and frequency_penalty, applied where ``Info.penalties``.
 pub const Penalties = lanes.Penalties;
+pub const LogitBias = lanes.logit_bias.Entry;
 pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
@@ -146,6 +147,7 @@ pub const Info = struct {
     logprobs: bool = false,
     /// Requests' presence_penalty and frequency_penalty change the draws (false: nonzero is refused).
     penalties: bool = false,
+    logit_bias: bool = false, // sparse request token biases, including hard bans at -100
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
@@ -418,6 +420,7 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         const info_ = e.info();
+        if (request.logit_bias.len > 0 and !info_.logit_bias) return error.InvalidRequest;
         if (request.embedding != null and request.readout != null) return error.InvalidRequest;
         if (request.readout != null) {
             lanes.readout.admit(info_, request) catch return error.InvalidRequest;

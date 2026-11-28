@@ -33,7 +33,7 @@ pub const Engine = struct {
     }
     fn info(ptr: *anyopaque) api.Info {
         const e = cast(ptr);
-        return .{ .context_window = 4096, .witness = if (e.hooked) .{ .ctx = e, .read = read, .begin = begin } else null };
+        return .{ .context_window = 4096, .logit_bias = true, .witness = if (e.hooked) .{ .ctx = e, .read = read, .begin = begin } else null };
     }
     fn begin(ptr: *anyopaque) void {
         _ = cast(ptr).begins.fetchAdd(1, .monotonic);
