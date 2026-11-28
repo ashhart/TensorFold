@@ -126,7 +126,7 @@ export function ConversationList({ convs, more, loadMore, convId, q, setQ, open,
   )
 
   return (
-    <section className="convs" aria-label="Conversations">
+    <div className="convs">
       <input className="input" type="search" placeholder="Search conversations" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search conversations" />
       <div className="convs-head">
         <label className="small muted">Show <select className="sel sm" value={by} onChange={(e) => setBy(e.target.value as Grouping)} aria-label="Group conversations">
@@ -149,6 +149,6 @@ export function ConversationList({ convs, more, loadMore, convId, q, setQ, open,
       ))}
       {!convs.length && <p className="small muted">{q ? 'No conversation matches.' : 'Conversations are kept here.'}</p>}
       {more && loadMore && <div className="actions"><button className="btn sm quiet" onClick={loadMore}>Show older conversations</button></div>}
-    </section>
+    </div>
   )
 }

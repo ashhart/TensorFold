@@ -52,10 +52,12 @@ export default function App() {
   }, [])
   // each screen names the tab, and a screen reader is taken to the new screen's content, not left in the menu
   const mainRef = useRef<HTMLElement>(null)
-  const firstRoute = useRef(true)
+  const previousRoute = useRef(route)
   useEffect(() => {
     document.title = `${TITLES[route]} · TensorFold Web`
-    if (firstRoute.current) { firstRoute.current = false; return }
+    const previous = previousRoute.current
+    previousRoute.current = route
+    if (previous === route || route === 'fleet' || (previous === 'fleet' && document.activeElement !== document.body)) return
     mainRef.current?.focus({ preventScroll: true })
   }, [route])
   // a refused token is not "the server is not answering": the banner below says what to do

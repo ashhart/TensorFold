@@ -45,7 +45,7 @@ export default function SettingsScreen({ machine, engine, settings, saveSettings
   const saveKey = async () => { if (!key.trim()) return; await save({ api_key: key.trim() }, 'Engine key saved'); setKey('') }
   return (
     <section className="settings-shell">
-      <nav className="settings-nav" aria-label="Settings sections"><a className="back-link" href="#chat">← Back to app</a><h2>Settings</h2>{SECTIONS.map(([id, label]) => <a key={id} href={`#settings/${id}`} aria-current={page === id ? 'page' : undefined}>{label}</a>)}</nav>
+      <nav className="settings-nav" aria-label="Settings sections"><a className="back-link" href="#chat"><span aria-hidden="true">← </span>Back to app</a><h2>Settings</h2>{SECTIONS.map(([id, label]) => <a key={id} href={`#settings/${id}`} aria-current={page === id ? 'page' : undefined}>{label}</a>)}</nav>
       <div className="settings-content"><div className="head"><div><h1>{SECTIONS.find(([id]) => id === page)?.[1]}</h1><p>Manage TensorFold Web on this machine.</p></div></div>
       {err && <div className="notice bad">{err}</div>}
       <div className="settings">

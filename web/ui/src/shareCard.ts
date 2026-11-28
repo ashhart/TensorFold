@@ -112,13 +112,29 @@ export function cardBlob(run: BenchRun, names: Record<string, string> = {}): Pro
 
 
 export async function copyText(text: string): Promise<void> {
-  if (window.isSecureContext && navigator.clipboard?.writeText) return navigator.clipboard.writeText(text)
-  const ta = Object.assign(document.createElement('textarea'), { value: text })
-  ta.style.position = 'fixed'; ta.style.opacity = '0'
-  document.body.appendChild(ta); ta.select()
-  const ok = document.execCommand('copy')
-  ta.remove()
-  if (!ok) throw new Error('the browser refused to copy')
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return
+    } catch {
+      // Some browsers expose the API but deny clipboard access.
+    }
+  }
+  const previous = document.activeElement
+  const field = Object.assign(document.createElement('textarea'), { value: text })
+  field.style.cssText = 'position:fixed;top:0;left:0;opacity:0'
+  document.body.appendChild(field)
+  try {
+    field.focus({ preventScroll: true })
+    field.select()
+    if (!document.execCommand('copy')) throw new Error('the browser refused to copy')
+  } finally {
+    const restore = document.activeElement === field
+    field.remove()
+    if (restore && previous instanceof HTMLElement && previous.isConnected) {
+      previous.focus({ preventScroll: true })
+    }
+  }
 }
 
 

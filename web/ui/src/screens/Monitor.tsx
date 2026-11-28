@@ -25,8 +25,10 @@ function HistoryChart({ h, window }: { h: History; window: number }) {
     last = t
   }
   if (cur.length) runs.push(cur)
+  const readings = pts.flatMap(([, v]) => v == null ? [] : [v])
+  const summary = readings.length ? `Range ${Math.min(...readings).toFixed(1)} to ${Math.max(...readings).toFixed(1)} tokens per second. Last reading ${readings[readings.length - 1].toFixed(1)}.` : 'No readings.'
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="Writing speed over time">
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`Writing speed over the last ${window / 60} minutes. ${summary}`}>
       {runs.map((r, i) => {
         const line = r.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' L')
         return <g key={i}>
@@ -153,7 +155,7 @@ export default function Monitor({ engine, settings, refreshEngine, toast, stale,
   return (
     <section>
       <div className="head">
-        <div><a className="back-link" href="#models">← Models</a><h1>Engine details</h1><p>{head}</p></div>
+        <div><a className="back-link" href="#models"><span aria-hidden="true">← </span>Models</a><h1>Engine details</h1><p>{head}</p></div>
         {engine?.owned && <div className="actions"><button className="btn" aria-busy={busy} disabled={busy || stale} onClick={restart}>{busy ? 'Working…' : 'Restart'}</button><button className="btn" aria-busy={busy} disabled={busy || stale} onClick={stop}>Stop</button></div>}
       </div>
       {err && <div className="notice bad">{err}</div>}

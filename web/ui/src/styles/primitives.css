@@ -85,3 +85,5 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .palette li span.k{margin-left:auto;font-size:12px;color:var(--ink3)}
 .palette li svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;flex:none;color:var(--ink2)}
 .palette .empty{padding:14px 16px;color:var(--ink3);font-size:13.5px}
+
+:root:not([data-theme=dark]) .chip.fits{color:#106b48}

@@ -83,22 +83,22 @@ export function PresetEditor({ preset, setPreset, mine, reload, toast }: {
   }
   return (
     <div className="presetbox">
-      <div className="phead"><b>This conversation's settings</b><span className="small muted">from the preset “{preset.name}”; they apply to the next messages and are kept with the conversation</span></div>
+      <div className="phead"><h2>This conversation's settings</h2><span className="small muted">from the preset “{preset.name}”; they apply to the next messages and are kept with the conversation</span></div>
       <div className="pgroups">
-        <section className="pgroup pwide" aria-label="Instructions">
-          <h4>Instructions</h4>
+        <section className="pgroup pwide">
+          <h3>Instructions</h3>
           <label className="pfield"><span className="small muted">What the model is told before every message (the system prompt).</span>
             <textarea className="input" rows={3} value={preset.system} onChange={(e) => setPreset({ ...preset, system: e.target.value })} placeholder="None: the model's own" /></label>
         </section>
-        <section className="pgroup" aria-label="Length of the reply">
-          <h4>Length of the reply</h4>
+        <section className="pgroup">
+          <h3>Length of the reply</h3>
           <Field label="Reply up to" help="The longest reply, in tokens (a token is about three quarters of a word).">
             <input className="input num" type="number" min={16} max={65536} step={16} value={preset.max_tokens ?? ''} placeholder="model" onChange={(e) => setPreset({ ...preset, max_tokens: num(e.target.value, true) })} /> <span className="small muted">tokens</span></Field>
           <Field label="Stop at" help="Texts that end the reply where they appear: one per line, up to four.">
             <textarea className="input" rows={2} value={(preset.stop ?? []).join('\n')} placeholder="none" onChange={(e) => setPreset({ ...preset, stop: e.target.value.split('\n').slice(0, 4).map((x) => x.slice(0, 64)).filter((x, i, all) => x || i === all.length - 1) })} /></Field>
         </section>
-        <section className="pgroup" aria-label="Randomness">
-          <h4>Randomness</h4>
+        <section className="pgroup">
+          <h3>Randomness</h3>
           <Field label="Temperature" help="How free the wording is: 0 always takes the likeliest word, about 1 is the model's usual, higher is looser.">
             <input className="input num" type="number" min={0} max={2} step={0.1} value={preset.temperature ?? ''} placeholder="model" onChange={(e) => setPreset({ ...preset, temperature: num(e.target.value) })} /></Field>
           <details className="pmore" open={finer}>
