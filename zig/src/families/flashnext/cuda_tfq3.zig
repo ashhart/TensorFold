@@ -9,6 +9,9 @@ const mixed = @import("cuda_mixed_experts.zig");
 
 const bf16Of = core.bf16_round.bits;
 
+/// Dequantized BF16 bytes keep the u16 allocation's alignment: a caller's `free` must match the `alloc` (issue #5459).
+pub const Bf16Bytes = []align(@alignOf(u16)) u8;
+
 fn bf16f(b: []const u8, i: usize) f32 {
     return @bitCast(@as(u32, std.mem.readInt(u16, b[2 * i ..][0..2], .little)) << 16);
 }
@@ -97,16 +100,21 @@ pub fn dequantPleRow(bits: u8, weight: []const u8, scales: []const u8, biases: [
 }
 
 /// Dequantizes a 2D MLX 8-bit group-32 projection `[n, k]` into contiguous BF16 bytes.
-pub fn dequantMatrix8(gpa: std.mem.Allocator, store: *wt.Store, prefix: []const u8, n: usize, k: usize) ![]u8 {
+pub fn dequantMatrix8(gpa: std.mem.Allocator, store: *wt.Store, prefix: []const u8, n: usize, k: usize) !Bf16Bytes {
     var buf: [512]u8 = undefined;
     const planes = try wt.join3(gpa, store, &buf, prefix, "");
     defer gpa.free(planes.w);
     defer gpa.free(planes.s);
     defer gpa.free(planes.b);
-    if (planes.w.len != n * k or planes.s.len != n * (k / 32) * 2 or planes.b.len != n * (k / 32) * 2) return error.UnexpectedTensor;
+    return dequantPlanes(gpa, planes.w, planes.s, planes.b, n, k);
+}
+
+/// `n` rows of `k` MLX 8-bit group-32 codes from their three planes, as BF16 bytes a caller frees with the same `gpa`.
+pub fn dequantPlanes(gpa: std.mem.Allocator, w: []const u8, s: []const u8, b: []const u8, n: usize, k: usize) !Bf16Bytes {
+    if (w.len != n * k or s.len != n * (k / 32) * 2 or b.len != n * (k / 32) * 2) return error.UnexpectedTensor;
     const out = try gpa.alloc(u16, n * k);
     errdefer gpa.free(out);
-    for (0..n) |r| try dequantRow8(planes.w, planes.s, planes.b, k, r, out[r * k ..][0..k]);
+    for (0..n) |r| try dequantRow8(w, s, b, k, r, out[r * k ..][0..k]);
     return std.mem.sliceAsBytes(out);
 }
 
@@ -172,7 +180,7 @@ pub fn uploadEmbedMlx8(gpa: std.mem.Allocator, d: *const cuda.Driver, store: *wt
 }
 
 /// Dequantizes selected proposal vocabulary rows (`ids`) from an MLX 8-bit/32 `lm_head` to BF16 bytes.
-pub fn draftRows8(gpa: std.mem.Allocator, store: *wt.Store, ids: []const u32) ![]u8 {
+pub fn draftRows8(gpa: std.mem.Allocator, store: *wt.Store, ids: []const u32) !Bf16Bytes {
     var buf: [120]u8 = undefined;
     const head = try wt.join3(gpa, store, &buf, "language_model.lm_head", "");
     defer gpa.free(head.w);
@@ -314,4 +322,24 @@ test "MLX 3-bit and 8-bit group-32 dequantization matches exact affine values" {
     var out8: [32]u16 = undefined;
     try dequantRow8(&w8, &sc, &bi, 32, 0, &out8);
     for (0..32) |j| try std.testing.expectEqual(bf16Of(@as(f32, @floatFromInt(j)) * 2.0 - 3.0), out8[j]);
+}
+
+test "TFQ3 matrix bytes keep their u16 alignment, so every caller's free matches the alloc (#5459)" {
+    const a = std.testing.allocator;
+    var w: [64]u8 = undefined; // two rows of 32 codes
+    for (&w, 0..) |*b, j| b.* = @intCast(j & 31);
+    var scales: [4]u8 = undefined; // two rows, one group of 32 each
+    var biases: [4]u8 = undefined;
+    for ([_]usize{ 0, 2 }) |at| {
+        std.mem.writeInt(u16, scales[at..][0..2], bf16Of(2.0), .little);
+        std.mem.writeInt(u16, biases[at..][0..2], bf16Of(-3.0), .little);
+    }
+    const out = try dequantPlanes(a, &w, &scales, &biases, 2, 32);
+    defer a.free(out); // the caller's free, as cuda_prompt's embed and lm_head uploads do: a plain []u8 aborts serve
+    try std.testing.expectEqual(@as(usize, 2 * 32 * 2), out.len);
+    const words = std.mem.bytesAsSlice(u16, out);
+    try std.testing.expectEqual(bf16Of(-3.0), words[0]);
+    try std.testing.expectEqual(bf16Of(31 * 2.0 - 3.0), words[31]);
+    try std.testing.expectEqual(bf16Of(-3.0), words[32]); // the second row dequantizes on its own
+    try std.testing.expectEqual(bf16Of(31 * 2.0 - 3.0), words[63]);
 }
