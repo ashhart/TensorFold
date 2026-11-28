@@ -81,6 +81,7 @@ pub const Args = struct {
     record: ?[]const u8 = null, // drafter training rows written under this folder
     kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
     prompt_precision: []const u8 = "bf16", // int8: prompt matmuls quantize their inputs to int8 a 64-input group
+    slide_forget: bool = false,
     slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
     slide_drift_gate: bool = false,
     slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)

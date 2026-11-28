@@ -17,6 +17,7 @@ test "Metal learner: Nemotron keeps its backend, adapter hooks and initial lesso
     try std.testing.expectEqual(before.learner.whole, typed.learner.whole);
     try std.testing.expectEqual(before.learner.method, typed.learner.method);
     try std.testing.expectEqual(before.learner.readsConversations(), after.conversations);
+    try std.testing.expectEqual(before.learner.whole and before.learner.method == .pocket, after.pocket_usage);
     const hook = before.hook();
     try std.testing.expectEqual(hook.begin, after.hook.begin);
     try std.testing.expectEqual(hook.step, after.hook.step);
@@ -56,4 +57,11 @@ test "Metal learner: descriptor widths match Nemotron's existing mixed-width adm
     const got = (try living.widths.other(a, living.families.nemotron_h, doc.object)).?;
     try std.testing.expectEqualStrings("backbone.embeddings", got.name);
     try std.testing.expectEqual(@as(u8, 8), got.quant.bits);
+}
+
+test "Metal learner: counting off exits before touching a device or an empty pocket" {
+    var b: nemo.backend.Metal = undefined;
+    b.usage_enabled = false;
+    var c: nemo.state.Cache = undefined;
+    try b.countUsage(&c, 16);
 }

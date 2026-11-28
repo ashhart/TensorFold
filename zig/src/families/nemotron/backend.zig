@@ -53,6 +53,7 @@ pub const Options = struct {
 };
 
 pub const Metal = struct {
+    pub const countUsage = @import("metal_usage.zig").chunk;
     gpa: std.mem.Allocator,
     m: *Model,
     o: Options,
@@ -78,6 +79,7 @@ pub const Metal = struct {
     last_ms: f64 = 0, // and of the last one
     masks: ?Masks = null, // structured output's bits (grammar.zig), made at the first structured request
     living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
+    usage_enabled: bool = false,
     trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
     coop_split: bool = true, // TF_COOP_SPLIT as forward.zig resolves it at load: in, out and eh K slices a threadgroup
     residency: ?mtl.ResidencySet.Follow = null,

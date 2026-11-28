@@ -32,6 +32,7 @@ pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
 
 pub const grammar = lanes.grammar;
+pub const pocket_usage = lanes.pocket_usage;
 pub const Request = @import("engine_request.zig").Request;
 pub const Stop = @import("engine_request.zig").Stop;
 
@@ -141,6 +142,8 @@ pub const Info = struct {
     thinking_applicable: bool = false, // server-set from the tokenizer (Server.init): the thinking close marker is one token
     /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
     answer_limit: bool = false,
+    /// Accepted-path pocket activity is reported once per completed external request, with no extra forward.
+    pocket_usage: bool = false,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
@@ -240,15 +243,7 @@ pub const Given = struct { tp: bool = false, rank: bool = false };
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
     pub const slideRefusal = @import("engine_slide.zig").refusal;
-    pub fn fsrRefusal(o: Open, backend: []const u8) ?[]const u8 {
-        if (o.ssd_experts_gib == null and !o.ple_on_ssd and o.fsr_trace == null) return null;
-        if (!std.mem.eql(u8, backend, "metal") or !std.mem.eql(u8, o.model_type, "qwen4_exp"))
-            return "--ssd-experts, --ple-on-ssd and --fsr-route-trace require Flash Next (qwen4_exp) on Metal";
-        if (o.speed_up != null) return "FSR SSD residency requires one Metal device; --speed-up is unsupported";
-        if (o.ssd_experts_gib) |g| if (!std.math.isFinite(g) or g <= 0 or g >= 0x1p33)
-            return "--ssd-experts requires a positive finite GiB budget below 2^33";
-        return null;
-    }
+    pub const fsrRefusal = @import("engine_fsr.zig").refusal;
     dir: []const u8,
     model_type: []const u8,
     context: ?i64 = null,
@@ -289,6 +284,7 @@ pub const Open = struct {
     spill: prompt_cache.rows.Spill = .off,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
     slide: bool = false,
+    slide_forget: bool = false,
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
     recall: bool = false,
     kv8: bool = false, // --kv-cache fp8: e4m3 attention caches, an fp32 scale a row (families whose Options take kv8)

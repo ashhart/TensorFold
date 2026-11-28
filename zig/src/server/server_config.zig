@@ -69,6 +69,7 @@ pub const Config = struct {
     compact_memory: ?[]const u8 = null,
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
+    slide_forget: bool = false,
     slide_drift_gate: bool = false,
     slide_take_out_check: bool = false, // TF_SLIDE_TAKE_OUT_CHECK=1 with --slide, read once at start
     slide_forget_fail: u32 = 0, // a fact a delete fails to check, to test its put-back (0: none; test-hook builds)

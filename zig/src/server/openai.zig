@@ -4,6 +4,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const chat = @import("chat.zig");
+const roleDelta = @import("chat_delta.zig").role;
 const compact = @import("compact.zig");
 const grammar = @import("grammar.zig");
 const messages = @import("messages.zig");
@@ -201,6 +202,9 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
         observed.vt.reply(observed.ctx, cx.status(), wrapError(a, body) catch return);
         return;
     };
+    var usage = @import("slide_usage_stream.zig").Scope.init(srv);
+    defer usage.deinit();
+    if (srv.config.slide_forget and srv.info.pocket_usage) p.input.usage = &usage;
     p.input.id = id;
     if (srv.info.folded_memory) p.input.learns = @import("auth_scope.zig").learnsFrom(gone.conn.key_scopes); // --slide
     // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
@@ -556,7 +560,3 @@ pub const Run = struct {
         r.warmNext(&reply, calls);
     }
 };
-
-fn roleDelta(a: Allocator) Allocator.Error!Value {
-    return chat.deltaOf(a, "role", "assistant");
-}

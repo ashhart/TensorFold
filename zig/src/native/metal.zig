@@ -223,6 +223,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .batch_rows = @min(128, @max(64, 4 * served)), // four rows a lane, so 32 and 64 sessions keep their drafts
     });
     errdefer h.metal.deinit();
+    h.metal.usage_enabled = api.pocket_usage.backendEnabled(o.slide, o.slide_forget, mem_ctrl.useLegacyPocket());
     if (paged) |p| try nemotron.kv_pages.attach(h.metal, p.layout, p.pages, positions, served);
     nemotron.slide.loadLiving(gpa, io, h.metal) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native engine cannot read the saved lessons in {s} ({s})", .{ o.dir, @errorName(e) });
@@ -283,6 +284,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (o.slide and mem_ctrl.useLegacyPocket()) {
         const s = try metal_slide.init(nemotron, gpa, io, h.metal, o.dir);
         h.slide = s;
+        h.host.info_.pocket_usage = api.pocket_usage.enabled(o.slide, o.slide_forget) and s.pocket_usage;
+        h.metal.usage_enabled = h.host.info_.pocket_usage;
         h.host.learner = s.hook;
         h.host.info_.slide_conversations = s.conversations;
     } else if (o.slide) { // a saved bank alone never attaches it: --slide asks for learning
@@ -461,7 +464,6 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
 }
-
 /// GLM-5.3 (EXLR8) needs a pair: each Mac holds half of every expert and attention head (--speed-up names its link).
 fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const settings = o.speed_up orelse {
@@ -484,7 +486,6 @@ fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     };
     return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
 }
-
 test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -501,7 +502,6 @@ test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for th
     for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
     for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn = "/x" }, false)) == null);
 }
-
 test "--spill-gib with --checkpoint-slots opens the four families with a disk store, and the others refuse it by name" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

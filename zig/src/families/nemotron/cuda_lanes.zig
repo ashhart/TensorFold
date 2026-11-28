@@ -58,6 +58,9 @@ pub const Cuda = struct {
     bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (rowSlots rows), made at first use
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
+    usage_enabled: bool = false,
+    usage_reads: std.AutoHashMapUnmanaged(*const lanes.Stream, @import("cuda_usage.zig").Read) = .empty,
+    test_step: if (@import("builtin").is_test) ?@import("cuda_usage.zig").StepHook else void = if (@import("builtin").is_test) null else {},
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         const slots = rowSlots(e.c);
@@ -76,6 +79,7 @@ pub const Cuda = struct {
         } else if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
         self.fills.deinit(self.gpa); // passes left between their chunks
+        @import("cuda_usage.zig").deinit(self);
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
@@ -87,8 +91,8 @@ pub const Cuda = struct {
         return .{
             .ptr = self,
             .vtable = &.{
-                .prefill = prefillFn,
-                .prefill_step = fill.step,
+                .prefill = @import("cuda_usage.zig").prefill,
+                .prefill_step = @import("cuda_usage.zig").prefillStep,
                 .cancel_prefill = fill.keepCancelled,
                 .first = firstFn,
                 .queue = queueFn,
@@ -120,7 +124,6 @@ pub const Cuda = struct {
         @memcpy(self.bits.?.slice(u32)[slot * words ..][0..masks.len], masks);
         return .{ .bits = self.bits_dev + slot * words * 4, .words = words };
     }
-
     /// The first token drawn again among `mask`'s allowed tokens (prefill drew it unmasked); a fresh handle to it.
     fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
         const self = of(ptr);
@@ -498,6 +501,7 @@ pub const Cuda = struct {
     /// The stream's pass and lane gone once its GPU work has landed; again, nothing.
     pub fn release(self: *Cuda, s: *const lanes.Stream) void {
         fill.forget(self, s); // a pass released between its chunks
+        @import("cuda_usage.zig").release(self, s);
         const kv = self.lanes.fetchRemove(s) orelse return;
         self.e.stream.synchronize() catch {};
         self.drop(kv.value);

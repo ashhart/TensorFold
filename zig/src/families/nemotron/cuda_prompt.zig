@@ -5,6 +5,10 @@ const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const Cancel = engine.Cancel;
 const Keep = engine.Keep;
+/// Every host reader requiring all trailing MoE blocks.
+pub fn readers(e: *const Engine, head: ?*Head, dump: ?*Dump, lessons: bool) bool {
+    return head != null or dump != null or e.taps != null or e.prompt_rows != null or lessons or e.usage != null;
+}
 const Mask = engine.Mask;
 const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
@@ -54,6 +58,7 @@ pub fn begin(e: *Engine, prompt: []const u32, from: usize, head: ?*Head) !void {
     if (from >= prompt.len) return error.BadReuse;
     if (prompt.len + state.max_rows > e.cap()) return error.ContextFull;
     if (from == 0) {
+        if (e.usage) |u| u.trace.restore(0, .{});
         try e.reset();
         if (head) |h| try h.reset();
     } else if (e.pos != from) return error.BadReuse;
@@ -61,7 +66,7 @@ pub fn begin(e: *Engine, prompt: []const u32, from: usize, head: ?*Head) !void {
 
 /// Whether prefillFrom runs the pass as staggered segments (named request cuts keep the serial chunks).
 pub fn segmented(e: *const Engine, prompt: []const u32, from: usize, dump: ?*Dump, cancel: ?Cancel, keep: ?Keep, chunks: []const u32) bool {
-    return from == 0 and keep == null and chunks.len == 0 and e.vision == null and e.audio == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel);
+    return from == 0 and keep == null and chunks.len == 0 and e.vision == null and e.audio == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and e.usage == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel);
 }
 
 /// The pass's first token, which its last chunk drew on the GPU.
@@ -131,6 +136,7 @@ pub const Pass = struct {
         }
         const shared = e.lessons();
         var f = e.forward(p.dump);
+        f.usage = e.usage;
         try e.beforeChunk(p.cancel);
         const step: usize = if (p.wide and p.background) state.yield_rows else if (p.wide and inside(keep, s, s + state.pass_rows) < marks.max) state.pass_rows else state.prefill_rows; // 2,048 rows where a wide pass would crowd the scan's marks
         const forced: []const u32 = if (keep) |k| (if (k.cut) k.at else &.{}) else &.{};
@@ -139,12 +145,13 @@ pub const Pass = struct {
         if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
         const chunk = prompt[s..end];
         e.last_chunk = s;
+        if (e.usage) |u| try u.trace.start(s, chunk.len);
         if (keep) |k| arm(e, k, s, end);
         defer e.armed.n = 0;
         f.captures = e.armed.marks();
         const lessons = p.lessons or e.decide != lesson_route.none;
-        const readers = p.head != null or p.dump != null or e.taps != null or e.prompt_rows != null or lessons;
-        f.unread = prompt_tail.unread(.{ .logits = end == prompt.len, .readers = readers });
+        const active_readers = readers(e, p.head, p.dump, lessons);
+        f.unread = prompt_tail.unread(.{ .logits = end == prompt.len, .readers = active_readers });
         f.route = .{};
         f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
         try e.copied.synchronize();

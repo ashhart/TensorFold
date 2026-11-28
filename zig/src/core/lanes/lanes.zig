@@ -27,6 +27,7 @@ pub const hold_price = @import("hold_price.zig");
 pub const mtp_policy = @import("mtp_policy.zig");
 pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
+pub const pocket_usage = @import("pocket_usage.zig");
 pub const stream = @import("stream.zig");
 pub const backend = @import("backend.zig");
 pub const embedding = @import("embedding.zig");
@@ -125,4 +126,8 @@ test {
     _ = @import("sampling_row.zig");
     _ = @import("sampling_row_test.zig");
     _ = @import("penalty_rows.zig");
+}
+
+test {
+    _ = pocket_usage;
 }

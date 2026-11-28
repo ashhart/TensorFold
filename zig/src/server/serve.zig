@@ -250,6 +250,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
         .slide_drift_gate = args.slide_drift_gate,
+        .slide_forget = args.slide and args.slide_forget,
         .slide_take_out_check = take_out_check,
         .slide_forget_fail = s.forget_fail,
         .cortheon = args.cortheon,

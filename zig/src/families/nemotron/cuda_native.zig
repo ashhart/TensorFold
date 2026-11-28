@@ -42,6 +42,7 @@ pub const Options = struct {
     drafts: bool,
     segments: usize = 1,
     slide: bool = false,
+    slide_forget: bool = false,
     vision: ?vision.Limits = null,
     precision: ?@import("config.zig").Precision = null,
     mtp_drafts: ?u32 = null,
@@ -52,6 +53,10 @@ pub const Options = struct {
     master_port: u16 = 29551,
     launch_from: []const u8 = "",
 };
+
+pub fn usageEnabled(o: Options, bolt: bool, latent: usize) bool {
+    return @import("lanes").pocket_usage.enabled(o.slide, o.slide_forget) and !bolt and latent == 0;
+}
 pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
@@ -81,6 +86,7 @@ pub const Loaded = struct {
     vision: ?*vision.Vision = null, // --vision: the tower the server's image requests reach
     audio: ?*@import("cuda_audio.zig").Audio = null, // a Transcribe checkpoint's encoder the server's audio requests reach
     taps: []const u32 = &.{}, // the rows a recorder may ask `backend` for (empty: none)
+    pocket_usage: bool = false,
     host_snaps: bool = false, // a discrete card: prompt states go to pinned host memory when the cache does not fit
     /// The other streams' memory as one pool of KV pages (null: each allocates a window at its prefill).
     layout: ?kv.Layout = null,
@@ -160,6 +166,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
     own.lanes.copy_drafts = o.drafts and !e.c.salm; // a copied <|audio|> has no audio row
+    own.lanes.usage_enabled = usageEnabled(o, e.c.bolt, e.c.latent);
     own.lanes.mtp_drafts = o.mtp_drafts;
     own.lanes.mtp_confidence = o.mtp_confidence;
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
@@ -168,6 +175,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.taps = .{engine.finalTap(e.c)};
     return .{
         .backend = own.lanes.backend(),
+        .pocket_usage = own.lanes.usage_enabled,
         .facts = own.lanes.facts(),
         .rows = own.lanes.facts().exact_width,
         .stream_bytes = e.seqBytes(),
