@@ -136,6 +136,9 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
     } else if (glp_keys > 0) {
         return refuse(why, "the file carries glp keys but no glp.spec_version", .{});
     }
+    for ([_][]const u8{ "glp.dir_scales", "glp.layer_scales" }) |k| {
+        if (file.find(k) != null) return refuse(why, "the file carries {s}: per-direction and per-layer scales are not implemented", .{k});
+    }
 
     if (glp_keys > 0) {
         const rank = file.num("glp.rank") orelse value: {
@@ -251,6 +254,31 @@ pub fn checkModel(v: Vector, hidden: usize, base_model: []const u8, why: *Why) E
     if (v.width != hidden) return refuse(why, "the vector's directions are {d} wide; the model is {d}", .{ v.width, hidden });
     if (base_model.len > 0 and v.base_model.len > 0 and !sameModel(v.base_model, base_model)) {
         return refuse(why, "the vector is for {s}; the model is {s}", .{ v.base_model, base_model });
+    }
+}
+
+/// The hub's URL prefix: a base model named by URL names the repo that follows it.
+pub const hub_prefix = "https://huggingface.co/";
+
+/// A repo id, whether the file names the model as an id or as the hub's URL for it.
+pub fn repoId(name: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, name, hub_prefix)) name[hub_prefix.len..] else name;
+}
+
+const short_commit = 7;
+
+fn revisionMatches(a: []const u8, b: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(a, b)) return true;
+    if (@min(a.len, b.len) < short_commit) return false;
+    return std.ascii.startsWithIgnoreCase(a, b) or std.ascii.startsWithIgnoreCase(b, a);
+}
+
+/// Reject a snapshot revision mismatch when both vector and served model name the same cached repository.
+pub fn checkRevision(v: Vector, base_model: []const u8, revision: []const u8, why: *Why) Error!void {
+    if (base_model.len == 0 or v.base_model.len == 0 or v.base_revision.len == 0 or revision.len == 0) return;
+    if (!std.ascii.eqlIgnoreCase(repoId(v.base_model), repoId(base_model))) return;
+    if (!revisionMatches(v.base_revision, revision)) {
+        return refuse(why, "the vector is for revision {f}; the model is revision {f}", .{ std.zig.fmtString(v.base_revision), std.zig.fmtString(revision) });
     }
 }
 

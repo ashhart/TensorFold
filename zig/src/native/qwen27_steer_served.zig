@@ -4,6 +4,13 @@ const api = @import("engine_api");
 const q = @import("tensorfold").qwen27;
 const Allocator = std.mem.Allocator;
 
+/// Check whether a control vector matches the Qwen3.8-27B model's geometry, repo, and snapshot revision.
+pub fn checkFit(vector: api.glp.Vector, hidden: usize, dir: []const u8, a: Allocator, reason: *api.glp.Why) !void {
+    const src = cachedSource(a, dir);
+    try api.glp.checkModel(vector, hidden, src.repo, reason);
+    try api.glp.checkRevision(vector, src.repo, src.revision, reason);
+}
+
 /// Check the vector against the model that loaded, then put its directions on the device.
 pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.Glp, a: Allocator, why: *[]const u8) !void {
     // The steered norm has neither the looped model's mHC blocks nor its shifted gains.
@@ -14,7 +21,7 @@ pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var reason: api.glp.Why = .{};
-    api.glp.checkModel(g.vector, model.config.hidden, repoId(arena.allocator(), dir), &reason) catch |err| {
+    checkFit(g.vector, model.config.hidden, dir, arena.allocator(), &reason) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the control vector does not fit {s}: {s}", .{ dir, reason.text() });
         return err;
     };
@@ -54,14 +61,17 @@ pub fn report(g: api.glp.Glp) void {
     if (v.transferred) std.log.warn("Qwen3.8-27B: the control vector was derived at {f}, not at {f}: it is applied at the residual stream", .{ std.zig.fmtString(v.derived_at), std.zig.fmtString(v.hook_point) });
 }
 
-/// The repo id a cached checkpoint came from ("Org/Name"); empty when the folder is not a cache snapshot.
-fn repoId(a: Allocator, dir: []const u8) []const u8 {
-    const at = std.mem.lastIndexOf(u8, dir, "models--") orelse return "";
+/// The repo id and revision a cached checkpoint came from; empty strings when not a cache snapshot.
+fn cachedSource(a: Allocator, dir: []const u8) struct { repo: []const u8, revision: []const u8 } {
+    const at = std.mem.lastIndexOf(u8, dir, "models--") orelse return .{ .repo = "", .revision = "" };
     const rest = dir[at + "models--".len ..];
-    const sep = std.mem.indexOf(u8, rest, "/snapshots/") orelse return "";
+    const sep = std.mem.indexOf(u8, rest, "/snapshots/") orelse return .{ .repo = "", .revision = "" };
     const owner = rest[0..sep];
-    const dash = std.mem.indexOf(u8, owner, "--") orelse return "";
-    return std.fmt.allocPrint(a, "{s}/{s}", .{ owner[0..dash], owner[dash + 2 ..] }) catch "";
+    const dash = std.mem.indexOf(u8, owner, "--") orelse return .{ .repo = "", .revision = "" };
+    const tail = rest[sep + "/snapshots/".len ..];
+    const rev = tail[0 .. std.mem.indexOfScalar(u8, tail, '/') orelse tail.len];
+    const repo = std.fmt.allocPrint(a, "{s}/{s}", .{ owner[0..dash], owner[dash + 2 ..] }) catch "";
+    return .{ .repo = repo, .revision = if (repo.len > 0) rev else "" };
 }
 
 /// Why a vector's directions cannot be prepared, as the operator reads it.
@@ -72,4 +82,31 @@ fn steerProblem(err: anyerror) []const u8 {
         error.BadSteerShape => "it holds no direction",
         else => "its directions cannot be prepared",
     };
+}
+
+test "checkFit rejects a mismatched snapshot revision on the same Qwen repo while keeping conversions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = [_]f32{ 1, 0, 0, 0, 0, 0, 0, 0 };
+    const vector: api.glp.Vector = .{
+        .alpha = 1,
+        .hook_point = api.glp.residual_site,
+        .derived_at = api.glp.residual_site,
+        .base_model = "Qwen/Qwen3.8-27B",
+        .base_revision = "aaaa1111bbbb",
+        .method = "",
+        .contrast = "",
+        .width = 8,
+        .layers = &.{.{ .id = 1, .dir = &dir }},
+        .sha256 = @splat(0),
+        .claims_digest = false,
+        .file_sha256 = @splat(0),
+        .transferred = false,
+    };
+    var why: api.glp.Why = .{};
+    try checkFit(vector, 8, "/cache/models--Qwen--Qwen3.8-27B/snapshots/aaaa1111bbbb", a, &why);
+    try checkFit(vector, 8, "/cache/models--mlx-community--Qwen3.8-27B-4bit/snapshots/cccc2222dddd", a, &why);
+    try std.testing.expectError(error.BadGlpVector, checkFit(vector, 8, "/cache/models--Qwen--Qwen3.8-27B/snapshots/cccc2222dddd", a, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "revision") != null);
 }

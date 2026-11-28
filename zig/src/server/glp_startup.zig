@@ -125,6 +125,9 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
     if (model.hidden) |hidden| glp.checkModel(vector, hidden, model.repo, &why) catch {
         return try std.fmt.allocPrint(a, "--glp: {s}", .{why.text()});
     };
+    glp.checkRevision(vector, model.repo, model.revision, &why) catch {
+        return try std.fmt.allocPrint(a, "--glp: {s}", .{why.text()});
+    };
     if (model.layers) |layers| {
         for (vector.layers) |l| {
             if (l.id >= layers) return try std.fmt.allocPrint(a, "--glp: the vector steers layer {d} of a model with {d} layers: its deepest layer is {d}", .{ l.id, layers, layers - 1 });
@@ -136,7 +139,7 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
     return null;
 }
 
-/// The checkpoint's hidden size, depth and the repo it came from, as the vector's own check needs them.
+/// The checkpoint's hidden size, depth and provenance it came from, as the vector's own check needs them.
 const Model = struct {
     /// The model's hidden size, when its config names one.
     hidden: ?usize = null,
@@ -144,10 +147,13 @@ const Model = struct {
     layers: ?usize = null,
     /// The repo id the checkpoint came from ("Org/Name"), empty when it is not a cache snapshot.
     repo: []const u8 = "",
+    /// The snapshot revision the checkpoint came from, empty when it is not a cache snapshot.
+    revision: []const u8 = "",
 };
 
 fn modelOf(a: std.mem.Allocator, dir: []const u8) Model {
-    var m: Model = .{ .repo = cachedRepo(a, dir) };
+    const src = cachedSource(a, dir);
+    var m: Model = .{ .repo = src.repo, .revision = src.revision };
     var problem: []const u8 = "";
     const bytes = (cfg.read(a, startupIo(), dir, &problem) catch null) orelse return m;
     const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return m;
@@ -162,14 +168,17 @@ fn modelOf(a: std.mem.Allocator, dir: []const u8) Model {
     return m;
 }
 
-/// The repo id a cached checkpoint came from ("Org/Name"); empty when the folder is not a cache snapshot.
-fn cachedRepo(a: std.mem.Allocator, dir: []const u8) []const u8 {
-    const at = std.mem.lastIndexOf(u8, dir, "models--") orelse return "";
+/// The repo id and revision a cached checkpoint came from; empty strings when not a cache snapshot.
+fn cachedSource(a: std.mem.Allocator, dir: []const u8) struct { repo: []const u8, revision: []const u8 } {
+    const at = std.mem.lastIndexOf(u8, dir, "models--") orelse return .{ .repo = "", .revision = "" };
     const rest = dir[at + "models--".len ..];
-    const sep = std.mem.indexOf(u8, rest, "/snapshots/") orelse return "";
+    const sep = std.mem.indexOf(u8, rest, "/snapshots/") orelse return .{ .repo = "", .revision = "" };
     const owner = rest[0..sep];
-    const dash = std.mem.indexOf(u8, owner, "--") orelse return "";
-    return std.fmt.allocPrint(a, "{s}/{s}", .{ owner[0..dash], owner[dash + 2 ..] }) catch "";
+    const dash = std.mem.indexOf(u8, owner, "--") orelse return .{ .repo = "", .revision = "" };
+    const tail = rest[sep + "/snapshots/".len ..];
+    const rev = tail[0 .. std.mem.indexOfScalar(u8, tail, '/') orelse tail.len];
+    const repo = std.fmt.allocPrint(a, "{s}/{s}", .{ owner[0..dash], owner[dash + 2 ..] }) catch "";
+    return .{ .repo = repo, .revision = if (repo.len > 0) rev else "" };
 }
 
 /// Gemma checkpoints are never steered.

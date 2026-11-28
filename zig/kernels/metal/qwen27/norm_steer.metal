@@ -50,7 +50,9 @@ Q27_SPECIALIZE
   float ss = 0.0f;
   for (int i = 0; i < E; i++) {
     const float d = dv[i];
-    const float v = hv[i] + ALPHA * d;
+    const float step = ALPHA * d;
+    // a zero step leaves the rounded residual alone, so a negative zero stays negative
+    const float v = step == 0.0f ? hv[i] : (hv[i] + step);
     const bfloat rounded = bfloat(v);
     HO[base + i] = rounded;
     pv[i] = float(rounded);

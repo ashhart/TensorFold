@@ -28,6 +28,7 @@ const Shape = struct {
     tensor_names: ?[]const []const u8 = null,
     /// A general.description value, so its text can read like a metadata key.
     description: ?[]const u8 = null,
+    extra_key: ?[]const u8 = null,
 };
 
 /// The metadata a fixture writes: the key's bytes and how many keys there are.
@@ -123,6 +124,7 @@ fn writeFixture(shape: Shape) ![]u8 {
         .absent => {},
     }
     if (shape.description) |d| try kv.text("general.description", d);
+    if (shape.extra_key) |k| try kv.text(k, "0.5");
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
@@ -578,4 +580,15 @@ test "a digest key that is not text is refused" {
     const why = try reason(bytes);
     defer std.testing.allocator.free(why);
     try std.testing.expect(std.mem.indexOf(u8, why, "glp.content_sha256 is not text") != null);
+}
+
+test "version-1 vectors declaring dir_scales or layer_scales are refused" {
+    for ([_][]const u8{ "glp.dir_scales", "glp.layer_scales" }) |scale_key| {
+        const bytes = try writeFixture(.{ .extra_key = scale_key });
+        defer std.testing.allocator.free(bytes);
+        try refused(bytes);
+        const why = try reason(bytes);
+        defer std.testing.allocator.free(why);
+        try std.testing.expect(std.mem.indexOf(u8, why, scale_key) != null);
+    }
 }
