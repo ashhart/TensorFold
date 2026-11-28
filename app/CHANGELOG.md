@@ -39,6 +39,7 @@ current source and are awaiting a packaged Desktop release.
   [#4141](https://github.com/ashhart/TensorFold/pull/4141)
 - Benchmarks accept community-v2 results and preserve optional Mac product-family labels in
   saved history and exports. [#4031](https://github.com/ashhart/TensorFold/pull/4031) · [#2693](https://github.com/ashhart/TensorFold/pull/2693)
+- Desktop controls expose visible labels, Settings announces navigation state, and model drawers avoid extra banner landmarks. (#4716)
 
 ## 1.0.0 · 2026-11-02
 
