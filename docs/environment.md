@@ -86,6 +86,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_PAIR_EXPERTS` | Exactly `0` or `1`; default off. On, GLM paired CUDA prompt chunks share 128-pair routed NVFP4 expert items, with separate per-chunk outputs and unchanged slot combines |
 | `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing). On, all four prompt traces are created before readiness; startup, gate, final-draw, cache-admission and memory-counter records go to the log. A prompt step is one chunk, with no pair or solo steps, so its prompt timings are of that shape |
 | `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |
+| `TF_GLM_METAL_EARLY_DRAFT` | Exactly `0` or `1`; default off. `1` commits built-in Metal MTP drafts ahead and reuses one-stream absorb outputs without the redundant copies, query projection and norm |
 | `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM's kernels and its qmmf linears use dependent launches) |
 | `TF_GLM_INDEX_SPLIT` | A whole prompt position from `0` to `4294967295`; default `2048` (from that position on, rank 0 splits a prompt chunk's indexer rows at TP=2 or more; `0` never splits) |
 | `TF_GLM_PROMPT_STEPS` | Exactly `0` or `1`; default on (GLM prompt passes in chunks); read on rank 0 |
