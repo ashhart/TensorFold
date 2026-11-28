@@ -12,6 +12,7 @@ const usage =
     \\       tf-ricursive-tp2 <model dir> bench <ids> <decode rows>
     \\       tf-ricursive-tp2 <model dir> follow
     \\       tf-ricursive-tp2 <model dir> hello [--truncated]
+    \\       tf-ricursive-tp2 <model dir> fault <0|1|none> <start|load|call>
     \\suite: for each "name n" line of <run dir>/texts.txt, name.prompt.f32, name.decode.f32 (first n/2),
     \\name.greedy.txt (32) and with layers name.layers.f32, from one load.
     \\<ids>: a file of token ids (comma, space or newline separated). logits: the first <first> ids as prompt chunks of
@@ -23,6 +24,9 @@ const usage =
     \\(rows i % stride == stride - 1 and the tail). bench: the ids as a timed prefill (depth marks), then greedy decode.
     \\hello (both ranks): rank 1 asks one more slot than rank 0; both must refuse and give back every device byte, then
     \\open again with one slot each and run a decode row. Prints HELLO PASS on each rank.
+    \\fault (both ranks, through the served open and its liveness lines): plants a failure on one rank before NCCL
+    \\connects, after its weights load, or in the first call; both processes must end with that error. none: the
+    \\open and one decode row on rank 0, then a clean stop on both (FAULT NONE PASS on rank 0).
     \\Two ranks: TF_RICURSIVE_RANK (0 or 1) and NCCL_COMM_ID; rank 1 follows rank 0 whatever its mode.
     \\TF_RICURSIVE_CONTEXT (4096), TF_RICURSIVE_FULL_PROMPT=0 (full layers' prompt chunks on tree rows),
     \\TF_RICURSIVE_ROCE=1 (RoCE small gathers), TF_RICURSIVE_GRAPHS=1 (decode rows as CUDA graphs).
@@ -41,7 +45,7 @@ pub fn main(init: std.process.Init) !u8 {
     const is_suite = std.mem.eql(u8, mode, "suite");
     var ids: std.ArrayList(u32) = .empty;
     const pl = try place();
-    const is_hello = std.mem.eql(u8, mode, "hello");
+    const is_hello = std.mem.eql(u8, mode, "hello") or std.mem.eql(u8, mode, "fault");
     if (!is_suite and !is_hello and pl.rank == 0 and !std.mem.eql(u8, mode, "follow")) ids = try readIds(init.io, a, args[3]);
     var driver = try cuda.Driver.open();
     defer driver.close();
@@ -50,6 +54,8 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     var t0 = now(io);
     const context = if (std.c.getenv("TF_RICURSIVE_CONTEXT")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 4096;
+    if (std.mem.eql(u8, mode, "fault") and args.len < 5) return error.BadSetting;
+    if (std.mem.eql(u8, mode, "fault")) return fault(init, a, &ctx, args[1], args[3], args[4], context, pl);
     if (is_hello) return hello(init, a, &ctx, &driver, args[1], .{ .context = context, .truncated = truncated, .place = pl });
     const m = try rc.Model.load(init.gpa, init.io, &ctx, &driver, args[1], .{ .context = context, .slots = if (std.c.getenv("TF_RICURSIVE_SLOTS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1, .truncated = truncated, .place = pl, .full_prompt = !off("TF_RICURSIVE_FULL_PROMPT"), .roce = env("TF_RICURSIVE_ROCE"), .graphs = env("TF_RICURSIVE_GRAPHS") });
     defer m.deinit();
@@ -126,6 +132,24 @@ fn hello(init: std.process.Init, a: std.mem.Allocator, ctx: *const cuda.Context,
     }
     std.debug.print("rank {d}: HELLO PASS\n", .{r});
     return 0;
+}
+
+/// One planted failure (or none) through the served open: rank 1 never returns from it, rank 0 runs one decode row.
+fn fault(init: std.process.Init, a: std.mem.Allocator, ctx: *const cuda.Context, dir: []const u8, who: []const u8, at: []const u8, context: usize, pl: rc.forward.Place) !u8 {
+    const f: rc.stop.Fault = .{
+        .rank = if (std.mem.eql(u8, who, "none")) null else try std.fmt.parseInt(usize, who, 10),
+        .at = std.meta.stringToEnum(rc.stop.Fault.Stage, at) orelse return error.BadSetting,
+    };
+    const o: rc.native.Options = .{ .context = context, .drafts = false, .tp = 2, .rank = @intCast(pl.rank), .fault = f };
+    const l = rc.native.open(init.gpa, init.io, ctx, dir, null, o) catch |err| {
+        std.debug.print("rank {d}: open failed: {s}\n", .{ pl.rank, @errorName(err) });
+        return 1;
+    };
+    const out = try a.alloc(f32, l.target.m.c.vocab);
+    try l.target.m.forward(&.{1}, 0, 1, out, null);
+    std.debug.print("rank 0: a decode row's argmax {d}; {s}\n", .{ argmax(out), if (f.rank == null) "FAULT NONE PASS" else "FAULT FAIL" });
+    l.deinit(l.ctx);
+    return if (f.rank == null) 0 else 1;
 }
 
 fn readIds(io: std.Io, a: std.mem.Allocator, path: []const u8) !std.ArrayList(u32) {
