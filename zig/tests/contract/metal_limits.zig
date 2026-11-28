@@ -47,6 +47,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
+    if (std.mem.startsWith(u8, d.name, "q27 stack qk ")) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     if (std.mem.startsWith(u8, d.name, "hy4 units "))
@@ -60,6 +61,11 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
+    if (std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ") or std.mem.startsWith(u8, d.name, "qwen27 norm steer ")) {
+        if (!assemble) return undefined;
+        const resolved = try @import("metal_q27_limits.zig").resolve(a, device, d.name, d.offline);
+        return .{ .decl = d, .function = fun, .here = resolved.here, .pre_m5 = resolved.pre_m5 };
+    }
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
@@ -86,12 +92,6 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
         }
         return error.UnknownLaunch;
-    }
-    if (std.mem.startsWith(u8, d.name, "qwen27 norm steer ")) {
-        if (!assemble) return undefined;
-        const q = tf.qwen27.quant_gpu; // serving's steer key: 64-column sums where this GPU has tensor units
-        const here = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, if (device.tensorUnits()) 64 else 0));
-        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, 0)) };
     }
 
     const has = struct {
@@ -277,6 +277,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const body = try tf.lfm2_moe.source.prompt(device, a, true);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = "" };
+    }
+    if (std.mem.startsWith(u8, d.name, "tree round picks ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.core_tree_round, .pre_m5 = sources.core_tree_round };
     }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) {
         if (!assemble) return undefined;

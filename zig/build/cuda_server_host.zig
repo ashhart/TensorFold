@@ -15,6 +15,31 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living }, .{ .name = "core", .module = mods.core } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    const confidential_cli = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/cli.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+    });
+    confidential_cli.addImport("engine_api", native_modules.api);
+    confidential_cli.addImport("native_engines", native_modules.engines);
+    confidential_cli.addImport("core", mods.core);
+    confidential_cli.addImport("tokenizer", mods.tokenizer);
+    confidential_cli.addImport("template", template);
+    confidential_cli.addImport("living", mods.living);
+    _ = @import("server.zig").addTo(b, confidential_cli, host, .debug);
+    const confidential_admission = b.createModule(.{
+        .root_source_file = b.path("zig/confidential_admission_host.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "cli", .module = confidential_cli },
+            .{ .name = "native", .module = native_modules.engines },
+            .{ .name = "glm_cuda", .module = native_modules.engines.import_table.get("glm_cuda").? },
+        },
+    });
+    b.step("test-confidential-admission-host", "Confidential CLI options through real backend and family refusals").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = confidential_admission, .filters = &.{ "confidential admission:", "CUDA prompt cache admission:" } })).step);
     b.step("test-responses-owner-host", "Stored and running Responses stay with their creating API key").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "Responses owner:", "a whole response keeps", "the cancel route's path", "a held name", "with API keys only", "auth scopes:" } })).step);
     const owner_socket = b.addTest(.{ .root_module = server_tests, .filters = &.{"Responses owner socket:"} });
     b.step("check-responses-owner-socket-host", "Compile authenticated Responses transport tests without listening").dependOn(&owner_socket.step);

@@ -47,9 +47,12 @@ pub fn isReal(kind: Kind) bool {
 }
 
 const stock_rules = [_]Rule{
+    .{ .name = "TF_CUDA_PREFILL_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; one CUDA Qwen prompt stage ledger)" },
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
+    .{ .name = "TF_Q27_FLAT_GLUE", .scope = .metal, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_Q27_QK", .scope = .metal, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
     .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 runs exact all-length BF16 rows for multi-row Qwen decode windows)" },
@@ -94,6 +97,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
     .{ .name = "TF_DFLASH_QL_SPAN", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 drafts a ModelOpt NVFP4 or FP8 head over the DFlash2 spans)" },
     .{ .name = "TF_DFLASH_GRAPH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 replays DFlash2 holds and live absorbs from CUDA graphs)" },
+    .{ .name = "TF_QWEN_DRAFT_FULL_HEAD", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 restores the split head for a mixed-width DFlash2 hold)" },
+    .{ .name = "TF_QWEN_GRAPH_STATS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 prints per-width DFlash2 hold graph counters at shutdown)" },
     .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; opt in to sampled MTP tree drafting)" },
     .{ .name = "TF_MTP_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 keeps one stream at a time)" },
     .{ .name = "TF_QWEN_POOL_LOG", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
@@ -584,4 +589,8 @@ test {
     _ = @import("environment_flashnext_test.zig");
     _ = @import("environment_kv_test.zig");
     _ = @import("environment_kolibri_test.zig");
+}
+
+test {
+    _ = @import("environment_prefill_test.zig");
 }

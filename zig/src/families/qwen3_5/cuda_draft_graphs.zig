@@ -10,14 +10,33 @@ pub fn enabled() bool {
     return platform.environment.read(bool, "TF_DFLASH_GRAPH", false) catch false;
 }
 
+/// TF_QWEN_GRAPH_STATS=1 records hold outcomes once at drafter startup; off by default.
+pub fn statsEnabled() bool {
+    return platform.environment.read(bool, "TF_QWEN_GRAPH_STATS", false) catch false;
+}
+
+const HoldKey = struct { streams: u8, narrow: bool, projection_role: u8, width_mask: u128 };
 const Hold = struct { exec: graph.Exec, spanned: ?u64 };
+
+const Count = struct { captured: usize = 0, replayed: usize = 0, eager: usize = 0, key_miss: usize = 0, eviction: usize = 0, width_not_graphable: usize = 0 };
+const Stats = struct {
+    on: bool = false,
+    counts: std.AutoHashMapUnmanaged(HoldKey, Count) = .empty,
+
+    fn note(s: *Stats, gpa: std.mem.Allocator, key: HoldKey, comptime field: []const u8) !void {
+        if (!s.on) return;
+        const entry = try s.counts.getOrPut(gpa, key);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        @field(entry.value_ptr, field) += 1;
+    }
+};
 const Absorb = struct { source: graph.Graph, exec: graph.Exec, gather: graph.Node, ropes: []graph.Node, rings: []graph.Node };
 
 pub const Graphs = struct {
     on: bool = false,
-    holds: std.AutoHashMapUnmanaged(u32, Hold) = .empty,
+    stats: Stats = .{},
+    holds: std.AutoHashMapUnmanaged(HoldKey, Hold) = .empty,
     absorbs: std.AutoHashMapUnmanaged(u32, Absorb) = .empty,
-
     /// Drops every graph: their captured addresses die with the scratch they name.
     pub fn clear(g: *Graphs, gpa: std.mem.Allocator) void {
         var holds = g.holds.valueIterator();
@@ -29,9 +48,21 @@ pub const Graphs = struct {
     }
 
     pub fn deinit(g: *Graphs, gpa: std.mem.Allocator) void {
+        if (g.stats.on) {
+            std.log.info("qwen draft graphs: shutdown statistics", .{});
+            var it = g.stats.counts.iterator();
+            while (it.next()) |entry| {
+                var line: [512]u8 = undefined;
+                var w = std.Io.Writer.fixed(&line);
+                writeCount(&w, entry.key_ptr.*, entry.value_ptr.*) catch continue;
+                const rendered = w.buffered();
+                std.log.info("{s}", .{rendered[0 .. rendered.len - 1]});
+            }
+        }
         g.clear(gpa);
         g.holds.deinit(gpa);
         g.absorbs.deinit(gpa);
+        g.stats.counts.deinit(gpa);
     }
 };
 
@@ -171,15 +202,45 @@ pub fn absorb(d: anytype, ctx: anytype, ring: u64, start: u64, rows: usize, rs: 
     try a.exec.launchOn(d.e.stream);
     return true;
 }
+/// The launches and captured host-copy destinations vary with every stream's width class.
+fn holdKey(streams: usize, contexts: anytype, narrow: bool, projection_role: u8) !HoldKey {
+    if (streams != contexts.len or streams > 128) return error.BadDraftGraph;
+    var width_mask: u128 = 0;
+    for (contexts, 0..) |ctx, i| {
+        if (ctx.wide) width_mask |= @as(u128, 1) << @intCast(i);
+    }
+    return .{ .streams = @intCast(streams), .narrow = narrow, .projection_role = projection_role, .width_mask = width_mask };
+}
+
+/// Eight resident variants per stream count bound graph memory; a ninth evicts one.
+fn boundHolds(g: *Graphs, streams: u8) ?HoldKey {
+    var count: usize = 0;
+    var evict: ?HoldKey = null;
+    var it = g.holds.iterator();
+    while (it.next()) |entry| if (entry.key_ptr.streams == streams) {
+        count += 1;
+        if (evict == null) evict = entry.key_ptr.*;
+    };
+    if (count < 8) return null;
+    const key = evict.?;
+    g.holds.getPtr(key).?.exec.deinit();
+    _ = g.holds.remove(key);
+    return key;
+}
 
 /// A hold frame's kernels from their graph, keyed by what changes them; returns the packed logits when spanned.
 pub fn hold(d: anytype, streams: usize, contexts: anytype, narrow: bool, comptime body: anytype) !?u64 {
-    if (!live(d)) return body(d, streams, contexts);
-    const key: u32 = @intCast(streams | @as(usize, @intFromBool(narrow)) << 16 | @as(usize, @backingInt(d.projection_role)) << 17);
+    if (!live(d)) {
+        if (d.graphs.stats.on) try d.graphs.stats.note(d.gpa, try holdKey(streams, contexts, narrow, @backingInt(d.projection_role)), "eager");
+        return body(d, streams, contexts);
+    }
+    const key = try holdKey(streams, contexts, narrow, @backingInt(d.projection_role));
     if (d.graphs.holds.get(key)) |h| {
+        try d.graphs.stats.note(d.gpa, key, "replayed");
         try h.exec.launchOn(d.e.stream);
         return h.spanned;
     }
+    try d.graphs.stats.note(d.gpa, key, "key_miss");
     const stream = d.e.stream;
     try graph.beginCapture(stream, .thread_local);
     const spanned = body(d, streams, contexts) catch |err| {
@@ -191,13 +252,25 @@ pub fn hold(d: anytype, streams: usize, contexts: anytype, narrow: bool, comptim
     defer source.deinit();
     var exec = source.instantiate() catch |err| {
         if (err != error.GraphNotPermitted) return err;
+        try d.graphs.stats.note(d.gpa, key, "eager");
         d.graphs.on = false;
         return body(d, streams, contexts);
     };
+    if (boundHolds(&d.graphs, key.streams)) |old| try d.graphs.stats.note(d.gpa, old, "eviction");
+    try d.graphs.stats.note(d.gpa, key, "captured");
     d.graphs.holds.put(d.gpa, key, .{ .exec = exec, .spanned = spanned }) catch |err| {
         exec.deinit();
         return err;
     };
     try exec.launchOn(stream); // on failure the cache still owns the graph
     return spanned;
+}
+
+fn writeCount(w: anytype, key: HoldKey, c: Count) !void {
+    try w.print("qwen draft graphs: streams={d} narrow={} role={d} width_mask={x:0>32} captured={d} replayed={d} eager={d} key_miss={d} eviction={d} width_not_graphable={d}\n", .{ key.streams, key.narrow, key.projection_role, key.width_mask, c.captured, c.replayed, c.eager, c.key_miss, c.eviction, c.width_not_graphable });
+}
+
+pub fn writeStats(g: *const Graphs, w: anytype) !void {
+    var it = g.stats.counts.iterator();
+    while (it.next()) |entry| try writeCount(w, entry.key_ptr.*, entry.value_ptr.*);
 }

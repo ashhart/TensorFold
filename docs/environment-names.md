@@ -38,6 +38,7 @@ archives), so every host sees the same three release servers. It configures a se
 
 | Scope | Meaning |
 | --- | --- |
+| `TF_CUDA_PREFILL_TRACE` | release, tool, test | logs |
 | `release` | A `tensorfold-native` server the `dist` archives ship: macOS arm64 and both Linux CUDA builds. |
 | `tool` | Another executable: the `tf-*` developer programs and runners, and any server no archive ships. |
 | `test` | Only test builds: test steps, the test runner's environment, or a function only a test build option calls (`forgetFail`, behind `-Dslide-test-hooks`). |
@@ -699,6 +700,8 @@ reports the setting's own value, does not count as logging.
 | `TF_QWEN35_CHUNK` | release, tool, test | other |
 | `TF_QWEN35_CHUNK_SOLO` | release, tool, test | other |
 | `TF_QWEN35_METAL_KV_PAGES` | release, tool, test | other |
+| `TF_QWEN_DRAFT_FULL_HEAD` | release, tool, test | other |
+| `TF_QWEN_GRAPH_STATS` | release, tool, test | logs |
 | `TF_QWEN_KEEP_LATE` | release, tool, test | other |
 | `TF_QWEN_KV_HOST` | release, tool, test | other |
 | `TF_QWEN_KV_HOST_GIB` | release, tool, test | other |

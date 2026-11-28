@@ -13,6 +13,11 @@ fn weight() cuda.qlinear.Affine4 {
     return .{ .w = 1, .s = 2, .b = 3, .n = 256, .k = 256, .npad = 256 };
 }
 
+const c_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
 test "Draft frames: mixed affine-4 head rebuilds sums after row compaction" {
     const F = q.draft.frame;
     const Trace = struct {
@@ -297,4 +302,34 @@ test "Qwen CUDA contracts: mixed-width eligibility covers A4 and EXL3, not homog
     narrow.wide = true;
     wide.wide = true;
     try std.testing.expect(!q.draft.frame.mixedHeadEligible(e.head, &refs));
+    const Route = struct { e: *q.engine.Engine, full_head: bool };
+    var route: Route = .{ .e = &e, .full_head = false };
+    narrow.wide = false;
+    try std.testing.expect(q.draft.frame.mixedHeadPath(&route, &refs));
+    route.full_head = true;
+    try std.testing.expect(!q.draft.frame.mixedHeadPath(&route, &refs));
+    wide.wide = false;
+    try std.testing.expect(!q.draft.frame.mixedHeadPath(&route, &refs));
+}
+
+test "Draft frames: full head is default and zero restores the mixed hold split" {
+    const env = c_env;
+    try std.testing.expectEqual(@as(c_int, 0), env.unsetenv("TF_QWEN_DRAFT_FULL_HEAD"));
+    defer _ = env.unsetenv("TF_QWEN_DRAFT_FULL_HEAD");
+    var narrow: q.draft.Ctx = .{ .ring = undefined };
+    var wide: q.draft.Ctx = .{ .ring = undefined, .wide = true };
+    const refs = [_]*q.draft.Ctx{ &narrow, &wide };
+    var e: q.engine.Engine = undefined;
+    var a4 = weight();
+    a4.n = 248320;
+    a4.npad = a4.n;
+    e.head = .{ .a4 = a4 };
+    const Route = struct { e: *q.engine.Engine, full_head: bool };
+    var route: Route = .{ .e = &e, .full_head = q.draft.fullHeadEnabled() };
+    try std.testing.expect(route.full_head);
+    try std.testing.expect(!q.draft.frame.mixedHeadPath(&route, &refs));
+    try std.testing.expectEqual(@as(c_int, 0), env.setenv("TF_QWEN_DRAFT_FULL_HEAD", "0", 1));
+    route.full_head = q.draft.fullHeadEnabled();
+    try std.testing.expect(!route.full_head);
+    try std.testing.expect(q.draft.frame.mixedHeadPath(&route, &refs));
 }

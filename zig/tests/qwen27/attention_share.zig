@@ -58,7 +58,7 @@ const Rig = struct {
         try b.upload(plan, caches);
         const cb = r.queue.commandBuffer();
         const e = cb.compute(.concurrent);
-        for (0..n) |_| try r.op.encode(e, r.scratch, &b, plan, .{ .buffer = r.query, .offset = row0 * q_row * 2 }, .{ .buffer = r.key, .offset = row0 * kv_row * 2 }, .{ .buffer = r.value, .offset = row0 * kv_row * 2 }, .{ .buffer = out }, caches, .{ .buffer = r.gate, .offset = row0 * 2 * q_row * 2 }, false, false);
+        for (0..n) |_| try r.op.encodeContiguous(e, r.scratch, &b, plan, .{ .buffer = r.query, .offset = row0 * q_row * 2 }, .{ .buffer = r.key, .offset = row0 * kv_row * 2 }, .{ .buffer = r.value, .offset = row0 * kv_row * 2 }, .{ .buffer = out }, caches, .{ .buffer = r.gate, .offset = row0 * 2 * q_row * 2 }, false, false);
         e.end();
         cb.commit();
         cb.wait();
