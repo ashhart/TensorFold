@@ -235,6 +235,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .seed_salt = salt,
         .silence_mid = args.silence.mid_seconds != null,
         .silence_guard = args.silence.enabled(),
+        .speech = args.speech,
         .cfg = args.cfg.options(),
         .prompt_seed = args.prompt_seed,
         .cache_salt_per_key = args.cache_salt_per_key,

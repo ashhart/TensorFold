@@ -49,7 +49,7 @@ pub const flags = [_]Flag{
     .{ .name = "--chat-template", .path = true, .native = true },
     .{ .name = "--voices", .path = true, .native = true },
     .{ .name = "--default-voice", .native = true },
-} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ [_]Flag{
+} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ @import("speech_cli.zig").flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
@@ -325,6 +325,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try @import("cli_recall.zig").flag(a, out, name, v, u)) return;
     if (@import("voice_cli.zig").apply(&out.voice, name)) return;
+    if (@import("speech_cli.zig").apply(&out.speech, name)) return;
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
     if (is(name, "--voices")) {
@@ -419,17 +420,8 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
 }
 
-/// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
-pub fn parallel(text: []const u8) ?u32 {
-    const t = std.mem.trim(u8, text, " ");
-    if (std.ascii.eqlIgnoreCase(t, "auto")) return 8;
-    const n = std.fmt.parseInt(i64, t, 10) catch return null;
-    return @intCast(@max(1, @min(n, 4096)));
-}
-/// ``--parallel`` named a number (an engine that fits fewer refuses), not "auto" (it serves what fits).
-pub fn parallelFixed(text: []const u8) bool {
-    return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
-}
+pub const parallel = @import("cli_parallel.zig").parallel;
+pub const parallelFixed = @import("cli_parallel.zig").parallelFixed;
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
     return @import("drama_cfg.zig").withGuidance(args.cfg, .{
@@ -438,8 +430,8 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .context = args.context,
         .max_frames = args.max_frames,
         .silence = args.silence,
-        .lanes = parallel(args.parallel) orelse 8,
-        .lanes_fixed = parallelFixed(args.parallel),
+        .lanes = @import("cli_parallel.zig").parallel(args.parallel) orelse 8,
+        .lanes_fixed = @import("cli_parallel.zig").parallelFixed(args.parallel),
         .drafts = !args.no_drafts,
         .drafter = args.drafter,
         .drafter_name = args.drafter_name orelse args.drafter,

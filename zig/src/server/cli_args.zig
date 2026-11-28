@@ -31,6 +31,7 @@ pub const Args = struct {
     silence: api.speech_guard.Config = .{},
     cfg: @import("drama_cfg.zig").Flags = .{},
     voice: @import("voice_cli.zig").Flags = .{},
+    speech: @import("speech_cli.zig").Flags = .{},
     redraw: @import("speech_redraw.zig").Policy = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     // Kept prompt states' budget: 0 disables them; null uses RAM left after loading.

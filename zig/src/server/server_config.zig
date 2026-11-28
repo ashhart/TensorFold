@@ -47,6 +47,7 @@ pub const Config = struct {
     seed_salt: i64 = 0,
     silence_mid: bool = false,
     silence_guard: bool = false,
+    speech: @import("speech_cli.zig").Flags = .{},
     cfg: ?@import("drama_cfg.zig").Options = null,
     /// The flock a voice holds while it synthesizes, so batch work on this GPU gives way (gpu_turn.zig).
     speech_lock: []const u8 = @import("gpu_turn.zig").path,

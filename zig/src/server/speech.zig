@@ -14,6 +14,7 @@ const speech_sampling = @import("speech_sampling.zig");
 const speech_redraw = @import("speech_redraw.zig");
 const speech_register = @import("speech_register_log.zig");
 const audio_out = @import("audio_out.zig");
+const tempo = @import("speech_tempo.zig");
 const drama_cfg = @import("drama_cfg.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
@@ -39,12 +40,12 @@ const zonos_codes = "speaker_reference_codes";
 const zonos_clip = "ref_audio";
 
 /// The rest of the speech protocol's fields: synthesis modifiers and references this route does not honor.
-const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
+const modifier_fields = [_][]const u8{ "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
 
 pub const Format = audio_out.Format;
 
 /// `rate` and `channels` are the reply's: the model's own rate and mono unless the request asked otherwise.
-pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, rate: u32 = 0, channels: u8 = 1, budget_s: ?f64 = null };
+pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, rate: u32 = 0, channels: u8 = 1, speed: f64 = 1, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -95,6 +96,8 @@ fn checkFields(cx: *Cx, body: Value, takes: Takes) errors.Refused!void {
             return cx.refuse("stream_format must be one of: audio, sse");
         } else if (std.mem.eql(u8, key, "sample_rate") or std.mem.eql(u8, key, "channels")) {
             continue; // checked with the format and stream in prepare
+        } else if (std.mem.eql(u8, key, "speed")) {
+            continue; // checked with the flag and stream in prepare
         } else if (speech_sampling.isField(key) or (takes.zonos and (std.mem.eql(u8, key, zonos_codes) or std.mem.eql(u8, key, zonos_clip)))) {
             continue; // validated together before building the prompt
         } else if (listed(&modifier_fields, key)) {
@@ -154,19 +157,20 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const format = try responseFormat(cx, raw.strField("response_format") orelse "wav");
     const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
+    const speed = try speedOf(srv, cx, raw.get("speed") orelse .null, stream);
     const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
     const codes = raw.field(zonos_codes);
     const clip = raw.field(zonos_clip);
     if (srv.zonos) |state| {
         const made = try zonos.plan(state, cx, srv.text, sp, input, voice, codes, clip);
         const rate, const channels = try output(cx, raw, sp, stream);
-        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels };
+        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels, .speed = speed };
     }
     const refs = try voiceRefs(srv, cx, raw);
     const rate, const channels = try output(cx, raw, sp, stream);
-    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels };
+    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels, .speed = speed };
     const prompt = try promptOf(srv, cx, sp, input);
-    return .{ .input = input, .prompt = prompt, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels };
+    return .{ .input = input, .prompt = prompt, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels, .speed = speed };
 }
 
 /// The request's references: an attested inline voice under --request-voices, else the named catalog voice's, copied.
@@ -187,6 +191,17 @@ fn voiceRefs(srv: *Server, cx: *Cx, raw: Value) errors.Refused![]const @import("
             return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
         return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
     };
+}
+
+/// ``speed``: absent, null or 1 leaves the take as synthesized; 0.25 to 4 needs --speech-speed and a whole reply.
+fn speedOf(srv: *Server, cx: *Cx, value: Value, stream: bool) errors.Refused!f64 {
+    if (value == .null) return 1;
+    const speed = if (value == .int or value == .float) value.float64() orelse 0 else 0;
+    if (!(speed >= tempo.min_speed and speed <= tempo.max_speed)) return cx.refuse("speed must be a number from 0.25 to 4");
+    if (speed == 1) return 1;
+    if (!srv.config.speech.speed) return cx.refuse("speed other than 1 needs the server's --speech-speed flag");
+    if (stream) return cx.refuse("stream=true requires speed 1");
+    return speed;
 }
 
 /// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
@@ -399,23 +414,25 @@ fn unused(id: []const u8, k: usize, take: Take, why_not: []const u8) Take {
 
 /// Sends a whole take under its finish reason: WAV or PCM at the model's rate in place, any other output encoded.
 fn reply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, take: Take, metadata: Metadata) void {
+    const pcm = if (plan.speed == 1) take.pcm else tempo.stretch(srv.gpa, take.pcm, sp.sample_rate, plan.speed) catch |e| return fail(c, cx, id, metadata, .server, if (e == error.OutOfMemory) "out of memory" else "the synthesized audio has non-finite samples");
+    defer if (plan.speed != 1) srv.gpa.free(pcm);
     const in_place = (plan.format == .wav or plan.format == .pcm) and plan.rate == sp.sample_rate and plan.channels == 1;
     var encoded: []u8 = &.{};
     defer srv.gpa.free(encoded);
-    if (!in_place) encoded = audio_out.encode(srv.gpa, take.pcm, sp.sample_rate, plan.rate, plan.channels, plan.format) catch |e|
+    if (!in_place) encoded = audio_out.encode(srv.gpa, pcm, sp.sample_rate, plan.rate, plan.channels, plan.format) catch |e|
         return fail(c, cx, id, metadata, .server, switch (e) {
             error.NonFinite => "the synthesized audio has non-finite samples",
             error.TooLarge => "the synthesized audio is too long for one reply",
             error.OutOfMemory => "out of memory",
         });
-    const data = if (!in_place) encoded else quantizeInPlace(take.pcm) catch return fail(c, cx, id, metadata, .server, "the synthesized audio has non-finite samples");
+    const data = if (!in_place) encoded else quantizeInPlace(pcm) catch return fail(c, cx, id, metadata, .server, "the synthesized audio has non-finite samples");
     if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, metadata, .server, "the synthesized audio is too long for one reply");
     const header = if (in_place and plan.format == .wav) wavHeader(sp.sample_rate, @intCast(data.len)) else null;
     sendAudio(c, plan.format, header, data, take.reason, if (srv.config.silence_mid) @intFromBool(take.silence_mid) else null, metadata) catch {
         c.close = true; // a head already started or a client gone: nothing more can be sent on this connection
         return;
     };
-    log.line("speech {s} prompt={d} samples={d} format={s} finish={s} seconds={d:.2}", .{ id, plan.prompt.len, take.pcm.len, @tagName(plan.format), @tagName(take.reason), clock.seconds(clock.nowNs(srv.io) - received) });
+    log.line("speech {s} prompt={d} samples={d} format={s} finish={s} seconds={d:.2}", .{ id, plan.prompt.len, pcm.len, @tagName(plan.format), @tagName(take.reason), clock.seconds(clock.nowNs(srv.io) - received) });
 }
 
 fn refuse(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata, e: errors.Refused) void {
@@ -511,7 +528,7 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
     const cases = [_][2][]const u8{
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"voice\": \"default\", \"response_format\": \"wav\", \"speed\": null, \"references\": null}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream_audio\": null}", "unknown speech request field: stream_audio" },
-        .{ "{\"model\": \"m\", \"input\": \"hi\", \"speed\": 1.0}", "speed is not supported by this model" },
+        .{ "{\"model\": \"m\", \"input\": \"hi\", \"speed\": 1.0}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": false, \"stream_format\": \"audio\"}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": null, \"stream_format\": null}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": \"yes\"}", "stream must be a boolean" },

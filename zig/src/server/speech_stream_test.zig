@@ -38,6 +38,7 @@ pub const Script = struct {
     reference_rows: [4]u32 = undefined,
     takes: usize = 0,
     voices: []const @import("drama_voice.zig").Voice = &.{},
+    zonos: ?*@import("zonos_speech.zig").State = null,
     get_voices: bool = false,
     expected_rows: ?[]const [11]i32 = null,
     rows_equal: bool = false,
@@ -195,6 +196,7 @@ pub const Served = struct {
         s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), isolated, null);
         if (probe) |p| p.srv = s.srv;
         try s.srv.voices.swap(script.voices);
+        s.srv.zonos = script.zonos;
         if (script.output_full) s.srv.speech_inflight.store(s.srv.info.lanes, .release);
         var head: [256]u8 = undefined;
         const method_path = if (script.get_voices) "GET /v1/voices" else "POST /v1/audio/speech";
