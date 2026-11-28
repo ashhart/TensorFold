@@ -528,7 +528,7 @@ pub const Graph = struct {
             fact.round = int(u32, f.field("round")) catch 0;
             fact.deleted = int(i64, f.field("deleted")) catch 0;
             if (f.field("answers")) |xs| fact.answers = try answers.read(a, xs);
-            fact.questions = try answers.readQuestions(a, f.field("questions"));
+            fact.questions = try stringList(a, f.field("questions"));
             if (f.field("chain")) |c| if (c.items()) |xs| if (xs.len == 2) {
                 fact.chain = .{ xs[0].str() orelse "", xs[1].str() orelse "" };
             };

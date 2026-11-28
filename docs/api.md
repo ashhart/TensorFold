@@ -179,10 +179,9 @@ It reports the loaded engine's boolean Info flags: text_generation, context_fitt
 thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, prompt_logprobs,
 prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only,
 slide_conversations, folded_memory and pocket_usage. folded_memory is true when `--slide` has attached the engine's folded
-memory weights (living weights), and false when learning is off. pocket_usage reports whether `--slide-forget` has enabled
-the usage audit. The vision, speech, embeddings, readouts and rerank fields report whether that user feature is present.
-The last two fields, thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts
-(see
+memory weights (living weights), and false when learning is off. The vision, speech, embeddings, readouts and rerank fields
+report whether that user feature is present. The last two fields, thinking_switch and thinking_applicable, are the loaded
+chat template's and tokenizer's thinking facts (see
 [Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean, including false,
 and no callback details or addresses are exposed.
 
