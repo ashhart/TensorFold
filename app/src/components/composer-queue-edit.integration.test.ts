@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import ts from 'typescript'
 import { ConversationDrafts } from '../lib/conversation-drafts'
 import { composerDraftKey } from '../../shared/composer-drafts'
 import { capturedDraftMatches, editQueuedFollowUp } from '../lib/queued-followups'
 import { fixtureText } from './preferences/language-test-fixture'
-const source = ts.createSourceFile('Composer.tsx', readFileSync('src/components/Composer.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
-const component = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'Composer')!
+const source = ts.createSourceFile('Composer.tsx', ['composer/useComposerState.ts', 'composer/useComposerSubmit.tsx'].map(file => readFileSync(path.join(__dirname, file), 'utf8')).join('\n'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
+const component = source
 const printer = ts.createPrinter()
 const declarations = (names: string[]) => names.map(name => {
-  const statement = component.body!.statements.find(row => ts.isVariableStatement(row) && row.declarationList.declarations.some(item => ts.isIdentifier(item.name) && item.name.text === name))
+  let statement: ts.VariableStatement | undefined
+  const visit = (node: ts.Node) => { if (ts.isVariableStatement(node) && node.declarationList.declarations.some(item => ts.isIdentifier(item.name) && item.name.text === name)) statement = node; ts.forEachChild(node, visit) }
+  visit(component)
   assert.ok(statement, name); return printer.printNode(ts.EmitHint.Unspecified, statement, source)
 }).join('\n')
 function production(names: string[], environment: Record<string, unknown>) {
@@ -78,7 +81,9 @@ try {
   }
 
   // Execute the actual completion effect, including its captured previous-busy transition.
-  const effectStatement = component.body!.statements.find(row => ts.isExpressionStatement(row) && ts.isCallExpression(row.expression) && row.expression.expression.getText(source) === 'useEffect' && row.expression.arguments[0]?.getText(source).includes('prevBusy.current &&')) as ts.ExpressionStatement
+  let effectStatement: ts.ExpressionStatement | undefined
+  const findEffect = (node: ts.Node) => { if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && node.expression.expression.getText(source) === 'useEffect' && node.expression.arguments[0]?.getText(source).includes('prevBusy.current &&')) effectStatement = node; ts.forEachChild(node, findEffect) }
+  findEffect(component)
   assert.ok(effectStatement)
   const arrow = (effectStatement.expression as ts.CallExpression).arguments[0]
   const code = ts.transpileModule('const effect = ' + printer.printNode(ts.EmitHint.Expression, arrow, source) + '; return effect;', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText

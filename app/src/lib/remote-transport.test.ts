@@ -282,6 +282,13 @@ const SNAPSHOT = {
   const call = h.calls.find((c) => c.url === '/v1/threads/t1/start')
   assert.equal(call?.method, 'POST')
   assert.equal((call?.body as { userText?: string }).userText, 'go')
+  const document = { id: 'document', kind: 'document' as const, name: 'notes.txt', mime: 'text/plain', status: 'ready' as const, text: 'Attached document contents' }
+  await h.api.startRun({ threadId: 't1', userText: '', attachments: [document] })
+  const attachmentCall = h.calls.filter((c) => c.url === '/v1/threads/t1/start').at(-1)
+  const attachmentBody: unknown = attachmentCall?.body
+  assert.ok(attachmentBody && typeof attachmentBody === 'object' && 'userText' in attachmentBody && 'attachments' in attachmentBody)
+  assert.equal(attachmentBody.userText, '')
+  assert.deepEqual(attachmentBody.attachments, [document])
 
   await h.api.cueRun({ threadId: 't1', userText: 'steer it' })
   assert.ok(h.calls.some((c) => c.url === '/v1/threads/t1/guide'), 'guide rides /v1')

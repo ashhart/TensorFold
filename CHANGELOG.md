@@ -9,6 +9,20 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
 - Qwen3.8-27B on Metal: with `--glp` and MTP drafts both enabled, the control vector's last-layer direction is no longer applied a second time inside the MTP head; the head reads the steered target rows with its own final norm, and output is unchanged without `--glp` (#1835).
 - Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
+- Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
+
+- Desktop: a ready attachment can start a local or remote conversation without typed text, and folder guidance clears after a successful selection or launch (#4836). Thanks @taylorarndt for the report.
+
+
+
+- Inkling 2 Mini on HIP (groundwork, not yet served): CUDA's text-weight loader becomes generic, so one HIP rank can load the text weights through it; CUDA's loading is unchanged (#5031, part of #4274). Thanks to @AbrahamCete.
+
+- Server: preserve a tool reply's real finish reason and identify completed calls at the token limit, so session benchmarks never answer an open-envelope call even when its arguments are valid JSON (#4830)
+
+
+
+- Core: a chat template's content.N index counts only the code points up to the requested index instead of the whole string; rendered text and token ids are unchanged (#5396). Thanks to @BadAd84.
+
 - Tests: the CUDA kernel-contract runner takes opt-in `--jobs N` and `--shard I/N`; four jobs run the served suites in 1:11:50 against 3:17:59 one at a time, with identical summaries (#3093). Thanks to @BlivionIaG.
 
 - Tests: the lane host explore test's replay holds under load: once every request sent has ended, the test thread sends the next only once a whole engine turn has run after the one that ended the last (turns counted through the host's activity scope), so each send meets no prompt visit and lands at the same point on every run (#5386, fixes #5367).

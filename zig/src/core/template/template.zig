@@ -263,4 +263,5 @@ test {
     _ = @import("unicode.zig");
     _ = @import("value.zig");
     _ = @import("provenance_test.zig");
+    _ = @import("access.zig");
 }

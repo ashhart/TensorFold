@@ -454,6 +454,7 @@ pub const Generation = struct {
             .native_tool_format = native != null,
             .native_calls = if (native) |n| n.calls else null,
             .native_cut_calls = if (native) |n| n.cut_calls else false,
+            .native_cut_call = if (native) |n| n.cut_call else null,
             .finish_reason = reason,
             .prompt_tokens = prompt_len,
             .cached_tokens = cached_tokens.within(m.cached, prompt_len),
