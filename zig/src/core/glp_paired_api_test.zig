@@ -378,4 +378,26 @@ test "a residual file loads as it did: its own strength must be valid unless the
     const zero_edits = residual ++ [_]t.Edit{.{ .key = "glp.alpha_default", .value = .{ .f32v = 0 } }};
     const zero = try put(a, &tmp, "zero.gguf", try t.build(a, .{ .edits = &zero_edits }));
     try std.testing.expect((try glp.load(a, io, zero, null, &why)).off());
+
+    // Version-1 residual vectors declaring dir_scales or layer_scales must be refused rather than silently ignored.
+    for ([_][]const u8{ "glp.dir_scales", "glp.layer_scales" }) |scale_key| {
+        const scaled_edits = residual ++ [_]t.Edit{.{ .key = scale_key, .value = .{ .string = "0.5" } }};
+        const scaled = try put(a, &tmp, "scaled.gguf", try t.build(a, .{ .edits = &scaled_edits }));
+        try std.testing.expectError(error.BadGlpVector, glp.readFile(a, io, scaled, &why));
+        try std.testing.expect(std.mem.indexOf(u8, why.text(), scale_key) != null);
+    }
+}
+
+test "paired vector glp.validation survives read and writeVector round-trip" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const edits = [_]t.Edit{.{ .key = "glp.validation", .value = .{ .string = "suite-v3" } }};
+    const bytes = try t.build(a, .{ .edits = &edits });
+    var why: glp.Why = .{};
+    const first = try glp.read(a, bytes, &why);
+    try std.testing.expectEqualStrings("suite-v3", first.validation orelse "");
+    const rewritten = try glp.writeVector(a, first);
+    const second = try glp.read(a, rewritten, &why);
+    try std.testing.expectEqualStrings("suite-v3", second.validation orelse "");
 }

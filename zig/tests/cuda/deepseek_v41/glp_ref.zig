@@ -91,7 +91,9 @@ fn mean4(v: [4]f32) f32 {
 /// x + alpha d in fp32 (the product rounded, then the sum), before the one bf16 store.
 fn edit(x: f32, alpha: f32, d: f32, a: Arith) f32 {
     const dk = if (a.dir_bf16) widen(rne32(d)) else d;
-    return accRound(a.edit_acc, accRound(a.edit_acc, x) + accRound(a.edit_acc, alpha * dk));
+    const p = accRound(a.edit_acc, alpha * dk);
+    if (a.edit_acc == .f32 and p == 0) return x;
+    return accRound(a.edit_acc, accRound(a.edit_acc, x) + p);
 }
 
 /// One fold row: `x` is the four copies (4 width), `y` their steered values, `tap` the 0.25 mean of the steered copies.
@@ -433,4 +435,25 @@ test "glp ref: the allowance covers the fp32 product and sum error and the bf16 
     const want = @as(f64, x) + @as(f64, 0.75) * @as(f32, 0.3);
     try std.testing.expect(@abs(widen(got) - want) <= allow(want, x, 0.3, 0.75));
     try std.testing.expect(@abs(widen(rne32(x + 0.75 * 0.3 + 0.01)) - want) > allow(want, x, 0.3, 0.75)); // a wrong edit is outside
+}
+
+test "glp ref: zero scaled step preserves negative-zero residual across foldRow and writerRow" {
+    const neg_zero: u16 = 0x8000;
+    for ([_]struct { alpha: f32, d: f32 }{
+        .{ .alpha = 1.0, .d = 0.0 },
+        .{ .alpha = 1e-25, .d = 1e-25 },
+    }) |case| {
+        const fx = [_]u16{ neg_zero, neg_zero, neg_zero, neg_zero };
+        const fd = [_]f32{case.d};
+        var fy: [4]u16 = undefined;
+        foldRow(&fx, &fd, case.alpha, .{}, &fy, null);
+        for (fy) |v| try std.testing.expectEqual(neg_zero, v);
+
+        const r0 = [_]u16{neg_zero};
+        const r1 = [_]u16{neg_zero};
+        const ranks = [_][]const u16{ &r0, &r1 };
+        var wy: [1]u16 = undefined;
+        writerRow(2, &ranks, &fd, case.alpha, .{}, &wy);
+        try std.testing.expectEqual(neg_zero, wy[0]);
+    }
 }

@@ -237,6 +237,7 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, why: *Why)
         .file_sha256 = file_sha256,
         .digest_claimed = claimed != null,
         .transferred = !std.mem.eql(u8, derived, hook),
+        .validation = try text(file, "glp.validation", why),
         .publication = .{
             .name = try text(file, "general.name", why),
             .description = try text(file, "general.description", why),

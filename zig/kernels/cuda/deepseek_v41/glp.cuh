@@ -89,7 +89,8 @@ template <int CTL> __device__ __forceinline__ float edit(float x, float alpha, f
     } else if constexpr (CTL == DROP_NONFINITE) {
         return __fadd_rn(isfinite(x) ? x : 0.0f, p);
     } else {
-        return __fadd_rn(x, p);
+        // A zero scaled step leaves the residual untouched so a negative zero keeps its sign bit.
+        return p == 0.0f ? x : __fadd_rn(x, p);
     }
 }
 

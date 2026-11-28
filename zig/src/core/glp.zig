@@ -69,6 +69,7 @@ pub const Vector = struct {
     spec_version: u32 = 1,
     /// Whether the file claims a content digest, which the reader then checked against the vectors.
     digest_claimed: bool = false,
+    validation: ?[]const u8 = null, // glp.validation: the suites the shipped strength passed
 
     /// The direction for layer `id`, or null when the vector does not steer it; the layers ascend by id as read.
     pub fn layer(self: Vector, id: u32) ?[]const f32 {
@@ -182,7 +183,9 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
     } else if (glp_keys > 0) {
         return refuse(why, "the file carries glp keys but no glp.spec_version", .{});
     }
-
+    for ([_][]const u8{ "glp.dir_scales", "glp.layer_scales" }) |k| {
+        if (file.find(k) != null) return refuse(why, "the file carries {s}: per-direction and per-layer scales are not implemented", .{k});
+    }
     if (glp_keys > 0) {
         const rank = file.num("glp.rank") orelse value: {
             if (file.find("glp.rank") != null) return refuse(why, "glp.rank is not an integer", .{});
@@ -234,7 +237,6 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
     for (layers.items) |l| {
         for (l.dir) |v| if (!std.math.isFinite(v)) return refuse(why, "layer {d}'s direction holds a value that is not finite", .{l.id});
     }
-
     var sha: [32]u8 = undefined;
     if (file.find("glp.content_sha256")) |v| switch (v) {
         .string => {},
@@ -254,13 +256,10 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
             return refuse(why, "the file's content digest does not match its vectors", .{});
         }
     } else sha = digest(file, true) orelse std.mem.zeroes([32]u8);
-
     const hook = file.str("glp.hook_point") orelse residual_site;
     const derived = file.str("glp.derived_at") orelse hook;
-
     var file_sha256: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &file_sha256, .{});
-
     return .{
         .file_sha256 = file_sha256,
         .spec_version = residual_version,
@@ -280,6 +279,7 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
         .layers = layers.items,
         .sha256 = sha,
         .transferred = !std.mem.eql(u8, derived, hook),
+        .validation = file.str("glp.validation"),
         .publication = .{
             .name = file.str("general.name"),
             .description = file.str("general.description"),
@@ -445,6 +445,7 @@ pub const WriteSpec = struct {
     base_revision: []const u8 = "",
     method: []const u8 = "",
     contrast: []const u8 = "",
+    validation: ?[]const u8 = null, // glp.validation: the suites the shipped strength passed, named
     /// What the file says about itself; the keys a consumer reads before it reads the directions.
     publication: Publication = .{},
     layers: []const Layer,
@@ -561,18 +562,17 @@ pub fn write(a: std.mem.Allocator, spec: WriteSpec) Error![]u8 {
     try appendText(&written, tmp, "controlvector.model_hint", about.model_hint);
     try appendText(&written, tmp, "glp.measured_effect", about.measured_effect);
     try appendText(&written, tmp, "glp.created", about.created);
+    try appendText(&written, tmp, "glp.validation", spec.validation);
     return gguf.write(a, written.items, tensors) catch |err| switch (err) {
         error.BadGguf => error.BadGlpVector,
         error.OutOfMemory => error.OutOfMemory,
     };
 }
-
 /// One more metadata key, when the producer named one.
-fn appendText(written: *std.ArrayList(gguf.Entry), tmp: std.mem.Allocator, key: []const u8, text: ?[]const u8) !void {
-    const value = text orelse return;
+fn appendText(written: *std.ArrayList(gguf.Entry), tmp: std.mem.Allocator, key: []const u8, value_opt: ?[]const u8) !void {
+    const value = value_opt orelse return;
     try written.append(tmp, .{ .key = key, .value = .{ .string = value } });
 }
-
 /// Write a vector read earlier back out, so a file can be rewritten with the same fields.
 pub fn writeVector(a: std.mem.Allocator, v: Vector) Error![]u8 {
     return write(a, .{
@@ -584,6 +584,7 @@ pub fn writeVector(a: std.mem.Allocator, v: Vector) Error![]u8 {
         .base_revision = v.base_revision,
         .method = v.method,
         .contrast = v.contrast,
+        .validation = v.validation,
         .publication = v.publication,
         .layers = v.layers,
     });

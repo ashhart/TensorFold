@@ -63,10 +63,10 @@ fn source(a: std.mem.Allocator, variant: Variant) ![]u8 {
     defer a.free(text);
     return switch (variant) {
         .production => a.dupe(u8, text),
-        .nan => edit(a, text, "const float v = hv[i] + ALPHA * d;", "const float v = isnan(hv[i]) ? 0.0f : hv[i] + ALPHA * d;"),
+        .nan => edit(a, text, "const float v = step == 0.0f ? hv[i] : (hv[i] + step);", "const float v = isnan(hv[i]) ? 0.0f : (step == 0.0f ? hv[i] : (hv[i] + step));"),
         // The norm's own division, wrong: the row the model reads changes and the steered row does not.
         .norm => edit(a, text, "total / float(K)", "total"),
-        .contracted => edit(a, text, "const float v = hv[i] + ALPHA * d;", "const float v = fma(ALPHA, d, hv[i]);"),
+        .contracted => edit(a, text, "const float v = step == 0.0f ? hv[i] : (hv[i] + step);", "const float v = step == 0.0f ? hv[i] : fma(ALPHA, d, hv[i]);"),
     };
 }
 

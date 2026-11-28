@@ -36,8 +36,13 @@ fn servedBy(list: []const []const u8, name: []const u8) bool {
 
 /// Whether this build can apply a control vector: the Metal engine on macOS, or a Linux server with the CUDA engine.
 pub fn steers() bool {
-    if (builtin.os.tag == .macos) return true;
-    return builtin.os.tag == .linux and !served("--backend=rocm");
+    return steersFor(builtin.os.tag, native_serves);
+}
+
+/// Whether a build for `os` serving `list` can apply a control vector: Metal on macOS, or Linux CUDA (not ROCm/Vulkan).
+pub fn steersFor(os: std.Target.Os.Tag, list: []const []const u8) bool {
+    if (os == .macos) return true;
+    return os == .linux and !servedBy(list, "--backend=rocm") and !servedBy(list, "--backend=vulkan");
 }
 
 /// The CUDA build's own flags and variables (the Metal build refuses them).
