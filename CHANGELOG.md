@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA with paged KV (`TF_FLASHNEXT_KV_PAGES`) no longer reserves pool snapshot slots it never uses, so the prompt cache keeps its whole budget (#5502, thanks @shantanugoel).
+
 - DeepSeek-V4.1 on CUDA: with slot drafts, every pass's DSpark statics staging region starts int64-aligned, so 13 or 14 live requests at 16 slots no longer stop both ranks with `incorrect alignment`; with 12 or fewer live requests nothing moves (#3446). Thanks to @jayleaton.
 
 - Server: a streamed chat, completion or Responses request with `return_progress: true` receives `tensorfold.progress` counts (prompt tokens done, total and cached) while its prompt pass runs, before the first token; off by default, and a stream without it is byte for byte what it was (#3216).
