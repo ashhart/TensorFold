@@ -77,6 +77,82 @@ test "capture parser returns missing fields without an optional unwrap" {
     var driver = mock.init();
     try t.expectError(error.MissingField, @import("triton_capture.zig").Set.load(t.allocator, t.io, &driver, 0, dir));
 }
+
+fn capturePdlRefused(pdl: bool, compiled: i64) !void {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(t.io, "cubins", .default_dir);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "cubins/ab.cubin", .data = "synthetic kernel image" });
+    const json = try std.fmt.allocPrint(
+        t.allocator,
+        "{{\"kernels\":[{{\"hash\":\"ab\",\"name\":\"valid_first\",\"num_warps\":4,\"params\":[]}}," ++
+            "{{\"hash\":\"cd\",\"name\":\"mismatched_pdl\",\"num_warps\":4,\"pdl\":{}," ++
+            "\"params\":[],\"consts\":{{\"PDL\":{{\"int\":{d}}}}}}}]}}",
+        .{ pdl, compiled },
+    );
+    defer t.allocator.free(json);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "aot.json", .data = json });
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(dir);
+    var driver = mock.init();
+    if (@import("triton_capture.zig").Set.load(t.allocator, t.io, &driver, 0, dir)) |value| {
+        var set = value;
+        set.deinit();
+        return error.ExpectedPdlRefusal;
+    } else |err| try t.expectEqual(error.PdlMismatch, err);
+    try t.expectEqual(@as(usize, 0), mock.modules);
+    try t.expectEqual(@as(usize, 0), mock.unloaded);
+}
+
+test "capture PDL: disabled constexpr refuses an enabled launch before any module" {
+    try capturePdlRefused(true, 0);
+}
+
+test "capture PDL: enabled constexpr refuses a disabled launch before any module" {
+    try capturePdlRefused(false, 1);
+}
+
+test "capture PDL: matching and legacy flags reach both loaded kernel configurations unchanged" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(t.io, "cubins", .default_dir);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "cubins/ab.cubin", .data = "synthetic kernel image" });
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(dir);
+    const cases = [_]struct { flag: []const u8, consts: []const u8, want: bool }{
+        .{ .flag = "\"pdl\":false,", .consts = "{\"PDL\":{\"int\":0}}", .want = false },
+        .{ .flag = "\"pdl\":true,", .consts = "{\"PDL\":{\"int\":1}}", .want = true },
+        .{ .flag = "", .consts = "{}", .want = false },
+        .{ .flag = "", .consts = "{\"PDL\":{\"int\":0}}", .want = false },
+    };
+    for (cases) |case| {
+        const json = try std.fmt.allocPrint(
+            t.allocator,
+            "{{\"kernels\":[{{\"fn\":\"test\",\"hash\":\"ab\",\"name\":\"matching_pdl\",\"num_warps\":4," ++
+                "{s}\"params\":[],\"consts\":{s}}}]}}",
+            .{ case.flag, case.consts },
+        );
+        defer t.allocator.free(json);
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "aot.json", .data = json });
+        var driver = mock.init();
+        {
+            var capture = try @import("triton_capture.zig").Set.load(t.allocator, t.io, &driver, 0, dir);
+            defer capture.deinit();
+            try t.expectEqual(case.want, capture.kernels.get("ab").?.kernel.config(.{ .x = 1 }).pdl);
+        }
+        try t.expectEqual(@as(usize, 1), mock.modules);
+        try t.expectEqual(mock.modules, mock.unloaded);
+        driver = mock.init();
+        {
+            var generic = try cuda.aot.Set.load(t.allocator, t.io, &driver, 0, dir);
+            defer generic.deinit();
+            try t.expectEqual(case.want, generic.variants[0].kernel.config(.{ .x = 1 }).pdl);
+        }
+        try t.expectEqual(@as(usize, 1), mock.modules);
+        try t.expectEqual(mock.modules, mock.unloaded);
+    }
+}
+
 test "runtime forms release every intermediate allocation on failure" {
     var b = try builder(t.allocator);
     defer b.deinit();
