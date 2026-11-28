@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
 const image = @import("image.zig");
+const rope_freq = @import("core").rope_freq;
 
 const vit = cuda.vit;
 const toBf16 = @import("core").bf16_round.bits;
@@ -145,11 +146,17 @@ pub const Tower = struct {
     }
 };
 
+/// The tower's 18 inverse frequencies: half of a 72-wide head's pairs, theta from the tower.
+fn inverseFrequencies() [D / 4]f32 {
+    var inv: [D / 4]f32 = undefined;
+    rope_freq.inverseFrequencies(rope_theta, D / 2, &inv);
+    return inv;
+}
+
 /// Gemma4VisionRotaryEmbedding gw wide (Metal's vision.rope): dims 0-35 by x, 36-71 by y, bf16 cos and sin.
 fn rope(cs: []u16, sn: []u16, gw: usize, p: usize) void {
     const half = D / 2;
-    var inv: [half / 2]f32 = undefined;
-    for (&inv, 0..) |*f, i| f.* = 1.0 / std.math.pow(f32, rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, half));
+    const inv = inverseFrequencies();
     for (0..p) |q| for (0..D) |dd| {
         const axis: f32 = @floatFromInt(if (dd < half) q % gw else q / gw);
         const angle = axis * inv[(dd % half) % (half / 2)];
