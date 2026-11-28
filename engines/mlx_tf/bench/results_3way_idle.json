@@ -1,0 +1,184 @@
+[
+  {
+    "model": "Qwen3.5-0.8B-4bit",
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 148.7,
+      "prefill_tokens": 480,
+      "prefill_tps": 23424.7,
+      "prompt_tokens": 29,
+      "gen_tokens": 128,
+      "gen_tps": 571.2,
+      "text": "### What is a GPU Compute Shader?\n\nA **Compute Shader** is a specialized type of **Shader** (also known as a \"Vertex Shader\" in older terminology) that runs on the **Graphics Processing Unit (GPU)**. Unlike standard shaders that only control the rendering of 2D or 3D data, a Compute Shader executes mathematical operations on the data.\n\nThe key characteristics are:\n*   **Execution on the GPU:** It runs directly on the hardware, bypassing the CPU for heavy calculations.\n*   **Mathematical Operations:** It performs arithmetic, logic, and control flow based on the input data."
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 767.1,
+      "prefill_tokens": 480,
+      "prefill_tps": 16769.5,
+      "prompt_tokens": 29,
+      "gen_tokens": 128,
+      "gen_tps": 559.5,
+      "text": "### What is a GPU Compute Shader?\n\nA **Compute Shader** is a specialized type of **Shader** (also known as a \"Vertex Shader\" in older terminology) that runs on the **Graphics Processing Unit (GPU)**. Unlike standard shaders that control the rendering of 3D models (like `gl_FragColor`), a Compute Shader executes mathematical operations on the data that the GPU has already generated.\n\nThink of it as a \"mathematical engine\" running alongside the graphics engine. While the graphics engine draws the image, the compute shader takes that image, applies complex mathematical transformations (like filtering, texture mapping, or"
+    },
+    "llama_cpp": {
+      "engine": "llama.cpp",
+      "gguf": "Qwen3.5-0.8B-Q4_K_M.gguf",
+      "prefill_tps": 15745.2,
+      "gen_tps": 345.7,
+      "load_ms": 998.8
+    }
+  },
+  {
+    "model": "Qwen3.5-2B-4bit",
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 143.0,
+      "prefill_tokens": 480,
+      "prefill_tps": 12732.5,
+      "prompt_tokens": 29,
+      "gen_tokens": 128,
+      "gen_tps": 352.5,
+      "text": "### What is a GPU Compute Shader?\n\nA **GPU compute shader** is a specialized type of shader designed to perform mathematical calculations and data processing on the Graphics Processing Unit (GPU) rather than the Graphics Processing Unit (GPGPU) or the Graphics Processing Unit (GPU) (GPGPU).\n\nWhile traditional shaders (like vertex or fragment shaders) are primarily concerned with rendering graphics (transforming geometry, lighting, color), compute shaders are the \"brains\" of the GPU. They are optimized for high-throughput, low-latency numerical operations.\n\n**Key Characteristics:**\n*   **Mathematical Focus:** They handle"
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 823.0,
+      "prefill_tokens": 480,
+      "prefill_tps": 10150.6,
+      "prompt_tokens": 29,
+      "gen_tokens": 128,
+      "gen_tps": 336.2,
+      "text": "### What is a GPU Compute Shader?\n\nA **GPU compute shader** is a specialized type of shader designed to perform mathematical calculations and data processing on the Graphics Processing Unit (GPU) rather than the Graphics Processing Unit (GPGPU) or the Graphics Processing Unit (GPU) (GPGPU).\n\nWhile traditional shaders (like Vertex or Fragment shaders) are primarily concerned with rendering graphics (transforming geometry, lighting, and color), compute shaders are the \"brains\" of the GPU. They are optimized for high-throughput, low-latency numerical operations.\n\n**Key Characteristics:**\n*   **Mathematical Focus:** They"
+    },
+    "llama_cpp": {
+      "engine": "llama.cpp",
+      "gguf": "Qwen3.5-2B-Q4_K_M.gguf",
+      "prefill_tps": 9348.2,
+      "gen_tps": 237.4,
+      "load_ms": 830.1
+    }
+  },
+  {
+    "model": "Qwen2.5-1.5B-4bit",
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen2_dense",
+      "m5_tensor_ops": true,
+      "load_ms": 81.4,
+      "prefill_tokens": 480,
+      "prefill_tps": 12270.0,
+      "prompt_tokens": 14,
+      "gen_tokens": 128,
+      "gen_tps": 408.9,
+      "text": "Apple Silicon is a revolutionary new architecture that allows for faster and more efficient processing of data. One of the key features of Apple Silicon is the ability to use unified memory, which allows for the seamless transfer of data between different types of memory, including RAM, flash memory, and SSDs. In this article, we will provide a detailed technical overview of how unified memory works on Apple Silicon.\n\nWhat is Unified Memory?\n\nUnified memory is a feature that allows for the seamless transfer of data between different types of memory, including RAM, flash memory, and SSDs. This feature is particularly useful in Apple Silicon, where the processor is designed to handle"
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 358.5,
+      "prefill_tokens": 480,
+      "prefill_tps": 12193.5,
+      "prompt_tokens": 14,
+      "gen_tokens": 128,
+      "gen_tps": 384.7,
+      "text": "Apple Silicon is a revolutionary new architecture that allows for faster and more efficient processing of data. One of the key features of Apple Silicon is the ability to use unified memory, which allows for the simultaneous use of multiple memory types, such as RAM and flash memory, to improve performance and reduce power consumption.\n\nUnified memory works by allowing the CPU to access all of the memory in the system, including RAM and flash memory, as if it were a single memory space. This allows for faster access to data and reduces the need for multiple memory controllers, which can be expensive and power-hungry.\n\nTo implement unified memory, Apple Silicon uses a combination"
+    },
+    "llama_cpp": {
+      "engine": "llama.cpp",
+      "gguf": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "prefill_tps": 11152.2,
+      "gen_tps": 297.5,
+      "load_ms": 511.1
+    }
+  },
+  {
+    "model": "Qwen2.5-7B-4bit",
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen2_dense",
+      "m5_tensor_ops": true,
+      "load_ms": 84.2,
+      "prefill_tokens": 480,
+      "prefill_tps": 3215.2,
+      "prompt_tokens": 14,
+      "gen_tokens": 128,
+      "gen_tps": 127.1,
+      "text": "Unified memory is a feature introduced in Apple's M1 chip, which is the first chip designed by Apple for their Macs. Unified memory is a type of memory architecture that combines the system memory, graphics memory, and cache memory into a single memory pool. This means that all the memory in the system is accessible to all the cores in the chip, including the CPU, GPU, and other cores.\n\nThe M1 chip has 8 cores, 4 of which are high-performance cores, and 4 of which are high-efficiency cores. The high-performance cores are designed for demanding tasks, such as gaming, video editing, and"
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 597.1,
+      "prefill_tokens": 480,
+      "prefill_tps": 3076.9,
+      "prompt_tokens": 14,
+      "gen_tokens": 128,
+      "gen_tps": 123.0,
+      "text": "Unified memory is a feature introduced in Apple's M1 chip, which is the first chip designed by Apple for their Macs. Unified memory is a type of memory architecture that combines the system memory, graphics memory, and cache memory into a single memory pool. This means that all the memory in the system is accessible to all the cores in the chip, including the CPU, GPU, and other cores.\n\nThe M1 chip has 8 cores, 4 of which are high-performance cores, and 4 of which are high-efficiency cores. The high-performance cores are designed for demanding tasks, such as gaming, video editing, and"
+    },
+    "llama_cpp": {
+      "engine": "llama.cpp",
+      "gguf": "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+      "prefill_tps": 2849.9,
+      "gen_tps": 107.3,
+      "load_ms": 999.0
+    }
+  },
+  {
+    "model": "Qwen3.8-27B-4bit",
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 143.5,
+      "prefill_tokens": 480,
+      "prefill_tps": 833.1,
+      "prompt_tokens": 30,
+      "gen_tokens": 128,
+      "gen_tps": 35.3,
+      "text": "Speculative decoding is a technique that accelerates the inference of autoregressive Large Language Models (LLMs) by leveraging the parallelism of smaller, faster models to \"guess\" future tokens, which are then verified by the larger, slower model.\n\nThe key challenge is that LLMs are **autoregressive**: they generate one token at a time, and each step requires a full forward pass through the large model. This creates a bottleneck because the computation is **memory-bandwidth bound** (loading weights from GPU memory) rather than **compute-bound**.\n\nHere\u2019s how speculative decoding works and why it preserves the output distribution.\n\n###"
+    },
+    "mlx_tf_dflash2": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 1289.0,
+      "prefill_tokens": 480,
+      "prefill_tps": 734.0,
+      "prompt_tokens": 30,
+      "gen_tokens": 128,
+      "gen_tps": 108.7,
+      "text": "Speculative decoding is a technique that accelerates the inference of autoregressive Large Language Models (LLMs) by leveraging the parallelism of smaller, faster models to \"guess\" future tokens, which are then verified by the larger, slower model.\n\nThe key challenge is that LLMs are **autoregressive**: they generate one token at a time, and each step requires a full forward pass through the large model. This creates a bottleneck where the GPU is often underutilized because the computation is memory-bound (loading weights) rather than compute-bound.\n\nHere is how speculative decoding works and why it preserves the output distribution.\n\n###"
+    },
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 1867.0,
+      "prefill_tokens": 480,
+      "prefill_tps": 763.5,
+      "prompt_tokens": 30,
+      "gen_tokens": 128,
+      "gen_tps": 33.6,
+      "text": "Speculative decoding is a technique that accelerates the inference of autoregressive Large Language Models (LLMs) by leveraging the parallelism of smaller, faster models to \"guess\" future tokens, which are then verified by the larger, slower model.\n\nThe key challenge in autoregressive generation is that each token depends on all previous tokens, forcing the large model (the **Target Model**) to generate tokens one by one. This is computationally expensive and latency-bound. Speculative decoding solves this by introducing a **Draft Model** (a smaller, faster LLM) that proposes a sequence of tokens, which the Target Model then verifies in parallel"
+    },
+    "llama_cpp": {
+      "engine": "llama.cpp",
+      "gguf": "Qwen3.5-27B-Q4_K_M.gguf",
+      "prefill_tps": 665.3,
+      "gen_tps": 25.4,
+      "load_ms": 2549.9
+    }
+  }
+]

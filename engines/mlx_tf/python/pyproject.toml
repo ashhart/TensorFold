@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx-tf"
+version = "0.4.0"
+description = "TensorFold mlx_tf — Universal Bare-Metal Apple Silicon LLM & VLM Engine + Native TFQ3 (Zero Apple MLX)"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+
+[project.scripts]
+"mlx-tf" = "mlx_tf.generate:main"
+"mlx-tf-serve" = "mlx_tf.server:main"
+"mlx-tf-convert" = "mlx_tf.convert:main"
