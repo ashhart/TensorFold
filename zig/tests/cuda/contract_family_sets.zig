@@ -14,6 +14,9 @@ pub const Sets = struct {
     bf16_experts: *@import("contract_experts_bf16.zig").Set,
     mxfp4_experts: *@import("contract_experts_mxfp4.zig").Set,
     ernie5_5_head: *@import("contract_ernie5_5_head.zig").Set,
+    ernie5_5_index: *@import("contract_ernie5_5_index.zig").Set,
+    ernie5_5_mhc: *@import("contract_ernie5_5_mhc.zig").Set,
+    ernie5_5_hca: *@import("contract_ernie5_5_hca.zig").Set,
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
     inkling2: *@import("contract_inkling2.zig").Set,
@@ -50,6 +53,12 @@ pub const Sets = struct {
         errdefer mxfp4_experts.deinit();
         const ernie5_5_head = try @import("contract_ernie5_5_head.zig").Set.init(gpu, s, a, list);
         errdefer ernie5_5_head.deinit();
+        const ernie5_5_index = try @import("contract_ernie5_5_index.zig").Set.init(gpu, s, a, list);
+        errdefer ernie5_5_index.deinit();
+        const ernie5_5_mhc = try @import("contract_ernie5_5_mhc.zig").Set.init(gpu, s, a, list);
+        errdefer ernie5_5_mhc.deinit();
+        const ernie5_5_hca = try @import("contract_ernie5_5_hca.zig").Set.init(gpu, s, a, list);
+        errdefer ernie5_5_hca.deinit();
         const pocket = try @import("contract_pocket.zig").Set.init(gpu, s, a, list);
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
@@ -130,6 +139,9 @@ pub const Sets = struct {
             .bf16_experts = bf16_experts,
             .mxfp4_experts = mxfp4_experts,
             .ernie5_5_head = ernie5_5_head,
+            .ernie5_5_index = ernie5_5_index,
+            .ernie5_5_mhc = ernie5_5_mhc,
+            .ernie5_5_hca = ernie5_5_hca,
             .pocket = pocket,
             .minimax = minimax,
             .inkling2 = inkling2,
@@ -192,6 +204,9 @@ pub const Sets = struct {
         sets.minimax.deinit();
         sets.pocket.deinit();
         sets.ernie5_5_head.deinit();
+        sets.ernie5_5_index.deinit();
+        sets.ernie5_5_hca.deinit();
+        sets.ernie5_5_mhc.deinit();
         sets.bf16_experts.deinit();
         sets.mxfp4_experts.deinit();
     }
