@@ -12,6 +12,8 @@ pub fn operators(f: dk.ops.Functions) void {
     const o = dk.ops;
     for (f.attn) |fun| note(fun, o.attn.NT, o.attn.SMEM, 1);
     for (f.attn_split, 0..) |row, pi| for (row) |fun| note(fun, o.attn.NT, o.attn.splitSmem(if (pi == 0) 1 else 4), if (pi == 0) 1 else 4);
+    if (f.attn_part) |s| for (s.one) |fun| note(fun, o.attn.NT, o.attn.SMEM, 1);
+    if (f.attn_part) |s| for (s.split, 0..) |row, pi| for (row) |fun| note(fun, o.attn.NT, o.attn.splitSmem(if (pi == 0) 1 else 4), if (pi == 0) 1 else 4);
     note(f.topk, o.topk.NT, o.topk.smem(o.topk.MAXEPT), o.topk.MAXCL);
     note(f.topk_b, o.topk.NT, o.topk.smem(o.topk.MAXEPT), o.topk.MAXCL);
     for (f.mhc) |row| for (row) |fun| note(fun, o.mhc.NT, o.mhc.MAXR * o.mhc.ROWB, 1);

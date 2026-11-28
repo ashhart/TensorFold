@@ -61,12 +61,35 @@ pub const attn = struct {
         return std.fmt.comptimePrint("_ZN10dsv41_attn12split_kernelILi{d}ELb{d}ELb{d}ELi{d}EEEvNS_4ArgsE", .{ kw, @intFromBool(rows), @intFromBool(hi), p });
     }
 
+    /// attn_part_kernel<KW, ROWS, HAS_HI>: attn_kernel with a partial last head tile (H not a multiple of 16).
+    pub fn partSymbol(comptime kw: u32, comptime rows: bool, comptime hi: bool) [:0]const u8 {
+        return std.fmt.comptimePrint("_ZN10dsv41_attn16attn_part_kernelILi{d}ELb{d}ELb{d}EEEvNS_4ArgsE", .{ kw, @intFromBool(rows), @intFromBool(hi) });
+    }
+
+    /// split_kernel<KW, ROWS, HAS_HI, P + 16>: the split kernel with attn_part_kernel's last partial tile.
+    pub fn splitPartSymbol(comptime kw: u32, comptime rows: bool, comptime hi: bool, comptime p: u32) [:0]const u8 {
+        return splitSymbol(kw, rows, hi, p + part_tile);
+    }
+
+    /// split_kernel's P flag for a partial last head tile (attn_split.cuh PART_TILE).
+    pub const part_tile = 16;
+
+    /// The head tiles a (chunk, row): ceil(H / 16). A head count that is not a multiple of 16 runs the part kernels.
+    pub fn tiles(h: i64) i64 {
+        return @divTrunc(h + BMQ - 1, BMQ);
+    }
+
+    /// The heads the scratch partials and the ticket are laid out over: whole tiles.
+    pub fn scratchHeads(h: i64) i64 {
+        return tiles(h) * BMQ;
+    }
+
     /// Split<P>::SMEM: P 1 the same as attn_kernel's, P 4 the S rows' B pairs beside the PV slice.
     pub fn splitSmem(p: u32) u32 {
         return if (p == 4) 100864 else SMEM;
     }
 
-    /// The ticket's ranks a (row, head tile) once any launch splits: the ticket buffer must hold R H / 16 * MAXP.
+    /// The ticket's ranks a (row, head tile) once any launch splits: the ticket buffer must hold R tiles(H) * MAXP.
     pub const MAXP = 4;
 
     /// attn_cuda.split(R) (TF_DSV41_ATTN_SPLIT on): P 4 up to `split_rows` rows (2), P 1 above.
@@ -74,9 +97,9 @@ pub const attn = struct {
         return if (rows <= split_rows) 4 else 1;
     }
 
-    /// dispatch(): the instance index (kw 4 | rows | has_hi), after its checks.
+    /// dispatch(): the instance index (kw 4 | rows | has_hi), after its checks; a partial last tile runs the twins.
     pub fn instance(a: Args, kw: u32, rows: bool, has_hi: bool) Error!usize {
-        if (a.R < 1 or @rem(a.H, BMQ) != 0 or a.ring < WINDOW or (a.ring & (a.ring - 1)) != 0) return error.Shape;
+        if (a.R < 1 or a.H < 1 or a.ring < WINDOW or (a.ring & (a.ring - 1)) != 0) return error.Shape;
         return @as(usize, if (kw == 4) 4 else 0) + @as(usize, if (rows) 2 else 0) + @intFromBool(has_hi);
     }
 };

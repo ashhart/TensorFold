@@ -39,7 +39,7 @@ struct Args {
     const float* sink; const float* cs; long long csst;          // [H] fp32, RoPE table fp32 [max_pos, 64]
     float* po; float* pm; float* pl;              // partials (attn.Scratch layout)
     uint16_t* out;                                // [R, H, 512] bf16
-    int* ticket;                                  // [R, H / 16] (self-cleaning)
+    int* ticket;                                  // [R, ceil(H / 16)] (self-cleaning)
     int R, H, ring, has_comp;
     int qrope;                                    // split_kernel: q arrives un-rotated, RoPE'd as it loads
 };
@@ -123,9 +123,12 @@ __device__ __forceinline__ bool chunk_works(const Args& a, int r, int c) {
     return c == NCOMP || (a.has_comp && c * CH < a.cnt[r]);
 }
 
-template <bool ROWS>
+// PART: H % 16 != 0; the last tile's missing heads run on zero q into scratch over HS heads, no sink, no output.
+__device__ __forceinline__ int whole_heads(int H) { return (H + BMQ - 1) / BMQ * BMQ; }
+
+template <bool ROWS, bool PART>
 __device__ void merge(const Args& a, uint8_t* sm, int r, int hb) {
-    const int tid = threadIdx.x, H = a.H, R = a.R;
+    const int tid = threadIdx.x, H = a.H, R = a.R, HS = PART ? whole_heads(H) : H;
     float* ca = reinterpret_cast<float*>(sm + SM_TMAX);          // [5][16] a, [5][16] b, [16] af, [16] den
     float* cb = ca + NCH * BMQ;
     float* fa = cb + NCH * BMQ;
@@ -135,7 +138,7 @@ __device__ void merge(const Args& a, uint8_t* sm, int r, int hb) {
         float m = -INFINITY, l = 0.f;
         for (int c = 0; c < NCH; ++c) {
             const bool w = chunk_works(a, r, c);
-            const long long base = (static_cast<long long>(c) * R + r) * H + h;
+            const long long base = (static_cast<long long>(c) * R + r) * HS + h;
             const float cm = w ? __ldcg(a.pm + base) : -INFINITY, cl = w ? __ldcg(a.pl + base) : 0.f;
             const bool act = cl > 0.f;
             float aa, bb;
@@ -155,7 +158,7 @@ __device__ void merge(const Args& a, uint8_t* sm, int r, int hb) {
             ca[c * BMQ + tid] = aa;
             cb[c * BMQ + tid] = bb;
         }
-        const float sink = a.sink[h];
+        const float sink = PART && h >= H ? -INFINITY : a.sink[h];
         const float top = fmaxf(m, sink);
         const float af = m == -INFINITY ? 0.f : texp(__fsub_rn(m, top));
         const float e = sink == -INFINITY ? 0.f : texp(__fsub_rn(sink, top));
@@ -167,11 +170,12 @@ __device__ void merge(const Args& a, uint8_t* sm, int r, int hb) {
     const float* csr = a.cs + static_cast<long long>(at) * a.csst;
     for (int u = tid; u < BMQ * (D / 4); u += NT) {               // float4 units: head hl, columns d .. d + 3
         const int hl = u / (D / 4), d = (u % (D / 4)) * 4, h = hb * BMQ + hl;
+        if (PART && h >= H) continue;
         float o[4];
         for (int c = 0; c < NCH; ++c) {
             float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
             if (chunk_works(a, r, c))
-                v = __ldcg(reinterpret_cast<const float4*>(a.po + ((static_cast<long long>(c) * R + r) * H + h) * D
+                v = __ldcg(reinterpret_cast<const float4*>(a.po + ((static_cast<long long>(c) * R + r) * HS + h) * D
                                                             + d));
             const float co[4] = {v.x, v.y, v.z, v.w};
             const float aa = ca[c * BMQ + hl], bb = cb[c * BMQ + hl];
@@ -197,12 +201,12 @@ __device__ void merge(const Args& a, uint8_t* sm, int r, int hb) {
     }
 }
 
-template <int KW, bool ROWS, bool HAS_HI>
-__global__ void __launch_bounds__(NT, 1) attn_kernel(Args a) {
+template <int KW, bool ROWS, bool HAS_HI, bool PART>
+__device__ __forceinline__ void attn_body(Args a) {
     extern __shared__ __align__(16) uint8_t sm[];
     const int c = blockIdx.x, hb = blockIdx.y, r = blockIdx.z;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
-    const int H = a.H, R = a.R;
+    const int H = a.H, R = a.R, HS = PART ? whole_heads(H) : H;
     if (!chunk_works(a, r, c)) return;
     int* phys = reinterpret_cast<int*>(sm + SM_PHYS);
     const long long sl = ROWS ? a.sl[r] : 0;
@@ -233,11 +237,12 @@ __global__ void __launch_bounds__(NT, 1) attn_kernel(Args a) {
         for (int i = tid; i < 32 * 32; i += NT) {
             const int s = i >> 5, ln = i & 31, gg = ln >> 2, tt = ln & 3;
             const int k0 = klo<KW>(s, tt), k1 = khi<KW>(s, tt);
+            const bool lo = !PART || hb * BMQ + gg < H, hi = !PART || hb * BMQ + gg + 8 < H;
             uint4 f;
-            f.x = *reinterpret_cast<const uint32_t*>(qb + gg * D + k0);
-            f.y = *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k0);
-            f.z = *reinterpret_cast<const uint32_t*>(qb + gg * D + k1);
-            f.w = *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k1);
+            f.x = lo ? *reinterpret_cast<const uint32_t*>(qb + gg * D + k0) : 0u;
+            f.y = hi ? *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k0) : 0u;
+            f.z = lo ? *reinterpret_cast<const uint32_t*>(qb + gg * D + k1) : 0u;
+            f.w = hi ? *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k1) : 0u;
             reinterpret_cast<uint4*>(sm + SM_Q)[i] = f;
         }
     }
@@ -365,7 +370,7 @@ __global__ void __launch_bounds__(NT, 1) attn_kernel(Args a) {
             }
         }
     }
-    const long long pbase = (static_cast<long long>(c) * R + r) * H + hb * BMQ;
+    const long long pbase = (static_cast<long long>(c) * R + r) * HS + hb * BMQ;
     for (int j = 0; j < 8; ++j) {
         const int n = 64 * j + 8 * warp + 2 * t;
         *reinterpret_cast<float2*>(a.po + (pbase + g) * D + n) = make_float2(acc[j][0], acc[j][1]);
@@ -381,13 +386,24 @@ __global__ void __launch_bounds__(NT, 1) attn_kernel(Args a) {
     if (tid == 0) {
         int need = 0;
         for (int cc = 0; cc < NCH; ++cc) need += chunk_works(a, r, cc) ? 1 : 0;
-        *flag = atomicAdd(a.ticket + r * (H / BMQ) + hb, 1) == need - 1;
+        *flag = atomicAdd(a.ticket + r * (HS / BMQ) + hb, 1) == need - 1;
     }
     __syncthreads();
     if (!*flag) return;
     __threadfence();
-    if (tid == 0) atomicExch(a.ticket + r * (H / BMQ) + hb, 0);  // self-cleaning: the next launch / replay
-    merge<ROWS>(a, sm, r, hb);
+    if (tid == 0) atomicExch(a.ticket + r * (HS / BMQ) + hb, 0);  // self-cleaning: the next launch / replay
+    merge<ROWS, PART>(a, sm, r, hb);
+}
+
+template <int KW, bool ROWS, bool HAS_HI>
+__global__ void __launch_bounds__(NT, 1) attn_kernel(Args a) {
+    attn_body<KW, ROWS, HAS_HI, false>(a);
+}
+
+// a head count that is not a multiple of 16 (a three-rank 24-head share): grid y covers ceil(H / 16) tiles
+template <int KW, bool ROWS, bool HAS_HI>
+__global__ void __launch_bounds__(NT, 1) attn_part_kernel(Args a) {
+    attn_body<KW, ROWS, HAS_HI, true>(a);
 }
 
 template <int KW, bool ROWS, bool HAS_HI>
@@ -522,7 +538,15 @@ template __global__ void dsv41_attn::attn_kernel<4, false, false>(dsv41_attn::Ar
 template __global__ void dsv41_attn::attn_kernel<4, false, true>(dsv41_attn::Args);
 template __global__ void dsv41_attn::attn_kernel<4, true, false>(dsv41_attn::Args);
 template __global__ void dsv41_attn::attn_kernel<4, true, true>(dsv41_attn::Args);
-// dispatch_split's split_kernel<KW, ROWS, HAS_HI, P> at P 1 and 4 (a cluster of 4)
+template __global__ void dsv41_attn::attn_part_kernel<2, false, false>(dsv41_attn::Args);
+template __global__ void dsv41_attn::attn_part_kernel<2, false, true>(dsv41_attn::Args);
+template __global__ void dsv41_attn::attn_part_kernel<2, true, false>(dsv41_attn::Args);
+template __global__ void dsv41_attn::attn_part_kernel<2, true, true>(dsv41_attn::Args);
+template __global__ void dsv41_attn::attn_part_kernel<4, false, false>(dsv41_attn::Args);
+template __global__ void dsv41_attn::attn_part_kernel<4, false, true>(dsv41_attn::Args);
+template __global__ void dsv41_attn::attn_part_kernel<4, true, false>(dsv41_attn::Args);
+template __global__ void dsv41_attn::attn_part_kernel<4, true, true>(dsv41_attn::Args);
+// dispatch_split's split_kernel<KW, ROWS, HAS_HI, P> at P 1 and 4 (a cluster of 4); P + 16: the partial-tile twins
 template __global__ void dsv41_attn::split_kernel<2, false, false, 1>(dsv41_attn::Args);
 template __global__ void dsv41_attn::split_kernel<2, false, true, 1>(dsv41_attn::Args);
 template __global__ void dsv41_attn::split_kernel<2, true, false, 1>(dsv41_attn::Args);
@@ -539,3 +563,19 @@ template __global__ void dsv41_attn::split_kernel<4, false, false, 4>(dsv41_attn
 template __global__ void dsv41_attn::split_kernel<4, false, true, 4>(dsv41_attn::Args);
 template __global__ void dsv41_attn::split_kernel<4, true, false, 4>(dsv41_attn::Args);
 template __global__ void dsv41_attn::split_kernel<4, true, true, 4>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, false, false, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, false, true, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, true, false, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, true, true, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, false, false, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, false, true, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, true, false, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, true, true, 17>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, false, false, 20>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, false, true, 20>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, true, false, 20>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<2, true, true, 20>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, false, false, 20>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, false, true, 20>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, true, false, 20>(dsv41_attn::Args);
+template __global__ void dsv41_attn::split_kernel<4, true, true, 20>(dsv41_attn::Args);

@@ -119,9 +119,9 @@ __device__ __forceinline__ void stage_piece(uint32_t base, int region, int key, 
 }
 
 // the merge of columns [c0, c0 + NC) of (row r, head tile hb): attn_kernel's merge per element, loads first
-template <bool ROWS, int NC>
+template <bool ROWS, int NC, bool PART>
 __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, int c0) {
-    const int tid = threadIdx.x, H = a.H, R = a.R;
+    const int tid = threadIdx.x, H = a.H, R = a.R, HS = PART ? whole_heads(H) : H;
     float* ca = reinterpret_cast<float*>(sm + smt);              // [5][16] a, [5][16] b, [16] af, [16] den
     float* cb = ca + NCH * BMQ;
     float* fa = cb + NCH * BMQ;
@@ -138,7 +138,7 @@ __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, i
 #pragma unroll
         for (int c = 0; c < NCH; ++c)
             pv[ub][c] = cw[c] ? __ldcg(reinterpret_cast<const float4*>(
-                                    a.po + ((static_cast<long long>(c) * R + r) * H + h) * D + d))
+                                    a.po + ((static_cast<long long>(c) * R + r) * HS + h) * D + d))
                               : make_float4(0.f, 0.f, 0.f, 0.f);
     }
     if (tid < BMQ) {                                             // a head's scalar chain (Triton's _merge, unrolled)
@@ -146,11 +146,11 @@ __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, i
         float pmv[NCH], plv[NCH];
 #pragma unroll
         for (int c = 0; c < NCH; ++c) {
-            const long long base = (static_cast<long long>(c) * R + r) * H + h;
+            const long long base = (static_cast<long long>(c) * R + r) * HS + h;
             pmv[c] = cw[c] ? __ldcg(a.pm + base) : -INFINITY;
             plv[c] = cw[c] ? __ldcg(a.pl + base) : 0.f;
         }
-        const float sink = a.sink[h];
+        const float sink = PART && h >= H ? -INFINITY : a.sink[h];
         float m = -INFINITY, l = 0.f;
 #pragma unroll
         for (int c = 0; c < NCH; ++c) {
@@ -211,18 +211,22 @@ __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, i
         uint2 w;
         w.x = ob[0] | (static_cast<uint32_t>(ob[1]) << 16);
         w.y = ob[2] | (static_cast<uint32_t>(ob[3]) << 16);
-        *reinterpret_cast<uint2*>(a.out + (static_cast<long long>(r) * H + h) * D + d) = w;
+        if (!PART || h < H) *reinterpret_cast<uint2*>(a.out + (static_cast<long long>(r) * H + h) * D + d) = w;
     }
 }
 
-template <int KW, bool ROWS, bool HAS_HI, int P>
+// PP: P (1 or 4) plus PART_TILE when H % 16 != 0; one template, not a wrapper, so P 1 and 4 compile as before.
+constexpr int PART_TILE = 16;
+template <int KW, bool ROWS, bool HAS_HI, int PP>
 __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
+    constexpr int P = PP & ~PART_TILE;
+    constexpr bool PART = (PP & PART_TILE) != 0;
     using G = Split<P>;
     extern __shared__ __align__(16) uint8_t sm[];
     const int k = P == 1 ? 0 : static_cast<int>(cl_rank());
     const int c = blockIdx.x / P, hb = blockIdx.y, r = blockIdx.z;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
-    const int H = a.H, R = a.R;
+    const int H = a.H, R = a.R, HS = PART ? whole_heads(H) : H;
     if (!chunk_works(a, r, c)) return;                           // the whole cluster: no barrier is pending
     uint4 qv[32 * 32 / NT];                                      // q's A fragments: every load in flight at once
     {
@@ -231,10 +235,11 @@ __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
         for (int u = 0; u < 32 * 32 / NT; ++u) {
             const int i = tid + u * NT, s = i >> 5, ln = i & 31, gg = ln >> 2, tt = ln & 3;
             const int k0 = klo<KW>(s, tt), k1 = khi<KW>(s, tt);
-            qv[u].x = *reinterpret_cast<const uint32_t*>(qb + gg * D + k0);
-            qv[u].y = *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k0);
-            qv[u].z = *reinterpret_cast<const uint32_t*>(qb + gg * D + k1);
-            qv[u].w = *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k1);
+            const bool lo = !PART || hb * BMQ + gg < H, hi = !PART || hb * BMQ + gg + 8 < H;
+            qv[u].x = lo ? *reinterpret_cast<const uint32_t*>(qb + gg * D + k0) : 0u;
+            qv[u].y = hi ? *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k0) : 0u;
+            qv[u].z = lo ? *reinterpret_cast<const uint32_t*>(qb + gg * D + k1) : 0u;
+            qv[u].w = hi ? *reinterpret_cast<const uint32_t*>(qb + (gg + 8) * D + k1) : 0u;
         }
         if (a.qrope) {                                           // the rope dims (k >= 448): their pair's rotation
             const float* csr = a.cs + static_cast<long long>(row_pos<ROWS>(a, r)) * a.csst;
@@ -508,7 +513,7 @@ __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
             }
         }
     }
-    const long long pbase = (static_cast<long long>(c) * R + r) * H + hb * BMQ;
+    const long long pbase = (static_cast<long long>(c) * R + r) * HS + hb * BMQ;
 #pragma unroll
     for (int j = 0; j < G::J; ++j) {
         const int n = 64 * (G::J * k + j) + 8 * warp + 2 * t;
@@ -520,7 +525,7 @@ __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
         a.pl[pbase + tid] = reinterpret_cast<float*>(sm + G::SM_MISC)[16 + tid];
     }
     int* flag = reinterpret_cast<int*>(sm + G::SM_MISC) + 32;
-    int* tk = a.ticket + (r * (H / BMQ) + hb) * MAXP + k;
+    int* tk = a.ticket + (r * (HS / BMQ) + hb) * MAXP + k;
     __threadfence();
     __syncthreads();
     if (tid == 0) {
@@ -532,5 +537,5 @@ __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
     if (!*flag) return;
     __threadfence();
     if (tid == 0) atomicExch(tk, 0);                             // self-cleaning: the next launch / replay
-    merge_cols<ROWS, G::W>(a, sm, G::SM_TMAX, r, hb, G::W * k);
+    merge_cols<ROWS, G::W, PART>(a, sm, G::SM_TMAX, r, hb, G::W * k);
 }

@@ -244,7 +244,7 @@ const Ds = struct {
         if (e.kvNormStoreOn()) try d.normStore(kv, L, true) else try d.store(kvn, L, true);
         const r = try d.ring(L, false);
         const W: i64 = cf.window;
-        const rows_scr = n * 5 * H;
+        const rows_scr = n * 5 * dk.ops.attn.scratchHeads(H);
         const o = try e.buf("L.o", .{}, .bf16, &.{ n, H, hd });
         try e.ext("tf_dsv41_attn_cuda_v1.attn", &.{
             qr,                                                       r[0],

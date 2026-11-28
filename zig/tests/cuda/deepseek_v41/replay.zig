@@ -162,7 +162,7 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels, dir: []const u8) !Outcome {
     if (std.mem.eql(u8, ext, "tf_dsv41_attn_cuda_v1") and std.mem.eql(u8, func, "attn") and args.len == 23) {
         const ticket_name = storageOf(jargs[18]).?;
         const q = args[0].tensor;
-        const hb: usize = @intCast(@divTrunc(q.shape[1], 16));
+        const hb: usize = @intCast(dsv41.ops.attn.tiles(q.shape[1])); // a partial last tile has its ticket words
         for ([_]i64{ 1, 4 }) |p| {
             const v = try a.alloc(replay.Arg, 24);
             @memcpy(v[0..23], args);
