@@ -65,39 +65,56 @@ pub const Gone = struct {
     }
 
     /// The deepest record past `from` on `prompt`'s token path; two tokens filter before any hash.
-    pub fn match(g: *const Gone, s: *const pc.Store, prompt: []const u32, from: u32) ?Rec {
+    pub fn match(g: *const Gone, s: *const pc.Store, prompt: []const u32, from: u32, spans: []const modes.Span) ?Rec {
         var best: ?Rec = null;
         for (g.recs) |r| {
             if (r.n == 0 or r.at <= from or r.n > prompt.len or (best != null and r.at <= best.?.at)) continue;
-            if (prompt[r.n - 1] != r.last or prompt[r.n / 2] != r.mid or queryKey(s, prompt[0..r.n]) != r.key) continue;
+            if (prompt[r.n - 1] != r.last or prompt[r.n / 2] != r.mid or queryKey(s, prompt[0..r.n], r.at, spans) != r.key) continue;
             best = r;
         }
         return best;
     }
 };
 
-/// A kept state's key: its namespace, tokens, family frame and image identities.
+/// A kept state's key includes every field the exact reuse match reads.
 pub fn entryKey(e: *const pc.Entry) u64 {
-    var h = std.hash.Wyhash.init(e.image_frame);
-    if (e.salt) |salt| h.update(std.mem.asBytes(&salt));
-    h.update(std.mem.sliceAsBytes(e.tokens));
-    for (e.images) |i| h.update(std.mem.asBytes(&i.hash));
-    return h.final();
+    return namespaceKey(e.tokens, e.at, e.image_frame, e.salt, e.decode_spans, e.images);
 }
 
-/// The key the store's scoped query gives `tokens`: as `entryKey` for a state kept with them.
-pub fn queryKey(s: *const pc.Store, tokens: []const u32) u64 {
-    var h = std.hash.Wyhash.init(s.image_frame);
-    if (s.salt) |salt| h.update(std.mem.asBytes(&salt));
+/// The scoped query key uses spans through the state and images through its lookahead tokens.
+pub fn queryKey(s: *const pc.Store, tokens: []const u32, at: u32, spans: []const modes.Span) u64 {
+    return namespaceKey(tokens, at, s.image_frame, s.salt, spans, s.image_query orelse &.{});
+}
+
+fn namespaceKey(tokens: []const u32, at: u32, frame: u32, salt: ?u64, spans: []const modes.Span, pictures: anytype) u64 {
+    var h = std.hash.Wyhash.init(frame);
+    h.update(std.mem.asBytes(&@as(u8, @intFromBool(salt != null))));
+    if (salt) |value| h.update(std.mem.asBytes(&value));
     h.update(std.mem.sliceAsBytes(tokens));
-    for (s.image_query orelse &.{}) |i| if (i.at < tokens.len) h.update(std.mem.asBytes(&i.hash));
+    var count: u32 = 0;
+    for (spans) |span| count += @intFromBool(span[0] < at);
+    h.update(std.mem.asBytes(&count));
+    for (spans) |span| if (span[0] < at) {
+        const clipped: modes.Span = .{ span[0], @min(span[1], at) };
+        h.update(std.mem.asBytes(&clipped));
+    };
+    count = 0;
+    for (pictures) |i| count += @intFromBool(i.at < tokens.len);
+    h.update(std.mem.asBytes(&count));
+    for (pictures) |i| if (i.at < tokens.len) {
+        h.update(std.mem.asBytes(&i.at));
+        h.update(std.mem.asBytes(&i.tokens));
+        h.update(std.mem.asBytes(&i.gh));
+        h.update(std.mem.asBytes(&i.gw));
+        h.update(std.mem.asBytes(&i.hash));
+    };
     return h.final();
 }
 
 /// A keep that kept nothing at `at`: a later prompt on this path says `not_kept`.
-pub fn refused(s: *pc.Store, prompt: []const u32, at: u32) void {
+pub fn refused(s: *pc.Store, prompt: []const u32, at: u32, spans: []const modes.Span) void {
     const n = @as(usize, at) + s.rules.lookahead;
-    if (at > 0 and n <= prompt.len) s.gone.note(prompt[0..n], at, queryKey(s, prompt[0..n]), .not_kept);
+    if (at > 0 and n <= prompt.len) s.gone.note(prompt[0..n], at, queryKey(s, prompt[0..n], at, spans), .not_kept);
 }
 
 /// Why `prompt` resumes at `e` and no further. Runs after the store chose `e`; reads entries and allocates nothing.
@@ -114,7 +131,7 @@ pub fn diagnose(s: *const pc.Store, prompt: []const u32, starts: []const u32, sp
         w.shared = @intCast(@min(k.at, prompt.len));
         return w;
     }
-    if (s.gone.match(s, prompt, from)) |r| {
+    if (s.gone.match(s, prompt, from, spans)) |r| {
         w.reason = r.reason;
         w.shared = r.at;
         return w;
@@ -122,7 +139,8 @@ pub fn diagnose(s: *const pc.Store, prompt: []const u32, starts: []const u32, sp
     var best: ?*const pc.Entry = null; // the kept prompt sharing the most, as the fork rule scans
     for (s.entries.items) |k| {
         const n = w.shared;
-        if (k.expired or k.salt != s.salt or k.last.len <= n or n >= prompt.len or k.last[n] != prompt[n]) continue; // cannot share more
+        // Cannot share more.
+        if (k.expired or k.salt != s.salt or k.last.len <= n or n >= prompt.len or k.last[n] != prompt[n]) continue;
         const d: u32 = @intCast(std.mem.indexOfDiff(u32, k.last, prompt) orelse @min(k.last.len, prompt.len));
         if (d > n) {
             w.shared = d;

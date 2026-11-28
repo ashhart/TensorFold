@@ -2,28 +2,30 @@
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
-const Server = @import("server.zig").Server;
 const Why = api.prompt_cache.why.Why;
 const Reason = api.prompt_cache.why.Reason;
 const Allocator = std.mem.Allocator;
 
 /// The `tensorfold.prompt_cache` object: the reason, N, what resumed and was lost, and the message holding N.
-pub fn value(srv: *const Server, a: Allocator, w: Why, prompt: []const u32) !json.Value {
+pub fn value(a: Allocator, w: Why, starts: []const u32, is_chat: bool) !json.Value {
     const o = try json.newObject(a);
     try o.put(a, "reason", .{ .string = @tagName(w.reason) });
     try o.put(a, "shared", try json.intValue(a, w.shared));
     try o.put(a, "resumed", try json.intValue(a, w.resumed));
     try o.put(a, "lost", try json.intValue(a, w.lost()));
-    if (messageAt(srv.chunks.openers, prompt, w.shared)) |m| try o.put(a, "message", try json.intValue(a, m));
+    if (is_chat) if (messageAt(starts, w.shared)) |m| try o.put(a, "message", try json.intValue(a, m));
     return .{ .object = o };
 }
 
-/// The rendered message holding token `n`, counting the template's message openers (null: openers unknown).
-pub fn messageAt(openers: []const u32, prompt: []const u32, n: u32) ?u32 {
-    if (openers.len == 0 or prompt.len == 0) return null;
-    var seen: u32 = 0;
-    for (prompt[0..@min(@as(usize, n) + 1, prompt.len)]) |t| seen += @intFromBool(std.mem.indexOfScalar(u32, openers, t) != null);
-    return if (seen == 0) null else seen - 1;
+/// The rendered message holding token `n`, using exact starts rather than token spellings.
+pub fn messageAt(starts: []const u32, n: u32) ?u32 {
+    if (starts.len == 0) return null;
+    var found: u32 = 0;
+    for (starts) |start| {
+        if (start > n) break;
+        found += @intFromBool(start > 0);
+    }
+    return found;
 }
 
 /// The done line's ` cache=<reason>`, with ` at=<N> lost=<L>` past `none`: positions only, never token ids.
