@@ -8,6 +8,7 @@ const Gpu = check.Gpu;
 
 /// A communicator of `world` ranks: rank 0 writes its unique id to `id_path` as hex, the others read it there.
 pub fn openComm(gpu: Gpu, lib: *const cuda.nccl.Library, rank: c_int, world: c_int, id_path: []const u8) !cuda.nccl.Comm {
+    if (id_path.len == 0 and (world != 1 or rank != 0)) return error.FileNotFound;
     var id: cuda.nccl.UniqueId = undefined;
     if (rank == 0) {
         try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId");
@@ -66,6 +67,9 @@ test "GLM shared starts setup: one rank needs no rendezvous filename" {
     try std.testing.expectEqual(@as(usize, 3), Calls.unique);
     try std.testing.expectEqual(@as(usize, 4), Calls.initialized);
     try std.testing.expectError(error.FileNotFound, openComm(gpu, &lib, 0, 2, ""));
+    try std.testing.expectEqual(@as(usize, 3), Calls.unique);
+    try std.testing.expectError(error.FileNotFound, openComm(gpu, &lib, 1, 2, ""));
+    try std.testing.expectEqual(@as(usize, 3), Calls.unique);
     try std.testing.expectEqual(@as(usize, 4), Calls.initialized);
 }
 
