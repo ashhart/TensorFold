@@ -6,6 +6,7 @@ pub const weights = @import("tp2_weights.zig");
 pub const forward = @import("tp2_forward.zig");
 pub const Model = forward.Model;
 pub const native = @import("tp2_native.zig");
+pub const stop = @import("tp2_stop.zig");
 
 /// Bytes this rank's weights take: its share of the cut matrices, plus the bf16 embedding every rank holds whole.
 pub fn placementWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
@@ -40,6 +41,14 @@ test "ricursive weight share: the cut part halves, the embedding stays whole" {
     try std.testing.expectEqual(@as(u64, 600), share(1000, 200, 2));
 }
 
+test "ricursive two-rank admission: sm_121 at exactly two ranks" {
+    try forward.admit(121, 2, 0);
+    try forward.admit(121, 2, 1);
+    for ([_]u32{ 80, 86, 89, 90, 100, 120 }) |sm| try std.testing.expectError(error.RicursiveRequiresSm121, forward.admit(sm, 2, 0));
+    for ([_]usize{ 0, 1, 3, 4, 8 }) |w| try std.testing.expectError(error.RicursiveNeedsTwoRanks, forward.admit(121, w, 0));
+    try std.testing.expectError(error.RicursiveRankPastWorld, forward.admit(121, 2, 2));
+}
+
 test "ricursive hello: both ranks refuse unless each sent a hello with the same slots and context" {
     const h: forward.Header = .{ .op = @backingInt(forward.Op.hello), .n = 2, .p0 = 4096 };
     try forward.agree(.{ h, h });
@@ -55,5 +64,6 @@ test {
     _ = weights;
     _ = forward;
     _ = native;
+    _ = stop;
     _ = @import("tp2_lanes.zig");
 }

@@ -6,6 +6,7 @@ const fwd = @import("tp2_forward.zig");
 const rl = @import("tp2_lanes.zig");
 const kept = @import("tp2_kept.zig");
 const family = @import("tp2.zig");
+const halt = @import("tp2_stop.zig");
 
 pub const model_type = "ricursive";
 pub const formats: []const []const u8 = &.{"exl3"};
@@ -27,7 +28,7 @@ pub const reasoning_optional = true;
 pub const thinking_budget = false;
 
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, lanes_fixed: bool = false, room: ?Room = null, tp: u32 = 1, rank: u32 = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, lanes_fixed: bool = false, room: ?Room = null, tp: u32 = 1, rank: u32 = 0, master: ?[]const u8 = null, master_port: u16 = 29551, fault: halt.Fault = .{} };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -58,6 +59,16 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.CapturedKernels;
     const p: fwd.Place = .{ .rank = o.rank, .world = o.tp };
     try fwd.admit(try ctx.capability(), p.world, p.rank);
+    // each rank's liveness line to rank 0 comes first: past it, a failure on either rank stops both with its error
+    try cuda.tp_watch.start(io, p.rank, p.world);
+    return opened(gpa, io, ctx, dir, o, p) catch |err| {
+        cuda.tp_watch.fail(@errorName(err));
+        return err;
+    };
+}
+
+fn opened(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: fwd.Place) !Loaded {
+    try o.fault.hit(p.rank, .start);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
@@ -73,11 +84,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         std.log.err("ricursive: {d} slot(s) at {d} tokens need {d:.2} GiB a rank with the weights and the CUDA memory budget leaves {d:.2} GiB", .{ o.lanes, o.context, gib(per * @max(o.lanes, 1) + fixed), gib(room) });
         return e;
     };
-    own.m = try fwd.Model.load(gpa, io, ctx, ctx.d, dir, .{ .context = o.context, .slots = slots, .place = p, .roce = true, .graphs = true });
+    const lo: fwd.Options = .{ .context = o.context, .slots = slots, .place = p, .roce = true, .graphs = true, .fault = o.fault };
+    own.m = try fwd.Model.load(gpa, io, ctx, ctx.d, dir, lo);
     errdefer own.m.deinit();
     if (p.rank != 0) follow(own);
-    errdefer own.m.stop() catch {}; // rank 1 leaves its follow loop
-    own.r = try rl.Ripple.init(gpa, own.m);
+    own.r = try rl.Ripple.init(gpa, own.m); // a failure here reaches rank 1 on its line, not as a stop
     std.log.info("ricursive: rank 0 of {d}, {d} slot(s) x {d} tokens, {d:.2} GiB of caches a rank", .{ p.world, slots, o.context, gib(per * slots) });
     return .{
         .backend = own.r.backend(),
@@ -95,8 +106,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 fn follow(own: *Owned) noreturn {
     own.m.follow() catch |err| {
         std.log.err("ricursive rank {d}: following rank 0 stopped ({s})", .{ own.m.rank(), @errorName(err) });
+        cuda.tp_watch.fatal(@errorName(err)); // rank 0 stops with this error too
         std.c._exit(1); // the stream may hold kernels waiting on a gone rank: a normal exit would join them
     };
+    cuda.tp_watch.ended(); // rank 0 asked for this stop: its line closing from here is expected
     std.log.info("ricursive rank {d}: rank 0 ended; leaving", .{own.m.rank()});
     own.m.deinit();
     std.process.exit(0);
@@ -161,6 +174,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
+    cuda.tp_watch.ended(); // rank 1 leaves on this stop: its line closing is expected
     own.m.stop() catch {};
     own.r.deinit();
     own.m.deinit();

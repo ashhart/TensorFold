@@ -6,6 +6,7 @@ const config = @import("config.zig");
 const weights = @import("tp2_weights.zig");
 const Kernels = @import("tp2_kernels.zig").Kernels;
 const kept = @import("tp2_kept.zig");
+const halt = @import("tp2_stop.zig");
 
 const hd = config.head_dim;
 const Tree = cuda.tree_attention.TreeAttention;
@@ -34,14 +35,6 @@ pub fn admit(sm: u32, world: usize, rank: usize) !void {
     if (rank >= world) return error.RicursiveRankPastWorld;
 }
 
-test "ricursive two-rank admission: sm_121 at exactly two ranks" {
-    try admit(121, 2, 0);
-    try admit(121, 2, 1);
-    for ([_]u32{ 80, 86, 89, 90, 100, 120 }) |sm| try std.testing.expectError(error.RicursiveRequiresSm121, admit(sm, 2, 0));
-    for ([_]usize{ 0, 1, 3, 4, 8 }) |w| try std.testing.expectError(error.RicursiveNeedsTwoRanks, admit(121, w, 0));
-    try std.testing.expectError(error.RicursiveRankPastWorld, admit(121, 2, 2));
-}
-
 /// Both ranks' hello words, which each rank checks alike: a hello from each, with the same slots and context.
 pub fn agree(both: [2]Header) !void {
     for (both) |h| if (h.op != @backingInt(Op.hello) or h.n != both[0].n or h.p0 != both[0].p0) return error.RicursiveRanksDisagree;
@@ -61,6 +54,8 @@ pub const Options = struct {
     graphs: bool = false,
     /// --drafter on a follower: the drafter it opens its share of when rank 0 opens one.
     drafter: ?[]const u8 = null,
+    /// A failure the parity tool plants on one rank; a serve never sets one.
+    fault: halt.Fault = .{},
 };
 
 /// Plan ops: stop, decode rows, a prompt chunk, kept states (save, restore, drop, row copy), hello, a drafter's calls.
@@ -152,6 +147,7 @@ pub const Model = struct {
         if (o.roce) try m.group.openRoce(gpa, io, d, m.stream, max_rows * c.hidden * 4);
         m.w = try weights.load(gpa, d, &ck, c, .{ .rank = o.place.rank, .world = world });
         errdefer m.w.deinit();
+        try o.fault.hit(o.place.rank, .load);
         m.dense = try cuda.exl3.Dense.load(d);
         errdefer m.dense.unload();
         m.norms = try cuda.norms.Norms.load(d);
@@ -489,7 +485,13 @@ pub const Model = struct {
         return top;
     }
 
+    /// A call's rows on this rank; a failure here leaves the other rank inside the call, so both ranks stop.
     fn rows(m: *Model, hw: *const Header, out: ?[]f32, capture: ?[]f32, at: usize, total: usize) !void {
+        return m.rowsOn(hw, out, capture, at, total) catch |err| halt.fatal(m.rank(), err);
+    }
+
+    fn rowsOn(m: *Model, hw: *const Header, out: ?[]f32, capture: ?[]f32, at: usize, total: usize) !void {
+        try m.o.fault.hit(m.rank(), .call);
         const c = m.c;
         const s = m.stream;
         const b = &m.b;

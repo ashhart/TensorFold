@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const fwd = @import("tp2_forward.zig");
+const halt = @import("tp2_stop.zig");
 
 const hd = @import("config.zig").head_dim;
 
@@ -37,6 +38,10 @@ fn region(m: *const fwd.Model, ca: fwd.Cache, slot: usize, v: bool) u64 {
 
 /// A kept-state header: save (slot's rings as state a), restore (a into slot), drop (a), copy (rows [0, p0) of a).
 pub fn run(m: *fwd.Model, h: *const fwd.Header) !void {
+    return runOn(m, h) catch |err| halt.fatal(m.rank(), err); // the other rank runs the same op
+}
+
+fn runOn(m: *fwd.Model, h: *const fwd.Header) !void {
     const op: fwd.Op = @fromBackingInt(@intCast(h.op));
     const slot: usize = @intCast(h.slot);
     const kw = m.hk * hd;
