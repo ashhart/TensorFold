@@ -235,6 +235,10 @@ const NativeMutation = struct {
         return removable(root, path, handle, name_buf, access);
     }
 
+    fn name(buf: *[4096:0]u16, path: [*:0]const u8) ?[]const u16 {
+        return wideName(buf, path);
+    }
+
     fn attributes(handle: HANDLE, out: *u32) c_int {
         var info: FileInfo = undefined;
         if (GetFileInformationByHandle(handle, &info) == 0) {
@@ -312,7 +316,7 @@ fn renameAtWith(comptime Api: type, old_root: HANDLE, old: [*:0]const u8, new_ro
     if (Api.open(old_root, old, &handle, &old_buf, 0x4011_0000) != 0) return -1;
     defer Api.close(handle);
     var buf: [4096:0]u16 = undefined;
-    const units = wideName(&buf, new) orelse return -1;
+    const units = Api.name(&buf, new) orelse return -1;
     var info: RenameInfo = undefined;
     info.flags = 0x3; // REPLACE_IF_EXISTS | POSIX_SEMANTICS
     info.root = new_root;
@@ -409,6 +413,13 @@ const FakeMutation = struct {
         leaf = std.mem.span(path);
         handle.* = @ptrFromInt(0x100);
         return 0;
+    }
+
+    fn name(buf: *[4096:0]u16, path: [*:0]const u8) ?[]const u16 {
+        const bytes = std.mem.span(path);
+        for (bytes, 0..) |ch, i| buf[i] = ch;
+        buf[bytes.len] = 0;
+        return buf[0..bytes.len];
     }
 
     fn attributes(handle: HANDLE, out: *u32) c_int {

@@ -468,3 +468,25 @@ test "spill I/O: shutdown keeps a completed job's own filesystem error" {
     try std.testing.expectEqual(@as(u64, 1), x.r.counts.failed);
     try std.testing.expectEqual(@as(u64, 0), x.r.admission.reserved);
 }
+
+test "POSIX dot reopen scans independently after an earlier scan reached parent EOF" {
+    if (platform.windows) return error.SkipZigTest;
+    const t = std.testing;
+    const a = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "entry", .data = "contents" });
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(root);
+    const dir = try rowdir.openPath(root);
+    defer rowdir.close(dir);
+    for (0..2) |_| {
+        const stream = try rowdir.scan(dir);
+        defer _ = platform.c.closedir(stream);
+        var found = false;
+        while (platform.c.readdir(stream)) |entry| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&entry.name, 0), "entry")) found = true;
+        }
+        try t.expect(found);
+    }
+}
