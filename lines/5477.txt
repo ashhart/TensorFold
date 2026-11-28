@@ -1,0 +1,1 @@
+- Tests: the environment-names check passes on main again after `--confidential` began refusing every `LD_*` name (#5477, refs #5178). Thanks to @kotevcode.
