@@ -22,9 +22,17 @@ const served_27b = [_]c.Shape{
 };
 /// The 27B's prompt chunks past 16 rows on prompt16's FP8 tile.
 const served_prompt = [_]c.Shape{
-    .{ .rows = 17, .n = 512, .k = 5120 },
+    .{ .rows = 17, .n = 1024, .k = 5120 },
+    .{ .rows = 32, .n = 1024, .k = 5120 },
+    .{ .rows = 64, .n = 1024, .k = 5120 },
     .{ .rows = 128, .n = 1024, .k = 5120 },
     .{ .rows = 300, .n = 512, .k = 6144 },
+};
+const served_prompt_smallm = [_]c.Shape{
+    .{ .rows = 17, .n = 1024, .k = 5120 },
+    .{ .rows = 32, .n = 1024, .k = 5120 },
+    .{ .rows = 64, .n = 1024, .k = 5120 },
+    .{ .rows = 128, .n = 1024, .k = 5120 },
 };
 const served = [_]c.Shape{
     .{ .rows = 1, .n = 70, .k = 1024 },
@@ -53,6 +61,8 @@ pub const Product = struct {
     clusters: bool,
     out_kind: cuda.qmmf.Out = .f32,
     prompt: ?*const cuda.nvfp4.Prompt = null, // set: prompt16's FP8 or BF16 tile instead of the lane
+    smallm: bool = false,
+    control_fn: ?cuda.Function = null,
     d: ?Dense = null,
     weight: cuda.qmmf.Weight = undefined,
     x: u64 = 0,
@@ -65,6 +75,21 @@ pub const Product = struct {
     }
 
     pub fn kernel(self: *Product) g.Kernel {
+        if (self.smallm) return .{
+            .spec = .{
+                .name = "cuda prompt16 FP8 16-row tile",
+                .accum = .f32,
+                .depth = promptDepth,
+                .ops = 1,
+                .out = .bf16,
+                .replaces = "cuda prompt16 FP8 tile 4",
+                .tiles = .{ .{ .size = 16 }, .{ .size = 128 }, .{ .size = 128 } },
+                .served = &served_prompt_smallm,
+            },
+            .ctx = self,
+            .vt = &vt,
+            .control = if (self.control_fn != null) .shapes else null,
+        };
         if (self.prompt != null) return .{
             .spec = .{
                 .name = if (self.mode != .bf16) "cuda prompt16 FP8 tile 4" else if (self.out_kind == .f32) "cuda prompt16 BF16 tile, fp32 out" else "cuda prompt16 BF16 tile",
@@ -113,10 +138,26 @@ pub const Product = struct {
         self.d = d;
         d.fillX(fill, seed, 16);
         try self.prepareWeight(shape, fill, seed);
+        if (self.smallm) {
+            const p = self.prompt orelse return false;
+            if (self.mode != .fp8 or self.out_kind != .bf16 or shape.rows == 0 or shape.rows > 128 or shape.n == 0 or shape.n > 1024 or shape.k != 5120) return false;
+            // Gate 1 and gate 4 shrink M to 8 and 4. The tile handles them, though production dispatch starts at M=17.
+            if (fill == .random and !p.useSmallm(shape.rows, self.weight)) return false;
+        }
         self.x = try self.rig.input(std.mem.sliceAsBytes(d.x));
         const bytes = if (self.prompt != null) 0 else self.lane.partBytes(shape.rows, self.weight);
         if (bytes > 0) self.part = try self.rig.scratch(bytes);
         self.out = try self.rig.output(shape.rows * shape.n * @as(usize, if (self.out_kind == .f32) 4 else 2));
+        if (self.prompt) |p| if (self.mode == .fp8 and p.useSmallm(shape.rows, self.weight)) {
+            const nbytes = shape.rows * shape.n * 2;
+            const baseline = try self.rig.scratch(nbytes);
+            try p.matmulTile(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, .bf16, .smallm);
+            try p.matmulTile(self.rig.s, self.x, shape.k, shape.rows, self.weight, baseline, .bf16, .classic);
+            const candidate = try self.rig.gpu.gpa.dupe(u8, try self.rig.bytes(self.out, nbytes));
+            defer self.rig.gpu.gpa.free(candidate);
+            const baseline_bytes = try self.rig.bytes(baseline, nbytes);
+            if (!std.mem.eql(u8, candidate, baseline_bytes)) return error.PromptTileBytesDiffer;
+        };
         return true;
     }
 
@@ -213,9 +254,30 @@ pub const Product = struct {
     pub fn run(self: *Product) !void {
         const shape = self.d.?.shape;
         if (self.prompt) |p| {
-            if (self.mode == .bf16) try p.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, self.out_kind) else try p.matmul(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out);
+            if (self.mode == .bf16) {
+                try p.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, self.out_kind);
+            } else if (self.smallm) {
+                try p.matmulTile(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, .bf16, .smallm);
+            } else {
+                try p.matmulTile(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, .bf16, .classic);
+            }
         } else try self.lane.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.weight, self.out, self.out_kind, self.part);
+        if (self.control_fn) |f| {
+            var args: cuda.Args = .{};
+            args.add(self.out);
+            try cuda.launch.launch(f, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1 } }, self.rig.s, &args);
+        }
         try self.rig.s.synchronize();
+    }
+
+    pub fn replaced(self: *Product) ![]const u8 {
+        if (!self.smallm) return error.NotAReplacement;
+        const p = self.prompt orelse return error.PromptExpected;
+        const shape = self.d.?.shape;
+        const baseline = try self.rig.scratch(shape.rows * shape.n * 2);
+        try p.matmulTile(self.rig.s, self.x, shape.k, shape.rows, self.weight, baseline, .bf16, .classic);
+        try self.rig.s.synchronize();
+        return self.rig.bytes(baseline, shape.rows * shape.n * 2);
     }
 
     pub fn count(self: *Product) usize {

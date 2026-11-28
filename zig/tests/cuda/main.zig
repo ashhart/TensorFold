@@ -38,6 +38,7 @@ const glm_index_check = @import("glm_index_check.zig");
 const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
 const modelopt_tests = @import("modelopt_tests.zig");
+const prompt16_smallm_tests = @import("prompt16_smallm_tests.zig");
 const experts3_tests = @import("experts3_tests.zig");
 const moe_tests = @import("moe_tests.zig");
 const ck_tests = @import("ck_tests.zig");
@@ -231,6 +232,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qmmf-prompt-bench")) return @import("qmmf_prompt_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "lane-half")) return lane_half_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "group-proj")) return @import("group_proj_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "prompt16-smallm")) return prompt16_smallm_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lane-half-n")) return @import("lane_half_n_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);

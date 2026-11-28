@@ -60,3 +60,5 @@ zig/src/families/flashnext/cuda_ple_check.zig	e8b7cac1e0d3718f106482f6cff7375c00
 zig/src/families/flashnext/cuda_prompt_wt.zig	8380e31b7b84ed00eedbb1c49598987508ac84538590e532ba77b1db82ae8925	0	1.1.2 increments S1 checkpoint security; approved 20 Oct 2026
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	0	1.1.2 increments 176 (#1034); approved 20 Oct 2026
 zig/src/families/flashnext/cuda_rank_wire.zig	d4de46419b4c9e927993087d9fa1445fff4cab4c82cd8e1fd7948d54c34f5e61	0	1.1.2 increments 175 (#1034), 179 (#1034); approved 20 Oct 2026
+zig/kernels/cuda/prompt16.cu	877aa6d2eb25fef8c5f91a340613b60123621a096f89a63262e02d13b14ec3aa	0	#4951 adds the 16x128 FP8 prompt tile; exact-byte dispatch and output-extent gates
+zig/src/cuda/nvfp4.zig	2d8026531a9162a1b0ec00a3bec4c43f0bcdbc2c30b922a322d2c35271c9c5ba	0	#4951 resolves the optional symbol only on SM120/82 and dispatches only K5120/N1024/M17..128

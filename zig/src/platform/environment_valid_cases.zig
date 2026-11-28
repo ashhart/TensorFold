@@ -110,6 +110,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
     .{ .name = "TF_QMMF_HALF_BN", .raw = "0", .n = 0 },
     .{ .name = "TF_QMMF_HALF_BN", .raw = "1", .n = 1 },
+    .{ .name = "TF_QMMF_PROMPT16_SMALLM", .raw = "0", .n = 0 },
+    .{ .name = "TF_QMMF_PROMPT16_SMALLM", .raw = "1", .n = 1 },
     .{ .name = "TF_HY4_MEM_FLOOR_GIB", .raw = "10", .n = 10 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
