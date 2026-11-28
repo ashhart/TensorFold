@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const vl = @import("qwen_vl");
 const copy = @import("h3_qwen_copy");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("qwen_vl").checkpoint_fixture;
 const files = @import("h3_image_files.zig");
 const selftest = @import("h3_image_vision_selftest.zig");
 

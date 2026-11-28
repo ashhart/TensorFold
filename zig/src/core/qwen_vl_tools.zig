@@ -1,4 +1,5 @@
 //! The Qwen-VL tower on Metal with its settings, shards, tables and float64 reference, and core's pictures: one module.
+pub const checkpoint_fixture = @import("checkpoint_fixture.zig");
 pub const config = @import("qwen_vl/config.zig");
 pub const Config = config.Config;
 pub const tower = @import("qwen_vl/tower.zig");

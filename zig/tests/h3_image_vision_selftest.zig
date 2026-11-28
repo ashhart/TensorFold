@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const vl = @import("qwen_vl");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("qwen_vl").checkpoint_fixture;
 const bf16_round = @import("bf16_round");
 const tool = @import("h3_image_vision.zig");
 const files = @import("h3_image_files.zig");
@@ -126,15 +126,17 @@ fn writeAt(io: std.Io, a: std.mem.Allocator, parts: []const []const u8, data: []
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
 }
 
-pub fn run(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !u8 {
+pub fn run(init: std.process.Init, a: std.mem.Allocator, parent: []const u8) !u8 {
     const io = init.io;
     const gpa = init.gpa;
+    const scratch = try files.Scratch.init(io, a, parent);
+    defer scratch.deinit(io);
+    const dir = scratch.path;
     var prng = std.Random.DefaultPrng.init(0x5135);
     const rand = prng.random();
     const text_dir = try std.fs.path.join(a, &.{ dir, "text_encoder" });
     const model_dir = try std.fs.path.join(a, &.{ dir, "model" });
     const mlx_dir = try std.fs.path.join(a, &.{ dir, "qwen35" });
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     try writeAt(io, a, &.{ text_dir, "config.json" }, config_json);
     try writeAt(io, a, &.{ model_dir, "processor", "preprocessor_config.json" }, processor_json);
     const c = try tool.settings(io, a, text_dir, model_dir);
