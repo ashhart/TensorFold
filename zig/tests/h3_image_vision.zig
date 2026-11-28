@@ -6,6 +6,7 @@ const copy = @import("h3_qwen_copy");
 const fixture = @import("qwen_vl").checkpoint_fixture;
 const files = @import("h3_image_files.zig");
 const selftest = @import("h3_image_vision_selftest.zig");
+const reference_decode = @import("h3_reference_decode");
 
 const usage =
     \\usage: tf-h3-image-vision TEXT_ENCODER_DIR MODEL_DIR reference.(png|jpg|webp) out.safetensors
@@ -79,11 +80,16 @@ pub fn pass(device: mtl.Device, queue: mtl.Queue, tower: *vl.tower.Tower, a: std
     return out;
 }
 
+/// A reference upright in RGB, with alpha dropped as the edit encoder drops it.
+fn decode(io: std.Io, a: std.mem.Allocator, bytes: []const u8) !vl.picture.Rgb {
+    return reference_decode.vision(io, a, bytes);
+}
+
 fn run(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model_dir: []const u8, picture_path: []const u8, out_path: []const u8) !u8 {
     const io = init.io;
     const c = try settings(io, a, text_dir, model_dir);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, picture_path, a, .limited(512 << 20));
-    const rgb = vl.picture.decodeWithLimits(io, a, bytes, .{ .side = 1 << 15, .pixels = 1 << 26 }) catch |err| {
+    const rgb = decode(io, a, bytes) catch |err| {
         std.debug.print("{s}: {s}\n", .{ picture_path, vl.picture.problem(err) });
         return 2;
     };

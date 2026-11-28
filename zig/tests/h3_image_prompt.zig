@@ -9,6 +9,7 @@ const torch_noise = @import("moss_noise");
 const check = @import("h3_image_prompt_check.zig");
 const files = @import("h3_image_files.zig");
 const edit = @import("h3_image_prompt_edit.zig");
+const edit_options = @import("h3_edit_options");
 
 const rules = hp.rules;
 const ref = hp.reference;
@@ -16,7 +17,7 @@ const weights = hp.weights; // its fixture test runs here
 
 const usage =
     \\usage: tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out.safetensors [WIDTHxHEIGHT [SEED [MIN_AREA]]]
-    \\                          [--reference vision.safetensors [--anchors ENCODER_PREFIX]]...
+    \\                          [--reference vision.safetensors [--anchors ENCODER_PREFIX]]
     \\       tf-h3-image-prompt selftest [WORK_DIR]
     \\  TEXT_ENCODER_DIR  MiniMax-H3's text_encoder/ (Qwen3-VL): config.json, its index and shards
     \\  MODEL_DIR         the MiniMax-H3-Image folder: model_index.json, tokenizer/, transformer/
@@ -44,7 +45,7 @@ pub fn main(init: std.process.Init) !u8 {
         const dir = if (args.len == 3) args[2] else try std.fs.path.join(a, &.{ tmp, "tf-h3-image-prompt-selftest" });
         return selftest(init, a, dir);
     }
-    const rest, const options = edit.take(a, args) catch {
+    const rest, const options = edit_options.take(a, args) catch {
         std.debug.print("{s}", .{usage});
         return 2;
     };
@@ -132,7 +133,7 @@ pub const Encoder = struct {
     }
 
     /// `prompt` and optional edit inputs as tf-h3-image's picture case.
-    pub fn caseOptions(e: *Encoder, io: ?std.Io, a: std.mem.Allocator, prompt: []const u8, request: ?Request, options: edit.Options) ![]u8 {
+    pub fn caseOptions(e: *Encoder, io: ?std.Io, a: std.mem.Allocator, prompt: []const u8, request: ?Request, options: edit_options.Options) ![]u8 {
         const refs = try edit.References.read(e.gpa, a, e.device, options.references, e.enc.text.hidden);
         const p = try rules.present(a, &e.tok, e.enc.marks, refs.counts, prompt);
         const pos = try rules.positions(a, p, e.enc.marks, refs.grids);

@@ -34,6 +34,7 @@ pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module) *std.Build.Module {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const edit_options = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/edit_options.zig"), .target = target, .optimize = optimize });
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/prompt_kernels.zig") });
     const prompt = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/prompt.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{
         .{ .name = "metal", .module = metal },
@@ -43,5 +44,5 @@ fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.O
     } });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const fixture = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_prompt_fixture.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} });
-    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_prompt.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3_prompt", .module = prompt }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "core", .module = core }, .{ .name = "checkpoint_fixture", .module = fixture }, .{ .name = "moss_noise", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target, .optimize = optimize }) } } });
+    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_prompt.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3_prompt", .module = prompt }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "core", .module = core }, .{ .name = "checkpoint_fixture", .module = fixture }, .{ .name = "h3_edit_options", .module = edit_options }, .{ .name = "moss_noise", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target, .optimize = optimize }) } } });
 }

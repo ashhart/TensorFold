@@ -21,7 +21,8 @@ fn tower(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.
 fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const vl = tower(b, target, optimize);
     const copy = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/qwen_copy.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = vl }} });
-    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_vision.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = vl.import_table.get("metal").? }, .{ .name = "qwen_vl", .module = vl }, .{ .name = "h3_qwen_copy", .module = copy }, .{ .name = "core", .module = vl } } });
+    const reference_decode = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/reference_decode.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "core", .module = vl }} });
+    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_vision.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = vl.import_table.get("metal").? }, .{ .name = "qwen_vl", .module = vl }, .{ .name = "h3_qwen_copy", .module = copy }, .{ .name = "core", .module = vl }, .{ .name = "h3_reference_decode", .module = reference_decode } } });
 }
 
 /// On macOS: `tf-h3-image-vision`, `compile-h3-image-vision` (no shader compiled), the tower's host tests.

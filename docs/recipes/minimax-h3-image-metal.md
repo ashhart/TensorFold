@@ -53,9 +53,8 @@ zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 128 128 out/case.p
    anchor rows as the case's `references` and `anchors`, beside the canvas and the target's starting rows.
 4. `tf-h3-image` steps only the target rows, holding the reference's at 0.999. The decoder runs as for text to image.
 
-`--reference` may be given more than once, in upload order, each with its own `--anchors`. The encoder draws each
-reference's noise as a one-reference edit does, so only a one-reference edit draws exactly the reference pipeline's
-noise.
+Edits currently accept at most one `--reference`, with its optional `--anchors`; a second reference is rejected. This keeps the
+encoder's one-generator noise order identical to the reference pipeline.
 
 ### Resident: one process, every picture warm
 

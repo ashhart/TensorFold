@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const he = @import("h3_image_encoder");
 const codec = @import("core").picture;
+const reference_decode = @import("h3_reference_decode");
 const noise = @import("torch_noise");
 const selftest = @import("h3_image_encoder_selftest.zig");
 
@@ -26,13 +27,7 @@ const usage =
 /// A PNG upright in RGB, as Pillow's convert("RGB") gives it: alpha dropped, not composited.
 fn load(io: std.Io, a: std.mem.Allocator, path: []const u8) !codec.Rgb {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(512 << 20));
-    if (codec.sniff(bytes) != .png) return error.NotPng;
-    var s = try codec.png.decodeWithLimits(a, bytes, .{ .side = 1 << 15, .pixels = 1 << 26 });
-    if (s.channels == 4) {
-        var i: usize = 3;
-        while (i < s.data.len) : (i += 4) s.data[i] = 255;
-    }
-    return codec.finish(a, s);
+    return reference_decode.encoderPng(a, bytes);
 }
 
 /// CANVAS as width x height, both whole multiples of 32.

@@ -6,27 +6,6 @@ const fixture = @import("checkpoint_fixture");
 
 const rules = hp.rules;
 
-/// Each `--reference FILE` and `--anchors PREFIX` on the command line, in order.
-pub const Options = struct { references: []const []const u8 = &.{}, anchors: []const []const u8 = &.{} };
-
-/// `args` without its edit options, and those options; error.BadArguments when one lacks its value.
-pub fn take(a: std.mem.Allocator, args: []const []const u8) !struct { []const []const u8, Options } {
-    var rest: std.ArrayList([]const u8) = .empty;
-    var refs: std.ArrayList([]const u8) = .empty;
-    var prefixes: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const list = if (std.mem.eql(u8, args[i], "--reference")) &refs else if (std.mem.eql(u8, args[i], "--anchors")) &prefixes else {
-            try rest.append(a, args[i]);
-            continue;
-        };
-        i += 1;
-        if (i == args.len) return error.BadArguments;
-        try list.append(a, args[i]);
-    }
-    return .{ rest.items, .{ .references = refs.items, .anchors = prefixes.items } };
-}
-
 /// The references' vision rows in upload order: each one's token count and patch grid, and every row back to back.
 pub const References = struct {
     counts: []usize,
