@@ -126,7 +126,7 @@ test "bias host draws refuse an entry past the row's words, as the CUDA sparse l
     const words = [_]u16{ 0, 0, 0, 0 };
     _ = try draw(a, &words, null, 0, &.{}, &.{.{ .token = 3, .value = 1 }});
     try std.testing.expectError(error.BadLogitBiasToken, draw(a, &words, null, 0, &.{}, &.{.{ .token = 4, .value = 1 }}));
-    try std.testing.expectError(error.BadLogitBiasToken, draw(a, &words, null, 0, &.{}, &.{ .{ .token = 9 }, .{ .token = 0, .value = 1 } }));
+    try std.testing.expectError(error.BadLogitBiasToken, draw(a, &words, null, 0, &.{}, &.{ .{ .token = 9, .value = 0 }, .{ .token = 0, .value = 1 } }));
 }
 
 test "bias host allocations release both arrays on every allocation failure" {
