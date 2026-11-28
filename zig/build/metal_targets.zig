@@ -229,6 +229,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-lfm3-vision", .path = "zig/tests/lfm3_vision.zig", .about = "LFM3-VL native tower and projector outputs" },
         .{ .name = "tf-lfm3-exact", .path = "zig/tests/lfm3_exact.zig", .about = "LFM3 prompt, window, snapshot and concurrent cache equality" },
         .{ .name = "tf-lfm3-profile", .path = "zig/tests/lfm3_profile.zig", .about = "LFM3 calibrated GPU class costs with final-logit byte identity" },
+        .{ .name = "tf-lfm3-range-bench", .path = "zig/tests/lfm3_range_bench.zig", .about = "LFM3 synthetic range-repair byte equality and A-B-B-A timing" },
         .{ .name = "tf-lfm3-dual-project", .path = "zig/tests/lfm3_dual_project.zig", .about = "Actual checkpoint paired projection byte comparison" },
         .{ .name = "tf-lfm3-draw-tune", .path = "zig/tests/lfm3_draw_tune.zig", .about = "Diagnostic exact CPU greedy reduction timing" },
         .{ .name = "tf-lfm3-row-tune", .path = "zig/tests/lfm3_row_tune.zig", .about = "Diagnostic byte-preserving single-row projection launch sweep" },

@@ -23,6 +23,11 @@ constant constexpr bool L3_RANGE_REPAIR_ENABLED=false;
 #else
 constant constexpr bool L3_RANGE_REPAIR_ENABLED=true;
 #endif
+#ifdef L3_RANGE_FORCE_REPAIR
+constant constexpr bool L3_RANGE_FORCE=true;
+#else
+constant constexpr bool L3_RANGE_FORCE=false;
+#endif
 struct l3_x { float m; int e; };
 inline l3_x l3_x_bits(uint u) {
  const uint sign=u&0x80000000u,be=(u>>23)&255u,fr=u&0x7fffffu;
@@ -233,7 +238,7 @@ inline float lfm3_attention_merge(const device float* pm, const device float* pl
   bool range_risk=false;
   const float total = lfm3_attention_merge(pm, pl, po, p, tg.x, tg.y, lane, result,range_flags,&range_risk);
   for(uint j=0;j<4;++j)range_risk|=l3_div_risk(as_type<uint>(float(result[j])),as_type<uint>(total));
-  if(L3_RANGE_REPAIR_ENABLED&&simd_any(range_risk)){
+  if(L3_RANGE_REPAIR_ENABLED&&(L3_RANGE_FORCE||simd_any(range_risk))){
     l3_x repaired[4];l3_attention_replay(queries,keys,values,p,tg.x,tg.y,lane,repaired);
     for(uint j=0;j<4;++j)reinterpret_cast<device ushort*>(y)[(size_t(tg.y)*16+tg.x)*128+lane+32*j]=l3_x_pack(repaired[j]);
     return;
@@ -293,7 +298,7 @@ struct lfm3_attn_segment { ulong keys, values; uint base, rows; lfm3_attn_args a
   const float total = lfm3_attention_merge(pm + offset, pl + offset, po + offset * 128,
     seg.args, tg.x, tg.y - seg.base, lane, result,range_flags+offset,&range_risk);
   for(uint j=0;j<4;++j)range_risk|=l3_div_risk(as_type<uint>(float(result[j])),as_type<uint>(total));
-  if(L3_RANGE_REPAIR_ENABLED&&simd_any(range_risk)){
+  if(L3_RANGE_REPAIR_ENABLED&&(L3_RANGE_FORCE||simd_any(range_risk))){
     l3_x repaired[4];l3_attention_replay(queries+size_t(seg.base)*16*128,reinterpret_cast<const device bfloat*>(seg.keys),reinterpret_cast<const device bfloat*>(seg.values),seg.args,tg.x,tg.y-seg.base,lane,repaired);
     for(uint j=0;j<4;++j)reinterpret_cast<device ushort*>(y)[(size_t(tg.y)*16+tg.x)*128+lane+32*j]=l3_x_pack(repaired[j]);
     return;
@@ -302,4 +307,128 @@ struct lfm3_attn_segment { ulong keys, values; uint base, rows; lfm3_attn_args a
   if (tg.y + 1 == seg.base + seg.rows) return;
 #endif
   for (uint j = 0; j < 4; ++j) y[(size_t(tg.y) * 16 + tg.x) * 128 + lane + 32 * j] = bfloat(result[j] / total);
+}
+
+// Opt-in parallel repair: the same key, part and chunk arithmetic without a serial replay.
+inline bool l3_fast_flagged(const device float* pm,const device float* pl,const device float* po,
+ constant lfm3_attn_args& p,device bfloat* y,const device uint* range_flags,device uint* repair_flags,
+ uint head,uint row,uint out_row,uint lane) {
+ float result[4]={0,0,0,0};bool range_risk=false;
+ const float total=lfm3_attention_merge(pm,pl,po,p,head,row,lane,result,range_flags,&range_risk);
+ for(uint j=0;j<4;++j)range_risk|=l3_div_risk(as_type<uint>(float(result[j])),as_type<uint>(total));
+ const bool repair=L3_RANGE_REPAIR_ENABLED&&(L3_RANGE_FORCE||simd_any(range_risk));
+ if(lane==0)repair_flags[size_t(out_row)*16+head]=uint(repair);
+ if(repair)return true;
+ for(uint j=0;j<4;++j)y[(size_t(out_row)*16+head)*128+lane+32*j]=bfloat(result[j]/total);
+ return false;
+}
+
+inline void l3_repair_partial(const device bfloat* queries,const device bfloat* keys,const device bfloat* values,
+ constant lfm3_attn_args& p,device float* pm,device float* pl,device float* po,device int* pe,
+ const device uint* repair_flags,uint head,uint row,uint out_row,uint partition,uint sg,uint lane,
+ threadgroup float* maxima,threadgroup float* totals,threadgroup float* outputs,threadgroup int* exponents) {
+ if(repair_flags[size_t(out_row)*16+head]==0)return;
+ const uint chunk=partition+p.chunk_base,count=p.len+row+1,cut=p.window==0?0:count>p.window?count-p.window:0;
+ const uint first=max(chunk*4096+sg*1024,cut),end=min(chunk*4096+(sg+1)*1024,count),kh=head/4;
+ float q[4];for(uint j=0;j<4;++j)q[j]=float(queries[(size_t(row)*16+head)*128+lane+32*j]);
+ float maximum=-INFINITY,total=0;l3_x result[4];for(uint j=0;j<4;++j)result[j]={0,0};
+ for(uint key=first;key<end;++key){
+  const size_t base=(size_t(kh)*p.cap+key)*128+lane;
+  const float score=lfm3_attention_dot(q,keys+base)*p.scale,next=max(maximum,score),ga=maximum-next,gp=score-next;
+  const float a=maximum==-INFINITY?0:metal::precise::exp(ga),v=score==-INFINITY?0:metal::precise::exp(gp);
+  const l3_x ae=maximum==-INFINITY?l3_x{0,0}:l3_x_exp(ga,a),x=score==-INFINITY?l3_x{0,0}:l3_x_exp(gp,v);
+  total=total*a+v;
+  for(uint j=0;j<4;++j){
+   const l3_x value=l3_x_bf(as_type<ushort>(values[base+32*j]));
+   result[j]=l3_x_add(l3_x_mul(result[j],ae),l3_x_mul(x,value));
+  }
+  maximum=next;
+ }
+ if(lane==0){maxima[sg]=maximum;totals[sg]=total;}
+ for(uint j=0;j<4;++j){outputs[sg*128+lane+32*j]=result[j].m;exponents[sg*128+lane+32*j]=result[j].e;}
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(sg!=0)return;
+ const size_t target=(size_t(row)*16+head)*L3CHUNKS+chunk;
+ float cm=-INFINITY,cl=0;l3_x co[4];for(uint j=0;j<4;++j)co[j]={0,0};
+ for(uint i=0;i<4;++i){
+#ifdef L3_REPAIR_BAD_ORDER
+  const uint part=3-i;
+#else
+  const uint part=i;
+#endif
+  l3_x po_part[4];
+  for(uint j=0;j<4;++j)po_part[j]={outputs[part*128+lane+32*j],exponents[part*128+lane+32*j]};
+  l3_x_merge(maxima[part],totals[part],po_part,cm,cl,co);
+ }
+ if(lane==0){pm[target]=cm;pl[target]=cl;}
+ for(uint j=0;j<4;++j){po[target*128+lane+32*j]=co[j].m;pe[target*128+lane+32*j]=co[j].e;}
+}
+
+inline void l3_repair_merge(const device float* pm,const device float* pl,const device float* po,const device int* pe,
+ constant lfm3_attn_args& p,device bfloat* y,const device uint* repair_flags,uint head,uint row,uint out_row,uint lane) {
+ if(repair_flags[size_t(out_row)*16+head]==0)return;
+ const uint count=p.len+row+1,cut=p.window==0?0:count>p.window?count-p.window:0;
+ const size_t base=(size_t(row)*16+head)*L3CHUNKS;
+ float maximum=-INFINITY,total=0;l3_x result[4];for(uint j=0;j<4;++j)result[j]={0,0};
+ for(uint chunk=cut/L3PER;chunk<(count+L3PER-1)/L3PER;++chunk){
+  const size_t i=base+chunk;l3_x part[4];
+  for(uint j=0;j<4;++j)part[j]={po[i*128+lane+32*j],pe[i*128+lane+32*j]};
+  l3_x_merge(pm[i],pl[i],part,maximum,total,result);
+ }
+ for(uint j=0;j<4;++j)result[j]=l3_x_div(result[j],total);
+ for(uint j=0;j<4;++j)reinterpret_cast<device ushort*>(y)[(size_t(out_row)*16+head)*128+lane+32*j]=l3_x_pack(result[j]);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void lfm3_attn_merge_flagged(
+ const device float* pm [[buffer(0)]],const device float* pl [[buffer(1)]],const device float* po [[buffer(2)]],
+ constant lfm3_attn_args& p [[buffer(3)]],device bfloat* y [[buffer(4)]],const device uint* range_flags [[buffer(5)]],
+ device uint* repair_flags [[buffer(6)]],uint2 tg [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+ l3_fast_flagged(pm,pl,po,p,y,range_flags,repair_flags,tg.x,tg.y,tg.y,lane);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void lfm3_attn_segments_merge_flagged(
+ const device float* pm [[buffer(0)]],const device float* pl [[buffer(1)]],const device float* po [[buffer(2)]],
+ constant lfm3_attn_segment* segments [[buffer(3)]],device bfloat* y [[buffer(4)]],const device uint* row_segments [[buffer(5)]],
+ const device uint* range_flags [[buffer(6)]],device uint* repair_flags [[buffer(7)]],uint2 tg [[threadgroup_position_in_grid]],
+ uint lane [[thread_index_in_simdgroup]]) {
+ constant lfm3_attn_segment& seg=segments[row_segments[tg.y]];const size_t offset=size_t(seg.base)*16*L3CHUNKS;
+ l3_fast_flagged(pm+offset,pl+offset,po+offset*128,seg.args,y,range_flags+offset,repair_flags,tg.x,tg.y-seg.base,tg.y,lane);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]] void lfm3_attn_repair_partial(
+ const device bfloat* queries [[buffer(0)]],const device bfloat* keys [[buffer(1)]],const device bfloat* values [[buffer(2)]],
+ constant lfm3_attn_args& p [[buffer(3)]],device float* pm [[buffer(4)]],device float* pl [[buffer(5)]],device float* po [[buffer(6)]],
+ device int* pe [[buffer(7)]],const device uint* repair_flags [[buffer(8)]],uint3 tg [[threadgroup_position_in_grid]],
+ uint sg [[simdgroup_index_in_threadgroup]],uint lane [[thread_index_in_simdgroup]]) {
+ threadgroup float maxima[4],totals[4],outputs[4*128];threadgroup int exponents[4*128];
+ l3_repair_partial(queries,keys,values,p,pm,pl,po,pe,repair_flags,tg.x,tg.y,tg.y,tg.z,sg,lane,maxima,totals,outputs,exponents);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]] void lfm3_attn_segments_repair_partial(
+ const device bfloat* queries [[buffer(0)]],constant lfm3_attn_segment* segments [[buffer(1)]],const device uint* row_segments [[buffer(2)]],
+ device float* pm [[buffer(3)]],device float* pl [[buffer(4)]],device float* po [[buffer(5)]],device int* pe [[buffer(6)]],
+ const device uint* repair_flags [[buffer(7)]],uint3 tg [[threadgroup_position_in_grid]],uint sg [[simdgroup_index_in_threadgroup]],
+ uint lane [[thread_index_in_simdgroup]]) {
+ constant lfm3_attn_segment& seg=segments[row_segments[tg.y]];const uint row=tg.y-seg.base;
+ const uint last=(seg.args.len+row+1+L3PER-1)/L3PER;if(tg.z+seg.args.chunk_base>=last)return;
+ const size_t offset=size_t(seg.base)*16*L3CHUNKS;threadgroup float maxima[4],totals[4],outputs[4*128];
+ threadgroup int exponents[4*128];
+ l3_repair_partial(queries+size_t(seg.base)*16*128,reinterpret_cast<const device bfloat*>(seg.keys),
+  reinterpret_cast<const device bfloat*>(seg.values),seg.args,pm+offset,pl+offset,po+offset*128,pe+offset*128,
+  repair_flags,tg.x,row,tg.y,tg.z,sg,lane,maxima,totals,outputs,exponents);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void lfm3_attn_repair_merge(
+ const device float* pm [[buffer(0)]],const device float* pl [[buffer(1)]],const device float* po [[buffer(2)]],
+ const device int* pe [[buffer(3)]],constant lfm3_attn_args& p [[buffer(4)]],device bfloat* y [[buffer(5)]],
+ const device uint* repair_flags [[buffer(6)]],uint2 tg [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+ l3_repair_merge(pm,pl,po,pe,p,y,repair_flags,tg.x,tg.y,tg.y,lane);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void lfm3_attn_segments_repair_merge(
+ const device float* pm [[buffer(0)]],const device float* pl [[buffer(1)]],const device float* po [[buffer(2)]],const device int* pe [[buffer(3)]],
+ constant lfm3_attn_segment* segments [[buffer(4)]],device bfloat* y [[buffer(5)]],const device uint* row_segments [[buffer(6)]],
+ const device uint* repair_flags [[buffer(7)]],uint2 tg [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+ constant lfm3_attn_segment& seg=segments[row_segments[tg.y]];const size_t offset=size_t(seg.base)*16*L3CHUNKS;
+ l3_repair_merge(pm+offset,pl+offset,po+offset*128,pe+offset*128,seg.args,y,repair_flags,tg.x,tg.y-seg.base,tg.y,lane);
 }

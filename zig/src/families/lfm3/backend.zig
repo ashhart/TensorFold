@@ -13,6 +13,7 @@ const prefill_control = @import("prefill_control.zig");
 const steps = @import("prefill_steps.zig");
 const image_rows = @import("image_rows.zig");
 const image_fill = @import("image_fill.zig");
+const repair = @import("range_repair.zig");
 pub const greedy = @import("greedy.zig");
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
@@ -43,6 +44,7 @@ pub const Metal = struct {
         errdefer gpa.destroy(out);
         out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(gpa, model.device, &model.config.layer_types, @max(options.chunk, st.batch_rows)) };
         errdefer out.scratch.deinit();
+        if (try repair.enabled()) try out.scratch.prepareRangeRepair();
         try @import("qualify.zig").check(model, &out.scratch);
         out.width = st.window_rows;
         out.timed = try out.time();

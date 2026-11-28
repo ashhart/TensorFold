@@ -11,6 +11,8 @@ const binned = @import("../../core/binned_projection.zig");
 const pairs = @import("row_projection.zig");
 const Buffer = mtl.Buffer;
 pub const counters = @import("../../core/gpu_counters.zig");
+const repair = @import("range_repair.zig");
+const range_order = @import("range_order.zig");
 
 pub const Segment = struct { cache: *st.Cache, rows: usize };
 pub const Head = enum { last, all };
@@ -404,21 +406,21 @@ fn sharedAttention(enc: *Encoder, s: *st.Scratch, segments: []const Segment, lay
     enc.groups(.{ c.query_heads, total, used }, .{ 128, 1, 1 });
     try enc.end();
     try enc.begin(.attention);
-    enc.pipe("lfm3_attn_segments_merge");
-    for (segments) |seg| {
-        const cache = seg.cache.blocks[layer].attention;
-        enc.e.useResource(cache.keys, mtl.ResourceUsage.read);
-        enc.e.useResource(cache.values, mtl.ResourceUsage.read);
+    range_order.useCaches(enc.e, segments, layer, mtl.ResourceUsage.read);
+    if (s.repair_exp != null) {
+        repair.shared(enc.e, &enc.m.kernels, s, layer, total, used);
+    } else {
+        enc.pipe("lfm3_attn_segments_merge");
+        enc.e.setBuffer(s.pm, 0, 0);
+        enc.e.setBuffer(s.pl, 0, 1);
+        enc.e.setBuffer(s.po, 0, 2);
+        enc.e.setBuffer(s.attention_segments, layer * st.batch_rows * @sizeOf(AttentionSegment), 3);
+        enc.e.setBuffer(s.y, 0, 4);
+        enc.e.setBuffer(s.attention_rows, 0, 5);
+        enc.e.setBuffer(s.queries, 0, 6);
+        enc.e.setBuffer(s.attention_risk, 0, 7);
+        enc.groups(.{ c.query_heads, total, 1 }, .{ 32, 1, 1 });
     }
-    enc.e.setBuffer(s.pm, 0, 0);
-    enc.e.setBuffer(s.pl, 0, 1);
-    enc.e.setBuffer(s.po, 0, 2);
-    enc.e.setBuffer(s.attention_segments, layer * st.batch_rows * @sizeOf(AttentionSegment), 3);
-    enc.e.setBuffer(s.y, 0, 4);
-    enc.e.setBuffer(s.attention_rows, 0, 5);
-    enc.e.setBuffer(s.queries, 0, 6);
-    enc.e.setBuffer(s.attention_risk, 0, 7);
-    enc.groups(.{ c.query_heads, total, 1 }, .{ 32, 1, 1 });
     try enc.end();
 }
 
@@ -485,17 +487,21 @@ fn attention(enc: *Encoder, s: *st.Scratch, a: wts.Attention, segments: []const 
             enc.groups(.{ c.query_heads, rows, last_chunk - chunk_base }, .{ 128, 1, 1 });
             try enc.end();
             try enc.begin(.attention);
-            enc.pipe("lfm3_attn_merge");
-            enc.e.setBuffer(s.pm, 0, 0);
-            enc.e.setBuffer(s.pl, 0, 1);
-            enc.e.setBuffer(s.po, 0, 2);
-            enc.e.setBytes(std.mem.asBytes(&args), 3);
-            enc.e.setBuffer(s.y, (base + at) * c.hidden * 2, 4);
-            enc.e.setBuffer(s.queries, (base + at) * c.hidden * 2, 5);
-            enc.e.setBuffer(cache.keys, 0, 6);
-            enc.e.setBuffer(cache.values, 0, 7);
-            enc.e.setBuffer(s.attention_risk, 0, 8);
-            enc.groups(.{ c.query_heads, rows, 1 }, .{ 32, 1, 1 });
+            if (s.repair_exp != null) {
+                repair.full(enc.e, &enc.m.kernels, s, args, cache, (base + at) * c.hidden * 2, (base + at) * c.hidden * 2, rows, last_chunk - chunk_base);
+            } else {
+                enc.pipe("lfm3_attn_merge");
+                enc.e.setBuffer(s.pm, 0, 0);
+                enc.e.setBuffer(s.pl, 0, 1);
+                enc.e.setBuffer(s.po, 0, 2);
+                enc.e.setBytes(std.mem.asBytes(&args), 3);
+                enc.e.setBuffer(s.y, (base + at) * c.hidden * 2, 4);
+                enc.e.setBuffer(s.queries, (base + at) * c.hidden * 2, 5);
+                enc.e.setBuffer(cache.keys, 0, 6);
+                enc.e.setBuffer(cache.values, 0, 7);
+                enc.e.setBuffer(s.attention_risk, 0, 8);
+                enc.groups(.{ c.query_heads, rows, 1 }, .{ 32, 1, 1 });
+            }
             try enc.end();
         }
         base += seg.rows;

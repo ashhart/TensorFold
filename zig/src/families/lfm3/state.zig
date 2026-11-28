@@ -127,6 +127,8 @@ pub const Scratch = struct {
     pl: mtl.Buffer,
     po: mtl.Buffer,
     attention_risk: mtl.Buffer,
+    repair_exp: ?mtl.Buffer = null,
+    repair_flags: ?mtl.Buffer = null,
     gate: mtl.Buffer,
     up: mtl.Buffer,
     act: mtl.Buffer,
@@ -162,6 +164,8 @@ pub const Scratch = struct {
         const logits_bytes = logit_rows * c.vocab * 2;
         out.po = try mem.alloc(@max(partials * c.head_dim * 4, logits_bytes));
         out.attention_risk = try mem.alloc(partials * @sizeOf(u32));
+        out.repair_exp = null;
+        out.repair_flags = null;
         inline for (.{ "gate", "up", "act" }) |name| @field(out, name) = try mem.alloc(rows * c.intermediate * 2);
         comptime std.debug.assert(c.intermediate >= 3 * c.hidden);
         out.bcx = out.act; // Mixer input expires before the FFN activation writes this storage.
@@ -174,6 +178,13 @@ pub const Scratch = struct {
             s.* = try mem.alloc(logit_rows * conv_bytes);
         };
         return out;
+    }
+
+    pub fn prepareRangeRepair(self: *Scratch) !void {
+        const slice_rows: usize = @min(self.rows, attn_slice);
+        const partials = slice_rows * c.query_heads * chunks;
+        if (self.repair_exp == null) self.repair_exp = try self.memory.alloc(partials * c.head_dim * @sizeOf(i32));
+        if (self.repair_flags == null) self.repair_flags = try self.memory.alloc(slice_rows * c.query_heads * @sizeOf(u32));
     }
 
     pub fn prepareSharedConv(self: *Scratch) !void {
