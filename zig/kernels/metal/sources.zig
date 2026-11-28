@@ -280,8 +280,10 @@ pub const minimax_m3_attention_nax = @embedFile("minimax_m3/attention_nax.metal"
 pub const minimax_m3_dspark = @embedFile("minimax_m3/dspark.metal");
 /// MiniMax-M3's decode-window experts expert by expert (after core_row_projection: its sums, each weight read once).
 pub const minimax_m3_experts = @embedFile("minimax_m3/experts.metal");
+/// The DFlash2 drafters' shared RMS norm rows (core/df_norm.metal: macros), ahead of each drafter's file.
+const df_norm = @embedFile("core/df_norm.metal");
 /// incoai's DFlash2 drafter for MiniMax-M3: Qwen3 norms, full RoPE, the block convolution, top-k and the selector.
-pub const minimax_m3_dflash2 = @embedFile("minimax_m3/dflash2.metal");
+pub const minimax_m3_dflash2 = df_norm ++ @embedFile("minimax_m3/dflash2.metal");
 /// MiniMax-M3's indexer block scores on the tensor units (a prompt chunk's).
 pub const minimax_m3_index_nax = @embedFile("minimax_m3/index_nax.metal");
 /// Flint's glue at the reference's rounding points: embed, norms, q/k rotation, SwiGLU, residual and MoE adds.
@@ -316,7 +318,7 @@ pub const ricursive_fp4_gemm = gemm_nax ++ @embedFile("ricursive/fp4_gemm.metal"
 /// Ripple's prompt attention on the tensor units (llama's kernel over a window, keys in a ring; nax.h inlined at load).
 pub const ricursive_attention_nax = @embedFile("ricursive/attention_nax.metal");
 /// Ripple's DFlash2 drafter (norms, head prep, K-tap block convolution, block attention, selector) and its taps.
-pub const ricursive_dflash2 = @embedFile("ricursive/dflash2.metal");
+pub const ricursive_dflash2 = df_norm ++ @embedFile("ricursive/dflash2.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 

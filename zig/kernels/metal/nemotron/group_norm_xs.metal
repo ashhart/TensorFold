@@ -1,13 +1,16 @@
-// The group norm with per-64 column sums over MP rows; the kernel list adds one instance a row count.
+// The group norm with per-64 column sums over MP rows, named and sized by TF_GN_NAME/XD/GS (default: the hybrid's).
+#ifndef TF_GN_NAME
+#define TF_GN_NAME nemotron_group_norm_xs
+#define TF_GN_XD 4096
+#define TF_GN_GS 512
+#endif
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
 typedef half float16_t;
 
-#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-using namespace mpp::tensor_ops;
 template <int MP>
-[[kernel]] void nemotron_group_norm_xs(
+[[kernel]] void TF_GN_NAME(
   const device bfloat16_t* X [[buffer(0)]],
   const device bfloat16_t* W [[buffer(1)]],
   const constant float* eps [[buffer(2)]],
@@ -18,8 +21,8 @@ template <int MP>
   uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
   uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
   uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
-  constexpr int XD = 4096;
-  constexpr int GS = 512;
+  constexpr int XD = TF_GN_XD;
+  constexpr int GS = TF_GN_GS;
 
   const uint t = thread_position_in_threadgroup.x;
   const uint grp = threadgroup_position_in_grid.x;
