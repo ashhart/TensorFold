@@ -37,6 +37,10 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
         @memcpy(ids[rows..][0..p.ids.len], p.ids);
         rows += p.ids.len;
     }
+    const trace = @import("cuda_prefill_trace.zig");
+    const ledger: trace.Chunk = if (comptime @hasField(@TypeOf(e.*), "prefill_trace")) trace.enter(e.prefill_trace, e.stream, parts[0].slot, 0, segs[0].rows, parts[0].ids.len, false) else .{};
+    defer ledger.end();
+    errdefer ledger.fail();
     try e.gate(null);
     var one: [1]Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = &e.bp, .segs = segs[0..parts.len] }};
     var f: Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = &e.pieces, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(true) else null };

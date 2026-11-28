@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const b16 = @import("cuda_b16.zig");
+const trace = @import("cuda_prefill_trace.zig");
 const projection = @import("cuda_proj.zig");
 
 /// A dense layer's weights: NVFP4 as Fp4Linear holds them, an EXL3 checkpoint's bf16, FP4-Local's MXFP8, or TFQ3.
@@ -25,6 +26,8 @@ pub const Kernels = struct { set: glue.Set, linear: cuda.qlinear.Linear, copy_ro
 
 /// Fp4Linear.__call__ (prefill on a prompt chunk): bf16 out, or fp32 with `wide`; the prompt GEMM needs `ldx` % 8 == 0.
 fn mm(k: Kernels, stream: cuda.Stream, w: cuda.qmmf.Weight, x: u64, ldx: usize, rows: usize, out: u64, wide: bool, prompt: bool) !void {
+    const stamp = trace.span(stream, .dense_gemm);
+    defer stamp.end();
     const q: cuda.qlinear.Weight = .{ .nvfp4 = w };
     const in: cuda.qlinear.Rows = .{ .x = x, .ldx = ldx };
     if (prompt) {
@@ -42,6 +45,8 @@ pub fn block(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_st
 
 /// forward.out_proj's fill for the dense MLP: down of rows lo..hi (s.act) into out [hi - lo][dims] fp32.
 pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi: usize, prompt: bool, out: u64) !void {
+    const stamp: trace.Scope = if (l.w == .nvfp4) .{} else trace.span(stream, .dense_gemm);
+    defer stamp.end();
     switch (l.w) {
         .nvfp4 => |w| try mm(k, stream, w.down, s.act + lo * l.width * 2, l.width, hi - lo, out, true, prompt),
         .bf16 => |w| try b16.matmul(k.set, stream, s.act + lo * l.width * 2, l.width, w.down, out, s.mm_part, hi - lo, l.dims, l.width, true),
@@ -56,14 +61,19 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const q = switch (l.w) {
         .nvfp4 => |q| q,
         .bf16 => |b| { // [gate | up] in one matmul, as the shared expert's
+            const stamp = trace.span(stream, .dense_gemm);
             try b16.matmul(k.set, stream, x, x_stride, b.gu, s.gu, s.mm_part, rows, 2 * w, l.dims, false);
+            stamp.end();
             return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
         },
         .mxfp8 => |m| { // [gate | up] stacked on the lane, its rows straight into s.gu
+            const stamp = trace.span(stream, .dense_gemm);
             try projection.matmul(k.set, stream, .{ .mxfp8 = m.gu }, x, x_stride, s.gu, s.mm_part, rows, 2 * w, l.dims, false);
+            stamp.end();
             return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
         },
         .tfq3 => |t| {
+            const stamp = trace.span(stream, .dense_gemm);
             const tk = k.set.tfq3 orelse return error.FormatNotLoaded;
             if (prompt and rows > 16) {
                 try tk.densePrompt(stream, t.gate, x, x_stride, s.gu, 2 * w, rows, false);
@@ -72,6 +82,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
                 try tk.dense(stream, t.gate, x, x_stride, s.gu, 2 * w, rows, false);
                 try tk.dense(stream, t.up, x, x_stride, s.gu + w * 2, 2 * w, rows, false);
             }
+            stamp.end();
             return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
         },
     };

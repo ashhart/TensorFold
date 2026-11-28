@@ -1,4 +1,5 @@
 //! A prompt step of two chunks in one pass (TF_GLM_PROMPT_PAIR): each chunk's exchanges under the other's sites.
+const trace = @import("cuda_prefill_trace.zig");
 const std = @import("std");
 const cuda = @import("cuda");
 const fw = @import("cuda_forward.zig");
@@ -77,11 +78,15 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     const pair = if (e.pair) |*p| p else return error.BadChunk;
     if (rb < e.share.world or part.len != @min(len - start, ra + rb + 1) or e.drafter != null or e.prompt_logprobs != null) return error.BadChunk;
     if (!ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rb)) return error.BadChunk; // pairedAt's rule, every rank
+    const pair_stamp = trace.span(e.stream, .paired_prefill);
+    defer pair_stamp.end();
     if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
+    const gate_stamp = trace.span(e.stream, .gate);
     e.gate(cancel) catch |err| {
         if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
         return err;
     };
+    gate_stamp.end();
     var one: [1]fw.Rank = undefined;
     var two: [1]fw.Rank = undefined;
     var fa = e.view(&e.bp, &one);
@@ -104,25 +109,38 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     try fw.Forward.pairBody(&fa, &fb, ra, rb, last);
     pair.steps += 1;
     e.index_splits += @intFromBool(split);
+    trace.part(0, ra);
+    trace.context(null, null, .chunk);
     try mtpRows(e, &fa, ids[1 .. ra + 1], e.bp.fnormed);
+    var commit_stamp = trace.span(e.stream, .commit);
     try fa.commit(ra);
+    commit_stamp.end();
     st.pending = rb;
     st.prompt = true;
     var first: ?u32 = null;
+    trace.part(ra, rb);
     if (last) {
+        const draw_stamp = trace.span(e.stream, .draw);
         var t: [1]u32 = undefined;
         try e.draw(pair.bp.logits, 1, len, 0, &t);
         first = t[0];
+        draw_stamp.end();
         try e.holdPrompt(pair.bp.fnormed + (rb - 1) * e.c.hidden * 2);
     }
     try mtpRows(e, &fa, ids[ra + 1 ..], pair.bp.fnormed); // the MTP head on a's buffers, over b's rows
+    commit_stamp = trace.span(e.stream, .commit);
     try fa.commit(rb);
+    commit_stamp.end();
     return first;
 }
 
 /// decode._absorb_rows of a chunk: the MTP head over its next ids `nxt` on its final-norm rows `hidden`.
-fn mtpRows(e: *Engine, f: *fw.Forward, nxt: []const i32, hidden: u64) !void {
+pub fn mtpRows(e: anytype, f: anytype, nxt: []const i32, hidden: u64) !void {
     if (!e.mtp or nxt.len == 0) return;
+    const context = trace.mtpContext(nxt.len);
+    defer context.end();
+    const stamp = trace.span(e.stream, .mtp);
+    defer stamp.end();
     try f.mtpMode(nxt, &.{hidden}, false);
     try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
 }
