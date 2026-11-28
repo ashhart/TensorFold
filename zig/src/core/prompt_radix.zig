@@ -124,6 +124,7 @@ pub const Store = struct {
     page_only: bool = false,
     /// Checkpoints inside a page (C4): any row on the request's schedule, the partial page a held copy.
     tails: bool = false,
+    snapshot_tails: bool = false,
 
     const SHARED_KEYS = 64;
 
@@ -141,13 +142,16 @@ pub const Store = struct {
         for (groups.parts) |spec| if (spec.make == .retained and spec.rows == 0) return error.RetainedRows;
         if (groups.tails and hooks == null) return error.TailsNeedHooks; // copy_rows
         if (groups.tails and pages.vtable.hold == null) return error.TailsNeedHold;
+        if (groups.snapshot_tails and (!groups.legacy or groups.parts.len > 0 or groups.tails or groups.prefixCount() != 1))
+            return error.SnapshotTailGroups;
         return .{
             .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead, groups.prefixCount()),
             .rules = rules,
             .decl = .{ .specs = groups.parts, .hooks = hooks },
             .legacy = groups.legacy,
             .page_only = groups.none(),
-            .tails = groups.tails,
+            .tails = groups.tails or groups.snapshot_tails,
+            .snapshot_tails = groups.snapshot_tails,
         };
     }
 
@@ -165,7 +169,7 @@ pub const Store = struct {
 
     /// Ids a tail at `at` adds: one held copy a prefix group.
     fn tailIds(s: *const Store, at: u32) usize {
-        return if (s.addsTail(at)) s.per() else 0;
+        return if (s.addsTail(at) and !s.snapshot_tails) s.per() else 0;
     }
 
     /// Copy and copy_rows number the prefix groups after the parts.
@@ -458,7 +462,8 @@ pub const Store = struct {
         const np = at / s.rules.page; // whole logical pages below `at`
         const r = at % s.rules.page; // rows past them: a tail's (usable refuses them without tails)
         const whole = np * s.per();
-        if (!s.on() or !sched.keyed(q) or !sched.usable(s.cuts(), q, at) or at + s.rules.lookahead > prompt.len or mine.len != whole + @intFromBool(r > 0) * s.per() or path.len != whole) return .{ .held = false, .shared = 0 };
+        const extra = @intFromBool(r > 0 and !s.snapshot_tails) * s.per();
+        if (!s.on() or !sched.keyed(q) or !sched.usable(s.cuts(), q, at) or at + s.rules.lookahead > prompt.len or mine.len != whole + extra or path.len != whole) return .{ .held = false, .shared = 0 };
         if (at + s.rules.lookahead > (q.prefilled orelse q.prompt_len)) { // only prefilled rows: decoded ones need decode spans
             note("kept nothing at {d} tokens: past the {d} rows this pass prefills", .{ at, q.prefilled orelse q.prompt_len });
             return .{ .held = false, .shared = 0 };
@@ -500,7 +505,10 @@ pub const Store = struct {
         defer node.pins -= 1;
         if (tailed) node.tails.ensureUnusedCapacity(t.gpa, 1) catch |err| return s.fail(at, err, whole);
         // the path stays whatever follows; the entry is published only whole
-        const tl: ?Tail = if (tailed) tail_mod.make(t, s.decl.hooks.?, owner, s.prefixGroup(), full, node.end, r, mine[whole..]) catch |err| return s.fail(at, err, whole) else null;
+        const tl: ?Tail = if (!tailed) null else if (s.snapshot_tails)
+            tail_mod.identity(t, full, node.end, r) catch |err| return s.fail(at, err, whole)
+        else
+            tail_mod.make(t, s.decl.hooks.?, owner, s.prefixGroup(), full, node.end, r, mine[whole..]) catch |err| return s.fail(at, err, whole);
         const made = s.decl.make(t, owner, at, retained) catch |err| {
             if (tl) |x| tail_mod.free(t, x);
             return s.fail(at, err, whole);

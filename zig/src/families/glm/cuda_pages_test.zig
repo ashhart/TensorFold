@@ -89,6 +89,7 @@ const Fake = struct {
         f.e.seqs = .empty;
         f.e.local = &.{};
         f.e.pages = null;
+        f.e.share_pages = false;
         f.e.images = null;
         f.e.settings = .{};
         f.e.w = undefined;

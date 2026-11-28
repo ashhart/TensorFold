@@ -152,7 +152,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.installArtifact(b.addExecutable(.{ .name = "tf-tp-watch-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/tp_watch_check.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "cuda", .module = cuda }} }) }));
     @import("living_dense.zig").target(b, target, optimize, cuda, mods.qwen35);
     flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api, opts);
-    b.step("compile-cuda-tests", "Compile CUDA runner without executing a GPU").dependOn(&runner_exe.step);
+    @import("glm_shared_starts.zig").targets(b, runner_exe);
     const tfq3_run = b.addRunArtifact(runner_exe);
     tfq3_run.addArg("tfq3-contract");
     b.step("tfq3-contract", "TFQ3 serial rows equal every decode and prefill width").dependOn(&tfq3_run.step);

@@ -73,6 +73,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     step.dependOn(&pages_run.step);
     const api = glm.import_table.get("engine_api").?; // the family's own (the shared store's types): one module, one set of types
     const adapter = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_prompt_pages.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "engine_api", .module = api } } });
+    const shared_starts = b.addRunArtifact(b.addTest(.{ .root_module = adapter, .filters = &.{"shared request starts:"} }));
+    b.step("test-glm-shared-starts-adapter-host", "Snapshot-owned off-grid tails through the actual shared page adapter").dependOn(&shared_starts.step);
+    step.dependOn(&shared_starts.step);
+    const shared_setup = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_lanes_tests.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "core", .module = mods.core } } });
+    const shared_setup_run = b.addRunArtifact(b.addTest(.{ .root_module = shared_setup, .filters = &.{"GLM shared starts setup:"} }));
+    b.step("test-glm-shared-starts-setup-host", "Actual one-rank NCCL setup without a device or rendezvous file").dependOn(&shared_setup_run.step);
+    step.dependOn(&shared_setup_run.step);
     const image_cache = b.createModule(.{ .root_source_file = b.path("zig/glm_image_cache_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "core", .module = mods.core }, .{ .name = "prompt_pages", .module = adapter } } });
     const image_cache_run = b.addRunArtifact(b.addTest(.{ .root_module = image_cache }));
     b.step("test-glm-image-cache-host", "Image-content prefix reuse over the shared store and suffix rows across both ranks without devices").dependOn(&image_cache_run.step);
@@ -88,11 +95,20 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const copies = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_snaps.zig"), .target = host, .optimize = .debug, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "core", .module = mods.core } } });
     const snapshots = b.createModule(.{ .root_source_file = b.path("zig/glm_snapshot_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "engine_api", .module = api }, .{ .name = "copies", .module = copies } } });
     const snapshots_run = b.addRunArtifact(b.addTest(.{ .root_module = snapshots }));
+    const shared_bytes = b.createModule(.{ .root_source_file = b.path("zig/glm_shared_starts_host.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    shared_bytes.import_table = snapshots.import_table.clone(b.allocator) catch @panic("out of memory");
+    _ = shared_bytes.import_table.swapRemove("copies");
+    shared_bytes.addImport("lanes", mods.lanes);
+    shared_bytes.addImport("prompt_pages", adapter);
+    const shared_bytes_run = b.addRunArtifact(b.addTest(.{ .root_module = shared_bytes, .filters = &.{"GLM shared starts:"} }));
+    b.step("test-glm-shared-starts-bytes-host", "Actual off-grid GLM snapshot bytes, page identity and deferred lifetime").dependOn(&shared_bytes_run.step);
+    step.dependOn(&shared_bytes_run.step);
     b.step("test-glm-snapshots-host", "Prompt-sized GLM state copies, page budgets and rank ordering without devices").dependOn(&snapshots_run.step);
     step.dependOn(&snapshots_run.step);
     b.step("test-glm-prompt-settings-host", "Actual opt-in settings and rank agreement on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "prompt K experiment", "TF_GLM_PAIR_EXPERTS", "startup switches", "nvfp4 paired prompt staging bytes", "plan sizes as the Python" } })).step);
     const request_starts = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"glm request starts:"} }));
-    b.step("test-glm-request-starts-host", "GLM message-start prompt cuts and the shared-KV startup refusal without devices").dependOn(&request_starts.step);
+    b.step("test-glm-request-starts-host", "GLM message-start prompt cuts and shared-KV opt-in admission without devices").dependOn(&request_starts.step);
+    b.step("test-glm-shared-page-policy-host", "Existing GLM shared-page policy and deferred snapshot metadata").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"TF_KV_SHARE:"} })).step);
     const mm_record = b.createModule(.{ .root_source_file = b.path("zig/test_support/glm_mm_cuda.zig"), .target = host, .optimize = .debug });
     const mm_actual = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/cuda_mm.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "cuda", .module = mm_record }} });
     const mm_policy = b.createModule(.{ .root_source_file = b.path("zig/glm_mm_policy_host.zig"), .target = host, .optimize = .debug, .imports = &.{ .{ .name = "cuda", .module = mm_record }, .{ .name = "mm", .module = mm_actual } } });
@@ -115,6 +131,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
 }
 
 pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+    const shared_check = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_shared_starts_tests.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const shared_object = b.addObject(.{ .name = "glm-shared-starts-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_shared_starts_compile.zig"), .target = target, .optimize = .debug, .imports = &.{.{ .name = "check", .module = shared_check }} }) });
+    _ = shared_object.getEmittedBin();
+    b.step("compile-glm-shared-starts-host", "Analyze the actual shared request-start device check without a GPU").dependOn(&shared_object.step);
+    b.step("test-glm-shared-starts-plan-host", "One-GB10 subset settings refuse full loads and incomplete state coverage").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shared_check, .filters = &.{"GLM shared starts plan:"} })).step);
+    const memory_model = b.addExecutable(.{ .name = "glm-shared-starts-memory", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_shared_starts_memory_host.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "check", .module = shared_check }, .{ .name = "glm_cuda", .module = shared_check.import_table.get("glm_cuda").? }, .{ .name = "cuda", .module = cuda } } }) });
+    b.step("check-glm-shared-starts-memory-host", "Actual constructor geometry and NVFP4 packing with an address-only driver").dependOn(&b.addRunArtifact(memory_model).step);
     const fp8_gate = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_ref_fp8.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const fp8_object = b.addObject(.{ .name = "glm-fp8-gate-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_fp8_gate_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = fp8_gate }} }) });
     _ = fp8_object.getEmittedBin();

@@ -29,7 +29,7 @@ const Model = struct {
         m.words = s.words;
         m.restored = s.kept.at;
         const o: *glm.share.Owner = @ptrCast(@alignCast(owner orelse return error.NoGlmOwner));
-        o.pending = &s.kept;
+        o.pending = s.kept;
     }
     fn drop(m: *Model, saved: *anyopaque) void {
         a.destroy(@as(*Snap, @ptrCast(@alignCast(saved))));
@@ -83,6 +83,7 @@ const Cache = struct {
         try c.leases[0].ids.appendSlice(a, &c.ids);
         errdefer c.leases[0].ids.deinit(a);
         c.e.gpa = a;
+        c.e.share_pages = false;
         c.e.pages = &c.pages;
         c.store = (try prompt_pages.Adapter.open(Family, a, c, 512, 8)).?;
     }
@@ -140,6 +141,7 @@ test "GLM image cache: the actual lane opening enables a content-keyed image loo
     defer s.deinit(a);
     var e: glm.engine.Engine = undefined;
     e.gpa = a;
+    e.share_pages = false;
     e.capacity = N + 256;
     e.pages = &c.pages;
     var link: glm.follow.Link = undefined;

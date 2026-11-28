@@ -24,6 +24,12 @@ pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
 
 /// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
 pub fn shareSlot(e: *const Engine) u64 {
+    if (@import("cuda_snapshot_refs.zig").active(e)) {
+        const last = e.capacity - 1;
+        const edge = last / state.page_rows * state.page_rows;
+        // Before the preceding edge MTP can keep a full tail plus its window, without the capacity clamp.
+        return @max(e.stateBytes(last), if (edge > 0) e.stateBytes(edge - 1) else 0);
+    }
     return e.stateBytes(e.capacity - e.capacity % @import("cuda_native.zig").snap_grid);
 }
 
@@ -167,9 +173,13 @@ pub const Pages = struct {
         return slot < p.used.len;
     }
 
-    /// Whether a request's pages fit now and a paged sequence is free for it.
-    pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
-        for (p.used) |u| if (!u) return p.pool.fits(need(p.layout, prompt, max_tokens));
+    /// Whether pages and a slot fit, reclaiming idle snapshot co-ownership only under the combined opt-in.
+    pub fn fits(p: *Pages, prompt: usize, max_tokens: usize) bool {
+        for (p.used) |u| if (!u) {
+            const n = need(p.layout, prompt, max_tokens);
+            if (p.pool.fits(n)) return true;
+            return p.prompts != null and @import("cuda_snapshot_refs.zig").active(p.e) and p.pool.reclaim(n);
+        };
         return false;
     }
 

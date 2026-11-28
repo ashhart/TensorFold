@@ -28,6 +28,7 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = fw.prefill_rows;
 /// Chunk rows change prompt arithmetic: states keep and resume only where a cold pass cuts (cuda_prompt_cuts).
 pub const snap_grid: u32 = prompt_rows;
+pub const share_snapshot_tails = true;
 /// cuda_prompt_cuts cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
 pub const request_starts = true;
 pub const request_starts_switch = "TF_GLM_REQUEST_STARTS";
@@ -419,6 +420,13 @@ pub fn snap_reuses(ptr: *anyopaque, at: u32) bool {
     return snap_spare(ptr) >= snap_bytes(ptr, at);
 }
 
+/// The radix entry owns these actual prefix pages even when its canonical path names different ones.
+pub fn snap_reclaimable(ptr: *anyopaque, saved: *anyopaque) bool {
+    const e: *engine.Engine = @ptrCast(@alignCast(ptr));
+    const k: *engine.Kept = @ptrCast(@alignCast(saved));
+    return @import("cuda_snapshot_refs.zig").reclaimable(e, k.id);
+}
+
 /// The prompt pass stands at `at` (a mark at a chunk start): copy the state there under a new id, with its cuts below.
 pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     _ = owner;
@@ -435,7 +443,13 @@ pub fn snap_restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anye
     const e: *engine.Engine = @ptrCast(@alignCast(ptr));
     if (share_mod.of(e) == null) return error.RestoredInPromptPass;
     const o: *share_mod.Owner = @ptrCast(@alignCast(owner orelse return error.NoGlmOwner));
-    o.pending = @ptrCast(@alignCast(saved));
+    const k: *engine.Kept = @ptrCast(@alignCast(saved));
+    if (@import("cuda_snapshot_refs.zig").active(e)) {
+        if (!@import("cuda_prompt_cuts.zig").resumes(o.len, o.cuts, k.at, k.below)) return error.NonCanonicalResume;
+        try @import("cuda_snapshot_refs.zig").pin(e, k.id);
+        o.pin = k.id;
+    }
+    o.pending = k.*;
 }
 
 /// TF_KV_SHARE: the pool the shared store keeps prompts in, rank 0's pages (null: a window a stream).
@@ -502,7 +516,6 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadKvShare => "TF_KV_SHARE: give how many states the prompt store over the KV pages keeps, or 0 or unset for off",
         error.GlmKvShareMoved => "TF_GLM_KV_SHARE is now TF_KV_SHARE, the prompt store every family on the KV pool shares: set that instead",
-        error.GlmRequestStartsWithSharedKv => "TF_GLM_REQUEST_STARTS=1 cannot be used with TF_KV_SHARE above 0: unset request starts or disable shared KV",
         error.GlmRequestStartsWithLearnConversations => "TF_GLM_REQUEST_STARTS=1 cannot be used with --learn-conversations: unset request starts or serve without it",
         error.GlmShareNeedsPages => "TF_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
