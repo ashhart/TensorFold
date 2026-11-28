@@ -367,24 +367,28 @@ test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only it
     try t.expectEqual(@as(usize, 8), r.libraries);
 }
 
-test "qwen27 quant: inline sums select the fitting decode pipeline only with the switch on" {
+test "qwen27 quant: inline sums select fitting Q4 decode pipelines only with the switch on" {
     for ([_]bool{ false, true }) |enabled| {
-        var r: mtl.Record = .{};
-        var k = quant.Kernels{ .allocator = a, .device = r.device(), .inline_sums = enabled };
-        defer k.deinit();
-        var p = matrix(&r, 5120);
-        p.slices = 8;
-        for ([_]u32{ 17408, 25600 }) |width| {
-            p.k = width;
-            try k.prepareDecode(p);
-            const key = quant.Key{
-                .kind = .projection,
-                .n = p.n,
-                .k = p.k,
-                .slices = p.slices,
-                .inline_sums = enabled and width == 17408,
-            };
-            try t.expectEqual(key.inline_sums, k.lanes.get(key).?.inline_sums);
+        for ([_]u8{ 4, 5, 6 }) |bits| {
+            var r: mtl.Record = .{};
+            var k = quant.Kernels{ .allocator = a, .device = r.device(), .inline_sums = enabled };
+            defer k.deinit();
+            var p = matrix(&r, 5120);
+            p.bits = bits;
+            p.slices = 8;
+            for ([_]u32{ 17408, 25600 }) |width| {
+                p.k = width;
+                try k.prepareDecode(p);
+                const key = quant.Key{
+                    .kind = .projection,
+                    .n = p.n,
+                    .k = p.k,
+                    .bits = bits,
+                    .slices = p.slices,
+                    .inline_sums = enabled and bits == 4 and width == 17408,
+                };
+                try t.expectEqual(key.inline_sums, k.lanes.get(key).?.inline_sums);
+            }
         }
     }
 }

@@ -205,7 +205,7 @@ pub const Kernels = struct {
         const half = p.n / 64;
         const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
         var layout = lane.Layout{ .n = p.n, .k = p.k, .format = .{ .bits = p.bits, .group = p.group }, .sk = key.slices, .ranges = if (skip > 0) &ranges else &.{}, .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null, .output = if (cut[1] > 0) .f32 else .bf16, .precompute_sums = reg or (p.bits == 8 and p.group == 64), .reg = reg, .cooperative = cooperative, .row_blocks = long and !reg, .rows = if (long) lane.max_reg_rows else if (reg or cooperative) lane.reg_rows else 16 };
-        layout.inline_sums = k.inline_sums and !k.prompt and standalone_sums and layout.inlineSumsFit();
+        layout.inline_sums = k.inline_sums and p.bits == 4 and !k.prompt and standalone_sums and layout.inlineSumsFit();
         key.inline_sums = layout.inline_sums;
         const entry = try k.lanes.getOrPut(k.allocator, key);
         if (!entry.found_existing) {
