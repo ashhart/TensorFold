@@ -1,5 +1,6 @@
 //! Which queued request a lane host admits next: the head, or one behind a head that waits for pool room.
 const std = @import("std");
+const Id = @import("engine_api.zig").Id;
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const lanes = @import("lanes");
@@ -29,6 +30,17 @@ pub fn pick(h: *LaneHost) ?usize {
 /// Every queued job waits for `why`; no job is picked.
 fn hold(h: *LaneHost, why: Wait) ?usize {
     for (h.queued.items) |j| j.wait_reason = why;
+    return null;
+}
+
+/// A queued request past a whole class, refused with every lane busy too: none read for or cancelled (lock held).
+pub fn refused(h: *LaneHost) ?usize {
+    const a = h.info_.admit orelse return null;
+    if (a.need == null) return null; // no owner-class hook: no queue scan or per-job read/cancel checks
+    for (h.queued.items, 0..) |j, i| {
+        if (passed(h, j) or std.mem.indexOfScalar(Id, h.cancels.items, j.id) != null) continue;
+        if (ledger.pastClass(h, j)) return i;
+    }
     return null;
 }
 
@@ -84,7 +96,8 @@ fn chooseAt(h: *LaneHost, now: i96) ?usize {
 fn fits(h: *const LaneHost, job: *const Job) bool {
     if (ledger.priced(h)) return ledger.fits(h, job);
     const a = h.info_.admit.?;
-    return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
+    if (ledger.never(h, job) != null) return true; // past a whole class: it goes on, to its refusal by name
+    return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens) and ledger.fitsClasses(h, job);
 }
 
 /// The oldest eligible background job past the opt-in age that came before the ordinary head, else that head.

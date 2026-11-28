@@ -181,8 +181,10 @@ pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, win
 /// The pool beside the engine's own sequence (in `model`: a window, or on pages its fixed part); null: see `problem`.
 pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) !?Plan {
     const rows = budget.windowRows(F);
-    return kv_pool.plan(l, budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
+    const b = budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots);
+    return kv_pool.planClasses(l, b) catch |e| {
         problem.* = switch (e) {
+            error.ClassTooSmall => try std.fmt.allocPrint(a, "the KV pages split into {d} owner classes of {d} pages, and one stream at a {d}-token window takes {d}: lower --context, raise --parallel to {d} or more, or serve without TF_GLM_KV_SPLIT", .{ l.classes, (kv_pool.plan(l, b) catch unreachable).pages / l.classes, window, l.pages(window + rows), l.classes }),
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
         };
@@ -480,6 +482,7 @@ test {
     _ = @import("cuda_cache_capacity_test.zig");
     _ = @import("cuda_streams.zig");
     _ = @import("cuda_keep_others_test.zig");
+    _ = @import("cuda_kv_pool_classes_test.zig");
 }
 
 test "KV admission: a refusal prices the running states beside the fixed part and KV page" {
@@ -534,17 +537,6 @@ test "CUDA cache default uses half of unpaged room when it exceeds the floor" {
     try std.testing.expectEqual(@as(u32, 8), p.lanes);
     try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
     try std.testing.expectEqual(@as(u64, 24 * GiB), p.copied);
-}
-test "CUDA cache default leaves no copies when unpaged windows use all room" {
-    const GiB: u64 = 1 << 30;
-    const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
-    const o: api.Open = .{ .dir = "model", .model_type = "n", .lanes = 8 };
-    const b = budgetOf(struct {}, l, 56 * GiB, o, 8192, false, false, 0, null);
-    const p = try kv_pool.plan(l, b);
-    try std.testing.expectEqual(@as(u64, 0), b.cache);
-    try std.testing.expectEqual(@as(u32, 8), p.lanes);
-    try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
-    try std.testing.expectEqual(@as(u64, 0), p.copied);
 }
 const Promptless = struct {
     pub const keeps_no_prompts = true;
