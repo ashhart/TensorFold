@@ -237,8 +237,8 @@ test "lone copy price: context copies on a lone head window stay as on main" {
 }
 
 test "lone copy price: shared rounds' copies stay as on main (the streams' lone rounds after one ends excluded)" {
-    // main e7e24243d: shared rounds' windows, copy windows and copy rows
-    for ([_]bool{ true, false }, [_][3]u64{ .{ 124, 122, 1644 }, .{ 126, 122, 1644 } }) |head, expected| {
+    // shared rounds' windows, copy windows and copy rows; rows run over twice the table, so copies are priced early
+    for ([_]bool{ true, false }, [_][3]u64{ .{ 124, 118, 372 }, .{ 126, 118, 372 } }) |head, expected| {
         const got = try run(hip(head), long_context, .{}, 2, 64);
         try std.testing.expectEqual(expected, got.shared);
     }

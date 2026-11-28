@@ -472,8 +472,10 @@ pub const Rule = struct {
     /// The independent residual uses the same batching policy as next-draft allocation.
     pub fn observeSharedPrice(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64, plain: bool, calibration: bool) !void {
         if (streams > 1 and r.plain_guard and r.confidence_floor == null) {
-            const residual = if (r.shared_costs.get(@intCast(rows))) |forward| ms - forward - head_ms else std.math.nan(f64);
-            try r.shared_price.observeHead(r.gpa, streams, rows, residual, head_ms, sampled, plain, calibration, r.k.fixed_draft_block);
+            const table = r.shared_costs.get(@intCast(rows));
+            if (table) |forward| try r.shared_price.observeTable(r.gpa, streams, sampled, ms - head_ms, forward);
+            const residual = if (table) |forward| ms - forward - head_ms else std.math.nan(f64);
+            try r.shared_price.observeHead(r.gpa, streams, rows, residual, head_ms, sampled, plain, calibration);
         }
     }
 

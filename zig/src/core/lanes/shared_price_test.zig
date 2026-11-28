@@ -42,6 +42,10 @@ fn run(sampled: bool, row_ms: f64, plain_only: bool) ![2][800]u32 {
     var probes: usize = 0;
     var drafted_before: usize = 0;
     var drafted_after: usize = 0;
+    // at 9 ms a row the first drafted round, 2, takes 3x the table, so trials follow; at 0.5 ms they stay at 64, 128
+    const over = row_ms > 5;
+    const warm: usize = if (over) 3 else 64;
+    const kept: usize = if (over) 4 else 128;
     var round: usize = 0;
     while (e.activeCount() > 0) {
         round += 1;
@@ -49,25 +53,27 @@ fn run(sampled: bool, row_ms: f64, plain_only: bool) ![2][800]u32 {
         try e.step();
         if (plain_only) continue;
         if (due and target.last_rows == 2) {
-            try t.expect(round - previous_probe >= 64);
+            if (round > kept) try t.expect(round - previous_probe >= 64);
             previous_probe = round;
             probes += 1;
         }
-        if (round < 64) drafted_before += @intFromBool(target.last_rows > 2);
-        if (round > 129 and e.activeCount() == 2) drafted_after += @intFromBool(target.last_rows > 2);
+        if (round < warm) drafted_before += @intFromBool(target.last_rows > 2);
+        if (round > kept + 1 and e.activeCount() == 2) drafted_after += @intFromBool(target.last_rows > 2);
         // the first trial is the count's warm-up: the second one sets the plain price
-        if (round == 64) try t.expect(e.rule.sharedPrice(2, sampled) == null);
-        if (round == 128) {
+        if (round == warm) try t.expect(e.rule.sharedPrice(2, sampled) == null);
+        if (round == kept) {
             try t.expect(e.rule.sharedPrice(2, sampled) != null);
             const p = e.rule.sharedPrice(2, sampled).?;
             try t.expectApproxEqAbs(@as(f64, 2), p.plain, 1e-9);
             try t.expectApproxEqAbs(row_ms, p.row, 1e-9);
         }
-        if (row_ms > 5 and round == 129) try t.expectEqual(@as(usize, 2), target.last_rows);
+        if (over and round == kept + 1) try t.expectEqual(@as(usize, 2), target.last_rows);
     }
     if (!plain_only) {
-        try t.expect(drafted_before > 32);
-        if (row_ms > 5) try t.expectEqual(@as(usize, 0), drafted_after) else {
+        // rounds before the warm-up draft on the load-time table
+        try t.expect(if (over) drafted_before == 1 else drafted_before > 32);
+        // plain wins; a drafted point that goes `stale` stops pricing rows, so drafting is re-probed once a window
+        if (row_ms > 5) try t.expect(drafted_after >= 1 and drafted_after <= round / prices.stale) else {
             try t.expect(drafted_after > 200);
             try t.expect(probes >= 2 and probes <= (round + 63) / 64);
         }
@@ -119,6 +125,56 @@ test "shared prices: missing and stale trials obey exact independent count and m
     }
 }
 
+test "shared prices: an unpriced count whose rounds stay under twice the table keeps main's trial rounds" {
+    var p: prices.Prices = .{};
+    defer p.deinit(a);
+    for (1..129) |round| {
+        const due = try p.due(a, 4, false);
+        try t.expectEqual(round == 64 or round == 128, due);
+        // a drafted round at 1.9 times its load-time forward
+        if (!due) try p.observeTable(a, 4, false, 1.9 * 20, 20);
+        try p.observe(a, 4, if (due) 4 else 8, if (due) 2 else 6, false, due, due);
+    }
+}
+
+test "shared prices: an unpriced count whose round takes twice the table takes its warm-up and kept trial next" {
+    var p: prices.Prices = .{};
+    defer p.deinit(a);
+    var trials: [8]u64 = undefined;
+    var n: usize = 0;
+    for (1..400) |round| {
+        const due = try p.due(a, 4, false);
+        if (due) {
+            trials[n] = round;
+            n += 1;
+        }
+        if (!due) try p.observeTable(a, 4, false, 2 * 20, 20);
+        try p.observe(a, 4, if (due) 4 else 8, if (due) 2 else 6, false, due, due);
+        // the warm-up leaves the price missing; the trial after it sets it
+        if (round == 2) try t.expect(p.price(4, false, 0) == null);
+        if (round == 3) try t.expectEqual(@as(f64, 2), (p.price(4, false, 0) orelse return error.TestExpectedPrice).plain);
+        // another count and the other mode keep their own clocks
+        try t.expect(!try p.due(a, 2, false));
+        try t.expect(!try p.due(a, 4, true));
+    }
+    // a measured price's next trial waits until it is `stale`, as on main
+    try t.expectEqualSlices(u64, &.{ 2, 3, 259 }, trials[0..n]);
+}
+
+test "shared prices: an early trial that never completes leaves the count on main's spacing" {
+    var p: prices.Prices = .{};
+    defer p.deinit(a);
+    try p.observeTable(a, 4, false, 50, 20);
+    try p.observe(a, 4, 8, 6, false, false, false);
+    try t.expect(try p.due(a, 4, false));
+    // the trial is selected, and its round never completes
+    try p.probed(a, 4, false);
+    for (2..67) |round| {
+        try t.expectEqual(round == 66, try p.due(a, 4, false));
+        try p.observe(a, 4, 8, 6, false, false, false);
+    }
+}
+
 test "shared prices: drafted work at plain width cannot update the intercept; two-point fit separates rows" {
     var p: prices.Prices = .{};
     defer p.deinit(a);
@@ -132,6 +188,33 @@ test "shared prices: drafted work at plain width cannot update the intercept; tw
     try t.expectEqual(@as(f64, 2), v.row);
     try t.expect(p.price(4, true, 0) == null);
     try t.expect(p.price(2, false, 0) == null);
+}
+
+test "shared prices: a drafted point with no drafted round for `stale` rounds stops pricing rows" {
+    var p: prices.Prices = .{};
+    defer p.deinit(a);
+    try p.observe(a, 4, 4, 2, false, true, false);
+    try p.observe(a, 4, 8, 10, false, false, false);
+    try t.expectEqual(@as(f64, 2), p.price(4, false, 99).?.row);
+    for (0..prices.stale - 1) |_| try p.observe(a, 4, 4, 2, false, true, false);
+    try t.expectEqual(@as(f64, 2), p.price(4, false, 99).?.row);
+    try p.observe(a, 4, 4, 2, false, true, false);
+    const v = p.price(4, false, 99).?;
+    try t.expectEqual(@as(f64, 99), v.row);
+    try t.expectEqual(@as(f64, 2), v.plain);
+    try t.expectEqual(@as(f64, 2), v.fixed);
+}
+
+test "shared prices: a drafted round after a stale point replaces it instead of blending onto it" {
+    var p: prices.Prices = .{};
+    defer p.deinit(a);
+    try p.observe(a, 4, 4, 2, false, true, false);
+    try p.observe(a, 4, 8, 10, false, false, false);
+    for (0..prices.stale) |_| try p.observe(a, 4, 4, 2, false, true, false);
+    try p.observe(a, 4, 8, 6, false, false, false);
+    try t.expectEqual(@as(f64, 1), p.price(4, false, 99).?.row);
+    try p.observe(a, 4, 8, 10, false, false, false);
+    try t.expectApproxEqAbs(@as(f64, 1.2), p.price(4, false, 99).?.row, 1e-12);
 }
 
 test "shared prices: the round observer subtracts modeled heads before fitting rows" {

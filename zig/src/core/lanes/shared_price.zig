@@ -3,6 +3,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const every: u64 = 64;
 pub const stale: u64 = 256;
+/// An unpriced round this many times its load-time forward runs on the table's prices well past the clock.
+pub const over_table: f64 = 2;
 const Point = struct { residual: f64, rows: f64, head: f64 = 0, at: u64 };
 const Bucket = struct {
     streams: usize,
@@ -12,6 +14,7 @@ const Bucket = struct {
     trials: u64 = 0, // completed all-plain trials, the first of them a warm-up
     plain: ?Point = null,
     draft: ?Point = null,
+    over: bool = false, // a round with no plain price took `over_table` times its load-time forward
 };
 pub const Price = struct { plain: f64, fixed: f64, row: f64, head: f64 = 0 };
 
@@ -33,12 +36,20 @@ pub const Prices = struct {
         return &p.buckets.items[p.buckets.items.len - 1];
     }
 
-    /// Missing/stale plain prices earn a trial on round 64, then at least 64 completed rounds apart.
+    /// A missing or stale plain price earns a trial 64 rounds apart; a marked count takes its first two in a row.
     pub fn due(p: *Prices, a: Allocator, streams: usize, sampled: bool) !bool {
         const b = try p.get(a, streams, sampled);
         const next = b.rounds +| 1;
         const old = if (b.plain) |v| next -| v.at >= stale else true;
-        return old and next -| b.last_probe >= every;
+        // the kept trial must follow a completed warm-up: a selected trial that never completed waits `every`
+        const early = b.plain == null and b.over and (b.last_probe == 0 or (b.trials == 1 and b.last_probe == b.rounds));
+        return old and (early or next -| b.last_probe >= every);
+    }
+
+    /// A round of a count with no plain price that takes `over_table` times its load-time forward marks the count.
+    pub fn observeTable(p: *Prices, a: Allocator, streams: usize, sampled: bool, ms: f64, forward: f64) !void {
+        const b = try p.get(a, streams, sampled);
+        if (b.plain == null and ms >= over_table * forward) b.over = true;
     }
 
     /// Spend the trial's spacing when it is selected, even if its forward width cannot be measured.
@@ -49,10 +60,10 @@ pub const Prices = struct {
 
     /// No drafting round moves the plain point; a count's first plain trial is a warm-up, each later one replaces it.
     pub fn observe(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, sampled: bool, plain: bool, calibration: bool) !void {
-        return p.observeHead(a, streams, rows, residual, 0, sampled, plain, calibration, false);
+        return p.observeHead(a, streams, rows, residual, 0, sampled, plain, calibration);
     }
 
-    pub fn observeHead(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, head: f64, sampled: bool, plain: bool, calibration: bool, block: bool) !void {
+    pub fn observeHead(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, head: f64, sampled: bool, plain: bool, calibration: bool) !void {
         const b = try p.get(a, streams, sampled);
         b.rounds +|= 1;
         if (calibration) b.last_probe = b.rounds;
@@ -65,7 +76,10 @@ pub const Prices = struct {
         } else if (plain and rows == streams) {
             blend(&b.plain, point);
         } else if (rows > streams) {
-            if (block and b.draft != null and b.rounds -| b.draft.?.at >= stale) b.draft = null;
+            // A drafted point no drafted round refreshed for `stale` rounds is replaced, not blended onto.
+            if (b.draft) |v| if (b.rounds -| v.at >= stale) {
+                b.draft = null;
+            };
             blend(&b.draft, point);
         }
     }
@@ -80,12 +94,12 @@ pub const Prices = struct {
         return .{ .plain = plain.residual, .fixed = if (draft) |v| v.residual else fixed, .row = row, .head = if (draft) |v| v.head else head };
     }
 
-    /// Copy and chained-head models keep the measured row feedback, with head steps priced separately.
+    /// Copy and chained-head models keep the measured row feedback, head steps priced apart, until it goes `stale`.
     pub fn price(p: *const Prices, streams: usize, sampled: bool, row: f64) ?Price {
         const b = p.buckets.items[p.find(streams, sampled) orelse return null];
         const plain = b.plain orelse return null;
         var out: Price = .{ .plain = plain.residual, .fixed = plain.residual, .row = row };
-        if (b.draft) |draft| if (draft.rows > plain.rows) {
+        if (b.draft) |draft| if (draft.rows > plain.rows and b.rounds -| draft.at < stale) {
             out.row = @max(0, (draft.residual - plain.residual) / (draft.rows - plain.rows));
         };
         return out;
