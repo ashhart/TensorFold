@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 and Qwen3.8 (including the 27B) on CUDA: a full load now refuses a checkpoint with tensors the engine never binds, naming the first five; MTP, vision and tied-head tensors are scoped so they never count (#4577).
+
 - CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
 
 - Nemotron 3.5 Super on CUDA at TP=2: the expert rank runs a window's shared expert on a side stream beside its routed experts, with the same plans and kernels, so tokens are unchanged (#4886).
