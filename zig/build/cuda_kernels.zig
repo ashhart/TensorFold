@@ -179,8 +179,9 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_ops", .src = "inkling2/ops", .flags = glue }, // ours: Inkling 2's residual mix, convs, router
     .{ .name = "inkling2_rows", .src = "inkling2/rows", .flags = glue }, // ours: Inkling 2's router row dots on prompt rows
     // ours: Inkling 2's grouped experts, plus Mini's tensor-path epilogue and ascending combine
-    // Mini ModelOpt reference helpers
     .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
+    .{ .name = "inkling2_modelopt", .src = "inkling2/modelopt", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // Mini packed experts on BF16 activations
+    .{ .name = "inkling2_loop_math", .src = "inkling2/loop_math", .flags = &.{"-O3"} }, // Mini residuals, cross-pass messages, gates and split QKV
     // ours: Inkling 2's vision tower glue
     .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue },
     // ours: Inkling 2's DSpark drafter glue
