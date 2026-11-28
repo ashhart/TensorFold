@@ -60,8 +60,7 @@ const Walk = struct {
     }
 };
 
-/// `std.mem.endsWith` for a module's sub_path, with '\\' matching '/': on a Windows host the build gives sub_paths with
-/// backslashes, so "cli/cli.zig" never matched there and cli.zig went without flashnext_memory (compile-native-cuda-windows).
+/// `std.mem.endsWith` on a module sub_path, with '\\' matching '/' (Windows hosts give backslash sub_paths).
 fn ends(path: []const u8, suffix: []const u8) bool {
     if (path.len < suffix.len) return false;
     for (path[path.len - suffix.len ..], suffix) |a, b| if (a != b and !(a == '\\' and b == '/')) return false;
