@@ -49,8 +49,10 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, lanes: ling_la
 pub const explains_open = true;
 
 /// Bytes this rank's weights take at most, for the server's admission: at TP=2 its cut share plus the whole copies.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool, rank: u32, world: u32) u64 {
     _ = drafts; // drafts come from the prompt's text: the MTP layer is never loaded
+    _ = rank; // the established TF_LING_RANK / TF_LING_WORLD placement also drives open
+    _ = world;
     const p = tp.place(tp.env) catch return total;
     if (p.world == 1) return total;
     return weights.cuts.rankTotal(a, io, dir, p.world) catch total; // whole copies counted as the loader reads them
