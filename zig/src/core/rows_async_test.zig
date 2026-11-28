@@ -10,16 +10,30 @@ const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const Gate = struct {
     entered: std.atomic.Value(bool) = .init(false),
     release: std.atomic.Value(bool) = .init(false),
+    left: std.atomic.Value(bool) = .init(false),
+    hold_ns: i128 = 250 * std.time.ns_per_ms,
 
     fn write(ctx: ?*anyopaque, fd: c_int, bytes: []const u8) !usize {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.entered.store(true, .release);
-        while (!g.release.load(.acquire)) nap();
+        defer g.left.store(true, .release);
+        const end = rows.write.nowNs() + g.hold_ns;
+        while (!g.release.load(.acquire) and rows.write.nowNs() < end) nap();
+        if (!g.release.load(.acquire)) return error.GateTimedOut;
         const n = platform.c.write(fd, bytes.ptr, bytes.len);
         if (n < 0) return error.RowsWrite;
         return @intCast(n);
     }
 };
+
+test "spill I/O gates: write and sync timeouts fail instead of doing I/O" {
+    var local: Gate = .{ .hold_ns = 0 };
+    try std.testing.expectError(error.GateTimedOut, Gate.write(&local, -1, "x"));
+    var shared: @import("rows_async_fixture.zig").Gate = .{ .hold_ns = 0, .sync_release = .init(false) };
+    const io = shared.io();
+    try std.testing.expectError(error.GateTimedOut, io.write(io.ctx, -1, "x"));
+    try std.testing.expectError(error.GateTimedOut, io.sync(io.ctx, -1));
+}
 
 fn nap() void {
     var ts: platform.c.timespec = .{ .sec = 0, .nsec = 1_000_000 };
@@ -34,8 +48,8 @@ fn wait(flag: *std.atomic.Value(bool)) bool {
 
 fn keep(s: *pc.Store, f: *Fake, tokens: []const u32) !void {
     f.prompt = tokens;
-    f.at = 600;
-    try std.testing.expect(s.keep(tokens, 600, null, &.{}, &.{}));
+    f.at = 200;
+    try std.testing.expect(s.keep(tokens, 200, null, &.{}, &.{}));
 }
 
 test "spill I/O: eviction releases its RAM entry while the filesystem write is still blocked" {
@@ -49,7 +63,7 @@ test "spill I/O: eviction releases its RAM entry while the filesystem write is s
     const r = try rows.attach(a, &s, .{ .root = root, .identity = 7, .cap = 1 << 30, .daily = 1 << 30, .floor = 0, .lookahead = 1, .spill = .evicted });
     defer r.deinit();
     defer s.deinit();
-    var gate: Gate = .{};
+    var gate: Gate = .{ .hold_ns = 10 * std.time.ns_per_s };
     defer gate.release.store(true, .release);
     r.file_io = .{ .ctx = &gate, .write = Gate.write };
     var tokens: [700]u32 = undefined;
@@ -65,19 +79,38 @@ test "spill I/O: eviction releases its RAM entry while the filesystem write is s
     };
     var ev: Evict = .{ .store = &s };
     const thread = try std.Thread.spawn(.{}, Evict.run, .{&ev});
+    defer {
+        gate.release.store(true, .release);
+        thread.join();
+    }
     const entered = wait(&gate.entered);
     const returned = wait(&ev.done);
+    const left_before_release = gate.left.load(.acquire);
+    const live_while_blocked = f.live;
     gate.release.store(true, .release);
-    thread.join();
     try waits.published(r);
     try std.testing.expect(entered);
     try std.testing.expect(returned);
+    try std.testing.expect(!left_before_release);
+    try std.testing.expectEqual(@as(usize, 0), live_while_blocked);
     try std.testing.expectEqual(@as(usize, 0), f.live);
 }
 
 const fixture = @import("rows_async_fixture.zig");
 const Fixture = fixture.Fixture;
 const Hold = fixture.Gate;
+const Stager = struct {
+    x: *Fixture,
+    tokens: []const u32,
+    at: u32,
+    err: ?anyerror = null,
+
+    fn run(s: *Stager) void {
+        s.x.keep(s.tokens, s.at) catch |err| {
+            s.err = err;
+        };
+    }
+};
 
 test "spill I/O: worker files have the synchronous SHA256 and a restore equals a fresh pass" {
     try byteFiles(false);
@@ -87,7 +120,7 @@ test "spill I/O: worker files have the synchronous SHA256 and a restore equals a
 fn byteFiles(planned: bool) !void {
     const synchronous = try Fixture.open("sync", .evicted, true, 1 << 20);
     defer synchronous.close();
-    const threaded = try Fixture.open("thread", .evicted, false, 1 << 20);
+    const threaded = try Fixture.open("thread", .evicted, false, 9 << 20);
     defer threaded.close();
     const tokens = fixture.prompt(7);
     for ([_]*Fixture{ synchronous, threaded }) |x| {
@@ -125,7 +158,7 @@ fn byteFiles(planned: bool) !void {
 
 test "spill I/O: ENOSPC, truncated short writes and fsync failures publish nothing and retain each job failure" {
     for ([_]@TypeOf(@as(Hold, .{}).mode){ .full, .short, .sync_failure }) |mode| {
-        const x = try Fixture.open("fault", .evicted, false, 1 << 20);
+        const x = try Fixture.open("fault", .evicted, false, 9 << 20);
         defer x.close();
         var fault: Hold = .{ .mode = mode, .release = .init(true) };
         x.r.file_io = fault.io();
@@ -167,18 +200,18 @@ test "spill I/O: the byte permit skips immediately and leaves token state unchan
 }
 
 test "spill I/O: an entry evicted during its write has no borrowed storage and publishes once" {
-    const x = try Fixture.open("in-flight", .finish, false, 1 << 20);
+    const x = try Fixture.open("in-flight", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
     x.r.file_io = hold.io();
     const tokens = fixture.prompt(12);
-    try x.keep(&tokens, 600);
+    try x.keep(&tokens, 200);
     try Hold.wait(&hold.entered);
     try std.testing.expectEqual(@as(usize, 0), x.r.states.items.len);
     x.s.remove(0);
     try std.testing.expectEqual(@as(usize, 0), x.f.live);
-    try x.keep(&tokens, 600);
+    try x.keep(&tokens, 200);
     x.s.remove(0);
     try std.testing.expectEqual(@as(usize, 1), x.r.worker.?.pending());
     hold.release.store(true, .release);
@@ -193,13 +226,13 @@ test "spill I/O: an entry evicted during its write has no borrowed storage and p
 }
 
 test "spill I/O: forget fences a blocked job before unlink and the old generation cannot reappear" {
-    const x = try Fixture.open("forget", .finish, false, 1 << 20);
+    const x = try Fixture.open("forget", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
     x.r.file_io = hold.io();
     const tokens = fixture.prompt(13);
-    try x.keep(&tokens, 600);
+    try x.keep(&tokens, 200);
     try Hold.wait(&hold.entered);
     _ = x.r.forgetAll();
     hold.release.store(true, .release);
@@ -211,11 +244,11 @@ test "spill I/O: forget fences a blocked job before unlink and the old generatio
 }
 
 test "spill I/O: unload releases the family while a blocked syscall owns only staged bytes" {
-    const x = try Fixture.open("unload", .finish, false, 1 << 20);
+    const x = try Fixture.open("unload", .finish, false, 9 << 20);
     var hold: Hold = .{};
     x.r.file_io = hold.io();
     const tokens = fixture.prompt(14);
-    try x.keep(&tokens, 600);
+    try x.keep(&tokens, 200);
     try Hold.wait(&hold.entered);
     const began = rows.write.nowNs();
     x.s.deinit();
@@ -230,13 +263,13 @@ test "spill I/O: unload releases the family while a blocked syscall owns only st
 }
 
 test "spill I/O: shutdown returns at its deadline while a write is blocked" {
-    const x = try Fixture.open("deadline", .finish, false, 1 << 20);
+    const x = try Fixture.open("deadline", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
     x.r.file_io = hold.io();
     const tokens = fixture.prompt(15);
-    try x.keep(&tokens, 600);
+    try x.keep(&tokens, 200);
     try Hold.wait(&hold.entered);
     const began = rows.write.nowNs();
     const left = rows.write.drain(x.r, began + 20 * std.time.ns_per_ms);
@@ -250,28 +283,36 @@ test "spill I/O: shutdown returns at its deadline while a write is blocked" {
 }
 
 test "spill I/O: a completed payload is invisible until fsync finishes, with read-back verification" {
-    const x = try Fixture.open("sync-gate", .finish, false, 1 << 20);
+    const x = try Fixture.open("sync-gate", .finish, false, 9 << 20);
     defer x.close();
-    var hold: Hold = .{ .release = .init(true), .sync_release = .init(false) };
+    var hold: Hold = .{ .hold_ns = 20 * std.time.ns_per_s, .release = .init(true), .sync_release = .init(false) };
     defer hold.sync_release.store(true, .release);
     x.r.file_io = hold.io();
     x.r.verify = true;
     const tokens = fixture.prompt(16);
-    try x.keep(&tokens, 600);
-    try Hold.wait(&hold.sync_entered);
-    rows.write.reap(x.r);
-    try std.testing.expectEqual(@as(usize, 0), x.r.states.items.len);
-    try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".st"));
-    try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".blk"));
-    hold.sync_release.store(true, .release);
-    try x.settle();
-    try std.testing.expectEqual(@as(usize, 1), x.r.states.items.len);
-    try std.testing.expectEqual(@as(u64, 1), x.r.counts.verified);
-    try std.testing.expectEqual(@as(u64, 0), x.r.counts.differed);
+    var stager: Stager = .{ .x = x, .tokens = &tokens, .at = 600 };
+    {
+        const thread = try std.Thread.spawn(.{}, Stager.run, .{&stager});
+        defer {
+            hold.sync_release.store(true, .release);
+            thread.join();
+        }
+        try Hold.wait(&hold.sync_entered);
+        rows.write.reap(x.r);
+        try std.testing.expectEqual(@as(usize, 0), x.r.states.items.len);
+        try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".st"));
+        try std.testing.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".blk"));
+        hold.sync_release.store(true, .release);
+        try x.settle();
+        try std.testing.expectEqual(@as(usize, 1), x.r.states.items.len);
+        try std.testing.expectEqual(@as(u64, 1), x.r.counts.verified);
+        try std.testing.expectEqual(@as(u64, 0), x.r.counts.differed);
+    }
+    try std.testing.expectEqual(@as(?anyerror, null), stager.err);
 }
 
 test "spill I/O: two in-flight states keep shared block references across a disk eviction" {
-    const x = try Fixture.open("shared", .finish, false, 1 << 20);
+    const x = try Fixture.open("shared", .finish, false, 18 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -279,13 +320,32 @@ test "spill I/O: two in-flight states keep shared block references across a disk
     const first = fixture.prompt(17);
     var second = fixture.prompt(18);
     @memcpy(second[0..513], first[0..513]);
-    try x.keep(&first, 900);
-    try Hold.wait(&hold.entered);
-    try x.keep(&second, 900);
-    try std.testing.expectEqual(@as(usize, 2), x.r.worker.?.pending());
-    try std.testing.expect(x.r.worker.?.bytes() <= x.r.staging_bytes);
-    hold.release.store(true, .release);
-    try x.settle();
+    var stage1: Stager = .{ .x = x, .tokens = &first, .at = 900 };
+    var stage2: Stager = .{ .x = x, .tokens = &second, .at = 900 };
+    {
+        const stager1 = try std.Thread.spawn(.{}, Stager.run, .{&stage1});
+        defer {
+            hold.release.store(true, .release);
+            stager1.join();
+        }
+        try Hold.wait(&hold.entered);
+        const stager2 = try std.Thread.spawn(.{}, Stager.run, .{&stage2});
+        defer {
+            hold.release.store(true, .release);
+            stager2.join();
+        }
+        const staged = waits.deadline();
+        while (x.r.worker.?.pending() != 2) {
+            if (rows.write.nowNs() >= staged) return error.StagerStalled;
+            nap();
+        }
+        try std.testing.expectEqual(@as(usize, 2), x.r.worker.?.pending());
+        try std.testing.expect(x.r.worker.?.bytes() <= x.r.staging_bytes);
+        hold.release.store(true, .release);
+        try x.settle();
+    }
+    try std.testing.expect(stage1.err == null);
+    try std.testing.expect(stage2.err == null);
     try std.testing.expectEqual(@as(usize, 2), x.r.states.items.len);
     var shared: usize = 0;
     var it = x.r.blocks.valueIterator();
@@ -301,7 +361,7 @@ test "spill I/O: two in-flight states keep shared block references across a disk
 
 test "spill I/O: killing a child inside a partial write leaves no published state on restart" {
     if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
-    const x = try Fixture.open("kill", .evicted, false, 1 << 20);
+    const x = try Fixture.open("kill", .evicted, false, 9 << 20);
     defer x.close();
     var fds: [2]c_int = undefined;
     if (platform.c.pipe(&fds) != 0) return error.PipeFailed;
@@ -349,18 +409,18 @@ test "spill I/O: killing a child inside a partial write leaves no published stat
 }
 
 test "spill I/O: a full byte permit holds another save that fits it alone until the first job is written" {
-    const x = try Fixture.open("full-permit", .finish, false, 1 << 20);
+    const x = try Fixture.open("full-permit", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
     x.r.file_io = hold.io();
     const first = fixture.prompt(20);
-    try x.keep(&first, 600);
+    try x.keep(&first, 200);
     try Hold.wait(&hold.entered);
     const used = x.r.worker.?.bytes();
     x.r.worker.?.limit = used;
     const second = fixture.prompt(21);
-    try x.keep(&second, 600);
+    try x.keep(&second, 200);
     try std.testing.expectEqual(@as(usize, 1), x.r.worker.?.pending());
     try std.testing.expectEqual(used, x.r.worker.?.bytes());
     try std.testing.expectEqual(@as(usize, 1), x.r.queue.items.len);
@@ -377,14 +437,16 @@ test "spill I/O: a full byte permit holds another save that fits it alone until 
 test "spill I/O: the job permit holds a ninth small save behind eight blocked writes until one is written" {
     const x = try Fixture.open("job-permit", .finish, false, 1 << 30);
     defer x.close();
-    var hold: Hold = .{};
+    // A save below one block needs a single chunk, so staging returns while the writer is gated.
+    var hold: Hold = .{ .hold_ns = 10 * std.time.ns_per_s };
     defer hold.release.store(true, .release);
     x.r.file_io = hold.io();
     var tokens: [9][1100]u32 = undefined;
     for (&tokens, 0..) |*p, i| {
         p.* = fixture.prompt(@intCast(30 + i));
-        try x.keep(p, 600);
+        try x.keep(p, 200);
     }
+    try Hold.wait(&hold.entered);
     try std.testing.expectEqual(@as(usize, 8), x.r.worker.?.pending());
     try std.testing.expectEqual(@as(usize, 1), x.r.queue.items.len);
     try std.testing.expectEqual(@as(u64, 0), x.r.counts.skipped);
@@ -394,7 +456,7 @@ test "spill I/O: the job permit holds a ninth small save behind eight blocked wr
 }
 
 test "spill I/O: shutdown keeps a completed job's own filesystem error" {
-    const x = try Fixture.open("stop-error", .evicted, false, 1 << 20);
+    const x = try Fixture.open("stop-error", .evicted, false, 9 << 20);
     defer x.close();
     var fault: Hold = .{ .mode = .full, .release = .init(true) };
     x.r.file_io = fault.io();

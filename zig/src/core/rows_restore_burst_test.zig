@@ -23,7 +23,7 @@ fn counts(f: *pf.Prefetch) Counts {
     defer f.mutex.unlock(f.io);
     var out: Counts = .{ .reads = f.held_reads, .charged = f.held_bytes, .allocated = 0, .settled = 0 };
     for (f.reads.items) |rd| if (rd.phase == .ready or rd.phase == .failed) {
-        out.allocated += rd.buf.len;
+        for (rd.slots) |slot| out.allocated += slot.buf.len;
         out.settled += 1;
     };
     return out;
@@ -50,7 +50,7 @@ test "restore scale: bursts bound allocated staging and failures wake every admi
         x.f.prompt = r.states.items[0].tokens;
         const saved = try rows.read.read(r, 0);
         x.f.snapshots().vtable.drop(&x.f, saved);
-        const cap: u64 = if (slots == 8) 3 * rows.file.alignment else 16 << 30;
+        const cap: u64 = if (slots == 8) 3 * 2 * pf.chunk_bytes else 16 << 30;
         const expected: usize = if (slots == 8) 3 else slots;
         const f = try pf.make(r, t.io, .{ .reads = slots, .bytes = cap });
         var signal: Signal = .{};
@@ -67,7 +67,7 @@ test "restore scale: bursts bound allocated staging and failures wake every admi
             try t.expectEqual(expected, made);
             const c = try wait(f, made);
             try t.expectEqual(made, c.reads);
-            try t.expectEqual(@as(u64, made) * rows.file.alignment, c.allocated);
+            try t.expectEqual(@as(u64, made) * 2 * pf.chunk_bytes, c.allocated);
             try t.expect(c.allocated <= c.charged and c.charged <= cap);
             peak = @max(peak, c.allocated + r.stage.len);
             for (names[0..made]) |name| try t.expect(!f.pending(name));
@@ -83,9 +83,11 @@ test "restore scale: bursts bound allocated staging and failures wake every admi
             try t.expectEqual(@as(usize, 0), counts(f).reads);
             try t.expectEqual(@as(u64, 0), counts(f).charged);
         }
-        try t.expectEqual(@as(u64, expected + 1) * rows.file.alignment, peak);
+        try t.expectEqual(@as(u64, expected) * 2 * pf.chunk_bytes + r.stage.len, peak);
         f.stop();
-        try t.expectEqual(expected * 8, signal.calls.load(.acquire));
+        // A read wakes on its first fragment and again at settle; a failing read wakes only at settle.
+        const wakes: usize = expected * 8 * (if (fails) @as(usize, 1) else 2);
+        try t.expectEqual(wakes, signal.calls.load(.acquire));
         try t.expectEqual(f.counts.made, f.counts.freed);
         try t.expectEqual(@as(u64, if (fails) expected * 8 else 0), f.counts.failed);
         try t.expectEqual(@as(usize, 0), x.f.live);

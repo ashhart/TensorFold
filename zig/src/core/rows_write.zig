@@ -316,7 +316,7 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     var bytes = newBytes(r, &promised, prepared, metadata, &count);
     var charge: u64 = 0;
     while (true) {
-        charge = charged(bytes, count, prepared.wants.len);
+        charge = charged(count, prepared.wants.len, metadata);
         if (!w.fits(charge)) return if (may_wait and w.busy(charge)) error.StagingBusy else error.StagingFull;
         const reserved = w.reserved();
         if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
@@ -337,17 +337,18 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     const a = arena.allocator();
     const files = try a.alloc(io.File, count);
     var built: usize = 0;
+    var range_count: usize = 0;
     for (prepared.wants) |want| if (lacks(r, &promised, want)) {
         var ranges: std.ArrayList(image.Range) = .empty;
         defer ranges.deinit(r.gpa);
         try image.blockRanges(prepared.parts, r.keying.block, want.window, want.k, &ranges, r.gpa);
-        files[built] = .{ .trailer = .{ .kind = @backingInt(file.Kind.block), .payload = 0, .payload_hash = 0, .name = want.name, .block = r.keying.block }, .payload = try a.alloc(u8, @intCast(image.total(ranges.items))) };
-        try r.img.gather(r.family.ptr, e.saved, ranges.items, files[built].payload);
+        range_count += ranges.items.len;
+        files[built] = .{ .trailer = .{ .kind = @backingInt(file.Kind.block), .payload = 0, .payload_hash = 0, .name = want.name, .block = r.keying.block }, .payload_len = image.total(ranges.items), .ranges = try a.dupe(image.Range, ranges.items) };
         built += 1;
     };
     const own = &files[built];
-    own.* = .{ .trailer = .{ .kind = @backingInt(file.Kind.state), .payload = 0, .payload_hash = 0, .name = prepared.name, .at = e.at, .block = r.keying.block, .flags = @intFromBool(e.shared) }, .payload = try a.alloc(u8, @intCast(image.total(prepared.own))) };
-    if (own.payload.len > 0) try r.img.gather(r.family.ptr, e.saved, prepared.own, own.payload);
+    range_count += prepared.own.len;
+    own.* = .{ .trailer = .{ .kind = @backingInt(file.Kind.state), .payload = 0, .payload_hash = 0, .name = prepared.name, .at = e.at, .block = r.keying.block, .flags = @intFromBool(e.shared) }, .payload_len = image.total(prepared.own), .ranges = try a.dupe(image.Range, prepared.own) };
     const tokens = try a.dupe(u32, e.tokens);
     const spans = try a.dupe(@import("cache_modes.zig").Span, e.decode_spans);
     const starts = try a.dupe(u32, prepared.starts);
@@ -355,13 +356,37 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     counts.* = .{ @intCast(tokens.len), @intCast(spans.len), @intCast(starts.len) };
     own.meta = try a.dupe([]const u8, &.{ std.mem.asBytes(counts), std.mem.sliceAsBytes(tokens), std.mem.sliceAsBytes(spans), std.mem.sliceAsBytes(starts) });
     const wants = try a.dupe(Want, prepared.wants);
-    j.* = .{ .arena = arena, .id = r.next_job, .generation = w.generation.load(.acquire), .name = prepared.name, .at = e.at, .shared = e.shared, .tokens = tokens, .spans = spans, .starts = starts, .wants = wants, .files = files, .bytes = bytes, .staged = charge, .verify = r.verify, .began = prepared.began };
+    charge += @intCast(range_count * @sizeOf(image.Range));
+    if (!w.fits(charge)) return if (may_wait and w.busy(charge)) error.StagingBusy else error.StagingFull;
+    j.* = .{ .arena = arena, .id = r.next_job, .generation = w.generation.load(.acquire), .name = prepared.name, .at = e.at, .shared = e.shared, .tokens = tokens, .spans = spans, .starts = starts, .wants = wants, .files = files, .bytes = bytes, .staged = charge, .chunks = .{ .{ .bytes = &.{} }, .{ .bytes = &.{} } }, .verify = r.verify, .began = prepared.began };
+    for (&j.chunks) |*c| c.bytes = try a.alloc(u8, io.chunk_bytes);
     w.submit(j);
+    stream(r, w, j, e.saved) catch |err| j.fail(err); // after submit, reap owns admission and failure reporting
 }
 
-/// A staged job's charge: its files' bytes and the bookkeeping the worker holds beside them.
-fn charged(bytes: u64, files: usize, wants: usize) u64 {
-    return bytes + @sizeOf(io.Job) + files * @sizeOf(io.File) + wants * @sizeOf(Want) + 4 * @sizeOf([]const u8);
+/// Gather on the engine until every file is handed off; Saved dies only after this returns.
+fn stream(r: *Rows, w: *io.Worker, j: *io.Job, saved: pc.Saved) !void {
+    var pieces: std.ArrayList(image.Range) = .empty;
+    defer pieces.deinit(r.gpa);
+    for (j.files, 0..) |*f, index| {
+        var cursor: image.Cursor = .{};
+        var off: u64 = 0;
+        while (cursor.index < f.ranges.len) {
+            const c = try w.freeChunk(j);
+            pieces.clearRetainingCapacity();
+            const n: usize = @intCast(try image.nextChunk(f.ranges, &cursor, c.bytes.len, &pieces, r.gpa));
+            if (n == 0) break;
+            try r.img.gather(r.family.ptr, saved, pieces.items, c.bytes[0..n]);
+            j.sendChunk(c, index, off, n);
+            off += n;
+        }
+        std.debug.assert(off == f.payload_len);
+    }
+}
+
+/// A staged job's fixed two-slot handoff and bookkeeping, never its full disk payload.
+fn charged(files: usize, wants: usize, bookkeeping: u64) u64 {
+    return 2 * io.chunk_bytes + @sizeOf(io.Job) + files * @sizeOf(io.File) + wants * @sizeOf(Want) + bookkeeping + 4 * @sizeOf([]const u8);
 }
 
 /// The most staging a state of `at` tokens charges: none of its blocks on disk, spans and starts at most one a token.
@@ -376,7 +401,7 @@ pub fn coldCharge(r: *const Rows, at: u32) !u64 {
         blocks += w.end - w.first;
     }
     const metadata = 4 * (4 + 4 * @as(u64, at));
-    return charged(image.imageBytes(ps) + metadata + (blocks + 1) * @sizeOf(file.Trailer), blocks + 1, blocks);
+    return charged(blocks + 1, blocks, metadata + @as(u64, @intCast((blocks + 1) * ps.len * 2 * @sizeOf(image.Range))));
 }
 
 /// Whether the state's block is for this job to write: the disk lacks it and no job in flight is writing it.

@@ -1608,9 +1608,9 @@ used. `--learn-min-free-gib` keeps free disk (4 GiB by default), and `--learn-da
 
 On a Mac, `--spill-gib N` writes a state to that store when the prompt cache evicts it from RAM or the engine closes,
 up to N GiB under `~/.cache/tensorfold/spilled` for every model together, and reads it back as above: a later request whose prefix
-matches resumes from it, token for token as a fresh prompt pass, after a restart too. An eviction stages a copy before
-releasing RAM, then the engine continues while the I/O thread writes it. A full staging permit skips that save;
-the request prefills if it returns before a saved state is available. This changes cache hits, never reply tokens.
+matches resumes from it, token for token as a fresh prompt pass, after a restart too. An eviction gathers bounded
+chunks before releasing RAM, then the engine continues while the I/O thread writes them. A full staging permit skips
+that save; the request prefills if it returns before a saved state is available. This changes cache hits, never reply tokens.
 GLM-5.3-Flash also stages each resident state when it is kept, with or without `--spill-gib`, because its slots and
 shared pool can reuse those rows before an eviction. A busy permit waits and retries; an oversized image streams
 in bounded pieces. The log names the staging reason; other admission or copy failures still skip that save.
@@ -1633,9 +1633,9 @@ same bytes. That comparison writer retains blocking I/O; the bounded disk wait u
 
 On CUDA, Nemotron, the Qwen3.5 hybrids, Flash Next, Gemma 4, Dory and Spark2.5 take `--spill-gib` and
 `--checkpoint-slots` with the same store and cap as a Mac. At an eviction the engine thread stages a copy of the state
-into host memory, waiting for the GPU work that produced it, then releases its RAM entry and goes on; the I/O thread
-writes and fsyncs the copy while the engine decodes. Staging holds at most 1 GiB and eight jobs; for Gemma 4, Dory and
-Spark2.5 it holds one whole state at the served window, within the RAM cache's budget. A state whose new bytes (rows
+into bounded host-memory chunks, waiting for the GPU work that produced it, then releases its RAM entry and goes on;
+the I/O thread writes and fsyncs the chunks while the engine decodes. Staging holds at most 1 GiB and eight jobs; each
+save keeps two fixed 4 MiB handoff slots plus metadata, not another whole state. A state whose new bytes (rows
 neither on disk nor being written) do not fit what is free is not saved, and a later request for it prefills. When the
 engine closes, at a planned stop (SIGTERM or SIGINT) or an idle unload, it saves the states still in RAM, newest first,
 within the same disk cap and 20-second stop budget. While other streams run, a queued request whose state is on disk has

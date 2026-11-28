@@ -19,14 +19,16 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
     const t0 = write.nowNs();
     var plan = try prefetch.Plan.of(r, r.gpa, &s);
     defer plan.deinit(r.gpa);
-    const ahead = if (r.fetch) |p| p.take(s.name, &plan) else null; // read on the I/O thread, its files checked there
+    const fetch = r.fetch;
+    const ahead = if (fetch) |p| p.take(s.name, &plan) else null;
+    defer if (ahead) |a| fetch.?.finish(a);
     const saved = try r.img.blank(r.family.ptr, s.at);
     errdefer f.drop(r.family.ptr, saved);
     var bytes: u64 = 0;
-    for (plan.pieces) |p| {
-        if (ahead) |a| try scatter(r, p.name, prefetch.ext(p.kind), saved, plan.rangesOf(p), a.payload(p)) else bytes += try one(r, p.name, p.kind, prefetch.ext(p.kind), p.at, plan.rangesOf(p), saved);
-    }
-    if (ahead) |a| bytes = a.disk;
+    if (ahead) |a| {
+        try drain(r, fetch.?, a, &plan, saved);
+        bytes = a.disk;
+    } else for (plan.pieces) |p| bytes += try one(r, p.name, p.kind, prefetch.ext(p.kind), p.at, plan.rangesOf(p), saved);
     const ns = if (ahead) |a| a.ns else write.nowNs() - t0;
     if (ns > 0 and bytes > 64 << 20) r.read_rate = 0.5 * r.read_rate + 0.5 * @as(f64, @floatFromInt(bytes)) / (@as(f64, @floatFromInt(ns)) / 1e9);
     noteReadLatency(r, ns);
@@ -45,10 +47,65 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: 
     var o = file.open(p, kind, name) catch |err| return bad(r, name, ext, err);
     defer o.close();
     if (o.trailer.payload != n or o.trailer.block != r.keying.block or o.trailer.at != at) return bad(r, name, ext, error.RowsRead);
-    const stage = try r.staged(n);
-    const got = file.payload(&o, stage) catch |err| return bad(r, name, ext, err);
-    try scatter(r, name, ext, saved, ranges, got);
+    const stage = try r.staged(@min(n, image.copyChunk));
+    var hash: std.hash.Wyhash = .init(0);
+    var pieces: std.ArrayList(image.Range) = .empty;
+    defer pieces.deinit(r.gpa);
+    var cursor: image.Cursor = .{};
+    var done: u64 = 0;
+    while (done < n) {
+        pieces.clearRetainingCapacity();
+        const take = @min(n - done, image.copyChunk);
+        const planned = try image.nextChunk(ranges, &cursor, take, &pieces, r.gpa);
+        std.debug.assert(planned == take);
+        const got = file.payloadChunk(&o, stage[0..@intCast(take)], &done, &hash) catch |err| return bad(r, name, ext, err);
+        std.debug.assert(got.len == take);
+        try scatter(r, name, ext, saved, pieces.items, got);
+    }
+    if (hash.final() != o.trailer.payload_hash) return bad(r, name, ext, error.RowsHash);
     return o.trailer.payload + o.trailer.meta + @sizeOf(file.Trailer);
+}
+
+/// Scatter ordered prefetch fragments without retaining a whole-file payload.
+fn drain(r: *Rows, f: *prefetch.Prefetch, rd: *prefetch.Read, plan: *const prefetch.Plan, saved: pc.Saved) !void {
+    var ranges: std.ArrayList(image.Range) = .empty;
+    defer ranges.deinit(r.gpa);
+    var piece: usize = 0;
+    var cursor: image.Cursor = .{};
+    var done: u64 = 0;
+    while (piece < plan.pieces.len and plan.pieces[piece].len == 0) piece += 1;
+    while (true) {
+        const chunk = f.next(rd) catch |err| {
+            if (rd.failed_piece) |fp| {
+                const p = plan.pieces[fp];
+                return bad(r, p.name, prefetch.ext(p.kind), err);
+            }
+            return err;
+        } orelse break;
+        if (piece == plan.pieces.len or chunk.piece != piece or chunk.off != plan.pieces[piece].off + done) {
+            f.recycle(rd, chunk);
+            return error.RowsRead;
+        }
+        const p = plan.pieces[piece];
+        ranges.clearRetainingCapacity();
+        const n = image.nextChunk(plan.rangesOf(p), &cursor, chunk.bytes.len, &ranges, r.gpa) catch |err| {
+            f.recycle(rd, chunk);
+            return err;
+        };
+        std.debug.assert(n == chunk.bytes.len);
+        scatter(r, p.name, prefetch.ext(p.kind), saved, ranges.items, chunk.bytes) catch |err| {
+            f.recycle(rd, chunk);
+            return err;
+        };
+        f.recycle(rd, chunk);
+        done += n;
+        if (done != p.len) continue;
+        piece += 1;
+        while (piece < plan.pieces.len and plan.pieces[piece].len == 0) piece += 1;
+        cursor = .{};
+        done = 0;
+    }
+    if (piece != plan.pieces.len) return error.RowsRead;
 }
 
 /// Whether a family refused what a file holds (words that differ, of another world or layout; a size or range unfit).

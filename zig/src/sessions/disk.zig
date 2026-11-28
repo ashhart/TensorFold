@@ -49,6 +49,14 @@ pub const Options = struct {
 pub const Blob = struct {
     name: []const u8,
     bytes: []const u8,
+    /// Owned blobs transfer both slices; borrowed blobs free only their descriptor array.
+    owned: bool = true,
+
+    pub fn deinit(b: Blob, gpa: std.mem.Allocator) void {
+        if (!b.owned) return;
+        gpa.free(b.name);
+        gpa.free(b.bytes);
+    }
 };
 
 /// What a park writes: the entry, its tokens from first_page on, and this rank's pages per family, in logical order.
@@ -87,10 +95,7 @@ pub const Restored = struct {
     blobs: []Blob,
 
     pub fn deinit(r: *Restored, gpa: std.mem.Allocator) void {
-        for (r.blobs) |b| {
-            gpa.free(b.name);
-            gpa.free(b.bytes);
-        }
+        for (r.blobs) |b| b.deinit(gpa);
         gpa.free(r.blobs);
     }
 };
@@ -299,10 +304,7 @@ pub const Disk = struct {
         if (linux.errno(linux.statx(f.fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true }, &st)) != .SUCCESS or st.size < lay.head.total) return error.Truncated;
         var out: std.ArrayList(Blob) = .empty;
         errdefer {
-            for (out.items) |b| {
-                d.gpa.free(b.name);
-                d.gpa.free(b.bytes);
-            }
+            for (out.items) |b| b.deinit(d.gpa);
             out.deinit(d.gpa);
         }
         var op = try Op.init(d.gpa, d.io, &d.staging);

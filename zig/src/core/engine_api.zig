@@ -518,6 +518,7 @@ pub const Rounds = @import("lane_host.zig").Rounds;
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
 pub const cache_salt_key = @import("cache_salt_key.zig");
+pub const rows_peak_allocator = @import("rows_peak_allocator.zig");
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
 /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).

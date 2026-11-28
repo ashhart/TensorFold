@@ -261,6 +261,17 @@ pub fn payload(o: *const Opened, into: Stage) ![]u8 {
     return into[0..@intCast(n)];
 }
 
+/// The next payload bytes into `into`, checked in file order by the caller's `hash`; empty at the payload's end.
+pub fn payloadChunk(o: *const Opened, into: Stage, offset: *u64, hash: *std.hash.Wyhash) ![]u8 {
+    if (offset.* > o.trailer.payload) return error.RowsRead;
+    const n = @min(o.trailer.payload - offset.*, into.len);
+    const out = into[0..@intCast(n)];
+    if (!readUnaligned(o.fd, out, offset.*)) return error.RowsRead;
+    hash.update(out);
+    offset.* += n;
+    return out;
+}
+
 /// The metadata (a state's tokens, spans and starts) into `a`'s memory, checked against its hash.
 pub fn meta(o: *const Opened, a: std.mem.Allocator) ![]u8 {
     const m = try a.alloc(u8, @intCast(o.trailer.meta));
@@ -335,6 +346,25 @@ test "a block file reads back byte for byte, and a flipped byte, a cut tail or a
         var o = try open(file, .block, name);
         defer o.close();
         try std.testing.expectEqualSlices(u8, body, try payload(&o, s));
+    }
+    {
+        var o = try open(file, .block, name);
+        defer o.close();
+        var hash: std.hash.Wyhash = .init(0);
+        var off: u64 = 0;
+        var joined: std.ArrayList(u8) = .empty;
+        defer joined.deinit(a);
+        while (true) {
+            const cap: usize = @intCast(off % 8191 + 1);
+            const piece = try payloadChunk(&o, s[0..cap], &off, &hash);
+            if (piece.len == 0) break;
+            try joined.appendSlice(a, piece);
+        }
+        try std.testing.expectEqualSlices(u8, body, joined.items);
+        try std.testing.expectEqual(@as(u64, body.len), off);
+        try std.testing.expectEqual(o.trailer.payload_hash, hash.final());
+        off += 1;
+        try std.testing.expectError(error.RowsRead, payloadChunk(&o, s, &off, &hash));
     }
     try std.testing.expectError(error.RowsRead, open(file, .block, @splat(6)));
     try std.testing.expectError(error.RowsRead, open(file, .state, null));

@@ -10,7 +10,7 @@ fn drain(x: *Fixture) usize {
 }
 
 test "rows close: spill-only flushes more than eight RAM states newest first without ordinary idle writes" {
-    const x = try Fixture.open("close-order", .evicted, false, 1 << 20);
+    const x = try Fixture.open("close-order", .evicted, false, 9 << 20);
     defer x.close();
     var tokens: [12][1100]u32 = undefined;
     for (&tokens, 0..) |*p, i| {
@@ -26,9 +26,9 @@ test "rows close: spill-only flushes more than eight RAM states newest first wit
 }
 
 test "rows close: planned snapshots have eviction file bytes and restore the same image" {
-    const closed = try Fixture.open("close-bytes", .evicted, false, 1 << 20);
+    const closed = try Fixture.open("close-bytes", .evicted, false, 9 << 20);
     defer closed.close();
-    const evicted = try Fixture.open("close-eviction", .evicted, false, 1 << 20);
+    const evicted = try Fixture.open("close-eviction", .evicted, false, 9 << 20);
     defer evicted.close();
     const tokens = fx.prompt(120);
     for ([_]*Fixture{ closed, evicted }) |x| {
@@ -67,7 +67,7 @@ test "rows close: the cap keeps the newest RAM state instead of replacing it wit
 }
 
 fn capped(spill: rows.Spill, synchronous: bool) !void {
-    const x = try Fixture.open("close-cap", spill, synchronous, 1 << 20);
+    const x = try Fixture.open("close-cap", spill, synchronous, 9 << 20);
     defer x.close();
     const old = fx.prompt(130);
     try x.keep(&old, 600);
@@ -94,7 +94,7 @@ fn capped(spill: rows.Spill, synchronous: bool) !void {
 }
 
 test "rows close: finishing an earlier eviction leaves cap space available to the newer RAM conversation" {
-    const x = try Fixture.open("close-pending", .evicted, false, 1 << 20);
+    const x = try Fixture.open("close-pending", .evicted, false, 9 << 20);
     defer x.close();
     const old = fx.prompt(135);
     try x.keep(&old, 600);
@@ -114,17 +114,18 @@ test "rows close: finishing an earlier eviction leaves cap space available to th
 }
 
 test "rows close: a blocked spill-only flush cannot hold shutdown past its deadline" {
-    const x = try Fixture.open("close-deadline", .evicted, false, 1 << 20);
+    const x = try Fixture.open("close-deadline", .evicted, false, 9 << 20);
     defer x.close();
-    var gate: fx.Gate = .{};
+    var gate: fx.Gate = .{ .hold_ns = 10 * std.time.ns_per_s };
     defer gate.release.store(true, .release);
     x.r.file_io = gate.io();
     const tokens = fx.prompt(140);
-    try x.keep(&tokens, 600);
+    // A save below one block stages in one chunk, so a gated write does not backpressure staging.
+    try x.keep(&tokens, 200);
     x.s.remove(0);
     try fx.Gate.wait(&gate.entered);
     const next = fx.prompt(141);
-    try x.keep(&next, 600);
+    try x.keep(&next, 200);
     const left = rows.write.drain(x.r, rows.write.nowNs());
     try std.testing.expect(!gate.left.load(.acquire));
     gate.release.store(true, .release);
@@ -136,7 +137,7 @@ test "rows close: a blocked spill-only flush cannot hold shutdown past its deadl
 }
 
 test "rows close: an expired deadline starts no spill work" {
-    const x = try Fixture.open("close-expired", .evicted, false, 1 << 20);
+    const x = try Fixture.open("close-expired", .evicted, false, 9 << 20);
     defer x.close();
     const tokens = fx.prompt(150);
     try x.keep(&tokens, 600);
@@ -146,7 +147,7 @@ test "rows close: an expired deadline starts no spill work" {
 }
 
 test "rows close: without spill the learned-state queue and eviction behavior are unchanged" {
-    const x = try Fixture.open("close-off", .off, false, 1 << 20);
+    const x = try Fixture.open("close-off", .off, false, 9 << 20);
     defer x.close();
     const old = fx.prompt(160);
     x.f.prompt = &old;

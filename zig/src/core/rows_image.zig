@@ -13,6 +13,38 @@ pub const Part = struct {
 /// `len` bytes at `off` of an image.
 pub const Range = struct { off: u64, len: u64 };
 
+/// The largest payload copy staged on the engine thread.
+pub const copyChunk: u64 = 16 << 20;
+
+/// The next range and byte offset within it of a chunked image copy.
+pub const Cursor = struct { index: usize = 0, off: u64 = 0 };
+
+/// Consecutive slices from `cursor`, at most `limit` bytes together; the cursor moves only after success.
+pub fn nextChunk(ranges: []const Range, cursor: *Cursor, limit: u64, out: *std.ArrayList(Range), a: Allocator) !u64 {
+    std.debug.assert(limit > 0);
+    out.clearRetainingCapacity();
+    var next = cursor.*;
+    var n: u64 = 0;
+    while (next.index < ranges.len and n < limit) {
+        const r = ranges[next.index];
+        if (next.off == r.len) {
+            next.index += 1;
+            next.off = 0;
+            continue;
+        }
+        const take = @min(r.len - next.off, limit - n);
+        try out.append(a, .{ .off = r.off + next.off, .len = take });
+        next.off += take;
+        n += take;
+    }
+    while (next.index < ranges.len and next.off == ranges[next.index].len) {
+        next.index += 1;
+        next.off = 0;
+    }
+    cursor.* = next;
+    return n;
+}
+
 /// Where a group's whole blocks of `block` tokens lie for a state at `at`: blocks [first, end).
 pub const Span = struct { first: u32, end: u32 };
 
@@ -176,4 +208,132 @@ test "a ring's block that wraps its window comes back as two ranges in position 
     defer list.deinit(a);
     try blockRanges(&parts, 64, 100, 1, &list, a); // positions 64..128: rows 64..99, then 0..27
     try std.testing.expectEqualSlices(Range, &.{ .{ .off = 128, .len = 72 }, .{ .off = 0, .len = 56 } }, list.items);
+}
+
+test "nextChunk cuts only at its byte limit and resumes at the exact range seam" {
+    const ranges = [_]Range{ .{ .off = 10, .len = 5 }, .{ .off = 40, .len = 9 }, .{ .off = 80, .len = 4 } };
+    var cursor: Cursor = .{};
+    var out: std.ArrayList(Range) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 6), try nextChunk(&ranges, &cursor, 6, &out, std.testing.allocator));
+    try std.testing.expectEqualSlices(Range, &.{ .{ .off = 10, .len = 5 }, .{ .off = 40, .len = 1 } }, out.items);
+    try std.testing.expectEqual(Cursor{ .index = 1, .off = 1 }, cursor);
+    try std.testing.expectEqual(@as(u64, 6), try nextChunk(&ranges, &cursor, 6, &out, std.testing.allocator));
+    try std.testing.expectEqualSlices(Range, &.{.{ .off = 41, .len = 6 }}, out.items);
+    try std.testing.expectEqual(@as(u64, 6), try nextChunk(&ranges, &cursor, 6, &out, std.testing.allocator));
+    try std.testing.expectEqualSlices(Range, &.{ .{ .off = 47, .len = 2 }, .{ .off = 80, .len = 4 } }, out.items);
+    try std.testing.expectEqual(ranges.len, cursor.index);
+    try std.testing.expectEqual(@as(u64, 0), try nextChunk(&ranges, &cursor, 6, &out, std.testing.allocator));
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "bounded chunks gather exact destinations and copy failures leave the source intact" {
+    const a = std.testing.allocator;
+    const n: usize = @intCast(copyChunk + 11);
+    const source = try a.alloc(u8, n);
+    defer a.free(source);
+    for (source, 0..) |*b, i| b.* = @truncate(i *% 73 +% 19);
+    const before = try a.dupe(u8, source);
+    defer a.free(before);
+    const dest = try a.alloc(u8, n);
+    defer a.free(dest);
+    @memset(dest, 0xaa);
+    const ranges = [_]Range{ .{ .off = 0, .len = copyChunk - 3 }, .{ .off = copyChunk - 3, .len = 8 }, .{ .off = copyChunk + 5, .len = 6 } };
+    const Gather = struct {
+        fn apply(src: []const u8, rs: []const Range, out: []u8, fail: bool) !void {
+            if (fail) return error.GatherFailed;
+            var done: usize = 0;
+            for (rs) |r| {
+                const len: usize = @intCast(r.len);
+                @memcpy(out[done..][0..len], src[@intCast(r.off)..][0..len]);
+                done += len;
+            }
+        }
+    };
+    var out: std.ArrayList(Range) = .empty;
+    defer out.deinit(a);
+    var cursor: Cursor = .{};
+    const first = try nextChunk(&ranges, &cursor, copyChunk, &out, a);
+    try std.testing.expect(first <= copyChunk);
+    const stage = try a.alloc(u8, @intCast(first));
+    defer a.free(stage);
+    try std.testing.expectError(error.GatherFailed, Gather.apply(source, out.items, stage, true));
+    try std.testing.expectEqualSlices(u8, before, source);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, dest[0..1]);
+
+    cursor = .{};
+    var done: usize = 0;
+    while (cursor.index < ranges.len) {
+        const bytes = try nextChunk(&ranges, &cursor, copyChunk, &out, a);
+        try std.testing.expect(bytes > 0 and bytes <= copyChunk);
+        const bounded = try a.alloc(u8, @intCast(bytes));
+        defer a.free(bounded);
+        try Gather.apply(source, out.items, bounded, false);
+        @memcpy(dest[done..][0..bounded.len], bounded);
+        done += bounded.len;
+    }
+    try std.testing.expectEqual(n, done);
+    try std.testing.expectEqualSlices(u8, source, dest);
+    try std.testing.expectEqualSlices(u8, before, source);
+
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var fresh: std.ArrayList(Range) = .empty;
+    defer fresh.deinit(a);
+    cursor = .{};
+    try std.testing.expectError(error.OutOfMemory, nextChunk(&ranges, &cursor, copyChunk, &fresh, failing.allocator()));
+    try std.testing.expectEqual(Cursor{}, cursor);
+    try std.testing.expectEqualSlices(u8, before, source);
+}
+
+test "a later chunk allocation fails with a bounded peak and an unchanged source" {
+    const a = std.testing.allocator;
+    const n: usize = @intCast(copyChunk + 11);
+    const source = try a.alloc(u8, n);
+    defer a.free(source);
+    for (source, 0..) |*b, i| b.* = @truncate(i *% 73 +% 19);
+    const before = try a.dupe(u8, source);
+    defer a.free(before);
+    const dest = try a.alloc(u8, n);
+    defer a.free(dest);
+    @memset(dest, 0xaa);
+    const ranges = [_]Range{ .{ .off = 0, .len = copyChunk - 3 }, .{ .off = copyChunk - 3, .len = 8 }, .{ .off = copyChunk + 5, .len = 6 } };
+    var out: std.ArrayList(Range) = .empty;
+    defer out.deinit(a);
+    var cursor: Cursor = .{};
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    const fa = failing.allocator();
+    const first = try nextChunk(&ranges, &cursor, copyChunk, &out, a);
+    const one = try fa.alloc(u8, @intCast(first));
+    var copied: usize = 0;
+    for (out.items) |r| {
+        const len: usize = @intCast(r.len);
+        @memcpy(one[copied..][0..len], source[@intCast(r.off)..][0..len]);
+        @memcpy(dest[copied..][0..len], one[copied..][0..len]);
+        copied += len;
+    }
+    fa.free(one);
+    _ = try nextChunk(&ranges, &cursor, copyChunk, &out, a);
+    try std.testing.expectError(error.OutOfMemory, fa.alloc(u8, @intCast(total(out.items))));
+    try std.testing.expectEqualSlices(u8, before, source);
+
+    var peak: @import("rows_peak_allocator.zig").Peak = .{ .child = a };
+    const pa = peak.allocator();
+    cursor = .{};
+    var done: usize = 0;
+    while (cursor.index < ranges.len) {
+        const bytes = try nextChunk(&ranges, &cursor, copyChunk, &out, a);
+        const stage = try pa.alloc(u8, @intCast(bytes));
+        var off: usize = 0;
+        for (out.items) |r| {
+            const len: usize = @intCast(r.len);
+            @memcpy(stage[off..][0..len], source[@intCast(r.off)..][0..@intCast(r.len)]);
+            off += len;
+        }
+        @memcpy(dest[done..][0..@intCast(bytes)], stage);
+        pa.free(stage);
+        done += @intCast(bytes);
+    }
+    try std.testing.expectEqualSlices(u8, source, dest);
+    try std.testing.expectEqual(@as(usize, copyChunk), peak.peak);
+    try std.testing.expectEqual(@as(usize, 0), peak.live);
 }
