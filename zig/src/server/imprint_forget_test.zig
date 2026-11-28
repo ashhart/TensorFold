@@ -79,7 +79,7 @@ const Engine = struct {
         return true;
     }
     fn info(ctx: *anyopaque) api.Info {
-        return .{ .warm_turns = cast(ctx).warm_turns };
+        return .{ .warm_turns = cast(ctx).warm_turns, .cache_salt = true };
     }
     fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
         cast(ctx).submits += 1;
@@ -123,6 +123,7 @@ const Caller = struct {
     key: ?[]const u8 = null,
     scopes: scope.Scopes = scope.full,
     body: []const u8 = body_x,
+    digest: ?[32]u8 = null,
 };
 
 /// One forget through the dispatcher, as the connection thread hands it over after the key gate; status and body.
@@ -144,6 +145,7 @@ fn call(srv: *Server, a: Allocator, c: Caller) !struct { status: u16, body: json
         .write_hooks = .{ .ctx = &wire, .write = Wire.write },
         .key_label = c.key,
         .key_scopes = c.scopes,
+        .key_digest = c.digest,
     };
     routes.dispatch(srv, &conn, a);
     const out = wire.bytes.items;
@@ -243,6 +245,28 @@ test "imprint forget: the engine drops the rendered conversation's key, and an u
     const broken = try call(srv, a, .{ .body = "{\"messages\": 7}" });
     try t.expectEqual(@as(u16, 400), broken.status); // a body that is no conversation reaches no engine
     try t.expectEqual(@as(u32, 2), e.asks);
+}
+
+test "imprint forget: per-key cache salt names the keyed conversation" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var keys = try auth.Store.init(t.allocator, &.{"sk-forget-test"}, "", null, false, &problem);
+    defer keys.deinit();
+    var e: Engine = .{};
+    defer e.cancels.deinit(t.allocator);
+    const srv = try serve(e.engine(), &keys);
+    defer srv.deinit();
+    srv.config.cache_salt_per_key = true;
+    const digest: [32]u8 = @splat(0x42);
+    const named = try call(srv, a, .{ .key = "ops", .digest = digest });
+    try t.expectEqual(@as(u16, 200), named.status);
+    const salts = @import("cache_salt.zig");
+    var words: ["conversation x".len]u32 = undefined;
+    for ("conversation x", 0..) |ch, i| words[i] = ch;
+    const expected = try salts.salted(a, &words, salts.ofRequest(srv, 0, digest));
+    try t.expectEqualSlices(u32, expected, e.key[0..e.key_len]);
 }
 
 test "imprint forget: 501 where no store keeps states, and a model --idle-unload parked answers 503 unloaded" {

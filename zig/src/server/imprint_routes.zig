@@ -73,7 +73,8 @@ pub fn forgetOne(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     var cx: errors.Cx = .{ .a = a };
     const body = http_body.readJson(conn, &cx) catch return refuse(conn, a, &cx);
-    const input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
+    var input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
+    input.cache_salt = @import("cache_salt.zig").ofRequest(srv, input.cache_salt, conn.key_digest);
     const p = chat.prepare(srv, &cx, input, Never{}) catch return refuse(conn, a, &cx);
     defer srv.release(p.preparing, p.request);
     var named = p.request;

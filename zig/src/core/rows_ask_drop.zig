@@ -35,9 +35,15 @@ pub fn drop(a: *ask.Ask, s: *pc.Store, keys: ask.Keys) void {
     defer resumes(a, s, keys, frame);
     if (a.prompt.len == 0) return;
     const n: Named = .{ .key = a.prompt, .frame = if (frame != 0) pc.framed(a.prompt[0], frame) else null };
+    s.image_query = a.images;
+    s.image_frame = frame;
+    defer {
+        s.image_query = null;
+        s.image_frame = 0;
+    }
     const r = s.disk;
     if (r) |d| if (!settle(d)) rows.write.fence(d); // a save of it still in flight never publishes
-    for (s.entries.items) |e| if (!e.expired and n.related(e.tokens)) {
+    for (s.entries.items) |e| if (!e.expired and n.related(e.tokens) and @import("cache_images.zig").matches(s, e)) {
         if (stays(s, n, e.tokens, e.shared)) {
             a.shared += 1;
             continue;

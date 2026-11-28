@@ -5,6 +5,7 @@ const rows = @import("rows_store.zig");
 const fake = @import("rows_fake.zig");
 const fixture = @import("rows_async_fixture.zig");
 const Ask = @import("rows_ask.zig").Ask;
+const Image = @import("lanes").stream.Image;
 const t = std.testing;
 const a = t.allocator;
 const rules: pc.Rules = .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 };
@@ -185,4 +186,32 @@ test "drop: a write the I/O thread holds lands first, so another conversation's 
     try t.expectEqualSlices(u32, theirs[0..601], x.r.states.items[0].tokens);
     try t.expectEqual(@as(usize, 1), fixture.files(x.r.dir, ".st"));
     try t.expectEqual(@as(usize, 1), x.s.entries.items.len);
+}
+
+test "drop: a compact image collision leaves the other exact image state" {
+    var f: fake.Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), rules, 1 << 30);
+    defer s.deinit();
+    const words: [3000]u32 = @splat(11);
+    const first: Image = .{ .pixels = &.{}, .gh = 2, .gw = 2, .at = 4, .tokens = 1, .hash = 7 };
+    const Identity = @import("cache_images.zig").Identity;
+    f.prompt = &words;
+    f.at = 1000;
+    try t.expect(s.keep(&words, 1000, null, &.{}, &.{}));
+    f.at = 2000;
+    try t.expect(s.keep(&words, 2000, null, &.{}, &.{}));
+    try t.expectEqual(@as(usize, 2), s.entries.items.len);
+    for (s.entries.items) |e| {
+        const identity: Identity = .{ .at = first.at, .tokens = first.tokens, .gh = first.gh, .gw = first.gw, .hash = if (e.at == 1000) 7 else 8 };
+        e.images = try a.dupe(Identity, &.{identity});
+    }
+    var named: Ask = .{ .op = .drop, .prompt = &words, .images = &.{first} };
+    named.answer(&s, .{});
+    try t.expect(named.done.load(.acquire));
+    try t.expect(named.dropped < 2);
+    var other_left = false;
+    for (s.entries.items) |e| if (!e.expired and e.images.len == 1 and e.images[0].hash == 8) {
+        other_left = true;
+    };
+    try t.expect(other_left);
 }
