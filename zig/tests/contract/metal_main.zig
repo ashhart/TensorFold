@@ -31,7 +31,6 @@ const llama_k = @import("metal_llama_all.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 const Opts = struct { only: ?[]const u8 = null, gates: bool = true, limits: bool = true, offline: ?[]const u8 = null, seed: u64 = 0x6b63, repro: bool = false, rotary_long: bool = false, rotary_accuracy: ?[]const u8 = null };
-
 fn parse(args: []const [:0]const u8) !Opts {
     var o = Opts{};
     var i: usize = 1;
@@ -56,7 +55,6 @@ fn parse(args: []const [:0]const u8) !Opts {
     }
     return o;
 }
-
 const Reg = affine_k.Reg;
 const common = [_]Reg{
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
@@ -74,7 +72,6 @@ const common = [_]Reg{
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32 }, .name = "metal lane projection q6 g32 sk1" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32, .sk = 4, .f32_out = true }, .name = "metal lane projection q6 g32 sk4 fp32 out" },
 } ++ affine_k.half ++ affine_k.glm_m3;
-
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
 const m5_only = @import("metal_lane_variants.zig").m5;
 
@@ -429,6 +426,9 @@ pub fn main(init: std.process.Init) !u8 {
     var ios: @import("metal_q27_attn_io.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer ios.deinit();
     try ios.collect(o.only);
+    var out_sums: @import("metal_q27_out_sums.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer out_sums.deinit();
+    try out_sums.collect(o.only);
     var attn_rows: @import("metal_q27_attn_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer attn_rows.deinit();
     try attn_rows.collect(o.only);

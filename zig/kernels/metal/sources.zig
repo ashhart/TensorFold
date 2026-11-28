@@ -257,7 +257,7 @@ pub const core_qk = @embedFile("core/qk.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).
 pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 /// The core DeltaNet kernels (core/deltanet_kernels.zig).
-pub const core_deltanet = @embedFile("core/deltanet.metal") ++ "\n" ++ @embedFile("core/deltanet_slots.metal");
+pub const core_deltanet = @embedFile("core/deltanet.metal") ++ "\n" ++ @embedFile("core/deltanet_slots.metal") ++ "\n" ++ @embedFile("core/deltanet_sums.metal");
 /// SenseNova-Loop two-stream mHC routing, stream enter/leave collapse, and norm kernels.
 pub const core_sensenova_mhc = @embedFile("core/sensenova_mhc.metal");
 /// SenseNova-Loop BF16 row matvec and nax.h prefill GEMM kernels.

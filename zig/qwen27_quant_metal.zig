@@ -34,13 +34,16 @@ pub const Record = struct {
     live_bytes: usize = 0,
     fail_pipeline: bool = false,
     tensor_units: bool = true,
+    max_threads: usize = 1024,
+    name: []const u8 = "",
+    width: u32 = 0,
     virtual_ids: usize = 0,
     barriers: usize = 0,
     bindings: [16]?Binding = @splat(null),
     xs: ?bool = null,
     current: usize = 0,
     rows: u32 = 0,
-    launches: [256]struct { pipeline: usize, rows: u32, grid: Size, stride: i32, barriers: usize, xs: ?bool, input: ?Binding, output: ?Binding } = undefined,
+    launches: [256]struct { name: []const u8, threads: Size, width: u32, bindings: [16]?Binding, pipeline: usize, rows: u32, grid: Size, stride: i32, barriers: usize, xs: ?bool, input: ?Binding, output: ?Binding } = undefined,
     sums_stride: i32 = 0,
     count: usize = 0,
     pub fn device(r: *Record) Device {
@@ -112,10 +115,11 @@ pub const Pipeline = struct {
     r: *Record,
     id: usize,
     xs: ?bool = null,
-    pub fn init(d: Device, lib: Library, _: []const u8, _: bool) !Pipeline {
+    name: []const u8,
+    pub fn init(d: Device, lib: Library, name: []const u8, _: bool) !Pipeline {
         if (d.r.fail_pipeline) return error.PipelineBuild;
         d.r.pipelines += 1;
-        return .{ .r = d.r, .id = d.r.pipelines, .xs = lib.xs };
+        return .{ .r = d.r, .id = d.r.pipelines, .xs = lib.xs, .name = name };
     }
     pub fn deinit(p: Pipeline) void {
         p.r.released += 1;
@@ -123,8 +127,8 @@ pub const Pipeline = struct {
     pub fn simdWidth(_: Pipeline) usize {
         return 32;
     }
-    pub fn maxThreads(_: Pipeline) usize {
-        return 1024;
+    pub fn maxThreads(p: Pipeline) usize {
+        return p.r.max_threads;
     }
 };
 pub const ComputeEncoder = struct {
@@ -132,19 +136,22 @@ pub const ComputeEncoder = struct {
     pub fn setPipeline(e: ComputeEncoder, p: Pipeline) void {
         e.r.current = p.id;
         e.r.xs = p.xs;
+        e.r.name = p.name;
+        e.r.width = 0;
         e.r.bindings = @splat(null);
     }
     pub fn setBuffer(e: ComputeEncoder, b: Buffer, offset: usize, at: usize) void {
         e.r.bindings[at] = .{ .id = b.id, .offset = offset };
     }
     pub fn setValue(e: ComputeEncoder, v: anytype, at: usize) void {
+        if (@TypeOf(v) == u32 and at == 5) e.r.width = v;
         if (@TypeOf(v) == [2]i32 and at == 3) {
             e.r.rows = @intCast(v[0]);
             e.r.sums_stride = v[1];
         }
     }
-    pub fn dispatchGroups(e: ComputeEncoder, grid: Size, _: Size) void {
-        e.r.launches[e.r.count] = .{ .pipeline = e.r.current, .rows = e.r.rows, .grid = grid, .stride = e.r.sums_stride, .barriers = e.r.barriers, .xs = e.r.xs, .input = e.r.bindings[0], .output = e.r.bindings[5] };
+    pub fn dispatchGroups(e: ComputeEncoder, grid: Size, threads: Size) void {
+        e.r.launches[e.r.count] = .{ .name = e.r.name, .threads = threads, .width = e.r.width, .bindings = e.r.bindings, .pipeline = e.r.current, .rows = e.r.rows, .grid = grid, .stride = e.r.sums_stride, .barriers = e.r.barriers, .xs = e.r.xs, .input = e.r.bindings[0], .output = e.r.bindings[5] };
         e.r.count += 1;
     }
     pub fn dispatchThreads(_: ComputeEncoder, _: Size, _: Size) void {}

@@ -367,6 +367,39 @@ test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only it
     try t.expectEqual(@as(usize, 8), r.libraries);
 }
 
+test "qwen27 quant: production flat MLP retains classic and capacity fallbacks" {
+    const delta = @import("core_delta");
+    const saved = delta.flat_glue;
+    defer delta.flat_glue = saved;
+    for ([_]bool{ false, true }) |flat| for ([_]bool{ false, true }) |units| for ([_]usize{ 128, 256, 1024 }) |limit| {
+        delta.flat_glue = flat;
+        var r = mtl.Record{ .tensor_units = units, .max_threads = limit };
+        var k = quant.Kernels{ .allocator = a, .device = r.device() };
+        defer k.deinit();
+        const refs = [_]quant.Ref{
+            .{ .buffer = r.virtual(), .offset = 8 },
+            .{ .buffer = r.virtual(), .offset = 16 },
+            .{ .buffer = r.virtual(), .offset = 24 },
+            .{ .buffer = r.virtual(), .offset = 32 },
+            .{ .buffer = r.virtual(), .offset = 40 },
+        };
+        const selected = flat and units and limit >= 256;
+        for ([_]u32{ 1, 7, 16, 17 }) |rows| {
+            r.count = 0;
+            try k.mlp(r.encoder(), refs[0], refs[1], refs[2], refs[3], refs[4], 1024, rows);
+            try t.expectEqual(@as(usize, 1), r.count);
+            const l = r.launches[0];
+            try t.expectEqualStrings(if (selected) "q27_mlp_rows" else "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float", l.name);
+            try t.expectEqual(@as(?bool, units), l.xs);
+            try t.expectEqual(@as(usize, 16), l.grid.width);
+            try t.expectEqual(@as(usize, if (selected) quant.padded(rows) / 16 else if (units) quant.padded(rows) else rows), l.grid.height);
+            try t.expectEqual(@as(usize, if (selected) 256 else 64), l.threads.width);
+            try t.expectEqual(@as(u32, if (selected) 1024 else 0), l.width);
+            for (refs, 0..) |ref, i| try t.expectEqualDeep(@as(?mtl.Binding, .{ .id = ref.buffer.id, .offset = ref.offset }), l.bindings[i]);
+        }
+    };
+}
+
 test "qwen27 quant: 5-bit and 6-bit g64 use reg lane keys with 128/2048 row capacity and producer sums" {
     for ([_]u8{ 5, 6 }) |bits| {
         var r: mtl.Record = .{};

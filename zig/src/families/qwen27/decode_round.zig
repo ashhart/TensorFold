@@ -7,6 +7,8 @@ const forward = @import("forward.zig");
 const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
 pub const commit_every = 4;
+/// Passes past this many rows are prompt chunks (128 rows and up), 3.5% slower on Metal 4 with qk: Metal 3 takes them.
+const metal4_rows = 64;
 const wts = @import("gpu_weights.zig");
 const attn = @import("attention.zig");
 const abi = @import("gdn_contract.zig");
@@ -77,6 +79,8 @@ pub const Runner = struct {
     /// The running pass's prompt tail start (prompt_tail.zig): its last layer's q, o and MLP run from this row on.
     tail_from: ?u32 = null,
     last_gpu_seconds: f64 = 0,
+    /// Verify passes take the model's Metal 4 context when it has one; an A/B tool turns it off for one runner.
+    metal4: bool = true,
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
     trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
     current_round: ?*const Round = null,
@@ -348,7 +352,7 @@ pub const Runner = struct {
         if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
         const keys = @import("prompt_tail.zig").keysOnly(tail_facts);
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
+        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.passQueue(round.ids.len)}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
         };
@@ -376,6 +380,13 @@ pub const Runner = struct {
     /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
     pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
         return @import("mtp.zig").pass(r, round, sc, hidden, head);
+    }
+
+    /// The model's Metal 4 queue, unless the pass is a prompt chunk or needs Metal 3: a trace, the Neural Engine, seams
+    fn passQueue(r: *const Runner, rows: usize) mtl.Queue {
+        const c = r.model.metal4 orelse return r.model.queue;
+        if (!r.metal4 or rows > metal4_rows or r.trace != null or r.model.ane != null or r.reduce != null) return r.model.queue;
+        return c;
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
@@ -561,31 +572,13 @@ pub const Runner = struct {
 
     pub fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
-        var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain };
+        var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain, .out_sums = if (forward.outSums(r.model, r.reduce)) forward.sums(frame, .sums, rows) else null };
         try GdnHook.forward(&hook, e, block, weights, frame, rows);
     }
 
     pub fn attentionForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
-        const plan = (r.current_attention orelse return error.RoundNotReady).*;
-        const layer = r.attention_index[block];
-        var views: [attn.planning.max_streams]attn.Cache = undefined;
-        const caches = r.layerCaches(layer, r.current_round orelse return error.RoundNotReady, &views);
-        try r.bindings[layer].upload(plan, caches);
-        const attn_loop = if (comptime @hasDecl(@import("core"), "sensenova_loop")) blk: {
-            if (!r.model.config.looped) break :blk false;
-            try @import("loop.zig").encodeAttnProj(&r.model.kernels, r.model.glue, e, weights, f, rows, @intCast(r.model.config.qDim()), @intCast(r.model.config.kvDim()));
-            break :blk true;
-        } else false;
-        // the tail's other rows' queries reach only rows its o projection skips: their q rows stay unwritten
-        const t0: u32 = if (block + 1 == r.model.config.layers) r.tail_from orelse 0 else 0;
-        if (!attn_loop) try @import("attention_input.zig").project(&r.model.kernels, e, weights, f, forward.sums(f, .sums, rows), rows, t0);
-        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .mixed = f.get(.mixed), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry, .shift = r.model.config.shift_norms, .rope = r.model.config.rope, .key = if (attn_loop) f.get(.key) else null, .value = if (attn_loop) f.get(.value) else null });
-        if (attn_loop) {
-            try r.attention.encodeContiguous(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
-        } else {
-            try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.mixed), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
-        }
+        return @import("decode_attention.zig").forward(r, e, block, weights, f, rows);
     }
 
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {

@@ -7,6 +7,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_Q27_IDLE_RELEASE", .raw = "40", .n = 40 },
     .{ .name = "TF_Q27_IDLE_RELEASE", .raw = "86400", .n = 86400 },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .raw = "8", .n = 8 },
+    .{ .name = "TF_Q27_METAL4", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_METAL4", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_QK", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_QK", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_FLAT_GLUE", .raw = "0", .n = 0 },

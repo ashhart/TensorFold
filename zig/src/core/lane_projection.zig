@@ -398,7 +398,8 @@ pub const Projection = struct {
 
     /// tf_lane_sums of `rows` rows of x into this projection's scratch, and a barrier; callers order its reuse.
     pub fn encodeOwnSums(p: Projection, e: mtl.ComputeEncoder, x: Ref, rows: u32) !Sums {
-        return qk.encodeOwnSums(p, e, x, rows);
+        const stride = try @import("lane_sums.zig").encode(p, e, x, rows);
+        return .{ .ref = .{ .buf = p.sums_buffer.? }, .stride = stride };
     }
 
     fn encodeImpl(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, given: ?Sums, y: Ref, rows: u32) !void {
@@ -430,11 +431,7 @@ pub const max_reg_rows = 2048;
 /// Group sums of a projection's input: XS[group * stride + row], fp32, each group's values added in order from zero.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-fn checkRef(r: Ref, need: usize, alignment: usize) !void {
-    if (r.off % alignment != 0) return error.MisalignedBuffer;
-    const len = r.buf.length();
-    if (r.off > len or need > len - r.off) return error.BufferTooSmall;
-}
+const checkRef = @import("lane_sums.zig").checkRef;
 
 test {
     _ = qk; // qk_projection.zig's tests run with this module's
