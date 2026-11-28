@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const reply_text = @import("reply_text.zig");
+const tool_json_cut = @import("tool_json_cut.zig");
 const tool_params = @import("tool_params.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
@@ -49,8 +50,8 @@ pub fn feed(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.
             .value => try value(s, text, out),
             .json_header => jsonHeader(s, text),
             .json_arguments => jsonArguments(s, text),
-            .json_envelope => try jsonEnvelope(s, text, out),
-            .json_tail => jsonTail(s, text),
+            .json_envelope => jsonEnvelope(s, text),
+            .json_tail => try jsonTail(s, text, out),
         };
         if (next != .more) return next;
     }
@@ -262,6 +263,7 @@ fn jsonHeader(s: anytype, text: []const u8) Next {
             s.glm.json_depth += 1;
         } else if (ch == '}') {
             s.glm.json_depth -|= 1;
+            if (s.glm.json_depth == 0) return .unstreamable;
         } else if (ch == '"') {
             if (s.glm.json_depth == 1 and std.mem.startsWith(u8, text[at..], argument_key)) {
                 var value_at = at + argument_key.len;
@@ -309,36 +311,17 @@ fn cutJson(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.E
         s.pos = s.glm.json_scan;
         return;
     }
-    const at = @min(s.glm.value_from, text.len);
-    const name = try jsonCutName(s, text[s.glm.base..at]) orelse return;
+    const start = s.glm.base - "<tool_call>".len;
+    const calls = try tool_json_cut.cutCalls(s.a, text[start..text.len], s.tools) orelse return;
+    if (calls.len != 1) return;
+    const function = calls[0].get("function") orelse return;
+    const name = function.strField("name") orelse return;
+    const arguments = function.get("arguments") orelse return;
+    if (arguments != .string) return;
     try s.begin(name, out);
-    try out.append(s.a, try s.args(text[at..]));
+    try out.append(s.a, try s.args(arguments.string));
     s.state = .glm;
     s.pos = text.len;
-}
-
-/// The offered name ahead of a cut argument object, null when that name has not arrived.
-fn jsonCutName(s: anytype, header: []const u8) Allocator.Error!?[]const u8 {
-    const document = try std.mem.concat(s.a, u8, &.{ header, "null}" });
-    const root = switch (try json.parseText(s.a, document)) {
-        .ok => |v| v,
-        .err => return null,
-    };
-    if (root != .object) return null;
-    const written = root.get("name") orelse return null;
-    if (written != .string) return null;
-    const raw = reply_text.pyStrip(written.string);
-    if (raw.len == 0) return null;
-    return s.known.get(try std.ascii.allocLowerString(s.a, raw));
-}
-/// The production parser validates and constructs the call before the streaming envelope closes.
-fn flushJson(s: anytype, payload: []const u8, end: usize, out: *std.ArrayList(Value)) Allocator.Error!Next {
-    if (!try s.jsonCall(payload, out)) return .unstreamable;
-    s.state = .glm;
-    s.glm.stage = .json_tail;
-    s.glm.json_scan = end;
-    s.pos = end;
-    return .more;
 }
 
 /// The argument object's end, including nested arrays/objects and escaped strings, before any delta goes out.
@@ -373,8 +356,8 @@ fn jsonArguments(s: anytype, text: []const u8) Next {
     return .wait;
 }
 
-/// The envelope's outer close, still before ``</tool_call>``, releases the validated tool-call deltas.
-fn jsonEnvelope(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!Next {
+/// The envelope's outer close: its tail must validate before any delta goes out.
+fn jsonEnvelope(s: anytype, text: []const u8) Next {
     var at = s.glm.json_scan;
     while (at < text.len and space(text[at])) at += 1;
     if (at == text.len) {
@@ -382,16 +365,21 @@ fn jsonEnvelope(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Alloca
         return .wait;
     }
     if (text[at] != '}') return .unstreamable;
-    return flushJson(s, text[s.glm.base .. at + 1], at + 1, out);
+    s.glm.json_scan = at + 1;
+    s.glm.stage = .json_tail;
+    s.pos = at + 1;
+    return .more;
 }
 
-/// The close after a complete, validated argument object.
-fn jsonTail(s: anytype, text: []const u8) Next {
+/// A whitespace-only tail and validated payload release the call at its envelope closer.
+fn jsonTail(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!Next {
     const from = @max(s.glm.json_scan, s.pos);
     const found = std.ascii.findIgnoreCasePos(text, from, call_close) orelse {
         s.pos = text.len -| (call_close.len - 1);
         return .wait;
     };
+    for (text[s.glm.json_scan..found]) |ch| if (!space(ch)) return .unstreamable;
+    if (!try s.jsonCall(text[s.glm.base..s.glm.json_scan], out)) return .unstreamable;
     s.pos = found + call_close.len;
     s.searched = s.pos;
     s.state = .outside;

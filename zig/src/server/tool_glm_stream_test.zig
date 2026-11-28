@@ -306,6 +306,52 @@ test "whole and streamed chat replies agree on GLM calls and on the envelopes ar
     try expectAgree(a, "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}</tool_call><tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"b\"}}</tool_call>", 2000);
 }
 
+test "GLM JSON fallback calls after a streamed call agree whole and streamed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}</tool_call>";
+    for ([_][]const u8{
+        "<tool_call>{\"name\":\"lookup\"}</tool_call>",
+        "<tool_call>{\"name\":\"lookup\",\"args\":{\"q\":\"b\"}}</tool_call>",
+        "<tool_call>{\"name\":\"lookup\",\"parameters\":{\"q\":\"b\"}}</tool_call>",
+        "<tool_call>{\"function\":{\"name\":\"lookup\",\"arguments\":{\"q\":\"b\"}}}</tool_call>",
+    }) |second| {
+        try expectAgree(a, try std.mem.concat(a, u8, &.{ first, second }), 2000);
+    }
+}
+
+test "GLM JSON non-whitespace tails stay content and stream no calls" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}</tool_call>";
+    const malformed = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"b\"}} junk</tool_call>";
+    try expectAgree(a, malformed, 2000);
+    try expectAgree(a, try std.mem.concat(a, u8, &.{ first, malformed }), 2000);
+}
+
+test "GLM JSON alias-named second cut call agrees whole and streamed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}</tool_call>";
+    const cut = try std.mem.concat(a, u8, &.{
+        first,
+        "<tool_call>{\"tool\":\"lookup\",\"arguments\":{\"q\":\"Par",
+    });
+    const tools = try toolsOf(a);
+    const expected = (try @import("tool_json_cut.zig").cutCalls(a, cut, tools)).?;
+    const actual = (try stream.cutCalls(a, cut, tools)).?;
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |want, got| {
+        try std.testing.expectEqualStrings(want.get("function").?.strField("name").?, got.get("function").?.strField("name").?);
+        try std.testing.expectEqualStrings(want.get("function").?.strField("arguments").?, got.get("function").?.strField("arguments").?);
+    }
+    const reply = try std.mem.concat(a, u8, &.{ cut, "x" });
+    try expectAgree(a, reply, cut.len - 1);
+}
+
 test "a GLM value that runs into the next pair or never closes is text, whole and streamed" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -340,7 +386,7 @@ fn jsonCall(a: Allocator, arguments: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "<tool_call>{{\"name\":\"lookup\",\"arguments\":{s}}}</tool_call>", .{arguments});
 }
 
-test "GLM JSON arguments stream after their object closes and before the envelope closer" {
+test "GLM JSON arguments stream at the closer after their tail validates" {
     for ([_][]const u8{ "{\"q\":\"a\"}", "{\"obj\":{\"k\":[1,{\"s\":\"x\"}]},\"n\":2}" }) |arguments| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -350,6 +396,8 @@ test "GLM JSON arguments stream after their object closes and before the envelop
         var s = try Streamer.init(a, try toolsOf(a));
         var out: std.ArrayList(Value) = .empty;
         for (1..closer + 1) |end| try s.feed(text[0..end], &out);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+        try s.feed(text, &out);
         try std.testing.expectEqual(@as(usize, 2), out.items.len);
         const first = out.items[0].get("tool_calls").?.array[0];
         try std.testing.expectEqual(@as(i64, 0), first.get("index").?.int64().?);
