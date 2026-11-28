@@ -269,6 +269,17 @@ fn lookup(s: *pc.Store, q: []const u32, history: u32, buf: []u8) !Stats {
     return stats(&xs);
 }
 
+/// The reason a lookup gives (#3686), alone, with warm caches: its share of `lookup`.
+fn diagnosed(s: *pc.Store, q: []const u32, e: ?*pc.Entry) Stats {
+    var xs: [samples]f64 = undefined;
+    for (0..20 + samples) |k| {
+        const t0 = now();
+        std.mem.doNotOptimizeAway(pc.why.diagnose(s, q, &.{}, &.{}, e));
+        if (k >= 20) xs[k - 20] = @floatFromInt(now() - t0);
+    }
+    return stats(&xs);
+}
+
 /// Kept states sharing at least 1K tokens with another, a prefix of another, or sharing only the template header.
 fn mix(w: *const World, n: usize) struct { long: usize, prefix: usize, header: usize, median_at: u32 } {
     var long: usize = 0;
@@ -327,8 +338,8 @@ test "snapshot index timing: find at 16 64 256 1024 kept states" {
             try std.testing.expect(oracle.find(&s, k.query, &.{}, &.{}) == k.want);
             try std.testing.expect(s.find(k.query, &.{}, &.{}) == k.want);
             const did = work(&s, k.query, k.want);
-            const hot, const fresh, const whole = .{ warm(&s, k.query), cold(&s, k.query, flush), try lookup(&s, k.query, k.history, buf) };
-            std.debug.print("CACHE_INDEX states={d} case={s} query={d} resumes_at={d} probes={d} compares={d} tokens_compared={d} warm_ns={d:.1} warm_min={d:.1} warm_max={d:.1} cold_ns={d:.0} cold_min={d:.0} cold_max={d:.0} lookup_ns={d:.0} lookup_min={d:.0} lookup_max={d:.0}\n", .{ n, k.name, k.query.len, if (k.want) |e| e.at else 0, did.probes, did.compares, did.tokens, hot.median, hot.low, hot.high, fresh.median, fresh.low, fresh.high, whole.median, whole.low, whole.high });
+            const hot, const fresh, const whole, const why = .{ warm(&s, k.query), cold(&s, k.query, flush), try lookup(&s, k.query, k.history, buf), diagnosed(&s, k.query, k.want) };
+            std.debug.print("CACHE_INDEX states={d} case={s} query={d} resumes_at={d} probes={d} compares={d} tokens_compared={d} warm_ns={d:.1} warm_min={d:.1} warm_max={d:.1} cold_ns={d:.0} cold_min={d:.0} cold_max={d:.0} lookup_ns={d:.0} lookup_min={d:.0} lookup_max={d:.0} diagnose_ns={d:.0} diagnose_max={d:.0}\n", .{ n, k.name, k.query.len, if (k.want) |e| e.at else 0, did.probes, did.compares, did.tokens, hot.median, hot.low, hot.high, fresh.median, fresh.low, fresh.high, whole.median, whole.low, whole.high, why.median, why.high });
         }
     }
 }

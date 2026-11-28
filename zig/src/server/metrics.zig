@@ -45,6 +45,7 @@ pub const Metrics = struct {
     kept_unoffered: u64 = 0,
     kept_malformed: u64 = 0,
     disconnects: u64 = 0,
+    cache: @import("cache_why.zig").Counts = .{}, // finished requests by prompt-cache reason (#3686)
     latency: Histogram = .{},
     ttft: Histogram = .{},
     decode: Histogram = .{},
@@ -98,6 +99,13 @@ pub const Metrics = struct {
         };
         const owned = m.gpa.dupe(u8, key) catch return;
         m.requests.append(m.gpa, .{ .key = owned, .status = status, .count = 1 }) catch m.gpa.free(owned);
+    }
+
+    /// One finished request's prompt-cache reason, from an engine whose store says one.
+    pub fn noteCache(m: *Metrics, io: std.Io, w: api.prompt_cache.why.Why) void {
+        m.mutex.lockUncancelable(io);
+        defer m.mutex.unlock(io);
+        m.cache.note(w);
     }
 
     pub fn disconnected(m: *Metrics, io: std.Io) void {
@@ -199,6 +207,7 @@ pub const Metrics = struct {
         }
         const keeps = info.prompt_cache;
         if (keeps) try gauge(w, "prompt_tokens_cached_total", "counter", "Prompt tokens of finished requests restored from kept prompt states.", snap.cached);
+        if (keeps) try snap.cache.render(w, prefix);
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
         const live = streams[0..@min(status.streams, streams.len)];
         try family(w, "kv_cache_usage_ratio", "gauge", "Tokens in a stream cache divided by that stream's context window.");

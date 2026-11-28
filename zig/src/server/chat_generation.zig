@@ -81,6 +81,7 @@ pub const Generation = struct {
     recover: bool = false, // a chat request with no forced tool or structure: an unclosed think block may be the answer
     deadline_ns: ?i96 = null, // "deadline_s": when the server ends the reply itself
     deadline_hit: bool = false, // it did: the engine was cancelled there; what it gave before its end still lands
+    message_starts: []const u32 = &.{}, // exact rendered offsets, independent of stepped prefill
 
     fn eos(g: *const Generation, t: u32) bool {
         return g.grammar.ends(g.ignore_eos, g.srv.eos, t);
@@ -426,6 +427,8 @@ pub const Generation = struct {
             try runtime.put(a, "token_ids", .{ .array = reply_ids });
         }
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
+        if (m.stats.prompt_cache) |w| g.srv.metrics.noteCache(g.srv.io, w);
+        if (g.srv.config.cache_why) if (m.stats.prompt_cache) |w| try runtime.put(a, "prompt_cache", try @import("cache_why.zig").value(a, w, g.message_starts, g.chat));
         if (m.stats.loop_period) |period| {
             const loop_field = try json.newObject(a);
             try loop_field.put(a, "period", try json.intValue(a, period));
@@ -483,7 +486,9 @@ pub const Generation = struct {
         reply.queued_s = s.queued_seconds;
         reply.ttft_s = if (g.first_ns != null) ttft_s else null;
         reply.decode_tps = rate;
-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
+        var why_text: [64]u8 = undefined;
+        const why_line = @import("cache_why.zig").logged(&why_text, m.stats.prompt_cache);
+        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed, why_line });
         return reply;
     }
 };
