@@ -181,7 +181,12 @@ test "gemma prompt head: zero rows refused and first decode starts from its own 
     const e = mtl.ComputeEncoder{ .r = &record };
     const l = linear(true);
     try cacheTwin(&ps, l);
+    // The public prompt-head entry refuses an empty prompt on its row and lane paths before it binds or dispatches.
+    for ([_]weights.Linear{ l, linear(false) }) |head| {
+        try std.testing.expectError(error.BadChunk, prompt.projectHead(std.testing.allocator, .{}, &ps, e, head, buf(1), buf(5), 0));
+    }
     try std.testing.expectEqual(@as(usize, 0), record.n);
+    try std.testing.expectEqualDeep(mtl.Pass{}, record.current);
     // The production decode caller supplies this zero-offset Ref for its first (or window's first) row.
     try weights.projectRow(&ps, .{}, e, l.raw.?, l, .{ .buf = buf(6) }, buf(5), 1);
     try std.testing.expectEqual(mtl.Bound{ .id = 6 }, record.passes[0].buffers[0]);
