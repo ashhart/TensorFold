@@ -213,6 +213,7 @@ pub fn encodeMatrix(a: Allocator, tbl: *const PwV3Tables, w_in: []const f32, r: 
     const n_bc = c / 128;
     const wpb = bits * 2;
     const scales = try a.alloc(u16, n_br * n_bc);
+    errdefer a.free(scales);
     const words = try a.alloc(u32, @as(usize, r / 16) * n_bc * wpb * 32);
     @memset(words, 0);
 
@@ -429,7 +430,7 @@ pub fn convertDir(a: Allocator, io: std.Io, out: *std.Io.Writer, err: *std.Io.Wr
 
 fn convertImpl(a: Allocator, io: std.Io, out: *std.Io.Writer, opt: EncodeOptions) !void {
     const requested_target = try targetBytes(opt.target_gib);
-    if (opt.bits < 3 or opt.bits > 5 or opt.head_bits > 5) return error.InvalidBits;
+    if (opt.bits < 3 or opt.bits > 5 or (opt.head_bits != 0 and opt.head_bits != 4 and opt.head_bits != 5)) return error.InvalidBits;
     var d = try std.Io.Dir.cwd().openDir(io, opt.src_dir, .{ .iterate = true });
     defer d.close(io);
     var st_files: std.ArrayList([]const u8) = .empty;
@@ -471,6 +472,7 @@ fn convertImpl(a: Allocator, io: std.Io, out: *std.Io.Writer, opt: EncodeOptions
         const c = std.math.cast(u32, t.shape[1]) orelse return error.TensorTooLarge;
         if (r % 128 != 0 or c % 128 != 0) return error.UnalignedTensor;
         const stem = t.name[0 .. t.name.len - 7];
+        if (stem.len == 0) return error.EmptyTensorName;
         if (stem.len > 79) return error.TensorNameTooLong;
         for (jobs.items) |prior| if (std.mem.eql(u8, stem, prior.tfpn_name)) return error.DuplicateTensorName;
         var flags: u32 = 0;
@@ -491,7 +493,10 @@ fn convertImpl(a: Allocator, io: std.Io, out: *std.Io.Writer, opt: EncodeOptions
     }
     for ([_][]const u8{ "config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json" }) |name| {
         const path = try std.fs.path.join(a, &.{ opt.src_dir, name });
-        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch continue;
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
         if (stat.kind != .file or stat.size > (64 << 20)) continue;
         try configs.append(a, .{ .name = name, .size = stat.size });
         fixed = std.math.add(u64, fixed, stat.size) catch return error.OutputTooLarge;
