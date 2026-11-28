@@ -270,6 +270,7 @@ reports the setting's own value, does not count as logging.
 | `TF_CUDA_DEVICE` | release, tool, test | other |
 | `TF_CUDA_MEMORY_RECEIPTS` | release, tool, test | logs |
 | `TF_CUDA_POOL_AFTER_WARMUP` | release, tool, test | other |
+| `TF_CUDA_PREFILL_TRACE` | release, tool, test | logs |
 | `TF_CUDA_SCHED` | release, tool, test | other |
 | `TF_CUDA_SEGMENTS` | release, tool, test | other |
 | `TF_CUDA_TEST_ATTN_MT2` | release, tool, test | other |
@@ -671,6 +672,7 @@ reports the setting's own value, does not count as logging.
 | `TF_Q27_DFLASH_ABSORB_BATCH` | release, tool, test | other |
 | `TF_Q27_DFLASH_ADAPTIVE_BLOCK` | release, tool, test | other |
 | `TF_Q27_DRAFT_SLOTS` | release, tool, test | other |
+| `TF_Q27_FLAT_GLUE` | release, tool, test | other |
 | `TF_Q27_GEMM` | release, tool, test | other |
 | `TF_Q27_IDLE_RELEASE` | release, tool, test | writes |
 | `TF_Q27_KV_GROW` | release, tool, test | other |
@@ -678,6 +680,7 @@ reports the setting's own value, does not count as logging.
 | `TF_Q27_PASS_PROFILE` | release, tool, test | logs |
 | `TF_Q27_POCKET_OFF` | release, tool, test | other |
 | `TF_Q27_PROFILE` | release, tool, test | logs |
+| `TF_Q27_QK` | release, tool, test | other |
 | `TF_Q27_TAIL` | release, tool, test | other |
 | `TF_Q35_DFLASH_ABSORB_BATCH` | release, tool, test | other |
 | `TF_Q35_DFLASH_TRACE` | release, tool, test | writes-content |
