@@ -283,23 +283,25 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     const rows = ids.len;
     if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
     var total: usize = 0;
-    var base: usize = 0;
-    for (segments, 0..) |seg, si| {
+    for (segments) |seg| {
         if (seg.rows == 0 or seg.rows > seg.cache.max_chunk_rows or seg.cache.len + seg.rows > seg.cache.capacity) return error.Inkling2ContextFull;
         if (seg.rows > state.window_rows and seg.cache.pending != null) return error.Inkling2CacheTransaction;
         if (seg.cache.pending) |pending| if (pending != seg.rows) return error.Inkling2CacheTransaction;
-        total += seg.rows;
+        total = std.math.add(usize, total, seg.rows) catch return error.Inkling2Segments;
+    }
+    if (total != rows) return error.Inkling2Segments;
+    if (options.ids == null) {
+        for (ids) |id| if (id >= m.config.text.vocab) return error.Inkling2Token;
+        @memcpy(s.ids.slice(u32, rows), ids);
+    }
+    var base: usize = 0;
+    for (segments, 0..) |seg, si| {
         for (0..seg.rows) |i| {
             s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
             s.seg_of.slice(i32, rows)[base + i] = 0;
         }
         s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         base += seg.rows;
-    }
-    if (total != rows) return error.Inkling2Segments;
-    if (options.ids == null) {
-        for (ids) |id| if (id >= m.config.text.vocab) return error.Inkling2Token;
-        @memcpy(s.ids.slice(u32, rows), ids);
     }
 
     const pool = mtl.objc.Pool.push();
