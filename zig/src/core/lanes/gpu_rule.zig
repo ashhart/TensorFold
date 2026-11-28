@@ -107,7 +107,7 @@ pub fn topCands(logits: []const f32, inv_t: f32, out: []Cand) f32 {
 }
 
 /// One row's draw under the kernel's rule; `ids` maps columns to token ids (a draft head's subset vocabulary).
-pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, ids: ?[]const u32) !u32 {
+pub fn sample(_: Allocator, logits: []const f32, s: ?Sampling, position: u32, ids: ?[]const u32) !u32 {
     const st = s orelse {
         const at = argmax(logits);
         return if (ids) |m| m[at] else at;
@@ -118,17 +118,15 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, 
     const min_log = r.min_log;
     const kc = r.top_k;
     const cap: usize = if (kc == 0 or kc > candidates) candidates else kc;
+    var m = -std.math.inf(f32);
+    for (logits) |l| m = @max(m, l * inv_t);
     const n: usize = @min(@min(logits.len, candidates), cap);
-    const all = try gpa.alloc(Cand, n);
-    defer gpa.free(all);
-    const m = topCands(logits, inv_t, all);
-    var norm: f32 = undefined;
-    if (kc == 0) {
-        norm = threadSum(logits, inv_t, m); // every token's mass, in row order: the sort never touches it
-    } else {
-        norm = 0.0;
-        for (all) |c| norm += @exp(c.v - m);
-    }
+    var kept: [candidates]Cand = undefined;
+    const all = @import("gpu_select.zig").top(logits, inv_t, n, &kept); // the full sort's first n, in its order
+    var norm: f32 = 0.0;
+    if (kc != 0) {
+        for (all[0..n]) |c| norm += @exp(c.v - m);
+    } else norm = threadSum(logits, inv_t, m);
     var keep: usize = n;
     if (top_p > 0.0 and top_p < 1.0) {
         var cum: f32 = 0.0;
