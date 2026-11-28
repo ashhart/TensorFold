@@ -1,6 +1,7 @@
 // Types and calls for TensorFold Web's own API and the engine relay.
 
 import type { CustomBrand } from './brand'
+import type { ClusterBenchmark, ClusterDiscoverCandidate, ClusterPlan, ClusterState } from './clusterTypes'
 
 export type Verdict = {
   level: 'fits' | 'tight' | 'no'
@@ -378,6 +379,27 @@ export const api = {
   fleetTest: (url: string, token: string) => j<{ ok: boolean; checks: FleetCheck[] }>('/api/fleet/test', { method: 'POST', body: JSON.stringify({ url, token }) }, 30000),
   fleetAdd: (body: { url: string; token: string; name: string }) => j<FleetPeer>('/api/fleet', { method: 'POST', body: JSON.stringify(body) }, 30000),
   fleetUpdate: (id: string, body: { name?: string; token?: string }) => j<FleetPeer>(`/api/fleet/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  clusterState: () => j<ClusterState>('/api/cluster/state', undefined, 15000),
+  clusterDiscover: () => j<{ candidates: ClusterDiscoverCandidate[] }>('/api/cluster/discover', { method: 'POST' }, 20000),
+  clusterSshTest: (body: { host: string; user?: string; port?: number; key_path?: string }) =>
+    j<{ ok: boolean; latency_ms?: number; hostname?: string; chip?: string; ram_gb?: number | null; gpu_cores?: number | null; rdma_devices?: string[]; has_native?: boolean; has_mcdma?: boolean; error?: string }>('/api/cluster/ssh/test', { method: 'POST', body: JSON.stringify(body) }, 15000),
+  clusterSshBootstrap: (body: { host: string; user?: string; port?: number; key_path?: string; name?: string; slave_port?: number; slave_host?: string }) =>
+    j<{ node: Record<string, any>; telemetry: Record<string, any> }>('/api/cluster/ssh/bootstrap', { method: 'POST', body: JSON.stringify(body) }, 120000),
+  clusterRegisterNode: (body: { name?: string; slave_url: string; token?: string; ssh_host?: string }) =>
+    j<Record<string, any>>('/api/cluster/nodes', { method: 'POST', body: JSON.stringify(body) }, 15000),
+  clusterUpdateNode: (id: string, body: { name?: string; enabled?: boolean; weight?: number }) =>
+    j<Record<string, any>>(`/api/cluster/nodes/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  clusterDeleteNode: (id: string) => j<{ removed: string }>(`/api/cluster/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  clusterPlan: (body: { node_ids?: string[]; model_path?: string; mode?: string; context?: number; parallel?: number; tp?: number; pp?: number; custom_weights?: Record<string, number> }) =>
+    j<ClusterPlan>('/api/cluster/plan', { method: 'POST', body: JSON.stringify(body) }, 15000),
+  clusterDeploy: (body: { node_ids?: string[]; model_path?: string; mode?: string; context?: number; parallel?: number; prompt_cache_gib?: number; tp?: number; pp?: number; custom_weights?: Record<string, number>; serve_port?: number; serve_host?: string; api_key?: string }) =>
+    j<Record<string, any>>('/api/cluster/deploy', { method: 'POST', body: JSON.stringify(body) }, 30000),
+  clusterStop: () => j<{ stopped: boolean }>('/api/cluster/stop', { method: 'POST' }, 20000),
+  clusterProbeLinks: () => j<{ started?: boolean; status?: string }>('/api/cluster/probe-links', { method: 'POST' }, 15000),
+  clusterSyncModel: (body: { model_path: string; node_ids?: string[] }) =>
+    j<{ jobs: Record<string, any> }>('/api/cluster/sync-model', { method: 'POST', body: JSON.stringify(body) }, 20000),
+  clusterBenchmark: (body: { prompt_tokens?: number[]; decode_tokens?: number; draft?: boolean; label?: string }) =>
+    j<ClusterBenchmark>('/api/cluster/benchmark', { method: 'POST', body: JSON.stringify(body) }, 20000),
   fleetRemove: (id: string) => j<{ removed: string }>(`/api/fleet/${id}`, { method: 'DELETE' }),
   toolEvalInstall: () => j<{ path: string; version: string | null }>('/api/bench/tools/install', { method: 'POST' }, 330000),
   suiteCopy: (builtinId: string) => j<CustomSuite>(`/api/bench/suites/copy/${builtinId}`, { method: 'POST' }),

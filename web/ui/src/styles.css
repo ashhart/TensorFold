@@ -3,3 +3,5 @@
 @import './styles/primitives.css';
 @import './styles/screens.css';
 @import './styles/workspace.css';
+@import './styles/cluster.css';
+@import './styles/cluster-panels.css';

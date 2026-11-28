@@ -47,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--token-file", default=None, help="read the token from this file instead (keeps it out of the process list)")
     p.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                    help="another name TensorFold Web may be reached under without a token (repeatable)")
+    p.add_argument("--slave", action="store_true",
+                   help="run TensorFold Web in lightweight Cluster Slave mode (reports telemetry & executes Master rank commands)")
+    p.add_argument("--tls-cert", default=None,
+                   help="PEM TLS certificate file (required with --tls-key when --slave binds a non-loopback host)")
+    p.add_argument("--tls-key", default=None,
+                   help="PEM TLS private key file (required with --tls-cert when --slave binds a non-loopback host)")
     p.add_argument("--version", action="version", version=f"tensorfold-web {__version__}")
     args = p.parse_args(argv)
 
@@ -56,6 +62,28 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             p.error(f"cannot read --token-file: {exc}")
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
+    if args.slave:
+        if bool(args.tls_cert) != bool(args.tls_key):
+            p.error("--tls-cert and --tls-key must be provided together")
+        if not loopback and not args.token:
+            p.error("slave mode on a non-loopback address requires --token-file <path> or --token <cluster_secret>")
+        if not loopback and not (args.tls_cert and args.tls_key):
+            p.error(
+                "slave mode on a non-loopback address requires TLS (--tls-cert and --tls-key); "
+                "keep --host 127.0.0.1 and tunnel over SSH otherwise"
+            )
+        from .slave import create_slave_app
+
+        slave_app = create_slave_app(token=args.token)
+        shown = f"[{args.host}]" if ":" in args.host else args.host
+        scheme = "https" if args.tls_cert else "http"
+        print(f"[slave] TensorFold Cluster Slave {__version__} listening on {scheme}://{shown}:{args.port}/", flush=True)
+        run_kwargs: dict = {"host": args.host, "port": args.port, "log_level": "warning", "timeout_graceful_shutdown": 3}
+        if args.tls_cert and args.tls_key:
+            run_kwargs["ssl_certfile"] = args.tls_cert
+            run_kwargs["ssl_keyfile"] = args.tls_key
+        uvicorn.run(slave_app, **run_kwargs)
+        return 0
     if not loopback and not args.token:
         p.error("binding on a non-loopback address exposes TensorFold Web's controls: pass --token <secret>, or keep "
                 "127.0.0.1 and reach TensorFold Web through an SSH tunnel")

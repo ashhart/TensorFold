@@ -8,9 +8,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 test('opening and old Home links start a new chat; old feature shortcuts survive', () => {
   for (const hash of ['', '#', '#home', '#unknown']) assert.equal(routeOf(hash), 'chat')
   assert.equal(routeOf('#chat/saved'), 'chat')
+  assert.equal(routeOf('#cluster'), 'cluster')
   for (const address of ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://127.0.0.2', 'http://[::1]:8080']) assert.equal(loopbackEngine(address), true)
   for (const address of [undefined, 'bad address', 'http://engine.example:8080']) assert.equal(loopbackEngine(address), false)
-  assert.deepEqual(SHORTCUTS, ['chat', 'models', 'chat', 'teach', 'connect', 'bench', 'monitor', 'fleet', 'settings'])
+  assert.deepEqual(SHORTCUTS, ['chat', 'cluster', 'models', 'teach', 'connect', 'bench', 'monitor', 'fleet', 'settings'])
   for (const [hash, tab] of [['#models', 'mine'], ['#models/discover', 'discover'], ['#models/learning', 'learning'], ['#teach', 'learning'], ['#models/api', 'api'], ['#connect', 'api'], ['#models/owner/checkpoint', 'mine']]) assert.equal(modelTab(hash), tab)
 })
 

@@ -25,6 +25,7 @@ export default function Sidebar({ engine, conversations, toast }: {
         <a href="#monitor" className="engine-status"><span className={`dot ${status === 'running' ? '' : status === 'starting' ? 'warn' : 'off'}`} />
           <span>{status === 'running' ? `${name ?? 'Model'} ready` : status === 'starting' ? 'Loading model…' : status === 'unauthorized' ? 'Engine key refused' : status === 'failed' ? 'Engine stopped with a problem' : 'No model loaded'}</span>
         </a>
+        <a href="#cluster" style={{ fontWeight: 600 }}><span aria-hidden="true">⬡</span> Cluster Studio</a>
         <a href="#models"><span aria-hidden="true">◇</span> Models</a>
         <a href="#settings"><span aria-hidden="true">⚙</span> Settings</a>
       </div>
