@@ -27,33 +27,50 @@ pub fn socket() !posix.socket_t {
 
 /// Rank 0: a line from each other rank into `lines`, each within `ms` of the last and each proving `secret`.
 pub fn gather(server: posix.socket_t, secret: *const auth.Secret, world: usize, lines: *[max_lines]posix.socket_t, ms: u64) !void {
+    return gatherWith(NativeLines, server, secret, world, lines, ms);
+}
+
+const NativeLines = struct {
+    const nowMs = auth.nowMs;
+    const poll = posix.poll;
+    const accept = posix.system.accept;
+    const errno = posix.errno;
+    const prove = auth.accept;
+    const peerText = auth.peerText;
+    const close = posix.system.close;
+};
+
+fn gatherWith(comptime Ops: type, server: posix.socket_t, secret: *const auth.Secret, world: usize, lines: *[max_lines]posix.socket_t, ms: u64) !void {
     var seen: u32 = 1; // a bit for each rank whose line is in; rank 0 has none
     var count: usize = 0;
-    var until = auth.nowMs() + ms;
+    errdefer for (lines[0..count]) |fd| {
+        _ = Ops.close(fd);
+    };
+    var until = Ops.nowMs() + ms;
     while (count < world - 1) {
-        const left = until -| auth.nowMs();
+        const left = until -| Ops.nowMs();
         if (left == 0) return error.RankNeverCame;
         var fds = [_]posix.pollfd{.{ .fd = server, .events = posix.POLL.IN, .revents = 0 }};
-        if ((posix.poll(&fds, @intCast(@min(left, 1000))) catch 0) == 0) continue;
-        const rc = posix.system.accept(server, null, null);
-        if (posix.errno(rc) != .SUCCESS) return error.AcceptFailed;
+        if ((Ops.poll(&fds, @intCast(@min(left, 1000))) catch 0) == 0) continue;
+        const rc = Ops.accept(server, null, null);
+        if (Ops.errno(rc) != .SUCCESS) return error.AcceptFailed;
         const fd: posix.socket_t = @intCast(rc);
         // a connection that proves no key, or claims a rank already in, is closed: no line, and sent no NCCL id
-        const who = auth.accept(fd, secret, &.{.liveness}, left) catch |e| {
+        const who = Ops.prove(fd, secret, &.{.liveness}, left) catch |e| {
             var at: [64]u8 = undefined;
-            std.log.warn("tp: a connection from {s} to the liveness port proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
-            _ = posix.system.close(fd);
+            std.log.warn("tp: a connection from {s} to the liveness port proved no key and is ignored: {s}", .{ Ops.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
+            _ = Ops.close(fd);
             continue;
         };
         if (who.world != world or seen & (@as(u32, 1) << @intCast(who.rank)) != 0) {
             std.log.warn("tp: a second line for rank {d} of {d} is ignored", .{ who.rank, who.world });
-            _ = posix.system.close(fd);
+            _ = Ops.close(fd);
             continue;
         }
         seen |= @as(u32, 1) << @intCast(who.rank);
         lines[count] = fd;
         count += 1;
-        until = auth.nowMs() + ms;
+        until = Ops.nowMs() + ms;
     }
 }
 
@@ -179,4 +196,70 @@ test "security: a rank with another key and a second line for one rank are not l
     const late = try testListener();
     defer _ = posix.system.close(late.fd);
     try std.testing.expectError(error.RankNeverCame, gather(late.fd, &key, 2, &lines, 200));
+}
+
+const GatherFixture = struct {
+    const Mode = enum { timeout, accept_error, success };
+    var mode: Mode = .timeout;
+    var accepted: usize = 0;
+    var closed: [max_lines]posix.socket_t = undefined;
+    var closes: usize = 0;
+    var tick: u64 = 0;
+    fn reset(m: Mode) void {
+        mode = m;
+        accepted = 0;
+        closes = 0;
+        tick = 0;
+    }
+    fn nowMs() u64 {
+        tick += 1;
+        return tick;
+    }
+    fn poll(_: []posix.pollfd, _: i32) !usize {
+        if (accepted == 1 and mode == .timeout) {
+            tick += 100;
+            return 0;
+        }
+        return 1;
+    }
+    fn accept(_: posix.socket_t, _: ?*posix.sockaddr, _: ?*posix.socklen_t) c_int {
+        if (accepted == 1 and mode == .accept_error) return -1;
+        accepted += 1;
+        return @intCast(100 + accepted);
+    }
+    fn errno(rc: c_int) posix.E {
+        return if (rc < 0) .NOBUFS else .SUCCESS;
+    }
+    fn prove(_: posix.socket_t, _: *const auth.Secret, _: []const auth.Purpose, _: u64) auth.Error!auth.Proven {
+        return .{ .purpose = .liveness, .rank = @intCast(accepted), .world = 3, .session = @splat(0) };
+    }
+    fn peerText(_: posix.socket_t, _: *[64]u8) []const u8 {
+        return "a fixture peer";
+    }
+    fn close(fd: posix.socket_t) c_int {
+        closed[closes] = fd;
+        closes += 1;
+        return 0;
+    }
+};
+
+test "rank liveness cleanup: a late rank timeout closes the accepted unpublished prefix" {
+    GatherFixture.reset(.timeout);
+    var lines: [max_lines]posix.socket_t = @splat(999);
+    try std.testing.expectError(error.RankNeverCame, gatherWith(GatherFixture, 1, &auth.Secret.none, 3, &lines, 20));
+    try std.testing.expectEqual(@as(usize, 1), GatherFixture.closes);
+    try std.testing.expectEqual(@as(posix.socket_t, 101), GatherFixture.closed[0]);
+    try std.testing.expectEqual(@as(posix.socket_t, 999), lines[1]);
+}
+
+test "rank liveness cleanup: accept failure closes prior lines and success transfers all lines" {
+    GatherFixture.reset(.accept_error);
+    var lines: [max_lines]posix.socket_t = @splat(999);
+    try std.testing.expectError(error.AcceptFailed, gatherWith(GatherFixture, 1, &auth.Secret.none, 3, &lines, 20));
+    try std.testing.expectEqual(@as(usize, 1), GatherFixture.closes);
+    try std.testing.expectEqual(@as(posix.socket_t, 101), GatherFixture.closed[0]);
+    GatherFixture.reset(.success);
+    try gatherWith(GatherFixture, 1, &auth.Secret.none, 3, &lines, 20);
+    try std.testing.expectEqual(@as(usize, 0), GatherFixture.closes);
+    try std.testing.expectEqual(@as(posix.socket_t, 102), lines[1]);
 }

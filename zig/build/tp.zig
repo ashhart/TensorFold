@@ -93,10 +93,9 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     cli_step.dependOn(&cli_tests.step);
     test_step.dependOn(&cli_tests.step);
     const portable = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/portable_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = runtime(b, host, .debug) }} });
-    const tests = b.addRunArtifact(b.addTest(.{ .root_module = if (host.result.os.tag == .linux)
-        module(b, host, .debug, runtime(b, host, .debug))
-    else
-        portable }));
+    const test_module = if (host.result.os.tag == .linux) module(b, host, .debug, runtime(b, host, .debug)) else portable;
+    const tests = b.addRunArtifact(b.addTest(.{ .root_module = test_module }));
+    @import("rank_secret_host.zig").steps(b, host, test_module);
     const tp_step = b.step("test-tp", "TP bootstrap, failure, settings and in-process transport tests");
     tp_step.dependOn(&tests.step);
     const rank_auth = b.createModule(.{ .root_source_file = b.path("zig/src/platform/rank_auth.zig"), .target = host, .optimize = .debug, .link_libc = true });

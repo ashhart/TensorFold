@@ -169,8 +169,12 @@ pub const Config = struct {
             }
         }
         c.graph_cache_env = get("TF_GRAPH_CACHE");
-        if (get(auth.env_name)) |path| c.secret = keyFile(path) catch |e| {
-            log.warn("{s}={s}: {s}", .{ auth.env_name, path, auth.explain(e) orelse @errorName(e) });
+        const secret_path = @import("sys").environment.path("TF_RANK_SECRET_FILE", get("TF_RANK_SECRET_FILE")) catch {
+            log.warn("{s}: expected a key-file path without control characters", .{auth.env_name});
+            return error.BadSetting;
+        };
+        if (secret_path) |path| c.secret = keyFile(path) catch |e| {
+            log.warn("{s}: {s}", .{ auth.env_name, auth.explain(e) orelse @errorName(e) });
             return error.BadSetting;
         };
         return c;
@@ -426,4 +430,29 @@ test "the link label: quotes, backslashes and control bytes become ?, and a cut 
     try std.testing.expectEqualStrings("cable ?2?", (try Config.parse(&Fake.get)).linkLabel(&wide));
     Fake.pairs = &.{};
     try std.testing.expectEqualStrings("unnamed link (set TF_TP_LINK)", (try Config.parse(&Fake.get)).linkLabel(&wide));
+}
+
+test "rank secret settings: unset and blank select no secret" {
+    defer Fake.pairs = &.{};
+    for ([_][]const [2][]const u8{ &.{}, &.{.{ "TF_RANK_SECRET_FILE", "" }}, &.{.{ "TF_RANK_SECRET_FILE", " \t" }} }) |pairs| {
+        Fake.pairs = pairs;
+        try std.testing.expect(!(try Config.parse(&Fake.get)).secret.keyed);
+    }
+}
+
+test "rank secret settings: validate control bytes before reading an existing key file" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "rank\nkey", .{ .permissions = .fromMode(0o600) });
+    file.close(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "rank\nkey", .data = "a fictional group key of32 bytes!!" });
+    const path = try tmp.dir.realPathFileAlloc(io, "rank\nkey", a);
+    Fake.pairs = &.{.{ "TF_RANK_SECRET_FILE", path }};
+    defer Fake.pairs = &.{};
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
 }
