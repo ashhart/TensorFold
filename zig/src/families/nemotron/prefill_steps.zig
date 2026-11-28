@@ -38,7 +38,7 @@ pub fn whole(b: anytype, ops: anytype, s: *Stream) !void {
     var at = try ops.open(s);
     var next: usize = 0;
     while (at < s.prompt_len) at = chunk(b, ops, s, at, &next) catch |err| {
-        if (err == error.Cancelled) try retain(b, s, at);
+        if (err == error.Cancelled or err == error.Yielded) try retain(b, s, at);
         return err;
     };
     try ops.finish(s);
