@@ -87,6 +87,8 @@ pub fn draws(gpu: Gpu) !void {
     defer meta.free();
     var tok = try cuda.DeviceBuffer.alloc(gpu.d, rows * 4);
     defer tok.free();
+    var tok_null = try cuda.DeviceBuffer.alloc(gpu.d, rows * 4);
+    defer tok_null.free();
     var prob = try cuda.DeviceBuffer.alloc(gpu.d, rows * 4);
     defer prob.free();
     // a draft head's subset vocabulary: every fourth id, so the noise keys differ from the columns
@@ -99,11 +101,12 @@ pub fn draws(gpu: Gpu) !void {
     var ids_dev = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(wide_ids));
     defer ids_dev.free();
     const temps = [_]f64{ 0.6, 1.0, 1.5 };
-    const ks = [_]u32{ 1, 20, 40, 100, 1024, 0, 1500 };
+    const ks = [_]u32{ 1, 20, 40, 100, 1024, 1025, 0, 1500 };
     const ps = [_]f64{ 0.9, 0.95, 1.0 };
     const mins = [_]f64{ 0.0, 0.05 };
     var total: usize = 0;
     var differ: usize = 0;
+    var prob_parity: usize = 0;
     var by_full: [2]usize = .{ 0, 0 };
     var worst: f64 = 0; // the largest relative error of a pick's share
     var identity_hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -117,7 +120,7 @@ pub fn draws(gpu: Gpu) !void {
             for (&sorted, 0..) |*o, r| o.* = try order(gpa, wide[r * n ..][0..n]);
             defer for (sorted) |o| gpa.free(o);
             for (temps) |t| for (ks) |k| for (ps) |p| for (mins) |mp| {
-                if (mapped and (k == 1500 or mp > 0)) continue; // the draft head's draws: fewer rules suffice
+                if (mapped and (k > 1024 or mp > 0)) continue; // the draft head's draws: fewer rules suffice
                 const s: lanes.Sampling = .{ .seed = 0x5EED_0000 + ki * 7 + total, .temperature = t, .top_k = k, .top_p = p, .min_p = mp };
                 const base: i32 = @intCast(100 + total % 997);
                 const offset: i32 = if (mapped) 2 else 0;
@@ -132,10 +135,37 @@ pub fn draws(gpu: Gpu) !void {
                 args.add(tok.ptr);
                 if (mapped) args.add(ids_dev.ptr);
                 args.add(prob.ptr);
+                try tok.fill8(0xff, stream.handle);
                 try cuda.launch.launch(if (mapped) ids_fn else full, .{ .grid = .{ .x = rows }, .block = .{ .x = 1024 } }, stream, &args);
                 try stream.synchronize();
                 var got: [rows]u32 = undefined;
                 try tok.download(0, std.mem.sliceAsBytes(&got));
+                for (got, 0..) |token, r| try check.expect(token < vocab, "sample output token is invalid for {s}{s} row {d}: {d}", .{ @tagName(kind), if (mapped) " ids" else "", r, token });
+
+                if (!mapped) {
+                    try tok_null.fill8(0xff, stream.handle);
+                    var null_args: cuda.Args = .{};
+                    null_args.add(logits.ptr);
+                    null_args.add(@as(u32, @intCast(n)));
+                    null_args.add(rule.ptr);
+                    null_args.add(meta.ptr);
+                    null_args.add(offset);
+                    null_args.add(tok_null.ptr);
+                    null_args.add(@as(u64, 0));
+                    try cuda.launch.launch(full, .{ .grid = .{ .x = rows }, .block = .{ .x = 1024 } }, stream, &null_args);
+                    try stream.synchronize();
+                    var got_null: [rows]u32 = undefined;
+                    try tok_null.download(0, std.mem.sliceAsBytes(&got_null));
+                    for (got, got_null, 0..) |with_prob, without_prob, r| {
+                        try check.expect(without_prob < vocab, "sample null PROB left an invalid token for {s} row {d}: {d}", .{ @tagName(kind), r, without_prob });
+                        try check.expect(
+                            with_prob == without_prob,
+                            "sample null PROB changed {s} row {d} token at top_k {d}, top_p {d}, min_p {d}, T {d}: {d} != {d}",
+                            .{ @tagName(kind), r, k, p, mp, t, with_prob, without_prob },
+                        );
+                        prob_parity += 1;
+                    }
+                }
                 var shares: [rows]f32 = undefined;
                 try prob.download(0, std.mem.sliceAsBytes(&shares));
                 for (0..rows) |r| {
@@ -162,7 +192,112 @@ pub fn draws(gpu: Gpu) !void {
     try check.expect(differ == 0, "sample: {d} of {d} draws differ", .{ differ, total });
     try check.expect(worst < 1e-3, "sample: a pick's share is {e} off its f64 value", .{worst});
     check.pass("sample: {d} draws equal the Metal rule's host references", .{total});
+    check.pass("sample optional probability: {d} full-row matrix token IDs match", .{prob_parity});
+    try probabilityOutputOptional(gpu);
     try @import("sample_proposal_tests.zig").run(gpu);
+}
+
+/// A null probability output preserves tf_draw's token for full-row and candidate sampling.
+fn probabilityOutputOptional(gpu: Gpu) !void {
+    const gpa = gpu.gpa;
+    var module = try cuda.Module.load(gpu.d, cuda.kernels.sample);
+    defer module.unload();
+    const draw_fn = try module.function("tf_draw");
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+
+    const widths = [_]usize{ 154880, 200064 };
+    const widest = widths[1];
+    const host = try gpa.alloc(u16, rows * widest);
+    defer gpa.free(host);
+    const wide = try gpa.alloc(f32, rows * widest);
+    defer gpa.free(wide);
+    var logits = try cuda.DeviceBuffer.alloc(gpu.d, rows * widest * 2);
+    defer logits.free();
+    var rule = try cuda.DeviceBuffer.alloc(gpu.d, @sizeOf(Rule));
+    defer rule.free();
+    var meta = try cuda.DeviceBuffer.alloc(gpu.d, 16);
+    defer meta.free();
+    var tok = try cuda.DeviceBuffer.alloc(gpu.d, rows * 4);
+    defer tok.free();
+    var tok_null = try cuda.DeviceBuffer.alloc(gpu.d, rows * 4);
+    defer tok_null.free();
+    var prob = try cuda.DeviceBuffer.alloc(gpu.d, rows * 4);
+    defer prob.free();
+
+    var cases: usize = 0;
+    const temps = [_]f64{ 0.6, 1.5 };
+    const ks = [_]u32{ 0, 20, 1024, 1025 };
+    const ps = [_]f64{ 1.0, 0.95 };
+    const mins = [_]f64{ 0.0, 0.05 };
+    for (widths) |n| for (std.enums.values(Kind), 0..) |kind, ki| {
+        for (0..rows) |r| {
+            const start = r * n;
+            const row = host[start..][0..n];
+            const row_wide = wide[start..][0..n];
+            fill(kind, 0x3711 + @as(u64, @intCast(ki * rows + r)), row, row_wide);
+            // Model output rows may contain masked tokens; sample.cu excludes -inf logits.
+            for (row, row_wide, 0..) |*h, *w, i| if (i % 97 == 3) {
+                h.* = bf16(-std.math.inf(f32));
+                w.* = -std.math.inf(f32);
+            };
+        }
+        try logits.uploadAsync(0, std.mem.sliceAsBytes(host[0 .. rows * n]), stream.handle);
+        for (temps) |t| for (ks) |k| for (ps) |p| for (mins) |mp| {
+            const sampling: lanes.Sampling = .{
+                .seed = 0x5EED_3711 + @as(u64, @intCast(cases)),
+                .temperature = t,
+                .top_k = k,
+                .top_p = p,
+                .min_p = mp,
+            };
+            const rule_data = ruleOf(sampling);
+            const base: i32 = @intCast(1234 + cases % 997);
+            const metadata = [4]i32{ base, 0, 0, 0 };
+            try rule.uploadAsync(0, std.mem.asBytes(&rule_data), stream.handle);
+            try meta.uploadAsync(0, std.mem.asBytes(&metadata), stream.handle);
+
+            var args: cuda.Args = .{};
+            args.add(logits.ptr);
+            args.add(@as(u32, @intCast(n)));
+            args.add(rule.ptr);
+            args.add(meta.ptr);
+            args.add(@as(i32, 0));
+            args.add(tok.ptr);
+            args.add(prob.ptr);
+            try tok.fill8(0xff, stream.handle);
+            try cuda.launch.launch(draw_fn, .{ .grid = .{ .x = rows }, .block = .{ .x = 1024 } }, stream, &args);
+            try stream.synchronize();
+            var with_prob: [rows]u32 = undefined;
+            try tok.download(0, std.mem.sliceAsBytes(&with_prob));
+
+            var null_args: cuda.Args = .{};
+            null_args.add(logits.ptr);
+            null_args.add(@as(u32, @intCast(n)));
+            null_args.add(rule.ptr);
+            null_args.add(meta.ptr);
+            null_args.add(@as(i32, 0));
+            null_args.add(tok_null.ptr);
+            null_args.add(@as(u64, 0));
+            try tok_null.fill8(0xff, stream.handle);
+            try cuda.launch.launch(draw_fn, .{ .grid = .{ .x = rows }, .block = .{ .x = 1024 } }, stream, &null_args);
+            try stream.synchronize();
+            var without_prob: [rows]u32 = undefined;
+            try tok_null.download(0, std.mem.sliceAsBytes(&without_prob));
+
+            for (with_prob, without_prob, 0..) |a, b, r| {
+                try check.expect(a < n, "sample with PROB left invalid token at vocab {d}, row {d}: {d}", .{ n, r, a });
+                try check.expect(b < n, "sample null PROB left invalid token at vocab {d}, row {d}: {d}", .{ n, r, b });
+                try check.expect(
+                    a == b,
+                    "sample null PROB changed token at vocab {d}, row {d}, {s}, top_k {d}, top_p {d}, min_p {d}, T {d}: {d} != {d}",
+                    .{ n, r, @tagName(kind), k, p, mp, t, a, b },
+                );
+            }
+            cases += 1;
+        };
+    };
+    check.pass("sample optional probability: {d} settings across GLM/MiniMax widths matched for {d} rows", .{ cases, cases * rows });
 }
 
 /// topkRows' two stages against tf_logprob_rows: the same k ids and logits, word for word, on every row kind and width.

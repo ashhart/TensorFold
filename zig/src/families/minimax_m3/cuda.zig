@@ -22,6 +22,7 @@ test {
     _ = engine;
     _ = follow;
     _ = native;
+    _ = @import("cuda_sampler.zig");
     _ = @import("cuda_prompt_tail.zig"); // which prompt rows the last layer runs
     _ = @import("cuda_graphs.zig"); // TF_MINIMAX_GRAPHS
 }

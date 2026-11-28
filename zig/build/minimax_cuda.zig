@@ -23,9 +23,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 /// The family's host regressions (shares, EXL3 cuts and admission, config, kernel geometry, the link header) in `all`.
 pub fn hostTests(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, all: *std.Build.Step) void {
-    const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, host, .debug, cuda, core, lanes) }));
+    const family = module(b, host, .debug, cuda, core, lanes);
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = family }));
     b.step("test-minimax-cuda-host", "MiniMax-M3.1-Flash's CUDA backend host regressions (no GPU work)").dependOn(&run.step);
     all.dependOn(&run.step);
+    const sampler_prob = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{"MiniMax sampler PROB output"} }));
+    const sampler_prob_step = b.step("test-minimax-sampler-prob-host", "MiniMax CUDA sampler output pointer and storage without a GPU");
+    sampler_prob_step.dependOn(&sampler_prob.step);
     // its shares as mesh declarations: a test-only module, so no binary roots canon or mesh twice
     const mesh = @import("mesh.zig").module(b, host, .debug, @import("cuda_engines.zig").canonModule(b, host, .debug));
     const decl = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/cuda_shard_decl_test.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "mesh", .module = mesh }} }) }));
