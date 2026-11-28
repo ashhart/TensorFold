@@ -150,7 +150,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     h.cache = null;
     if (plan.budget_bytes > 0) {
         h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = Backend.snapBytes, .save = Backend.snapSave, .restore = Backend.snapRestore, .drop = Backend.snapDrop, .charged = Backend.snapCharged, .spare = Backend.snapSpare, .trim = Backend.snapTrim, .reuses = Backend.snapReuses, .rows = &state_image } }, .{ .lookahead = 1, .planned = true, .warm = .on }, plan.budget_bytes);
-        if (learn) |l| _ = try disk.attach(gpa, &h.cache.?, try disk.identity(gpa, io, dir, eng), l);
+        if (learn) |l| _ = try disk.attach(gpa, &h.cache.?, try disk.identity(gpa, io, dir, eng), l, h.host.info_.context_window);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.host.info_.warm_turns = true;

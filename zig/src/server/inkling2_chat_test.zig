@@ -208,7 +208,8 @@ fn runMode(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
     const hf = try HfText.load(a, t.io, fx.path, null, a, &problem);
     defer hf.deinit();
     var script: Script = .{ .a = a, .reply = reply, .stride = stride, .lane = lane };
-    const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    var key: @import("ids.zig").Key = .of(@import("ids.zig").test_key_text);
+    const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .tool_id_key = &key }, null);
     defer srv.deinit();
     var grammars: Grammars = .{};
     var tool_grammars: Grammars = .{};
@@ -336,7 +337,9 @@ test "Inkling 2 reply: repeated blocks and a native JSON tool call agree whole a
     const got = try probe(arena.allocator(), raw, tools);
     try t.expectEqualStrings("Check ", got.reasoning);
     try t.expectEqualStrings("Before After", got.content);
-    try t.expectEqualStrings("call_0", got.ids);
+    try t.expectEqual(@as(usize, 29), got.ids.len);
+    try t.expect(std.mem.startsWith(u8, got.ids, "call_"));
+    for (got.ids["call_".len..]) |c| try t.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
     try t.expectEqualStrings("lookup", got.names);
     try t.expectEqualStrings("{\"q\":\"x\",\"nested\":{\"ok\":true}}", got.arguments);
 }

@@ -60,16 +60,18 @@ pub const Weights = struct {
     layers: []Layer = &.{},
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
     tfq3_tables: ?cuda.DeviceBuffer = null,
+    tfq4_tables: ?cuda.tfq4.UploadedTables = null,
     tfq3_layers: std.ArrayList(cuda.tfq3.OwnedMoeLayer) = .empty,
     bytes: usize = 0,
 
     pub fn hasTfq3(w: *const Weights) bool {
-        return w.tfq3_tables != null or w.tfq3_layers.items.len > 0;
+        return w.tfq3_tables != null or w.tfq4_tables != null or w.tfq3_layers.items.len > 0;
     }
 
     pub fn deinit(w: *Weights) void {
         for (w.tfq3_layers.items) |*l| l.deinit();
         w.tfq3_layers.deinit(w.gpa);
+        if (w.tfq4_tables) |*t| t.free();
         if (w.tfq3_tables) |*t| t.free();
         for (w.buffers.items) |*b| b.free();
         w.buffers.deinit(w.gpa);
@@ -167,9 +169,16 @@ fn loadImpl(gpa: std.mem.Allocator, io_opt: ?std.Io, d: *const cuda.Driver, ck: 
         return err;
     };
     if (any_tfq3) {
-        const tables = try cuda.tfq3.uploadTables(gpa, io_opt.?, d, dir_opt.?);
-        w.tfq3_tables = tables;
-        w.bytes += tables.len;
+        if (cuda.tfq3_format.hasTables(gpa, io_opt.?, dir_opt.?)) {
+            const tables = try cuda.tfq3.uploadTables(gpa, io_opt.?, d, dir_opt.?);
+            w.tfq3_tables = tables;
+            w.bytes += tables.len;
+        }
+        if (try cuda.tfq4.uploadTablesOptional(gpa, io_opt.?, d, dir_opt.?)) |t4| {
+            w.tfq4_tables = t4;
+            w.bytes += t4.buf.len;
+        }
+        if (w.tfq3_tables == null and w.tfq4_tables == null) return error.MissingTfq3Tables;
     }
     w.layers = try gpa.alloc(Layer, c.text.layers);
     w.attn_queries = try gpa.alloc(u64, c.text.layers);
@@ -252,11 +261,16 @@ fn loadImpl(gpa: std.mem.Allocator, io_opt: ?std.Io, d: *const cuda.Driver, ck: 
             const fname = try std.fmt.bufPrint(&fname_buf, "layer_{d:0>2}.tffpw", .{i});
             const layer_path = try std.fs.path.join(gpa, &.{ dir_opt.?, fname });
             defer gpa.free(layer_path);
-            var owned = try cuda.tfq3.uploadTfpwLayer(
+            const t3_ptr: u64 = if (w.tfq3_tables) |t| t.ptr else 0;
+            const t4_ptr: u64 = if (w.tfq4_tables) |t| t.lutPtr() else 0;
+            const t4_kind: u32 = if (w.tfq4_tables) |t| t.table_kind else 0;
+            var owned = try cuda.tfq3.uploadTfpwLayerHybrid(
                 io_opt.?,
                 d,
                 layer_path,
-                w.tfq3_tables.?.ptr,
+                t3_ptr,
+                t4_ptr,
+                t4_kind,
                 c.text.experts,
                 c.text.hidden,
                 c.text.expert_inter,

@@ -5,12 +5,28 @@ const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
 
 /// TensorFold's settings and the loader's injection variables; HOME, PATH, TMPDIR and HF_* stay allowed.
-const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_PRELOAD", "LD_AUDIT" } ++ gpu;
+const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_", "GLIBC_TUNABLES" } ++ gpu;
 
 /// The GPU drivers' device-memory dumps, profiler injection, and Metal capture, validation and device wrappers.
 const gpu = [_][]const u8{
     "CUDA_ENABLE_",  "CUDA_COREDUMP_",  "CUDA_INJECTION",            "NVTX_INJECTION",        "MTL_CAPTURE",
     "METAL_CAPTURE", "MTL_DEBUG_LAYER", "METAL_DEVICE_WRAPPER_TYPE", "MTL_SHADER_VALIDATION",
+};
+
+/// Accelerator library, compiler and kernel paths; every NCCL_*_PLUGIN name is refused separately.
+const path_names = [_][]const u8{
+    "NCCL_NET_LIBRARY",
+    "ZE_DRIVERS",
+    "ZE_LIBRARY_PATH",
+    "ROCBLAS_TENSILE_LIBRARY",
+    "HIPBLASLT_TENSILE_LIBRARY",
+    "HIPBLASLT_EXTOP_LIBRARY_PATH",
+    "MIOPEN_DEVICE_LIB_PATH",
+    "MIOPEN_COMPILER",
+    "MIOPEN_CUSTOM_CACHE_DIR",
+    "MIOPEN_KERNELS_PATH",
+    "MIOPEN_CACHE_DIR",
+    "MIOPEN_GCN_ASM_PATH",
 };
 
 /// The first flag that keeps request content on disk, sends it to another process or fetches its URLs; null: none.
@@ -49,7 +65,8 @@ pub fn settings(a: Allocator, env: *const std.process.Environ.Map) ![]const []co
 
 fn refused(name: []const u8) bool {
     for (prefixes) |p| if (std.mem.startsWith(u8, name, p)) return true;
-    return false;
+    for (path_names) |p| if (std.mem.eql(u8, name, p)) return true;
+    return std.mem.startsWith(u8, name, "NCCL_") and std.mem.endsWith(u8, name, "_PLUGIN");
 }
 
 /// Why a confidential start is refused, naming flags and variables but never a value; null: it may start.
@@ -77,7 +94,7 @@ pub fn harden() !void {
 const deny_attach: c_int = 31;
 extern "c" fn ptrace(request: c_int, pid: c_int, addr: ?[*]u8, data: c_int) c_int;
 
-/// The refusal, then `harden` once it may start: every serving entry point calls it before anything loads.
+/// LD_PRELOAD/LD_AUDIT/DYLD_INSERT_LIBRARIES precede main; refusal stops serving but cannot prevent or undo injection.
 pub fn enforce(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map) !?[]const u8 {
     if (!args.confidential) return null;
     const empty: std.process.Environ.Map = .init(a);
