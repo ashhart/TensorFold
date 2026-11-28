@@ -2,6 +2,7 @@
 const std = @import("std");
 const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
+const gather_lanes = @import("cuda_ple_gather_lanes.zig");
 const Lane = @import("cuda_batch_state.zig").Lane;
 
 const dims = wt.dims;
@@ -28,6 +29,7 @@ pub const Gather = struct {
             };
             return;
         }
+        if (gather_lanes.early(g)) return;
         var row0: usize = 0;
         for (g.lanes) |l| {
             g.ngram.rows(l.seq.history[0..], g.ids[row0..][0..l.rows], g.emb[row0 * dims ..][0 .. l.rows * dims], g.xs[row0 * (dims / 32) ..][0 .. l.rows * (dims / 32)]) catch |err| {
