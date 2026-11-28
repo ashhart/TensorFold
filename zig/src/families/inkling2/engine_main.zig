@@ -184,9 +184,9 @@ fn greedyRank(e: *ink.engine.Engine, rank: usize, run: *const Run, out: std.Io.D
     if (e.serial != null) try out.writeFile(io, .{ .sub_path = "logits.r1.json", .data = lists[1].items });
     try out.writeFile(io, .{ .sub_path = "logits.json", .data = lists[2].items });
     try out.writeFile(io, .{ .sub_path = "greedy.json", .data = toks.items });
-    // the digest the server's ranks compare at ready: every shard byte, the config run and the stream shape
+    // the digest the server's ranks compare at ready: shard bytes, config, stream shape and graph settings
     const shards = try (try ink.native_exl3.startIdentity(gpa, io, run.o.dir)).finish();
-    const digest = ink.native_exl3.readyDigest(shards, &e.c, e.capacity, e.vision);
+    const digest = ink.native_exl3.readyDigest(shards, &e.c, e.capacity, e.vision, (cuda.graph_cache.Settings{}).fromEnv().digest());
     const yes = [2][]const u8{ "false", "true" };
     const info = try std.fmt.allocPrint(a, "{{\"ranks\": {d}, \"virtual\": {s}, \"serial\": {s}, \"graphed\": {s}, \"context\": {d}, \"new\": {d}, " ++
         "\"streams\": {d}, \"padded_vocab\": {d}, \"ready_digest\": \"{s}\", \"ids_sha256\": \"{s}\", \"image_sha256\": \"{s}\"}}\n", .{ e.w.share.world, yes[@intFromBool(run.o.virtual)], yes[@intFromBool(run.o.serial)], yes[@intFromBool(run.o.graphed)], run.o.context, run.o.new, k, e.w.padded_vocab, &hex(digest), &hex(run.ids_sha), &hex(run.image_sha) });
