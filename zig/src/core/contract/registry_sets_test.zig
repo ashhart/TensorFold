@@ -39,7 +39,8 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
         .{ .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 0 }, 121, 45 },
         .{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 2 }, 121, 43 },
         .{ .{ .major = 13, .minor = 3 }, .{ .major = 13, .minor = 3 }, 122, 43 },
-        .{ .{ .major = 14, .minor = 0 }, .{ .major = 13, .minor = 3 }, 122, 43 },
+        .{ .{ .major = 13, .minor = 4 }, .{ .major = 13, .minor = 4 }, 122, 43 },
+        .{ .{ .major = 14, .minor = 0 }, .{ .major = 13, .minor = 4 }, 122, 43 },
     };
     for (cases) |c| {
         try std.testing.expectEqual(c[1], setFor(c[0]));
@@ -47,6 +48,20 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
         try std.testing.expectEqual(c[3], usageFor(rms, c[0])[4].regs);
         try std.testing.expectEqual(topk.usage[0], usageFor(topk, c[0])[0]);
     }
+}
+
+test "mHC receipts: nvcc 13.0 has its own records and 13.1 through 13.3 remain pending" {
+    const route = named("qwen35_mhc route").?;
+    const old = usageFor(route, .{ .major = 13, .minor = 0 });
+    try std.testing.expectEqual(@as(u32, 39), old[3].regs);
+    try std.testing.expectEqual(@as(u32, 1068), old[3].static);
+    for (1..4) |minor| {
+        try std.testing.expectEqual(registry.none, usageFor(route, .{ .major = 13, .minor = @intCast(minor) }));
+    }
+    const usage = usageFor(route, .{ .major = 13, .minor = 4 });
+    try std.testing.expectEqual(@as(u32, 39), usage[3].regs);
+    try std.testing.expectEqual(@as(u32, 1068), usage[3].static);
+    try std.testing.expectEqual(usage, usageFor(route, .{ .major = 14, .minor = 0 }));
 }
 
 test {

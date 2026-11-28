@@ -141,14 +141,14 @@ pub const Entry = struct {
     }
 };
 
-const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
+const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe", "sensenova_loop" };
 const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 /// GLM-5.3-Flash and full GLM-5.3 on the one GLM CUDA engine.
 const glm: []const []const u8 = &.{ "glm5_next", "glm_moe_dsa" };
 /// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
-pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "nemo_speechlm", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive", "inkling2_loop", "lfm3" };
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "nemo_speechlm", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "sensenova_loop", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive", "inkling2_loop", "lfm3" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_CUDA_POOL_AFTER_WARMUP, .families = &.{"qwen3_5"}, .class = .experimental, .syntax = .one, .report_values = &.{"1"}, .effect = "Size an idle device KV pool after Qwen DFlash2 warm-up", .evidence = "Default off; host sizing checks; device capacity and token checks required" },

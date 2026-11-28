@@ -77,7 +77,7 @@ pub const explains_open = true;
 /// The server's reading of the room left now; null if unreadable.
 pub const Room = @import("cuda_mtp.zig").Room;
 /// `room` and `drafter` size an EXL3 checkpoint's load: its embedding rows go to host memory when the card is short.
-pub const Options = struct { context: usize, drafts: bool, mtp_drafts: ?u32 = null, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, rope_yarn: ?f64 = null, room: ?Room = null, drafter: ?[]const u8 = null, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
+pub const Options = struct { context: usize, drafts: bool, mtp_drafts: ?u32 = null, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, rope_yarn: ?f64 = null, room: ?Room = null, drafter: ?[]const u8 = null, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551, loops: ?u32 = null };
 /// The window --context may ask for: the config's, or the YaRN window its block or --rope-yarn makes.
 pub const contextCeiling = plan.contextCeiling;
 
@@ -194,7 +194,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     // shared save marks are page edges and become cold-pass cuts independent of the compute chunk grid
     if (share_snaps > 0 and page_tokens == 0) return error.QwenShareNeedsPages;
     if (kv_host_mod.onHost() and share_snaps == 0) std.log.warn("TF_QWEN_KV_HOST pins the KV pages in host memory; the prompt cache would pin more beside them: set --prompt-cache-gib to bound it", .{});
-    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context);
+    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context, o.loops);
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
@@ -551,7 +551,6 @@ pub const Lanes = struct {
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
         for (requests) |r| if (r.depth != 0) return error.QwenCheckpointHasNoDraftHead;
     }
-
     /// A drafter's tapped layers, before any stream's caches exist: each forward fills their rings after.
     fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) !void {
         const self = cast(ptr);

@@ -132,12 +132,12 @@ test "snap hooks: a family's spare, trim and reuses reach the prompt cache, and 
     const pooled = Snaps(Pooled, null).vtable;
     try std.testing.expect(pooled.spare.? == &Pooled.snap_spare and pooled.trim.? == &Pooled.snap_trim and pooled.reuses.? == &Pooled.snap_reuses);
     var qwen: usize = 0;
-    inline for (@import("cuda.zig").registry) |F| if (comptime std.mem.startsWith(u8, F.model_type, "qwen3_5")) {
+    inline for (@import("cuda.zig").registry) |F| if (comptime std.mem.startsWith(u8, F.model_type, "qwen3_5") or std.mem.eql(u8, F.model_type, "sensenova_loop")) {
         const v = Snaps(F, null).vtable;
         try std.testing.expect(v.spare != null and v.trim != null and v.reuses != null);
         qwen += 1;
     };
-    try std.testing.expectEqual(@as(usize, 2), qwen); // the dense and MoE entry points
+    try std.testing.expectEqual(@as(usize, 3), qwen); // dense, MoE and Loop entry points
 }
 
 test "request starts: snap_cut_invariant: message starts are on by default for invariant families, opt-in for the rest" {

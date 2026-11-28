@@ -110,7 +110,9 @@ pub const Engine = struct {
     tfq3: ?*tfq3w.Kit = null, // TFQ3 checkpoint kernels and shards (g.tfq3)
     head: Proj,
     final_norm: u64,
+    mhc: @import("cuda_mhc.zig").Runtime,
     layers: []Layer,
+    steps: []@import("loop_schedule.zig").Step,
     // scratch, scratch_capacity rows each
     h: u64,
     x: u64,
@@ -169,14 +171,15 @@ pub const Engine = struct {
     pub const src_at = Round.src_at;
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize) !*Engine {
-        return initStage(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null);
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, loops: ?u32) !*Engine {
+        return initStage(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null, loops);
     }
     /// One engine, or with `span` a pipeline stage holding only its layers' weights and state (RFC #2005).
-    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span) !*Engine {
+    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span, loops: ?u32) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
-        const g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
+        var g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
+        if (loops) |n| g = try g.withLoops(n);
         const d = ctx.d;
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
@@ -193,6 +196,7 @@ pub const Engine = struct {
         e.tfq3 = null;
         e.d = d;
         e.g = g;
+        e.mhc = .{};
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
         e.verify_rows = most_verify;
         e.kv8 = kv8;
@@ -234,6 +238,10 @@ pub const Engine = struct {
             e.mods[i] = try cuda.Module.load(d, img);
             loaded += 1;
         }
+        if (g.loop) |c| if (c.mhc) |m| {
+            e.mhc = try @import("cuda_mhc.zig").Runtime.load(d, m);
+        };
+        errdefer e.mhc.deinit();
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
@@ -262,6 +270,9 @@ pub const Engine = struct {
         try @import("cuda_pdl.zig").bind(ctx);
         e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
         errdefer if (e.mo) |*m| m.unload();
+        const schedule = g.schedule();
+        e.steps = try gpa.dupe(@import("loop_schedule.zig").Step, schedule.slice());
+        errdefer gpa.free(e.steps);
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
         if (g.exl3) {
@@ -308,7 +319,6 @@ pub const Engine = struct {
         try e.stream.synchronize();
         recurrent.completed(e);
     }
-
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
@@ -328,42 +338,40 @@ pub const Engine = struct {
         hosted.release(e);
         if (e.boundary) |*b| b.free();
         e.gpa.free(e.layers);
+        e.gpa.free(e.steps);
         e.gpa.free(e.dir);
         e.affine.deinit();
         e.wide.deinit();
         e.int8.deinit();
         if (e.mo) |*m| m.unload();
+        e.mhc.deinit();
         for (&e.mods) |*m| m.unload();
         e.stream.deinit();
         e.gpa.destroy(e);
     }
-
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         return e.streamBytesWithTaps(cap, e.n_taps);
     }
-
     /// The same allocation plan for a tap count known before `setTaps` mutates the engine.
     pub fn streamBytesWithTaps(e: *const Engine, cap: usize, taps: usize) usize {
         const c = @import("cuda_cache.zig");
         return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapRows() * taps * e.g.hidden * 2 + c.pendBytes(e.g);
     }
-
     /// A stream's tap ring: tapRows() rows of the tapped layers' residuals.
     pub fn tapBytes(e: *const Engine) usize {
         return e.tapRows() * e.n_taps * e.g.hidden * 2;
     }
     pub const tapRows = S.tapRows;
-
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {
+        if (e.g.loop != null and taps.len > 0) return error.SenseNovaDrafter;
         if (e.g.whole != 0 and taps.len > 0) return error.StageTaps; // v1 stages serve no drafter
         if (taps.len > e.taps.len) return error.TooManyTaps;
         for (taps) |t| if (t >= e.g.layers) return error.BadTap;
         @memcpy(e.taps[0..taps.len], taps);
         e.n_taps = taps.len;
     }
-
     /// The next `bytes` of the arena, 256-byte aligned.
     pub fn alloc(e: *Engine, bytes: usize) !u64 {
         const at = aligned(e.arena_at);
@@ -371,15 +379,12 @@ pub const Engine = struct {
         e.arena_at = at + bytes;
         return e.arena.ptr + at;
     }
-
     pub fn scratch(e: *Engine, rows: usize, mode: scratch_memory.Mode) !usize {
         return scratch_memory.scratch(e, rows, mode);
     }
-
     pub fn ensureScratch(e: *Engine, rows: usize) !void {
         return scratch_memory.ensureScratch(e, rows);
     }
-
     pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.{ .launch = if (f.handle) |h| @intFromPtr(h) else 0 });
         var a: cuda.Args = .{};
@@ -398,12 +403,10 @@ pub const Engine = struct {
         const cfg = @import("cuda_pdl.zig").config(base, @import("cuda_pdl.zig").on() and !unsafe_rope8);
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
-
     pub fn promptAttention(e: *Engine, layer: usize, from: usize, end: usize) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.attn);
         return @import("cuda_prompt.zig").runFrom(e, layer, from, end);
     }
-
     /// The projections: the row tiles, the prompt GEMM and the grouped form, in their own file.
     pub const proj = @import("cuda_projection.zig").proj;
     pub const projSums = @import("cuda_projection.zig").projSums;
@@ -422,7 +425,6 @@ pub const Engine = struct {
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
-
     /// Logits rows first..first + n's greedy tokens into toks: the highest logit, ties to the lower id.
     fn argmax(e: *Engine, first: usize, n: usize, toks: u64) !void {
         if (n == 0) return;
@@ -432,12 +434,10 @@ pub const Engine = struct {
         try e.run(e.fns.argmax_slices, .{ slices, n, 1 }, .{ 256, 1, 1 }, .{ e.logits + first * e.g.vocab * 2, @as(c_int, @intCast(e.g.vocab)), pv, pi });
         try e.run(e.fns.argmax_merge, .{ n, 1, 1 }, .{ 32, 1, 1 }, .{ pv, pi, @as(c_int, @intCast(slices)), toks + first * 4 });
     }
-
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.norm);
         try e.runPdl(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
     }
-
     /// Refuse the whole frame before settling any prior window or launching work.
     pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
@@ -461,7 +461,6 @@ pub const Engine = struct {
         for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
         for (parts) |p| if (p.images != null and record) return error.InvalidQwenImages;
     }
-
     /// A window's staged segment: one-row windows that skip their rollback copy read no `before`.
     pub fn stagedSeg(c: *Cache, e: *const Engine, len: usize, row0: usize, rows: usize, undo: bool) Seg {
         var sg = c.fold(c.seg(e, len, row0, rows));

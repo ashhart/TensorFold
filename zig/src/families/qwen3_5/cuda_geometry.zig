@@ -13,12 +13,13 @@ pub const dk = 128;
 pub const taps = 4;
 pub const head_dim = 256;
 pub const max_query_heads = 32;
+/// The most Sinkhorn iterations the mHC route kernel runs per row.
+pub const max_mhc_iterations = 1000;
 /// The rotary base the kernels fix (parse checks the config says so).
 pub const theta: f32 = 10000000;
 
 /// A layer's projections, each its own MLX width in a mixed checkpoint.
 pub const Slot = enum { gate, up, down, qkv, z, a, b, out, q, k, v, o };
-
 /// Each slot's module under its layer (`layers.{i}.` before it), as the config's quantization table names it.
 pub const slot_modules = std.enums.EnumArray(Slot, []const u8).init(.{
     .gate = "mlp.gate_proj",
@@ -34,7 +35,6 @@ pub const slot_modules = std.enums.EnumArray(Slot, []const u8).init(.{
     .v = "self_attn.v_proj",
     .o = "self_attn.o_proj",
 });
-
 /// The MLX code width of every quantized module (2 to 8 bits, groups of 64): a uniform checkpoint's are all one.
 pub const Widths = struct {
     embed: u8 = 4,
@@ -44,7 +44,6 @@ pub const Widths = struct {
     pub fn of(w: *const Widths, layer: usize, slot: Slot) u8 {
         return w.proj[layer][@backingInt(slot)];
     }
-
     /// Whether any module is not 4 bits: the loader then packs that module from its own width.
     pub fn mixed(w: *const Widths, layers: usize) bool {
         if (w.embed != 4 or w.head != 4) return true;
@@ -52,10 +51,8 @@ pub const Widths = struct {
         return false;
     }
 };
-
 /// How a projection is stored: MLX affine codes, or a ModelOpt checkpoint's NVFP4, FP8 or bf16 weights.
 pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16, nvfp4_w16, fp8c }; // nvfp4_w16: W4A16_NVFP4; fp8c: FP8, a scale a row
-
 /// A ModelOpt checkpoint's kind for every module (cuda_modelopt.zig); an MLX checkpoint's are all affine.
 pub const Kinds = struct {
     modelopt: bool = false,
@@ -63,7 +60,6 @@ pub const Kinds = struct {
     head: Kind = .affine,
     experts: Kind = .affine, // a MoE's routed and shared experts (one recipe)
     proj: [max_layers][std.enums.values(Slot).len]Kind = @splat(@splat(.affine)),
-
     pub fn of(k: *const Kinds, layer: usize, slot: Slot) Kind {
         return k.proj[layer][@backingInt(slot)];
     }
@@ -84,6 +80,9 @@ pub const Geometry = struct {
     context: usize, // the window ceiling: max_position_embeddings, or the YaRN window --rope-yarn makes
     rope: cuda_rope.Rope = .plain,
     linear: [max_layers]bool,
+    loop: ?@import("loop_config.zig").Config = null,
+    loop_deltas: usize = 0,
+    loop_attentions: usize = 0,
     bits: Widths = .{},
     kinds: Kinds = .{},
     /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
@@ -103,7 +102,6 @@ pub const Geometry = struct {
     /// Whether the stage holds the embedding, and the final norm and the head (a whole model holds both).
     embeds: bool = true,
     heads: bool = true,
-
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Geometry {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(path);
@@ -158,24 +156,37 @@ pub const Geometry = struct {
     pub fn valueWidth(g: Geometry) usize {
         return g.v_heads * dk;
     }
-
     /// Channels the causal convolution sees: q, k and v.
     pub fn convWidth(g: Geometry) usize {
         return (2 * g.k_heads + g.v_heads) * dk;
     }
-
     /// Attention output width (q_heads of head_dim), the o projection's input.
     pub fn attnWidth(g: Geometry) usize {
         return g.q_heads * head_dim;
     }
-
-    /// The stage's linear layers (`linear` is indexed by global layer).
+    /// Delta executions in the schedule.
     pub fn deltas(g: Geometry) usize {
+        return if (g.loop != null) g.loop_deltas else g.physicalDeltas();
+    }
+    pub fn physicalDeltas(g: Geometry) usize {
         var n: usize = 0;
-        for (g.linear[g.first..][0..g.layers]) |l| n += @intFromBool(l);
+        for (g.linear[g.first..][0..g.layers]) |is_delta| n += @intFromBool(is_delta);
         return n;
     }
-
+    pub fn physicalAttentions(g: Geometry) usize {
+        return g.layers - g.physicalDeltas();
+    }
+    pub fn schedule(g: Geometry) @import("loop_schedule.zig").Schedule {
+        return @import("loop_schedule.zig").build(g.linear[g.first..][0..g.layers], g.loop) catch unreachable;
+    }
+    pub fn withLoops(g: Geometry, loops: usize) !Geometry {
+        var out = g;
+        out.loop = try (g.loop orelse return error.BadLoops).withLoops(loops);
+        const s = try @import("loop_schedule.zig").build(out.linear[0..out.layers], out.loop);
+        out.loop_deltas = s.deltas;
+        out.loop_attentions = s.attentions;
+        return out;
+    }
     /// The whole model's geometry, of which this may be a stage.
     pub fn model(g: Geometry) Geometry {
         var m = g;
@@ -186,10 +197,9 @@ pub const Geometry = struct {
         m.heads = true;
         return m;
     }
-
     /// Layers [first, end) of this whole model as a stage; it holds the embedding when it starts at layer 0.
     pub fn stage(g: Geometry, first: usize, end: usize, heads: bool) error{BadStageRange}!Geometry {
-        if (g.whole != 0 or first >= end or end > g.layers) return error.BadStageRange;
+        if (g.loop != null or g.whole != 0 or first >= end or end > g.layers) return error.BadStageRange;
         var s = g;
         s.first = first;
         s.layers = end - first;
@@ -198,47 +208,38 @@ pub const Geometry = struct {
         s.heads = heads;
         return s;
     }
-
     pub fn attentions(g: Geometry) usize {
-        return g.layers - g.deltas();
+        return if (g.loop != null) g.loop_attentions else g.physicalAttentions();
     }
-
     /// Bytes of one linear layer's recurrence (fp32) and convolution tail (bf16).
     pub fn recBytes(g: Geometry) usize {
         return g.v_heads * dk * dk * 4;
     }
-
     pub fn convBytes(g: Geometry) usize {
         return (taps - 1) * g.convWidth() * 2;
     }
-
     /// A stream's recurrences and tails.
     pub fn stateBytes(g: Geometry) usize {
         return g.deltas() * (g.recBytes() + g.convBytes());
     }
-
     /// A row's record of a linear layer (qwen35.cuh log_bytes): decay and write a value head, key a key head, the tail.
     pub fn logRowBytes(g: Geometry) usize {
         return g.v_heads * 4 + g.v_heads * dk * 4 + g.k_heads * dk * 2 + g.convBytes();
     }
-
     /// A stream's log of a window's `rows` rows.
     pub fn logBytes(g: Geometry, rows: usize) usize {
         return rows * g.deltas() * g.logRowBytes();
     }
-
     /// A stream's keys and values at a `cap`-token window: bf16 rows, or with `kv8` e4m3 rows and an fp32 scale each.
     pub fn kvBytes(g: Geometry, cap: usize, kv8: bool) usize {
         const row: usize = if (kv8) head_dim + 4 else head_dim * 2;
         return g.attentions() * 2 * g.kv_heads * cap * row;
     }
 };
-
 /// The dense Qwen3.8-27B's shape (hidden 5120, 64 layers, no experts), whatever its checkpoint format.
 pub fn dense27(g: anytype) bool {
     return g.hidden == 5120 and g.layers == 64 and g.experts == 0;
 }
-
 /// The supported geometry: the prompt tiles take an even group and a chunk's rows; the partials the verify rows.
 pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bool {
     const group = g.q_heads / g.kv_heads;
@@ -246,7 +247,6 @@ pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bo
     if (group < 2 or group > 16) return false; // the decode partials' groups
     return rows <= partial_rows; // and the rows they hold
 }
-
 /// Per-module overrides: routers at 8 bits, switch_mlp at 3 or 4 (one width throughout), others 4; groups of 64.
 fn expertBits(q: std.json.ObjectMap, layers: usize, p: *fields.Problem) !struct { bits: u8, count: usize } {
     var bits: ?usize = null;
@@ -332,10 +332,12 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
     const doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer doc.deinit();
     const root = try object(doc.value);
+    const type_value = root.get("model_type") orelse return error.UnsupportedQwenConfig;
+    const loop_model = type_value == .string and std.mem.eql(u8, type_value.string, "sensenova_loop");
     const moe = blk: {
         const v = root.get("model_type") orelse return error.UnsupportedQwenConfig;
         if (v != .string) return error.UnsupportedQwenConfig;
-        if (std.mem.eql(u8, v.string, "qwen3_5")) break :blk false;
+        if (std.mem.eql(u8, v.string, "qwen3_5") or loop_model) break :blk false;
         if (std.mem.eql(u8, v.string, "qwen3_5_moe")) break :blk true;
         return error.UnsupportedQwenConfig;
     };
@@ -357,7 +359,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
     const modelopt = !exl3 and qv == null and root.get("quantization_config") != null;
     // neither table nor config: the publisher's BF16 weights (a decision backbone, dense only)
     const bf16 = !modelopt and !exl3 and qv == null;
-    if (bf16 and moe) return error.UnsupportedQwenQuantization;
+    if (bf16 and moe or loop_model and !bf16) return error.UnsupportedQwenQuantization;
     var g: Geometry = .{
         .hidden = try integer(text, "hidden_size"),
         .intermediate = try integer(text, if (moe) "moe_intermediate_size" else "intermediate_size"),
@@ -376,6 +378,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
         .bf16 = bf16,
     };
     if (t.get("tensorfold_learned_neurons")) |pocket| {
+        if (loop_model and (pocket != .integer or pocket.integer != 0)) return error.SenseNovaPocket;
         if (pocket != .integer or pocket.integer < 0 or pocket.integer > 128 or @mod(pocket.integer, 64) != 0)
             return error.UnsupportedQwenGeometry;
         g.pocket = @intCast(pocket.integer);
@@ -400,6 +403,18 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
     var full: [max_layers]bool = undefined;
     try layer_pattern.read(full[0..g.layers], t);
     for (g.linear[0..g.layers], full[0..g.layers]) |*l, f| l.* = !f;
+    if (loop_model) {
+        if (t.get("num_experts")) |v| if (v != .integer or v.integer != 0) return error.SenseNovaMoe;
+        if (t.get("mtp_num_hidden_layers")) |v| if (v != .integer or v.integer != 0) return error.SenseNovaMtp;
+        if (g.pocket != 0) return error.UnsupportedLearningFormat;
+        g.loop = try @import("loop_config.zig").parse(root, g.layers);
+        if (g.loop.?.mhc) |m| if (m.streams != 2 or m.fixed_identity or m.iterations > max_mhc_iterations or !std.math.isFinite(@as(f32, @floatCast(m.pre_scale))) or @as(f32, @floatCast(m.pre_scale)) == 0) return error.UnsupportedSenseNovaMhc;
+        if (g.tied) return error.UnsupportedQwenConfig;
+        const plan = try @import("loop_schedule.zig").build(g.linear[0..g.layers], g.loop);
+        if (plan.attentions == 0) return error.UnsupportedQwenGeometry;
+        g.loop_deltas = plan.deltas;
+        g.loop_attentions = plan.attentions;
+    }
     if (modelopt or bf16) {
         if (g.pocket > 0) return error.UnsupportedLearningFormat;
         const mo = @import("cuda_modelopt.zig");
@@ -567,14 +582,12 @@ test "a mixed checkpoint's widths by module, under any spelling; other groups an
     defer std.testing.allocator.free(gptq);
     try std.testing.expectError(error.UnsupportedQwenQuantization, parse(std.testing.allocator, gptq));
 }
-
 test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head against bf16's 1024" {
     var g: Geometry = .{ .hidden = 2048, .intermediate = 6144, .layers = 4, .vocab = 248320, .k_heads = 16, .v_heads = 16, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
     g.linear[3] = false;
     try std.testing.expectEqual(@as(usize, 2 * 2 * 1000 * 512), g.kvBytes(1000, false));
     try std.testing.expectEqual(@as(usize, 2 * 2 * 1000 * 260), g.kvBytes(1000, true));
 }
-
 test {
     _ = @import("cuda_quant_admission_test.zig");
     _ = @import("cuda_modelopt_moe_test.zig");
@@ -583,4 +596,5 @@ test {
     _ = @import("cuda_exl3_admission_test.zig");
     _ = @import("cuda_bf16_admission_test.zig");
     _ = @import("cuda_rope.zig");
+    _ = @import("loop_geometry_test.zig");
 }

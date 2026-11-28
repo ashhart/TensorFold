@@ -58,6 +58,14 @@ pub fn sm110Product(a: std.mem.Allocator, io: std.Io, o: api.Open, moss_image: b
 
 /// Flags refused whatever the family; null when `o` may open.
 pub fn backend(o: api.Open) ?[]const u8 {
+    if (std.mem.eql(u8, o.model_type, "sensenova_loop")) {
+        if (o.loops) |count| if (count < 1 or count > 4) return "--loops: SenseNova Loop accepts a count from 1 to 4";
+        if (o.vision != null) return "SenseNova Loop supports text only; image input and --vision are not supported";
+        if (o.drafter != null) return "--drafter: SenseNova Loop supports plain decoding only";
+        if (o.mtp_drafts != null or o.mtp_confidence != null) return "SenseNova Loop does not support MTP drafts";
+        if (o.slide or o.learn != null or o.learn_conversations or o.record != null) return "SenseNova Loop does not support learning or training";
+        if (o.tp != 1 or o.rank != 0) return "SenseNova Loop does not support pipeline stages or tensor-parallel ranks";
+    }
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
         return deepseek_release_message;
     const qwen_mtp = std.mem.eql(u8, o.model_type, "qwen3_5") or std.mem.eql(u8, o.model_type, "qwen3_5_moe");
@@ -81,7 +89,7 @@ pub fn backend(o: api.Open) ?[]const u8 {
     }
     if (o.policy.len > 0) return "--policy is not supported by this CUDA build";
     if (@import("disk_spill.zig").refusal(o, "")) |why| return why;
-    if (o.rope_yarn != null and !std.mem.eql(u8, o.model_type, "qwen3_5") and !std.mem.eql(u8, o.model_type, "qwen3_5_moe"))
+    if (o.rope_yarn != null and !std.mem.eql(u8, o.model_type, "qwen3_5") and !std.mem.eql(u8, o.model_type, "qwen3_5_moe") and !std.mem.eql(u8, o.model_type, "sensenova_loop"))
         return "--rope-yarn: this CUDA family has no YaRN rope; serve it without --rope-yarn";
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
@@ -146,6 +154,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
+    if (o.loops != null and (F == qwen35.native or F == qwen35.native_moe)) return "--loops: this Qwen checkpoint has no recurrent loop";
     if (o.loops != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "loops"))) return "--loops sets a looped model's recurrent passes (Dory's): this CUDA family has none; serve without it";
     if (o.prompt_cache_gib != null and @import("cuda_kv_pool.zig").keepsNoPrompts(F)) return no_prompts;
     return null;
@@ -506,4 +515,37 @@ test "a rank outside its world and a world the family does not serve refuse by n
     try std.testing.expectEqualStrings("argument --rank: 1 is not below --tp 1", (try place(fnx, a, .{ .dir = "d", .model_type = "m", .rank = 1, .given = .{ .rank = true } })).?);
     try std.testing.expect(try place(fnx, a, .{ .dir = "d", .model_type = "m", .tp = 2, .rank = 1, .given = .{ .tp = true, .rank = true } }) == null);
     try std.testing.expect(try place(fnx, a, .{ .dir = "d", .model_type = "m" }) == null);
+}
+
+test "SenseNova loop: CUDA rejects unsupported modes" {
+    const base: api.Open = .{ .dir = "d", .model_type = "sensenova_loop" };
+    try std.testing.expect(backend(base) == null);
+    var o = base;
+    o.vision = .{};
+    try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop supports text only");
+    o = base;
+    o.drafter = "draft";
+    try std.testing.expectStringStartsWith(backend(o).?, "--drafter");
+    o = base;
+    o.mtp_drafts = 1;
+    try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop does not support MTP");
+    o = base;
+    o.slide = true;
+    try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop does not support learning");
+    o = base;
+    o.learn_conversations = true;
+    try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop does not support learning");
+    o = base;
+    o.tp = 2;
+    try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop does not support pipeline");
+    o = base;
+    o.rank = 1;
+    try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop does not support pipeline");
+    o = base;
+    o.loops = 2;
+    try std.testing.expect(family(qwen35.native_loop, o) == null);
+    o.loops = 0;
+    try std.testing.expectStringStartsWith(backend(o).?, "--loops:");
+    o.loops = 5;
+    try std.testing.expectStringStartsWith(backend(o).?, "--loops:");
 }

@@ -19,7 +19,7 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     // #2825 hoists copy addresses before the K loop; copy order and math match prefill_kernel.
     try std.testing.expectEqualStrings("e3724114b87cae6f6f761b2f86357f05b1693d84a0233e4d58ce46349fa853f6", &hash(@embedFile("kernels/cuda/qmm_prefill.cu")));
     // KIA14 adds all_rows (false keeps selection/arithmetic); #4706 adds TF_QWEN_PDL prologues
-    try std.testing.expectEqualStrings("79e97b0992f82e891ff8a80cdad68b534e07606b98feef3dffe25101477c99e1", &hash(@embedFile("kernels/cuda/qwen35.cu")));
+    try std.testing.expectEqualStrings("7a42deb533fcb6558edb3edc765f3f6f53f7caa63759fc3c618dcdbb40382808", &hash(@embedFile("kernels/cuda/qwen35.cu")));
     // #1879's bytes: a comment names cuda_scratch.zig, where max_chunks moved; the code is unchanged
     try std.testing.expectEqualStrings("f9e4a040cf219aac8db211df25d264dba390fce4a7e8da45557652c6ff0f28ba", &hash(@embedFile("kernels/cuda/qwen35.cuh")));
     // 67711a6aa7's bytes: the opt-in DSpine draft kernels (#2633); default serving unchanged
@@ -31,7 +31,7 @@ test "dense serving: owned launches and projections retain their reviewed argume
     const source = @embedFile("src/families/qwen3_5/cuda_engine.zig") ++
         @embedFile("src/families/qwen3_5/cuda_scan.zig") ++
         @embedFile("src/families/qwen3_5/cuda_forward.zig");
-    const prefixes = [_][]const u8{ "try e.run(e.fns.", "try e.run(scan,", "try e.proj(", "try e.norm(" };
+    const prefixes = [_][]const u8{ "try e.run(e.fns.", "try e.runPdl(e.fns.", "try e.run(scan,", "try e.proj(", "try e.norm(", "try mhc." };
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     var at: usize = 0;
@@ -51,6 +51,6 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // main's moved delta scan and MTP's retained-row tap argument stay; #4706 adds TF_QWEN_PDL glue
-    try std.testing.expectEqualStrings("2822d47ae041b6d7051e39209bd389cb5e4f01520efee64838c1c0e0e5428b75", &hash(out.items));
+    // The scan, retained-row MTP tap, opt-in TF_QWEN_PDL glue, and schedule-driven norm and mHC launches are pinned.
+    try std.testing.expectEqualStrings("194b2a2b7597b12289250bb9100950c4c2c962f0a2487945511060c9ef7d1b29", &hash(out.items));
 }
