@@ -88,6 +88,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | open H[#4673] | ? | ? | ? | ? |
+| 41. Parallel routing | ? | open M[#5471] | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -130,6 +131,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | ? | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? | ? |
+| 41. Parallel routing | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -173,6 +175,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
 | 40. CPU KDA heads | n/a | n/a | n/a | done CPU, exact independent heads (Refs #1247) |
+| 41. Parallel routing | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -221,6 +224,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 41. Parallel routing | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 | snloop |
 | --- | --- | --- | --- | --- |
@@ -263,6 +267,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 41. Parallel routing | ? | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -319,6 +324,7 @@ below; these are estimates for planning a port, not results.
 | 37. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
 | 38. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
 | 39. Drafted rows share the walk | none | medium | none | HIP qwen3_5: decode at one stream with drafts at 131K-258K, score half +1.0–5.1 %, values' half +0.4–6.9 % more |
+| 41. Parallel routing | none | low | none | Metal Flash Next TFQ3 (every Apple GPU runs it; measured on an M3 Ultra, published TFQ3 checkpoint): drafted decode +8.0 % against main, one row level, tokens equal |
 
 ## The optimizations
 
@@ -679,6 +685,16 @@ below; these are estimates for planning a port, not results.
     | qwen3_5 (35B-A3B) | score half +0.96 % to +3.27 % decode at one stream with drafts at 131,072 and 258,048 kept tokens; the values' half +3.86 % to +6.94 % on top of it; `"draft": false` and four streams without drafts level; tokens equal | [#4673] and [#3811], gfx1151 |
     | qwen3_5 (27B) | score half +2.59 % to +5.11 %; the values' half +0.43 % to +4.91 % on top of it; the same checks | [#4673] and [#3811], gfx1151 |
 
+41. **Parallel routing.** Flash Next TFQ3 on Metal (M1-M5: the decode dispatch has no tensor-unit branch) routed a
+    decode window of 2 to 16 rows in one 32-thread group, one row after another, and one lane then built the
+    deduplicated expert lists alone. Each row now routes in the rotation kernel's spare group, in parallel, and one
+    thread a slot builds the same lists (`fn_pw_dedup_par`). Picks, weights and lists are the same bytes, so tokens do
+    not change; one-row decode keeps its path ([#5471]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | fnext (TFQ3) | against main 2d15aae, published TFQ3 checkpoint: drafted decode -1.88 ms a round (-6.8 %), +8.0 % tok/s, A-B-B-A, faster in both pairs; one row (`--no-drafts`) level; tokens equal | [#5471], M3 Ultra |
+
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
 [#519]: https://github.com/ashhart/TensorFold/pull/519
@@ -846,3 +862,4 @@ below; these are estimates for planning a port, not results.
 [#3811]: https://github.com/ashhart/TensorFold/issues/3811
 [#4673]: https://github.com/ashhart/TensorFold/pull/4673
 [#4932]: https://github.com/ashhart/TensorFold/pull/4932
+[#5471]: https://github.com/ashhart/TensorFold/issues/5471
