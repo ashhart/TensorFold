@@ -88,7 +88,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_MINIMAX_GRAPHS", "2" },                            .{ "TF_MINIMAX_GRAPHS", "on" },
         .{ "TF_MTP_TREES", "yes" },                               .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },                          .{ "TF_COST_KEY_TRACE", "on" },
-        .{ "TF_QWEN_GRAPH_STATS", "on" },                         .{ "TF_COST_KEY_TRACE", "on" },
+        .{ "TF_QWEN_GRAPH_STATS", "on" },                         .{ "TF_QWEN_DRAFT_FULL_HEAD", "on" },
         .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" }, .{ "GLM_POOL_TOKENS", "0" },
         .{ "GLM_POOL_TOKENS", "1023" },                           .{ "GLM_POOL_TOKENS", "4294967232" },
         .{ "GLM_POOL_TOKENS", "2k" },                             .{ "GLM_POOL_TOKENS", "+2000000" },
