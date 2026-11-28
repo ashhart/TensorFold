@@ -29,7 +29,6 @@ pub fn refusal(a: std.mem.Allocator, env: anytype) !?[]const u8 {
 
 pub fn startup() !void {
     try check(environment.Process{});
-    _ = try @import("graphs.zig").Settings.fromEnv();
 }
 
 /// Model admission retains the experimental gate's exact public refusal.

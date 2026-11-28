@@ -33,9 +33,7 @@ fn blank(r: sys.environment.Rule) !void {
         try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
         _ = try @import("aot_needs.zig").Served.fromEnv();
     } else if (r.blank_default) {
-        if (std.mem.eql(u8, r.name, "TF_DSV41_GRAPH_FLOOR")) {
-            try t.expectError(error.BadGraphFloor, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
-        } else if (r.empty_default_only or std.mem.eql(u8, r.name, "TF_DSV41_GRAPH_BUCKET") or std.mem.eql(u8, r.name, "TF_DSV41_GRAPH_ROWS_MAX")) {
+        if (r.empty_default_only) {
             try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
         } else {
             try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
@@ -88,26 +86,12 @@ test "DeepSeek strict env: migrated exact-string readers still reject whitespace
     try t.expectError(error.BadPhasesMode, @import("phases.zig").Phases.fromEnv(t.allocator));
 }
 
-test "DeepSeek strict env: graph capture constraints stop CUDA startup before resources" {
-    try t.expectEqual(@as(c_int, 0), env.setenv("TF_EXPERIMENTAL", "deepseek", 1));
-    defer _ = env.unsetenv("TF_EXPERIMENTAL");
-    for ([_][2][:0]const u8{
-        .{ "TF_DSV41_GRAPH_ROWS_MAX", "0" },
-        .{ "TF_DSV41_GRAPH_ROWS_MAX", "65" },
-        .{ "TF_DSV41_GRAPH_BUCKET", " 2048 " },
-        .{ "TF_DSV41_GRAPH_BUCKET", " " },
-        .{ "TF_DSV41_GRAPH_BUCKET", "\t\r\n" },
-    }) |c| {
-        try t.expectEqual(@as(c_int, 0), env.setenv(c[0], c[1], 1));
-        defer _ = env.unsetenv(c[0]);
-        try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
-    }
-    _ = env.unsetenv("TF_DSV41_GRAPH_BUCKET");
-    _ = env.unsetenv("TF_DSV41_GRAPH_ROWS_MAX");
-    const defaults = try @import("graphs.zig").Settings.fromEnv();
-    try t.expectEqual(@as(u32, 2048), defaults.bucket);
-    try t.expectEqual(@as(u32, 64), defaults.rows_max);
+test "DeepSeek strict env: graph constraints stay at their existing settings reader" {
+    const name = "TF_DSV41_GRAPH_ROWS_MAX";
+    try t.expectEqual(@as(c_int, 0), env.setenv(name, "65", 1));
+    defer _ = env.unsetenv(name);
     try v.startup();
+    try t.expectError(error.InvalidEnvironment, @import("graphs.zig").Settings.fromEnv());
 }
 
 test "DeepSeek strict env: lookup and session readers preserve exact-empty defaults" {
