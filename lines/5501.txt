@@ -1,0 +1,1 @@
+- Flash Next on CUDA: the rows-store staging permit is sized from the served window, so kept states past 1 GiB are written to disk and a later turn resumes from it instead of prefilling again; `--learn-conversations` also loads at small `--context` values (#5501, refs #5371).
