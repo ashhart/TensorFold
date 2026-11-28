@@ -193,7 +193,12 @@ pub const Trace = struct {
     /// The parent itself when neither the journal nor the reply log is on, so a request runs as it would without one.
     pub fn out(t: *Trace) openai.Out {
         if (t.journal == null and t.reply_log == null) return t.parent;
-        return .{ .ctx = t, .vt = &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive } };
+        // Keep each vtable comptime: a runtime field in a returned anonymous table would dangle.
+        const vt: *const openai.Out.VTable = if (t.parent.vt.progress != null)
+            &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive, .progress = progress }
+        else
+            &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive };
+        return .{ .ctx = t, .vt = vt };
     }
 
     fn keep(t: *Trace, bytes: []const u8) void {
@@ -225,6 +230,11 @@ pub const Trace = struct {
         t.stream = true;
         t.status = 200;
         return t.parent.vt.open(t.parent.ctx, n);
+    }
+
+    fn progress(ctx: *anyopaque, p: api.Progress) error{Closed}!void {
+        const t: *Trace = @ptrCast(@alignCast(ctx));
+        return t.parent.vt.progress.?(t.parent.ctx, p);
     }
 
     fn event(ctx: *anyopaque, payload: ?Value) error{Closed}!void {
