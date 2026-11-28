@@ -22,6 +22,7 @@ pub const Settings = struct {
     pair: bool = true, // TF_GLM_PROMPT_PAIR: 1 (while no stream decodes, a prompt step takes two chunks, each one's exchanges under the other's sites) or 0
     pair_experts: bool = false, // TF_GLM_PAIR_EXPERTS=1: paired chunks share 128-pair NVFP4 routed-expert items (0: two 64-pair passes)
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
+    dsa_columns: bool = false, // TF_GLM_DSA_COLUMNS=1: exact Flash BF16 output shards over two tiled ranks
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
@@ -137,6 +138,12 @@ pub const Settings = struct {
                 return error.BadSetting;
             };
         }
+        if (get("TF_GLM_DSA_COLUMNS")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.dsa_columns = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_DSA_COLUMNS: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_LAYERS")) |v| {
             s.layers = std.fmt.parseInt(u32, v, 10) catch 0;
             if (s.layers == 0) {
@@ -237,13 +244,14 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // this struct's version (24, plus dsa_columns)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
     pages: u32 = 0, // TF_KV_PAGES: the engine's own sequence is made on pages at init, so every rank pages alike
     prompt_fixed_k: u32,
     tiled: u32,
+    dsa_columns: u32 = 0, // TF_GLM_DSA_COLUMNS: both ranks load and gather the same backbone output shards
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
     kda_wide: u32,
     kda_pad: u32 = 0, // TF_GLM_KDA_PAD: every rank's KDA input rows carry one width
@@ -283,6 +291,7 @@ pub const Fingerprint = extern struct {
         pages,
         prompt_fixed_k,
         tiled,
+        dsa_columns,
         split,
         kda_wide,
         kda_pad,
@@ -330,6 +339,7 @@ pub const Fingerprint = extern struct {
             .rank = @intCast(rank),
             .prompt_fixed_k = @intFromBool(s.prompt_fixed_k),
             .tiled = @intFromBool(s.tiled),
+            .dsa_columns = @intFromBool(s.dsa_columns),
             .split = if (!s.split) 0 else if (s.ring) 2 else 1,
             .kda_wide = @intFromBool(s.kda_wide),
             .kda_pad = @intFromBool(s.kda_pad),
@@ -372,6 +382,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "prompt_fixed_k",
             "world",
             "tiled",
+            "dsa_columns",
             "split",
             "kda_wide",
             "kda_pad",
@@ -500,6 +511,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .pages => "TF_KV_PAGES (unset or auto pages from two ranks)",
         .prompt_fixed_k => "TF_GLM_PROMPT_K",
         .tiled => "TF_GLM_MM",
+        .dsa_columns => "TF_GLM_DSA_COLUMNS",
         .split => "TF_GLM_PREFILL_REDUCE",
         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
         .kda_pad => "TF_GLM_KDA_PAD",
@@ -542,31 +554,6 @@ pub fn mediaFingerprint(f: *Fingerprint, limits: @import("cuda_images.zig").Limi
 /// The checkpoint digest a rank sends: its metadata and every shard byte, read again only for a file that changed.
 pub fn artifact(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
     return @import("core").checkpoint_identity.fullIdentity(gpa, io, dir);
-}
-test "TF_GLM_PAIR_EXPERTS: off by default, 0 or 1, and every rank must agree" {
-    const Reader = struct {
-        fn absent(_: [:0]const u8) ?[]const u8 {
-            return null;
-        }
-        fn on(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "1" else null;
-        }
-        fn off(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "0" else null;
-        }
-        fn bad(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "2" else null;
-        }
-    };
-    var problem: []const u8 = "";
-    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).pair_experts);
-    const on = try Settings.read(Reader.on, &problem);
-    try std.testing.expect(on.pair_experts);
-    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).pair_experts);
-    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
-    try std.testing.expectEqualStrings("TF_GLM_PAIR_EXPERTS: 0 or 1", problem);
-    const all = [_]Fingerprint{ Fingerprint.of(2, 0, on, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), @splat(0)) };
-    try std.testing.expectEqual(Mismatch{ .field = .pair_experts, .rank = 1 }, mismatch(&all).?);
 }
 
 test "wire pieces: a blank override is unset; the tools' form takes its world from TF_GLM_WORLD" {

@@ -499,6 +499,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     var recipes = try formats.readRecipes(gpa, io, dir);
     defer if (recipes) |*r| r.deinit();
     if (recipes) |*r| L.recipes = recipeTable(r);
+    try @import("cuda_dsa_load.zig").preflightColumns(&L, layers);
     w.layers = try gpa.alloc(Layer, layers.len);
     try @import("cuda_load_ahead.zig").layers(&L, prefix, layers, w.layers);
     const embedding = try L.get("embed_tokens.weight", .{});

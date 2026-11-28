@@ -4,6 +4,21 @@ const cuda = @import("cuda");
 const formats = @import("cuda_formats.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
 const sparse = @import("cuda_sparse.zig");
+const shard = @import("cuda_shard.zig");
+const mm = @import("cuda_mm.zig");
+
+/// Refuse non-BF16 column targets from checkpoint headers before layer allocation or upload; off adds no queries.
+pub fn preflightColumns(L: anytype, ids: []const u32) !void {
+    if (!L.w.share.dsa_columns) return;
+    const c = &L.w.config;
+    for (ids) |i| {
+        if (i >= c.layers) return error.BadLayer;
+        if (c.kind(i) != .mla) continue;
+        try L.format("layers.{d}.self_attn.q_a_proj", .{i}, .bf16);
+        try L.format("layers.{d}.self_attn.kv_a_proj_with_mqa", .{i}, .bf16);
+        if (!c.shared.isSet(i)) try L.format("layers.{d}.self_attn.indexer.wq_b", .{i}, .bf16);
+    }
+}
 
 /// weights.load's dsa(i) (latent): [q_a | kv_a], norms, q_b by heads, kv_b as wk/wv (AbsorbW), o by cols, indexer.
 pub fn dsa(L: anytype, i: u32) !dsa_block.Layer {
@@ -18,7 +33,15 @@ pub fn dsa(L: anytype, i: u32) !dsa_block.Layer {
     const kv_mx = mtp and (try L.get("layers.{d}.self_attn.kv_b_proj.weight", .{i})).dtype == .f8_e4m3;
     try L.format("layers.{d}.self_attn.kv_b_proj", .{i}, if (kv_mx) .mxfp8 else .bf16);
     const kv_wide: ?formats.mxfp8.Mxfp8 = if (kv_mx) try formats.mxfp8.Mxfp8.read(L.ck, kv_name) else null;
-    const proj = try formats.cutProj(L, L.prefix, i, &.{ .{ .rel = "self_attn.q_a_proj" }, .{ .rel = "self_attn.kv_a_proj_with_mqa" } }, wants, "layers.{d}.dsa.proj");
+    const columns = L.w.share.dsa_columns and !mtp;
+    const ps: ?shard.Span = if (columns) try shard.Share.outputColumns(c.q_lora + c.kv_lora, L.w.share.rank, L.w.share.world) else null;
+    var proj_parts: [2]formats.Part = undefined;
+    const proj_count = projectionParts(ps, c.q_lora, &proj_parts);
+    if (ps != null) {
+        try L.format("layers.{d}.self_attn.q_a_proj", .{i}, .bf16);
+        try L.format("layers.{d}.self_attn.kv_a_proj_with_mqa", .{i}, .bf16);
+    }
+    const proj = try formats.cutProj(L, L.prefix, i, proj_parts[0..proj_count], if (columns) &.{.bf16} else wants, "layers.{d}.dsa.proj");
     try L.whole(try L.get("layers.{d}.self_attn.q_a_layernorm.weight", .{i}), .bf16);
     const q_norm = try L.put("layers.{d}.dsa.q_norm", .{i});
     try L.whole(try L.get("layers.{d}.self_attn.kv_a_layernorm.weight", .{i}), .bf16);
@@ -36,6 +59,7 @@ pub fn dsa(L: anytype, i: u32) !dsa_block.Layer {
     const inv = try ropeInv(L);
     return .{
         .proj = proj,
+        .proj_columns = ps,
         .q_norm = q_norm,
         .kv_norm = kv_norm,
         .q_b = q_b,
@@ -55,13 +79,32 @@ pub fn dsa(L: anytype, i: u32) !dsa_block.Layer {
         .dense_limit = c.keyWidth(),
     };
 }
+/// The stored row cuts for one rank's `[q_a | kv_a]` outputs; null keeps the replicated pair.
+fn projectionParts(ps: ?shard.Span, q_lora: usize, parts: *[2]formats.Part) usize {
+    const sp = ps orelse {
+        parts.* = .{ .{ .rel = "self_attn.q_a_proj" }, .{ .rel = "self_attn.kv_a_proj_with_mqa" } };
+        return 2;
+    };
+    var count: usize = 0;
+    if (sp.lo < q_lora) {
+        parts[count] = .{ .rel = "self_attn.q_a_proj", .rows = .{ sp.lo, @min(sp.hi, q_lora) } };
+        count += 1;
+    }
+    if (sp.hi > q_lora) {
+        parts[count] = .{ .rel = "self_attn.kv_a_proj_with_mqa", .rows = .{ @max(sp.lo, q_lora) - q_lora, sp.hi - q_lora } };
+        count += 1;
+    }
+    return count;
+}
 
 /// The layer's own indexer: [wk | weights_proj], wq_b and its key LayerNorm; GLM-5.3-Flash's pool gate and ape too.
 fn index(L: anytype, i: u32, mtp: bool, inv: u64) !dsa_block.Index {
     const c = &L.w.config;
     const iw: []const formats.Format = if (mtp) &.{ .bf16, .mxfp8 } else &.{.bf16};
     const kw = try formats.cutProj(L, L.prefix, i, &.{ .{ .rel = "self_attn.indexer.wk" }, .{ .rel = "self_attn.indexer.weights_proj" } }, iw, "layers.{d}.dsa.index.kw");
-    const qb = try formats.cutProj(L, L.prefix, i, &.{.{ .rel = "self_attn.indexer.wq_b" }}, iw, "layers.{d}.dsa.index.qb");
+    const qs: ?shard.Span = if (L.w.share.dsa_columns and !mtp) try shard.Share.outputColumns(c.i_heads * c.i_dim, L.w.share.rank, L.w.share.world) else null;
+    if (qs != null) try L.format("layers.{d}.self_attn.indexer.wq_b", .{i}, .bf16);
+    const qb = try formats.cutProj(L, L.prefix, i, &.{.{ .rel = "self_attn.indexer.wq_b", .rows = if (qs) |sp| .{ sp.lo, sp.hi } else null }}, if (qs != null) &.{.bf16} else iw, "layers.{d}.dsa.index.qb");
     try L.whole(try L.get("layers.{d}.self_attn.indexer.k_norm.weight", .{i}), .bf16);
     const ln_w = try L.put("layers.{d}.dsa.index.ln_w", .{i});
     try L.whole(try L.get("layers.{d}.self_attn.indexer.k_norm.bias", .{i}), .bf16);
@@ -75,7 +118,9 @@ fn index(L: anytype, i: u32, mtp: bool, inv: u64) !dsa_block.Index {
         ape = try L.put("layers.{d}.dsa.index.ape", .{i});
     }
     const g: sparse.Geometry = .{ .pool = c.kpool, .topk = c.i_topk / c.kpool, .rope = if (c.dsa) c.rope else 0, .inv = if (c.dsa) inv else 0 };
-    return .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim, .geom = g, .apart = c.dsa };
+    var result: dsa_block.Index = .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim, .geom = g, .apart = c.dsa };
+    result.qb_columns = qs;
+    return result;
 }
 
 /// A shared layer's indexer: none of its own; it attends the token lists its indexed layer left (Config.indexFrom).
@@ -100,4 +145,48 @@ fn ropeInv(L: anytype) !u64 {
 fn absorbRows(L: anytype, mx: ?formats.mxfp8.Mxfp8, t: anytype, name: []const u8, lo: usize, hi: usize, total: usize) !void {
     if (mx) |p| return formats.mxfp8.appendWide(L, p, name, lo, hi);
     try L.rows(t, lo, hi, total, .bf16);
+}
+
+test "GLM DSA columns: loader rows cover q_a and kv_a exactly once on each rank" {
+    var parts: [2]formats.Part = undefined;
+    try std.testing.expectEqual(@as(usize, 1), projectionParts(.{ .lo = 0, .hi = 1024 }, 1536, &parts));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 0, 1024 }), parts[0].rows);
+    try std.testing.expectEqualStrings("self_attn.q_a_proj", parts[0].rel);
+    try std.testing.expectEqual(@as(usize, 2), projectionParts(.{ .lo = 1024, .hi = 2048 }, 1536, &parts));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 1024, 1536 }), parts[0].rows);
+    try std.testing.expectEqual(@as(?[2]usize, .{ 0, 512 }), parts[1].rows);
+    try std.testing.expectEqualStrings("self_attn.kv_a_proj_with_mqa", parts[1].rel);
+    try std.testing.expectEqual(@as(usize, 2), projectionParts(null, 1536, &parts));
+    try std.testing.expectEqual(@as(?[2]usize, null), parts[0].rows);
+    try std.testing.expectEqual(@as(?[2]usize, null), parts[1].rows);
+}
+
+test "GLM DSA columns: full and half outputs keep the same glm_mm K slices" {
+    try std.testing.expectEqual(@as(usize, 8), mm.splitK(2048, 4096));
+    try std.testing.expectEqual(mm.splitK(2048, 4096), mm.splitK(1024, 4096));
+    try std.testing.expectEqual(@as(usize, 4), mm.splitK(4096, 1536));
+    try std.testing.expectEqual(mm.splitK(4096, 1536), mm.splitK(2048, 1536));
+}
+
+test "GLM DSA columns: preflight is off without queries and checks only requested backbone targets" {
+    const Config = @import("config.zig").Config;
+    const Mock = struct {
+        const W = struct { config: Config, share: shard.Share };
+        const Self = @This();
+        w: W,
+        calls: usize,
+        fn format(self: *Self, comptime _: []const u8, _: anytype, _: anytype) !void {
+            self.calls += 1;
+        }
+    };
+    var mock: Mock = .{ .w = .{ .config = .{}, .share = undefined }, .calls = 0 };
+    mock.w.share = try shard.Share.of(&mock.w.config, 0, 2);
+    try preflightColumns(&mock, &.{3});
+    try std.testing.expectEqual(@as(usize, 0), mock.calls);
+    mock.w.config.shared.set(7);
+    mock.w.share.dsa_columns = true;
+    try preflightColumns(&mock, &.{ 3, 7 }); // layer 7 shares an indexer: two formats, not three
+    try std.testing.expectEqual(@as(usize, 5), mock.calls);
+    try std.testing.expectError(error.BadLayer, preflightColumns(&mock, &.{mock.w.config.layers}));
+    try std.testing.expectEqual(@as(usize, 5), mock.calls);
 }

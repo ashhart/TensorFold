@@ -391,6 +391,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_GLM_WORLD", .raw = "1", .n = 1 },
     .{ .name = "TF_GLM_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_GLM_WORLD", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TF_GLM_DSA_COLUMNS", .raw = "0", .n = 0 },
+    .{ .name = "TF_GLM_DSA_COLUMNS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = "0", .n = 0 },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = " 0 ", .n = 0 },

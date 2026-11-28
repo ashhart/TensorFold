@@ -1,0 +1,44 @@
+//! Run preflight tests while suppressing only their expected loader-error log receipts.
+const std = @import("std");
+const builtin = @import("builtin");
+
+fn expectedErrors(comptime _: std.log.Level, comptime _: @EnumLiteral(), comptime _: []const u8, _: anytype) void {}
+pub const std_options: std.Options = .{ .logFn = expectedErrors };
+
+pub fn main(init: std.process.Init.Minimal) void {
+    var failed: usize = 0;
+    var skipped: usize = 0;
+    for (builtin.test_functions, 1..) |test_fn, i| {
+        std.testing.allocator_instance = .init(std.heap.page_allocator, .{
+            .check_write_after_free = true,
+            .stack_trace_frames = if (builtin.os.tag == .macos) 0 else (std.heap.SafeAllocator.Options{}).stack_trace_frames,
+        });
+        std.testing.io_instance = .init(std.testing.allocator, .{ .argv0 = .init(init.args), .environ = init.environ });
+        std.testing.environ = init.environ;
+        std.debug.print("{d}/{d} {s}...", .{ i, builtin.test_functions.len, test_fn.name });
+        var bad = false;
+        var skip = false;
+        test_fn.func() catch |err| {
+            if (err == error.SkipZigTest) {
+                skip = true;
+            } else {
+                bad = true;
+                std.debug.print("FAIL ({t})\n", .{err});
+                if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
+            }
+        };
+        std.testing.io_instance.deinit();
+        if (std.testing.allocator_instance.deinit() != 0) bad = true;
+        if (bad) {
+            failed += 1;
+            std.debug.print("FAIL\n", .{});
+        } else if (skip) {
+            skipped += 1;
+            std.debug.print("SKIP\n", .{});
+        } else {
+            std.debug.print("OK\n", .{});
+        }
+    }
+    std.debug.print("{d} passed; {d} skipped; {d} failed.\n", .{ builtin.test_functions.len - failed - skipped, skipped, failed });
+    if (failed != 0) std.process.exit(1);
+}

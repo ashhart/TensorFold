@@ -85,6 +85,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |
 | `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM's kernels and its qmmf linears use dependent launches) |
 | `TF_GLM_INDEX_SPLIT` | A whole prompt position from `0` to `4294967295`; default `2048` (from that position on, rank 0 splits a prompt chunk's indexer rows at TP=2 or more; `0` never splits) |
+| `TF_GLM_DSA_COLUMNS` | GLM-5.3-Flash on CUDA: exactly `0` or `1`; default off. `1` shards the 11 backbone BF16 DSA `q_a|kv_a` and `indexer.qb` weights by output columns over exactly two tiled ranks. Every output still uses full K and the same K slices; ranks all-gather BF16 outputs. MTP and all other projections stay replicated. Non-TP2, untiled, TFQ3, non-BF16, full GLM and non-target shapes refuse the opt-in |
 | `TF_GLM_PROMPT_STEPS` | Exactly `0` or `1`; default on (GLM prompt passes in chunks); read on rank 0 |
 | `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
 | `TF_GLM_DSEL` | Exactly `0` or `1`; default on (a GLM decode window's DSA select runs on many CTAs; 0 keeps one CTA a row) |

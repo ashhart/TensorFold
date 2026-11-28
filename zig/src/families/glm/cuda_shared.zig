@@ -78,10 +78,10 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di: 
         .mla => |a| {
             var sparse_any = false;
             for (r.segs) |g| sparse_any = sparse_any or dsa_block.sparseRows(a, g.st.pos, g.rows);
-            try dsa_block.prepare(f.set(), f.stream, a, b.dsa, b.normed, c.hidden, rows, sparse_any);
+            try dsa_block.prepareKernels(.{ .set = f.set(), .ops = f.m.ops(), .columns = f.dsaColumns(r) }, f.stream, a, b.dsa, b.normed, c.hidden, rows, sparse_any);
             for (r.segs) |g| {
                 const nch = @min(latent.chunksFor(g.st.pos + g.rows), b.nch);
-                try dsa_block.attend(.{ .set = f.set(), .ops = f.m.ops() }, f.stream, a, g.st.caches[di], b.dsa, g.row0, g.rows, g.st.pos_dev, g.st.pos, nch, b.part_rows);
+                try dsa_block.attend(.{ .set = f.set(), .ops = f.m.ops(), .columns = f.dsaColumns(r) }, f.stream, a, g.st.caches[di], b.dsa, g.row0, g.rows, g.st.pos_dev, g.st.pos, nch, b.part_rows);
             }
             try latent.expandV(f.set(), f.stream, b.dsa.ol, a.wv, b.dsa.vn, rows, a.heads, a.dv, a.lw);
             if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
