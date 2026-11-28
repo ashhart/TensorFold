@@ -37,6 +37,7 @@ fn wire(b: *std.Build, name: []const u8, about: []const u8, names: []const []con
 const linux_compile = [_][]const u8{
     "check-drama-cuda-host",
     "check-glm-gather-gpu-host",
+    "check-qwen27-speed-host",
     "compile-checkpoint-consumers",
     "compile-config-server",
     "compile-cuda-contract-consumers",

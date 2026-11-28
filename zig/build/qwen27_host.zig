@@ -112,12 +112,16 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
             .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n"),
         });
         const mods = @import("metal_targets.zig").metalEngineModules(b, b.graph.host, .Debug, draft_ids);
+        const no_shaders = b.addWriteFiles().add("no-shaders.metallib", "");
+        mods.sources.addImport("nemotron_packed_metallib", @import("metal_targets.zig").embedded(b, no_shaders, "nemotron_packed.metallib"));
         const api = b.createModule(.{
             .root_source_file = b.path("zig/src/core/engine_api.zig"),
             .target = b.graph.host,
             .link_libc = true,
             .imports = &.{.{ .name = "lanes", .module = mods.lanes }},
         });
+        const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "engine_api", .module = api }, .{ .name = "living", .module = mods.living } } });
+        speedCompile(b, mods.metal, mods.engine, api, host);
         fullCacheHost(b, mods.engine, api, mods.metal, mods.living);
     }
 }
@@ -165,6 +169,10 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen27-grants-host", "Native shared draft policy counts granted and proposed nodes without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = grants })).step);
     const tree_host = b.addTest(.{ .root_module = engine, .filters = &.{"qwen27 window:"} });
     b.step("test-qwen27-draft-tree-host", "Real selector 31-node tree and verify parents without a GPU").dependOn(&b.addRunArtifact(tree_host).step);
+    speedCompile(b, metal, engine, api, host);
+}
+
+fn speedCompile(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, api: *std.Build.Module, host: *std.Build.Module) void {
     const object = b.addObject(.{ .name = "qwen27-speed-compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/qwen27_speed_compile.zig"),
         .target = b.graph.host,

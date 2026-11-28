@@ -313,14 +313,23 @@ pub const Attention = struct {
         }
         try timing.end();
     }
-    /// The keys' half of `preprocess` and `encode`'s append: a pass whose rows reach only the cache.
+    /// The keys' half of `preprocess` and `encode`'s append for a mixed K/V projection.
     pub fn keysOnly(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, p: Preprocess, caches: []const Cache) !void {
+        if (p.key_row_stride != 0 or !plan.geometry.sameShape(p.geometry)) return error.TargetAttentionShape;
+        return a.keysOnlyRows(input_encoder, scratch, binding, plan, p, null, caches);
+    }
+    /// The same cache append for callers with separate contiguous K and V buffers.
+    pub fn keysOnlyContiguous(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, p: Preprocess, v: Ref, caches: []const Cache) !void {
+        return a.keysOnlyRows(input_encoder, scratch, binding, plan, p, v, caches);
+    }
+    fn keysOnlyRows(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, p: Preprocess, separate_v: ?Ref, caches: []const Cache) !void {
         try plan.geometry.check();
         try p.geometry.check();
         const g = plan.geometry;
         const pg = p.geometry;
-        if (p.key_row_stride != 0 or !g.sameShape(pg)) return error.TargetAttentionShape;
-        const kv_bytes = @as(usize, p.rows) * g.kv_heads * g.dim * 2;
+        const kv = g.kv_heads * g.dim;
+        const kv_bytes = @as(usize, p.rows) * kv * 2;
+        const v = separate_v orelse Ref{ .buffer = p.mixed.buffer, .offset = p.mixed.offset + @as(usize, kv) * 2 };
         if (p.rows != plan.rows or p.rows == 0 or p.rows > @import("gpu_frame.zig").max_rows or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
         if ((p.h_end > 0 or p.w_end > 0) and p.plane < p.rows) return error.TargetAttentionShape;
         const plane_rows: usize = if (p.h_end > 0 or p.w_end > 0) 2 * @as(usize, p.plane) + p.rows else p.rows;
@@ -328,9 +337,11 @@ pub const Attention = struct {
         try span(p.k_gain, @as(usize, g.dim) * 2);
         try span(p.norm_k, kv_bytes);
         try span(p.rotated_key, kv_bytes);
+        try span(v, kv_bytes);
         try spanAligned(p.positions, plane_rows * 4, 4);
         for ([_]Ref{ p.norm_k, p.rotated_key }) |dst| {
             try disjoint(dst, kv_bytes, p.mixed, keyBytes(p));
+            try disjoint(dst, kv_bytes, v, kv_bytes);
             try disjoint(dst, kv_bytes, p.k_gain, @as(usize, g.dim) * 2);
             try disjoint(dst, kv_bytes, p.positions, plane_rows * 4);
         }
@@ -339,7 +350,8 @@ pub const Attention = struct {
         try binding.check(plan, caches);
         for (caches) |cache| {
             try apart(cache, g, p.rotated_key, kv_bytes);
-            try apart(cache, g, p.mixed, 2 * kv_bytes);
+            try apart(cache, g, p.mixed, keyBytes(p));
+            try apart(cache, g, v, kv_bytes);
         }
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
@@ -363,8 +375,7 @@ pub const Attention = struct {
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         useCaches(e, caches);
-        const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .dim = g.dim, .group = g.group(), .value_stride = 2 * g.kv_heads * g.dim };
-        const v = Ref{ .buffer = p.mixed.buffer, .offset = p.mixed.offset + @as(usize, g.kv_heads) * g.dim * 2 };
+        const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .dim = g.dim, .group = g.group(), .value_stride = if (separate_v == null) 2 * kv else kv };
         e.setPipeline(a.io[2]);
         bind(e, .{ p.rotated_key, v, binding.get(.caches), binding.get(.meta), scratch.get(.nodes) });
         e.setValue(args, 5);
@@ -557,7 +568,6 @@ pub const Attention = struct {
         e.barrier();
     }
 };
-
 
 test {
     _ = @import("attention_test.zig");
