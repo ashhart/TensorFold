@@ -79,6 +79,7 @@ pub const Cuda = struct {
         } else if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
         self.fills.deinit(self.gpa); // passes left between their chunks
+        @import("cuda_usage.zig").deinit(self);
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
@@ -91,7 +92,7 @@ pub const Cuda = struct {
             .ptr = self,
             .vtable = &.{
                 .prefill = @import("cuda_usage.zig").prefill,
-                .prefill_step = fill.step,
+                .prefill_step = @import("cuda_usage.zig").prefillStep,
                 .cancel_prefill = fill.keepCancelled,
                 .first = firstFn,
                 .queue = queueFn,
@@ -500,6 +501,7 @@ pub const Cuda = struct {
     /// The stream's pass and lane gone once its GPU work has landed; again, nothing.
     pub fn release(self: *Cuda, s: *const lanes.Stream) void {
         fill.forget(self, s); // a pass released between its chunks
+        @import("cuda_usage.zig").release(self, s);
         const kv = self.lanes.fetchRemove(s) orelse return;
         self.e.stream.synchronize() catch {};
         self.drop(kv.value);

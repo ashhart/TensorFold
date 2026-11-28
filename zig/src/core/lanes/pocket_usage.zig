@@ -7,9 +7,9 @@ pub fn enabled(learning: bool, forgetting: bool) bool {
     return learning and forgetting;
 }
 
+/// Observe only in the legacy-pocket branch that has a consuming usage observer.
 pub fn backendEnabled(learning: bool, forgetting: bool, legacy: bool) bool {
-    _ = legacy;
-    return enabled(learning, forgetting);
+    return enabled(learning, forgetting) and legacy;
 }
 pub const Masks = struct {
     bits: [max_layers]u64 = @splat(0),

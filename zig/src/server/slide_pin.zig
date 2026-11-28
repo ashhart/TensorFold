@@ -17,7 +17,8 @@ pub fn id(path: []const u8) !u32 {
 }
 
 pub fn value(v: json.Value) !bool {
-    const b = v.field("pinned") orelse return true;
+    if (v != .object) return error.BadPin;
+    const b = v.get("pinned") orelse return true;
     return if (b == .bool) b.bool else error.BadPin;
 }
 
@@ -32,7 +33,9 @@ pub fn route(srv: *Server, conn: *Conn, a: std.mem.Allocator, path: []const u8) 
         .err => |why| return slide.refuse(conn, a, 400, why),
     };
     const pinned = value(v) catch return slide.refuse(conn, a, 400, "pinned must be true or false");
-    if (@import("slide_forget.zig").admit(srv, a)) |r| return slide.refuse(conn, a, r.code, r.message);
+    if (srv.info.folded_memory) {
+        if (!srv.teacher.learning.tryLock()) return slide.refuse(conn, a, 503, "a learn or delete request is running: send yours when it ends");
+    } else if (@import("slide_forget.zig").admit(srv, a)) |r| return slide.refuse(conn, a, r.code, r.message);
     defer srv.teacher.learning.unlock(srv.io);
     srv.slide.pin(n, pinned) catch |e| return slide.refuse(conn, a, switch (e) {
         error.NoSuchFact => 404,

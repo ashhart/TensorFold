@@ -3,6 +3,7 @@ const std = @import("std");
 const Example = @import("lesson_examples.zig").Example;
 const mode = @import("train_mode.zig");
 const pocket = @import("pocket.zig");
+const vacancy = @import("pocket_vacancy.zig");
 pub const floor = 2;
 pub const ceiling = 10;
 pub const questions = 8;
@@ -82,7 +83,7 @@ pub fn once(p: anytype, t: anytype) !bool {
         if (s.slot < n) {
             const j = s.slot;
             s.slot += 1;
-            if (p.used.items[j] < @TypeOf(p.*).neurons) {
+            if (p.used.items[j] < @TypeOf(p.*).neurons or vacancy.next(p, j) != null) {
                 const altered = try t.causalLogit(ex, p.moe.items[j], row);
                 s.score[j] += @max(0, s.baseline.? - altered);
             }
@@ -96,7 +97,7 @@ pub fn once(p: anytype, t: anytype) !bool {
     if (s.example == 0) return error.NoCausalQuestions;
     var free: [max_slots]bool = @splat(false);
     for (p.used.items, 0..) |used, i| {
-        free[i] = used < @TypeOf(p.*).neurons;
+        free[i] = used < @TypeOf(p.*).neurons or vacancy.next(p, i) != null;
         s.score[i] /= @floatFromInt(s.example);
     }
     const count = try select(s.score[0..n], free[0..n], s.chosen[0..n]);

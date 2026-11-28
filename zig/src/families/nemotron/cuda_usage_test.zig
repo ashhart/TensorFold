@@ -157,7 +157,7 @@ test "pocket usage: two foreground stepped streams retain independent row unions
     b.usage_enabled = true;
     b.usage_reads = .empty;
     defer b.usage_reads.deinit(t.allocator);
-    b.test_step = .{ .ctx = &fixture, .run = Stepped.run };
+    b.test_step = .{ .ctx = &fixture, .run = Stepped.run, .read = Stepped.read };
     const ids_a = [_]u32{ 10, 11, 12, 13 };
     const ids_b = [_]u32{ 20, 21, 22, 23 };
     var a = try lanes.Stream.init(t.allocator, .{ .id = "a", .prompt = &ids_a, .max_new = 1 });

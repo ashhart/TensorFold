@@ -138,6 +138,7 @@ pub fn ownLesson(gpa: std.mem.Allocator, lesson: Lesson) !Lesson {
     var out: Lesson = .{};
     errdefer disownLesson(gpa, out);
     inline for (edit_lists) |f| @field(out, f) = try own(gpa, @field(lesson, f));
+    out.reuse_deleted = lesson.reuse_deleted;
     return out;
 }
 

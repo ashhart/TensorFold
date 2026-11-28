@@ -59,10 +59,56 @@ pub fn saved(e: *Engine, owner: ?*anyopaque, at: usize) !?usage.Masks {
 pub const StepHook = struct {
     ctx: *anyopaque,
     run: *const fn (*anyopaque, *Cuda, *lanes.Stream) anyerror!bool,
+    read: *const fn (*anyopaque, *Read, usize, u64, usize) anyerror!void,
 };
 
-pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
-    const b: *Cuda = @ptrCast(@alignCast(ptr));
+fn initRead(b: *Cuda) !Read {
+    if (builtin.is_test) if (b.test_step) |hook| return Read.initTest(b.gpa, 4, state.pass_rows, hook.ctx, hook.read);
+    return Read.init(b.e);
+}
+
+fn runStep(b: *Cuda, s: *lanes.Stream, max_rows: u32) anyerror!bool {
     if (builtin.is_test) if (b.test_step) |hook| return hook.run(hook.ctx, b, s);
-    return fill.step(ptr, s);
+    return fill.step(b, s, max_rows);
+}
+
+pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, max_rows: u32) anyerror!bool {
+    const b: *Cuda = @ptrCast(@alignCast(ptr));
+    if (!b.usage_enabled or s.untaught) return runStep(b, s, max_rows);
+    if (b.usage_reads.getPtr(s)) |r| {
+        b.e.usage = r;
+    } else {
+        var r = try initRead(b);
+        errdefer r.deinit();
+        try b.usage_reads.putNoClobber(b.gpa, s, r);
+        b.e.usage = b.usage_reads.getPtr(s).?;
+    }
+    const done = runStep(b, s, max_rows) catch |e| {
+        b.e.usage = null;
+        release(b, s);
+        return e;
+    };
+    b.e.usage = null;
+    if (done) {
+        const r = b.usage_reads.getPtr(s).?;
+        s.pocket_usage = r.trace.through(s.prompt_len) catch |e| {
+            release(b, s);
+            return e;
+        };
+        release(b, s);
+    }
+    return done;
+}
+
+pub fn release(b: *Cuda, s: *const lanes.Stream) void {
+    if (b.usage_reads.fetchRemove(s)) |kv| {
+        var r = kv.value;
+        r.deinit();
+    }
+}
+
+pub fn deinit(b: *Cuda) void {
+    var it = b.usage_reads.valueIterator();
+    while (it.next()) |r| r.deinit();
+    b.usage_reads.deinit(b.gpa);
 }

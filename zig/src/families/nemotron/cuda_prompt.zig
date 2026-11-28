@@ -7,7 +7,7 @@ const Cancel = engine.Cancel;
 const Keep = engine.Keep;
 /// Every host reader requiring all trailing MoE blocks.
 pub fn readers(e: *const Engine, head: ?*Head, dump: ?*Dump, lessons: bool) bool {
-    return head != null or dump != null or e.taps != null or e.prompt_rows != null or lessons;
+    return head != null or dump != null or e.taps != null or e.prompt_rows != null or lessons or e.usage != null;
 }
 const Mask = engine.Mask;
 const Dump = @import("cuda_dump.zig").Dump;
