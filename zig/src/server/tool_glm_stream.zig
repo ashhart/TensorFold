@@ -59,7 +59,8 @@ pub fn feed(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.
 
 /// The cut the reply's end left inside a value: the bytes held back for a closer that never came.
 pub fn cut(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
-    if (s.glm.stage == .json_arguments or s.glm.stage == .json_envelope) return cutJson(s, text, out);
+    if (s.glm.stage == .json_arguments or s.glm.stage == .json_envelope or
+        s.glm.stage == .json_tail) return cutJson(s, text, out);
     if (s.glm.stage != .value) return;
     const end = text.len - reply_text.partialTag(text[@min(s.glm.value_from, text.len)..], value_close);
     try sendValue(s, text, end, out);

@@ -437,3 +437,81 @@ test "GLM JSON two calls keep their own indices and incremental arguments" {
     try std.testing.expectEqual(@as(usize, 2), headers_seen);
     for (arguments, got) |want, actual| try std.testing.expectEqualStrings(want, actual.items);
 }
+
+fn expectSameCalls(expected: ?[]Value, actual: ?[]Value) !void {
+    const want = expected orelse {
+        try std.testing.expect(actual == null);
+        return;
+    };
+    const got = actual orelse return error.ExpectedRecoveredCalls;
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| {
+        try std.testing.expectEqualStrings(w.get("function").?.strField("name").?, g.get("function").?.strField("name").?);
+        try std.testing.expectEqualStrings(w.get("function").?.strField("arguments").?, g.get("function").?.strField("arguments").?);
+    }
+}
+
+test "GLM cut keeps a complete second JSON payload without its envelope closer" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try toolsOf(a);
+    const cut = try std.mem.concat(a, u8, &.{
+        try jsonCall(a, "{\"q\":\"a\"}"),
+        "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"b\"}}",
+    });
+    const expected = try @import("tool_json_cut.zig").cutCalls(a, cut, tools);
+    try expectSameCalls(expected, try stream.cutCalls(a, cut, tools));
+    try std.testing.expectEqual(@as(usize, 2), expected.?.len);
+    try expectAgree(a, try std.mem.concat(a, u8, &.{ cut, "x" }), cut.len);
+}
+
+test "GLM cut preserves generic refusal of an unoffered second JSON payload" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try toolsOf(a);
+    const cut = try std.mem.concat(a, u8, &.{
+        try jsonCall(a, "{\"q\":\"a\"}"),
+        "<tool_call>{\"name\":\"other\",\"arguments\":{\"q\":\"b\"}}",
+    });
+    try std.testing.expect(try @import("tool_json_cut.zig").cutCalls(a, cut, tools) == null);
+    try expectSameCalls(null, try stream.cutCalls(a, cut, tools));
+    try expectAgree(a, try std.mem.concat(a, u8, &.{ cut, "x" }), cut.len);
+}
+
+test "GLM cut retains production repeated-key semantics before a JSON cut" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try toolsOf(a);
+    const cut = "<tool_call>lookup<arg_key>q</arg_key><arg_value>a</arg_value>" ++
+        "<arg_key>q</arg_key><arg_value>b</arg_value></tool_call>" ++
+        "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"Par";
+    const expected = (try @import("tool_json_cut.zig").cutCalls(a, cut, tools)).?;
+    try std.testing.expectEqual(@as(usize, 2), expected.len);
+    try std.testing.expectEqualStrings("{\"q\":\"b\"}", expected[0].get("function").?.strField("arguments").?);
+    try expectSameCalls(expected, try stream.cutCalls(a, cut, tools));
+}
+
+test "GLM JSON two-call recovery agrees at every cut position" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try toolsOf(a);
+    const reply = try std.mem.concat(a, u8, &.{ try jsonCall(a, "{\"q\":\"a\"}"), try jsonCall(a, "{\"q\":\"b\"}") });
+    for (0..reply.len + 1) |end| {
+        const prefix = reply[0..end];
+        const expected = try @import("tool_json_cut.zig").cutCalls(a, prefix, tools);
+        try expectSameCalls(expected, try stream.cutCalls(a, prefix, tools));
+        const calls = expected orelse continue;
+        var s = try Streamer.init(a, tools);
+        var out: std.ArrayList(Value) = .empty;
+        try s.finishCut(prefix, &out);
+        try std.testing.expectEqual(calls.len, headers(out.items));
+        try std.testing.expectEqualStrings(
+            try joined(a, try tool_parse.deltas(a, calls)),
+            try joined(a, out.items),
+        );
+    }
+}
