@@ -11,17 +11,32 @@ const Info = @import("pack.zig").Info;
 const partition = @import("partition.zig");
 const testing = std.testing;
 
-/// One EXL3 group of the rank: its stored name and the rank's part.
-pub const GroupPlan = struct {
-    proj: names.Proj,
-    prefix: []const u8,
-    split: exl3.Split,
+/// An EXL3 group as stored and the rank's part of it.
+pub const Exl3Form = struct {
     full: exl3.Group,
     part: exl3.Part,
     /// marker tensor (mul1 / mcg) whose value picks the codebook at load; null: the 3-instruction default
     marker: ?[]const u8,
+};
+
+/// How a planned projection stores its weights (the release's forms join in a later change).
+pub const Form = union(enum) { exl3: Exl3Form };
+
+/// One projection of the rank: its stored name, split and form.
+pub const GroupPlan = struct {
+    proj: names.Proj,
+    prefix: []const u8,
+    split: exl3.Split,
+    form: Form,
     /// wo_a: the global group index this slice is
     slice: u32 = 0,
+
+    /// The rank's bytes of this projection as stored.
+    pub fn bytes(g: *const GroupPlan) u64 {
+        return switch (g.form) {
+            .exl3 => |f| f.part.bytes(),
+        };
+    }
 };
 
 pub const NativePlan = struct {
@@ -32,12 +47,20 @@ pub const NativePlan = struct {
     bytes: u64,
 };
 
-/// One routed projection: each expert's group part, their layout on the device, and the stored prefixes.
-pub const ExpertsPlan = struct {
-    proj: names.ExpertProj,
+/// Routed EXL3 experts: each expert's group part, their layout on the device, and the stored prefixes.
+pub const Exl3Experts = struct {
     parts: []exl3.Part,
     prefixes: [][]const u8,
     layout: exl3.Layout,
+};
+
+/// How a routed projection's experts are stored.
+pub const ExpertsForm = union(enum) { exl3: Exl3Experts };
+
+/// One routed projection of the rank.
+pub const ExpertsPlan = struct {
+    proj: names.ExpertProj,
+    form: ExpertsForm,
 };
 
 pub const LayerPlan = struct {
@@ -53,9 +76,9 @@ pub const LayerPlan = struct {
     /// Routed trellis bytes plus the shared expert's: the quant repo's `rank_bytes`.
     pub fn expertBytes(l: *const LayerPlan) u64 {
         var n: u64 = 0;
-        for (l.experts) |e| n += e.layout.trellisBytes();
+        for (l.experts) |e| n += e.form.exl3.layout.trellisBytes();
         for (l.groups) |g| switch (g.proj) {
-            .shared_w1, .shared_w2, .shared_w3 => n += g.part.trellis.bytes(),
+            .shared_w1, .shared_w2, .shared_w3 => n += g.form.exl3.part.trellis.bytes(),
             else => {},
         };
         return n;
@@ -64,12 +87,14 @@ pub const LayerPlan = struct {
     /// Everything the rank holds for the block as stored: trellises, suh/svh, natives.
     pub fn bytes(l: *const LayerPlan) u64 {
         var n: u64 = 0;
-        for (l.groups) |g| n += g.part.bytes();
+        for (l.groups) |*g| n += g.bytes();
         for (l.natives) |v| n += v.bytes;
-        for (l.experts) |e| {
-            n += e.layout.trellisBytes();
-            for (e.parts) |p| n += p.suh.bytes() + p.svh.bytes();
-        }
+        for (l.experts) |e| switch (e.form) {
+            .exl3 => |x| {
+                n += x.layout.trellisBytes();
+                for (x.parts) |p| n += p.suh.bytes() + p.svh.bytes();
+            },
+        };
         return n;
     }
 };
@@ -98,11 +123,11 @@ pub const Plan = struct {
     }
 
     pub fn bytes(p: *const Plan) u64 {
-        var n: u64 = if (p.head) |h| h.part.bytes() else 0;
+        var n: u64 = if (p.head) |*h| h.bytes() else 0;
         for (p.top) |v| n += v.bytes;
         for (p.layers) |*l| n += l.bytes();
         if (p.dspark) |d| {
-            n += d.main_proj.part.bytes();
+            n += d.main_proj.bytes();
             for (d.natives) |v| n += v.bytes;
             if (d.confidence) |c| n += c.bytes;
         }
@@ -148,7 +173,8 @@ const Builder = struct {
         inline for (.{ "trellis", "suh", "svh" }) |part| try b.mark(try std.fmt.bufPrint(&b.buf, "{s}." ++ part, .{prefix}));
         const marker = try b.pack.marker(prefix, &b.buf);
         if (marker) |m| try b.mark(m);
-        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try b.partOf(proj, g, split), .marker = if (marker) |m| try b.dupe(m) else null };
+        const form: Exl3Form = .{ .full = g, .part = try b.partOf(proj, g, split), .marker = if (marker) |m| try b.dupe(m) else null };
+        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .form = .{ .exl3 = form } };
     }
 
     /// The rank's part of a group: `wq_b` and `wo_b` follow the output groups, everything else whole blocks.
@@ -191,13 +217,13 @@ const Builder = struct {
             const name = try names.expertName(block, @intCast(e), proj, &nb);
             const g = try b.group(.wq_a, name, proj.split(), kn[0], kn[1]);
             // the codebook is one a projection; here the marker's presence, its value at load
-            const has = g.marker != null;
+            const has = g.form.exl3.marker != null;
             if (codebook_marker) |m| if (m != has) return error.CodebooksDiffer;
             codebook_marker = has;
-            p.* = g.part;
+            p.* = g.form.exl3.part;
             pre.* = g.prefix;
         }
-        return .{ .proj = proj, .parts = parts, .prefixes = prefixes, .layout = try exl3.Layout.of(b.a, parts) };
+        return .{ .proj = proj, .form = .{ .exl3 = .{ .parts = parts, .prefixes = prefixes, .layout = try exl3.Layout.of(b.a, parts) } } };
     }
 
     /// Whether the pack stores `prefix` as a float `.weight` alone: no trellis, and no rotation scales to apply.
@@ -248,7 +274,7 @@ const Builder = struct {
         }
         var out: LayerPlan = .{ .index = index, .prefix = block, .mode = b.c.mode(index), .groups = groups, .natives = natives, .experts = undefined, .gate_up_mismatch = 0 };
         inline for (.{ .w1, .w2, .w3 }, 0..) |p, i| out.experts[i] = try b.experts(block, index, p);
-        for (out.experts[0].layout.words, out.experts[2].layout.words) |w1, w3| out.gate_up_mismatch += @intFromBool(w1 != w3);
+        for (out.experts[0].form.exl3.layout.words, out.experts[2].form.exl3.layout.words) |w1, w3| out.gate_up_mismatch += @intFromBool(w1 != w3);
         return out;
     }
 
@@ -301,7 +327,7 @@ pub fn build(gpa: std.mem.Allocator, c: *const Config, pack: *const Pack, o: Opt
     if (o.world != 3 and (c.heads % o.world != 0 or c.o_groups % o.world != 0)) return error.BadWorld;
     _ = partition.outputGroups(c.o_groups, o.rank, o.world) catch return error.BadWorld;
     _ = partition.share(c.vocab, o.rank, o.world) catch return error.BadWorld;
-    _ = partition.share(c.expert_width, o.rank, o.world) catch return error.BadWorld;
+    _ = partition.expertShare(c, o.rank, o.world) catch return error.BadWorld;
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     var b: Builder = .{ .a = arena.allocator(), .c = c, .pack = pack, .o = o };
@@ -396,8 +422,8 @@ test "CUDA rank planning selects EXL3 over a kept dense sibling from headers alo
         defer arena.deinit();
         var b: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = rank, .world = 2 } };
         const g = try b.group(.wq_a, prefix, .whole, 5120, 512);
-        try testing.expectEqual(@as(u32, 10), g.full.k2());
-        try testing.expectEqual(@as(u64, 1638400), g.part.trellis.bytes());
+        try testing.expectEqual(@as(u32, 10), g.form.exl3.full.k2());
+        try testing.expectEqual(@as(u64, 1638400), g.form.exl3.part.trellis.bytes());
         try testing.expect(!b.used.contains("layers.2.attn.compressor.wkv.weight"));
         try testing.expect(names.ignored("layers.2.attn.compressor.wkv.weight", &p));
     }
