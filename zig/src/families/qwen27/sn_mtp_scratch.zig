@@ -106,6 +106,8 @@ pub const ScratchField = enum(usize) {
     x,
     qg,
     kv_raw,
+    k,
+    v,
     norm_q,
     query,
     norm_k,
@@ -121,7 +123,7 @@ pub const ScratchField = enum(usize) {
     gather,
 };
 
-pub const scratch_count: usize = 23;
+pub const scratch_count: usize = 25;
 
 pub fn lref(r: projection.Ref) linear_gpu.Ref {
     return .{ .buf = r.buffer, .off = r.offset };
@@ -143,7 +145,9 @@ pub fn scratchSizes(c: Config, rows: u32) [scratch_count]usize {
         r * h * 2,
         r * h * 2,
         r * 2 * qd * 2,
-        r * 2 * kv * 2,
+        16,
+        r * kv * 2,
+        r * kv * 2,
         r * qd * 2,
         r * qd * 2,
         r * kv * 2,
@@ -369,15 +373,16 @@ pub fn warmup(m: anytype, io: std.Io) !void {
 
 test "mtp scratch batch cap and row sizing" {
     try std.testing.expectEqual(@as(u32, 2048), batch_cap);
-    var cfg = std.mem.zeroes(Config);
-    cfg.hidden = 4096;
-    cfg.heads = 16;
-    cfg.kv_heads = 4;
-    cfg.head_dim = 256;
-    cfg.intermediate = 12288;
-    cfg.vocab = 248320;
+    var cfg: Config = .{ .hidden = 4096, .intermediate = 12288, .layers = 1, .vocab = 248320, .heads = 16, .kv_heads = 4, .head_dim = 256, .k_heads = 4, .v_heads = 4, .dk = 256, .dv = 256, .conv_kernel = 1, .eps = 1e-6, .rope_dims = 256, .rope_theta = 1e6 };
     const s128 = scratchSizes(cfg, 128);
     const s2048 = scratchSizes(cfg, 2048);
     try std.testing.expectEqual(s128[@backingInt(ScratchField.ids)] * 16, s2048[@backingInt(ScratchField.ids)]);
     try std.testing.expectEqual(s128[@backingInt(ScratchField.planes)] * 16, s2048[@backingInt(ScratchField.planes)]);
+    const kv = cfg.kvDim();
+    try std.testing.expectEqual(@as(usize, 25), scratch_count);
+    try std.testing.expectEqual(@as(usize, 16), s128[@backingInt(ScratchField.kv_raw)]);
+    try std.testing.expectEqual(128 * kv * 2, s128[@backingInt(ScratchField.k)]);
+    try std.testing.expectEqual(128 * kv * 2, s128[@backingInt(ScratchField.v)]);
+    try std.testing.expectEqual(2048 * kv * 2, s2048[@backingInt(ScratchField.k)]);
+    try std.testing.expectEqual(2048 * kv * 2, s2048[@backingInt(ScratchField.v)]);
 }
