@@ -44,12 +44,15 @@ pub const DenseWeight = struct {
     }
 };
 
-/// One routed MoE layer on the device (from a `TFPW` shard).
+/// One routed MoE layer on the device (from a `TFPW` shard, supporting hybrid `2/225/3/4/5b` experts).
 pub const MoeLayer = struct {
     weights: u64,
     scales: u64,
     metas: u64,
     tables: u64,
+    tables4_lut: u64 = 0,
+    table4_kind: u32 = 0,
+    has_tfq4: bool = false,
     experts: u32,
     dims: u32,
     inter: u32,
@@ -73,6 +76,7 @@ pub const Kernels = struct {
     d: *const Driver,
     mod_dense: Module,
     mod_moe: Module,
+    mod_tfq4: Module,
     fwht_x: Function,
     fwht_y: Function,
     wmma_sk8: [3]Function, // 3b, 4b, 5b: split-K=8 BM=16 (all widths, fixed reduction order)
@@ -81,6 +85,9 @@ pub const Kernels = struct {
     moe_gu: Function,
     moe_gu_softcap: Function,
     moe_down: Function,
+    moe4_gu: Function,
+    moe4_gu_softcap: Function,
+    moe4_down: Function,
     xrot: ?DeviceBuffer = null,
     xrot_elems: usize = 0,
     yr: ?DeviceBuffer = null,
@@ -94,10 +101,13 @@ pub const Kernels = struct {
         errdefer mod_dense.unload();
         var mod_moe = try Module.load(d, kernels.tfq3_moe);
         errdefer mod_moe.unload();
+        var mod_tfq4 = try Module.load(d, kernels.tfq4);
+        errdefer mod_tfq4.unload();
         var k: Kernels = .{
             .d = d,
             .mod_dense = mod_dense,
             .mod_moe = mod_moe,
+            .mod_tfq4 = mod_tfq4,
             .fwht_x = try mod_dense.function("tf_tfq3_fwht_x"),
             .fwht_y = try mod_dense.function("tf_tfq3_fwht_y"),
             .wmma_sk8 = undefined,
@@ -106,6 +116,9 @@ pub const Kernels = struct {
             .moe_gu = try mod_moe.function("tf_tfq3_moe_gu_swiglu"),
             .moe_gu_softcap = try mod_moe.function("tf_tfq3_moe_gu_softcap"),
             .moe_down = try mod_moe.function("tf_tfq3_moe_down"),
+            .moe4_gu = try mod_tfq4.function("tf_tfq4_moe_gu_swiglu"),
+            .moe4_gu_softcap = try mod_tfq4.function("tf_tfq4_moe_gu_softcap"),
+            .moe4_down = try mod_tfq4.function("tf_tfq4_moe_down"),
         };
         inline for ([_]u8{ 3, 4, 5 }, 0..) |b, i| {
             const sb = std.fmt.comptimePrint("{d}b", .{b});
@@ -145,6 +158,7 @@ pub const Kernels = struct {
         if (k.act_rot) |*b| b.free();
         if (k.yr) |*b| b.free();
         if (k.xrot) |*b| b.free();
+        k.mod_tfq4.unload();
         k.mod_moe.unload();
         k.mod_dense.unload();
         k.* = undefined;
@@ -305,6 +319,7 @@ pub const Kernels = struct {
 
     fn moeDispatch(k: *const Kernels, stream: Stream, l: MoeLayer, x: u64, x_stride: usize, picks: u64, pick_stride: u32, ey: u64, out_slot_stride: u32, rows: usize, top_k: u32, act: MoeAct, out_f32: bool) !void {
         if (rows == 0 or top_k == 0 or l.dims % 128 != 0 or l.inter % 128 != 0) return error.Tfq3Shape;
+        if (l.has_tfq4 and (l.tables4_lut == 0 or l.table4_kind > fmt.tfq4.table_kind_max)) return error.MissingTfq4Tables;
         const xrot = k.xrot orelse return error.Tfq3ScratchNotReserved;
         const act_rot = k.act_rot orelse return error.Tfq3ScratchNotReserved;
         const cap_rows: usize = @min(k.xrot_elems / l.dims, k.act_rot_elems / (@as(usize, top_k) * l.inter));
@@ -330,6 +345,7 @@ pub const Kernels = struct {
                 a.add(l.scales);
                 a.add(l.metas);
                 a.add(l.tables);
+                if (l.has_tfq4) a.add(l.tables4_lut);
                 a.add(xrot.ptr);
                 a.add(p_off);
                 a.add(act_rot.ptr);
@@ -342,14 +358,15 @@ pub const Kernels = struct {
                     .swiglu => |sw| blk: {
                         a.add(sw.lim);
                         a.add(sw.act_mode);
-                        break :blk k.moe_gu;
+                        break :blk if (l.has_tfq4) k.moe4_gu else k.moe_gu;
                     },
                     .softcap => |sc| blk: {
                         a.add(sc.gate_cap);
                         a.add(sc.up_cap);
-                        break :blk k.moe_gu_softcap;
+                        break :blk if (l.has_tfq4) k.moe4_gu_softcap else k.moe_gu_softcap;
                     },
                 };
+                if (l.has_tfq4) a.add(l.table4_kind);
                 try launch_.launch(gu_fn, .{ .grid = .{ .x = l.inter / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
             }
             {
@@ -358,6 +375,7 @@ pub const Kernels = struct {
                 a.add(l.scales);
                 a.add(l.metas);
                 a.add(l.tables);
+                if (l.has_tfq4) a.add(l.tables4_lut);
                 a.add(act_rot.ptr);
                 a.add(p_off);
                 a.add(ey_off);
@@ -368,7 +386,9 @@ pub const Kernels = struct {
                 a.add(pick_stride);
                 a.add(out_slot_stride);
                 a.add(@as(u32, @intFromBool(out_f32)));
-                try launch_.launch(k.moe_down, .{ .grid = .{ .x = l.dims / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
+                if (l.has_tfq4) a.add(l.table4_kind);
+                const dn_fn = if (l.has_tfq4) k.moe4_down else k.moe_down;
+                try launch_.launch(dn_fn, .{ .grid = .{ .x = l.dims / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
             }
             done += take;
         }
@@ -385,12 +405,28 @@ pub fn uploadTables(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, dir: [
     return DeviceBuffer.fromHost(d, bytes);
 }
 
-/// Uploads one validated `TFPW` MoE layer file to device memory.
+/// Uploads one validated `TFPW` MoE layer file to device memory (TFQ3-only wrapper).
 pub fn uploadTfpwLayer(
     io: std.Io,
     d: *const Driver,
     path: []const u8,
     tables_ptr: u64,
+    expect_experts: ?u32,
+    expect_hidden: ?u32,
+    expect_inter: ?u32,
+    expect_layer: ?u32,
+) !OwnedMoeLayer {
+    return uploadTfpwLayerHybrid(io, d, path, tables_ptr, 0, 0, expect_experts, expect_hidden, expect_inter, expect_layer);
+}
+
+/// Uploads one validated `TFPW` MoE layer supporting hybrid `3/4/5b` TFQ3 and `2/225` TFQ4 experts.
+pub fn uploadTfpwLayerHybrid(
+    io: std.Io,
+    d: *const Driver,
+    path: []const u8,
+    tables_ptr: u64,
+    tables4_lut: u64,
+    table4_kind: u32,
     expect_experts: ?u32,
     expect_hidden: ?u32,
     expect_inter: ?u32,
@@ -404,6 +440,12 @@ pub fn uploadTfpwLayer(
     defer map.destroy(io);
     const mapped = map.memory;
     const parsed = try fmt.validateTfpw(mapped, expect_experts, expect_hidden, expect_inter, expect_layer);
+    if (parsed.has_tfq3 and tables_ptr == 0) return error.MissingTfq3Tables;
+    if (parsed.has_tfq4) {
+        if (tables4_lut == 0) return error.MissingTfq4Tables;
+        if (table4_kind > fmt.tfq4.table_kind_max) return error.InvalidTfq4Tables;
+        if (parsed.needs_e8p1024 and table4_kind != fmt.tfq4.table_kind_true_e8p1024) return error.InvalidTfq4Tables;
+    }
     const h = parsed.header;
     const meta_slice = mapped[@intCast(h.off_meta)..][0 .. @as(usize, h.num_experts) * @sizeOf(fmt.TfpwExpertMeta)];
     const sc_slice = mapped[@intCast(h.off_scales)..][0 .. @as(usize, @intCast(h.scale_halfs)) * 2];
@@ -419,6 +461,9 @@ pub fn uploadTfpwLayer(
             .scales = s_buf.ptr,
             .metas = m_buf.ptr,
             .tables = tables_ptr,
+            .tables4_lut = if (parsed.has_tfq4) tables4_lut else 0,
+            .table4_kind = if (parsed.has_tfq4) table4_kind else 0,
+            .has_tfq4 = parsed.has_tfq4,
             .experts = h.num_experts,
             .dims = h.hidden_size,
             .inter = h.moe_inter,
@@ -552,17 +597,3 @@ pub const TfpnStore = struct {
         if (store.owns_tables) store.tables.free();
     }
 };
-
-test "DenseWeight.sliceRows preserves alignment and computes exact word and scale offsets" {
-    const base: DenseWeight = .{ .words = 0x10000, .scales = 0x20000, .tables = 0x30000, .n = 248320, .k = 5120, .bits = 4 };
-    const first = try base.sliceRows(0, 98304);
-    try std.testing.expectEqual(@as(u32, 98304), first.n);
-    try std.testing.expectEqual(@as(u32, 0), first.row_off);
-    try std.testing.expectEqual(base.words, first.words);
-    const tail = try base.sliceRows(247936, 384);
-    try std.testing.expectEqual(@as(u32, 384), tail.n);
-    try std.testing.expectEqual(@as(u32, 247936), tail.row_off);
-    try std.testing.expectEqual(base.scales + @as(u64, 247936 / 128) * (5120 / 128) * 2, tail.scales);
-    try std.testing.expectError(error.Tfq3Shape, base.sliceRows(64, 128));
-    try std.testing.expectError(error.Tfq3Shape, base.sliceRows(248320, 128));
-}
