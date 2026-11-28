@@ -297,7 +297,7 @@ pub const Engine = struct {
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = if (e.local.len > 0) held_shares.ranks(e, b) else out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null, .pair_experts = e.pair != null and e.settings.pair_experts };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = if (e.local.len > 0) held_shares.ranks(e, b) else out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .mtp_last_row = e.settings.mtp_last_row, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null, .pair_experts = e.pair != null and e.settings.pair_experts };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.

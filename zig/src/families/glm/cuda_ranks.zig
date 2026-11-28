@@ -33,7 +33,7 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
-
+    mtp_last_row: bool = false, // TF_GLM_MTP_LAST_ROW=1: proposing decode attends and runs FFN for only the last absorbed row
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
         return s.roce_wide or s.draft_split;
@@ -86,12 +86,8 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
-        if (get("TF_GLM_KDA_DECODE_WIDE")) |v| {
-            if (std.mem.eql(u8, v, "1")) s.kda_wide = true else if (std.mem.eql(u8, v, "0")) s.kda_wide = false else {
-                problem.* = "TF_GLM_KDA_DECODE_WIDE: 0 or 1";
-                return error.BadSetting;
-            }
-        }
+        s.kda_wide = try @import("cuda_ranks_flag.zig").read("TF_GLM_KDA_DECODE_WIDE", true, get("TF_GLM_KDA_DECODE_WIDE"), problem);
+        s.mtp_last_row = try @import("cuda_ranks_flag.zig").read("TF_GLM_MTP_LAST_ROW", false, get("TF_GLM_MTP_LAST_ROW"), problem);
         if (get("TF_GLM_ROCE_MULTI")) |v| {
             if (std.mem.eql(u8, v, "1")) s.roce_multi = true else if (std.mem.eql(u8, v, "0")) s.roce_multi = false else {
                 problem.* = "TF_GLM_ROCE_MULTI: 0 or 1";
@@ -237,7 +233,7 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // this struct's version (24, plus TF_GLM_MTP_LAST_ROW in mtp's bit 4)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -252,7 +248,7 @@ pub const Fingerprint = extern struct {
     pair: u32, // TF_GLM_PROMPT_PAIR: rank 0's paired steps need the second chunk's buffers on every rank
     pair_experts: u32 = 0, // TF_GLM_PAIR_EXPERTS: every rank sizes the joint plan and twin scratch alike
     layers: u32, // TF_GLM_LAYERS (0: all)
-    mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
+    mtp: u32, // 0 no head, 1 MTP, 2 DFlash2; bit 4: every rank drops the same dead MTP decode rows
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
     video_tokens: u32 = 0,
     max_images: u32 = 0,
@@ -338,7 +334,7 @@ pub const Fingerprint = extern struct {
             .pair = @intFromBool(s.pair),
             .pair_experts = @intFromBool(s.pair_experts),
             .layers = s.layers,
-            .mtp = @intFromBool(mtp),
+            .mtp = @intFromBool(mtp) | @as(u32, @intFromBool(s.mtp_last_row)) << 2,
             .roce_multi = @intFromBool(s.roce_multi),
             .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
             .draft_split = @intFromBool(s.draft_split and world >= 3), // two ranks split whatever it says
@@ -508,7 +504,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .pair => "TF_GLM_PROMPT_PAIR",
         .pair_experts => "TF_GLM_PAIR_EXPERTS",
         .layers => "TF_GLM_LAYERS",
-        .mtp => "--no-drafts given to some ranks and not others",
+        .mtp => "--no-drafts or TF_GLM_MTP_LAST_ROW given to some ranks and not others",
         .vision => "--vision (or its image tokens) given to some ranks and not others",
         .video_tokens => "--vision-video-tokens",
         .max_images => "the image count limit",

@@ -108,3 +108,31 @@ test "prefill exact: E4 non-final lm_head is unread, final and decode heads keep
     try check(true, true, 128);
     try check(false, true, 128);
 }
+
+test "prefill exact: MTP last-row routing keeps default and host-paged decode whole" {
+    var st: fw.State = undefined;
+    var b: fw.Buffers = undefined;
+    var w: weights.Weights = undefined;
+    w.config = .{};
+    var one: [1]fw.Rank = .{.{ .w = &w, .st = &st, .b = &b }};
+    var f: fw.Forward = .{ .d = undefined, .m = undefined, .stream = undefined, .ranks = &one, .exchange = .local };
+    for ([_]bool{ false, true }) |prefill| {
+        b.prefill = prefill;
+        for ([_]bool{ false, true }) |enabled| {
+            f.mtp_last_row = enabled;
+            for ([_]u64{ 0, 4096 }) |pks| {
+                st.mtp_caches.pks = pks;
+                const route = fw.mtpRoute(&f, 4, true);
+                const last = prefill or (enabled and pks == 0);
+                try t.expectEqual(last, route.last_row);
+                try t.expectEqual(if (last) @as(usize, 1) else 4, route.rows);
+                try t.expectEqual(if (last) 3 * w.config.hidden * 2 else 0, route.tail);
+            }
+        }
+    }
+    b.prefill = false;
+    f.mtp_last_row = true;
+    st.mtp_caches.pks = 0;
+    try t.expect(!fw.mtpRoute(&f, 1, true).last_row);
+    try t.expect(!fw.mtpRoute(&f, 4, false).last_row);
+}

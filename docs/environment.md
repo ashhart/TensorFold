@@ -93,6 +93,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_DSEL` | Exactly `0` or `1`; default on (a GLM decode window's DSA select runs on many CTAs; 0 keeps one CTA a row) |
 | `TF_GLM_DSCORES` | Exactly `0` or `1`; default on (a GLM decode window's DSA index scores run on glm_index_scores; 0 keeps tf_glm_scores) |
 | `TF_GLM_MOE_DIRECT` | Exactly `0` or `1`; default off. On, a GLM decode window's EXL3 experts read the top-k kernel's flat picks and leave their slot rows in place, summed with the shared expert's row by one kernel: no row copies and no slot write, the same bytes (#3570) |
+| `TF_GLM_MTP_LAST_ROW` | Exactly `0` or `1`; default off. On, a multi-row proposing MTP decode still writes every row's latent/index state but attends and runs FFN only for the last accepted row; its draft, next-round outputs and committed state keep the same bytes. Host-paged KV keeps the full-row path |
 | `TF_GLM_DFLASH2_LOG` | Whole unsigned 64-bit count of DFlash2 rounds whose drafts are logged; default 0 |
 | `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 on CUDA, 0.5 on Metal |
 | `TF_GLM_CONTEXT_CEILING` | GLM-5.3-Flash on CUDA: whole token count 1 through 2147483616, the window `--context` may ask for and `--context 0` serves, in place of config.json's 1048576; read at GLM's open. Past that length the model's quality is the operator's to check. Unset keeps config.json's window |

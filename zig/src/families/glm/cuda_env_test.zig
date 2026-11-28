@@ -20,6 +20,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_DSEL", .default = true },
     .{ .name = "TF_GLM_DSCORES", .default = true },
     .{ .name = "TF_GLM_MOE_DIRECT" },
+    .{ .name = "TF_GLM_MTP_LAST_ROW" },
     .{ .name = "TF_GLM_WIDE_EXPERT_TILE" },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
