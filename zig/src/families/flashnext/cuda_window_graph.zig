@@ -22,6 +22,11 @@ pub fn enabled() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH", true) catch true;
 }
 
+/// `enabled`, and no pooled EXL3 experts block in `layers`: it waits on the host for its picks, which no capture holds.
+pub fn admits(layers: []const @import("cuda_prompt_load.zig").Layer) bool {
+    return enabled() and !@import("exl3/model/cuda_exl3_pass.zig").waitsHost(layers);
+}
+
 /// TF_FLASHNEXT_WINDOW_GRAPH_PARITY=1: retain both whole-accept state/spare pointer directions.
 pub fn retainSettleGraphs() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH_PARITY", false) catch false;

@@ -76,6 +76,17 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_QWEN35_ATTN_ALL_ROWS` | Qwen3.8 on CUDA: exactly `0` or `1`; unset, empty or `0` keeps the current BF16 decode attention launches. `1` uses the existing rows kernel at every context length and skips the separate partial launch for decode windows wider than one row. The kernel contract compares output bytes against the original dual-launch path |
 | `TF_QWEN_PDL` | Qwen3.8 on CUDA: exactly `0` or `1`, read once. Unset, the ModelOpt qmmf lanes and the glue kernels launch as programmatic dependent launches on sm_12x GPUs (GB10, RTX 50 series) and plainly on every other GPU; `1` makes them dependent on any sm_90 or newer GPU, `0` makes them plain everywhere. A dependent launch lets a kernel begin (the qmmf lanes load their weights) while the one before it finishes, and it waits for that kernel's output before reading it, so tokens keep their bits |
 | `TF_QWEN35_CHUNK_SOLO` | Qwen 3.5/3.6/3.8 on CUDA: 4096 or 8192 rows a foreground prompt pass while no other stream decodes (a background warm pass keeps 4096); unset, empty or 4096 is off, with main's scratch. Checked when the model loads, with the family's own message |
+| `TF_FLASHNEXT_CACHE_TELEMETRY`, `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY`, `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_SNAP_HOST` | Exactly `0` or `1`; default on for EXL3 above 32768 context tokens, otherwise off |
+| `TF_FLASHNEXT_EXL3_ARCH` | Exactly `unqualified`; unset requires the qualified architecture |
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | Finite nonnegative GiB; memory admission separately enforces its 0.5 GiB floor (2 on unified memory) and total memory size |
+| `TF_FLASHNEXT_EXL3_LINE_DELTAS` | `POOL:+N,POOL:-N` without control characters; pool validation requires balanced line transfers |
+| `TF_FLASHNEXT_EXL3_STREAMS` | Positive whole stream count; default 1; `--parallel` wins |
+| `TF_FLASHNEXT_EXPERT_LINES` | Whole expert-line count per layer; pool construction requires at least 10; unset derives the count from memory |
+| `TF_FLASHNEXT_EXPERT_RESERVE_MB` | Whole MiB from 0 through 17592186044415; unset uses the server reserve |
+| `TF_FLASHNEXT_PLE_READ` | Exactly `map` or `pread`; default `map` |
+| `TF_FLASHNEXT_EXL3_PROFILE_DIR` | Directory path without control characters; unset disables persisted expert-use profiles |
+| `TF_FLASHNEXT_EXL3_ROUTED` | Exactly `host` or `device`; default `host` |
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
 | `TF_GEMMA4_ARGMAX_GRAPH` | Gemma 4 on CUDA: exactly `0` or `1`; default off. `1` captures a greedy verify round's argmax (the same `tf_round_bf16_argmax` over the same logits) in the target forward's graph, skips the drawn-token download no greedy entry reads, and stages each forward's ids, positions and slots in pinned memory; target tokens keep their bits |
 | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
@@ -250,7 +261,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_WINDOW_CHECK` | Exactly `0` or `1`; default off. `1` measures, before the model serves, the widest verify window whose every row scores byte-equal to its one-token step, and widens a lone stream's copy window up to it, past the 32 rows served without it and at most the 48 rows a window's pending-row log holds; a check that cannot run, fails, or proves nothing past 32 rows leaves 32 |
 | `TF_FLASHNEXT_READOUT_ROWS` | Whole row count; default 64; `0` never takes the tiles |
 | `TF_FLASHNEXT_CHUNK` | Whole prompt rows a pass, 1 through 16384; default 3072 |
-| `TF_FLASHNEXT_CHUNK_SOLO` | Whole prompt rows a pass with no stream decoding, from the chunk `TF_FLASHNEXT_CHUNK` resolves to through 16384; unset or blank is the larger of that chunk and 8192 on a server of one stream, and that chunk elsewhere |
+| `TF_FLASHNEXT_CHUNK_SOLO` | Whole prompt rows a pass with no stream decoding, from the chunk `TF_FLASHNEXT_CHUNK` resolves to through 16384; unset or blank is the larger of that chunk and 8192 on a server of one stream, and that chunk elsewhere; an EXL3 pack refuses a set value |
 | `TF_FLASHNEXT_FACT_ROWS` | Whole row count; default 64; `0` never takes the tiles |
 | `TF_FLASHNEXT_KV_PAGE_TEST` | Whole page size the kernels take: whole blocks of the indexer's ratio up to the window; unset or blank leaves the plain caches |
 | `TF_FLASHNEXT_CONFIDENCE` | Finite number, negative values included; default -0.4, the chain's own stop |

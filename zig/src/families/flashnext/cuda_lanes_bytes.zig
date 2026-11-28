@@ -4,10 +4,12 @@ const core = @import("core");
 const weights = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const config = @import("cuda_config.zig");
+const exl3_memory = @import("exl3/pack/cuda_exl3_memory.zig");
 
 /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
 pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
     if (@import("cuda_tfq3.zig").isTfq3(gpa, io, dir)) return @import("cuda_tfq3.zig").deviceWeightBytes(gpa, io, dir, true) catch 0;
+    if (exl3_memory.isExl3(gpa, io, dir)) return exl3_memory.weightBytes(gpa, io, dir) catch 0;
     const main = weights.deviceBytes(gpa, io, dir) catch return 0;
     return main + mtp.headBytes(headFp8(gpa, io, dir) catch return 0, headShared(gpa, io, dir) catch mtp.Shared{ .width = weights.moe_w });
 }
@@ -19,6 +21,7 @@ pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8,
         if (world != 1) return error.UnsupportedQuantization;
         return @import("cuda_tfq3.zig").deviceWeightBytes(gpa, io, dir, drafts);
     }
+    if (mode == .exl3) return exl3_memory.placement(gpa, io, dir, world, rank);
     if (mode == .modelopt) {
         const main = try @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
         // Dense draft projections and vocabulary rows exceed the affine head's estimate.

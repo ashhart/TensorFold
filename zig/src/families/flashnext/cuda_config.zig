@@ -4,6 +4,7 @@ const std = @import("std");
 const wt = @import("cuda_prompt_wt.zig");
 const gdn = @import("cuda_gdn.zig");
 const widths = @import("cuda_widths.zig");
+const exl3 = @import("exl3/pack/cuda_exl3_config.zig");
 
 /// One config field and the value the kernels and buffers assume.
 const Want = struct { name: []const u8, value: i64 };
@@ -106,7 +107,7 @@ pub fn widthsOf(text: std.json.ObjectMap) widths.Selected {
     return widths.select(int(text, "num_experts_per_tok"), int(text, "shared_expert_intermediate_size"), int(text, learned_key) orelse 0);
 }
 
-fn geometry(text: std.json.ObjectMap) ?[]const u8 {
+pub fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     // a folder Living Weights taught widens the shared expert by its pocket (a whole number of groups, 128 at most)
     const learned = int(text, learned_key) orelse 0;
     if (!widths.learnedOk(learned)) return learned_key;
@@ -118,7 +119,7 @@ fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     return semantics(text);
 }
 
-pub const Mode = enum { affine, modelopt, tfq3 };
+pub const Mode = enum { affine, modelopt, tfq3, exl3 };
 
 fn tfq3Mismatch(text: std.json.ObjectMap, quant: ?std.json.ObjectMap) ?[]const u8 {
     if (quant) |q| {
@@ -234,10 +235,11 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checked {
     const text = textOf(root);
     const quant = if (root.get("quantization")) |v| (if (v == .object) v.object else null) else null;
     const is_tfq3 = @import("cuda_tfq3.zig").isTfq3(gpa, io, dir);
-    const selected: Mode = if (is_tfq3) .tfq3 else if (quant != null) .affine else .modelopt;
+    const selected: Mode = if (is_tfq3) .tfq3 else if (quant != null) .affine else if (exl3.named(root)) .exl3 else .modelopt;
     var field = switch (selected) {
         .tfq3 => tfq3Mismatch(text, quant),
         .affine => mismatch(text, quant),
+        .exl3 => exl3.mismatch(root, text, geometry),
         .modelopt => if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization",
     };
     if (field == null) if (given(root, "tie_word_embeddings")) |v| if (!holds(v, .{ .flag = false })) {

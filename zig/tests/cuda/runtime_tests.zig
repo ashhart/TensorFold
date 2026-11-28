@@ -8,6 +8,18 @@ const expect = check.expect;
 
 const ProbeView = extern struct { src: u64, n: c_int, scale: f32 };
 
+pub fn info(gpu: Gpu) !void {
+    var name_buf: [256]u8 = undefined;
+    const name = try gpu.ctx.name(&name_buf);
+    const mem = try gpu.ctx.memInfo();
+    std.debug.print("RESULT driver CUDA {d}, device {s}, sm_{d}, {d} SMs, {d} MiB total, {d} MiB free, kernels embedded {}\n", .{
+        try gpu.d.version(),      name,
+        try gpu.ctx.capability(), try gpu.ctx.attribute(.multiprocessor_count),
+        mem.total >> 20,          mem.free >> 20,
+        cuda.kernels.available,
+    });
+}
+
 pub fn smoke(gpu: Gpu) !void {
     const d = gpu.d;
     const n: usize = 1 << 20;

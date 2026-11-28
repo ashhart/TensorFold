@@ -406,7 +406,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
         const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (F == @import("glm_cuda").native) &@import("cuda_glm_disk.zig").image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
-        var rules = snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded));
+        var rules = snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded), snaps.loadedGrid(loaded));
         if (o.tp != 1) rules.warm = .off; // no warm passes across ranks: the cache keeps as without warm turns
         store.* = pc.Store.init(gpa, copies, rules, if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
         errdefer {

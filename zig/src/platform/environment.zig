@@ -46,19 +46,7 @@ pub fn isReal(kind: Kind) bool {
     return kind == .real or kind == .positive_real or kind == .signed_real;
 }
 
-const stock_rules = [_]Rule{
-    .{ .name = "TF_CUDA_PREFILL_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; one CUDA Qwen prompt stage ledger)" },
-    .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
-    .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
-    .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
-    .{ .name = "TF_Q27_FLAT_GLUE", .scope = .metal, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_Q27_QK", .scope = .metal, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
-    .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
-    .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 runs exact all-length BF16 rows for multi-row Qwen decode windows)" },
-    .{ .name = "TF_STARTUP_RECEIPT", .scope = .common, .kind = .flag, .forms = "0 or 1 (opt-in startup and first completion receipts)" },
-    .{ .name = "TF_SHARED_PRICE_LOG", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 logs the shared plain price, a line a round)" },
-    .{ .name = "TENSORFOLD_DEVICE_CHECK", .scope = .common, .kind = .flag, .forms = "0 or 1 (0 skips serve's device-profile check; default 1)" },
+const stock_prefix_rules = [_]Rule{
     .{ .name = "TENSORFOLD_REQUEST_LOG_REPLIES", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 also records each finished reply in TENSORFOLD_REQUEST_LOG's file; default 0)" },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (capped by --vision-max-images)" },
@@ -86,7 +74,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_QMMF_HALF_BN", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 adds FP4, FP8 and FP8G half tiles below two blocks an SM; default 0)" },
     .{ .name = "TF_HY4_MEM_FLOOR_GIB", .scope = .cuda, .kind = .size, .forms = "whole GiB of MemAvailable below which the Hy4-flash CUDA loader stops (default 10)" },
     // Qwen 3.5 CUDA and HIP settings, read through this table:
-    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .trim = " ", .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },
     .{ .name = "TENSORFOLD_HIP_MEMORY_LIMIT_GB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission still fits its byte count in a 64-bit size)" },
     .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_GROUP_PROJ", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 groups same-input ModelOpt decode projections in one launch; default 0)" },
@@ -115,6 +103,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
     .{ .name = "TF_ROCE_HCA", .scope = .cuda, .kind = .names, .max = 2, .forms = "one or two RDMA device names, comma-separated (the RoCE all-gather stripes over at most two)" },
+};
+const stock_suffix_rules = [_]Rule{
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_GEMMA4_ARGMAX_GRAPH", .scope = .gemma4, .kind = .flag, .forms = "0 or 1 (1 puts a greedy round's argmax in the target graph; default 0)" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
@@ -342,7 +332,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_WINDOW_CHECK", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1 runs the boot copy-window self-check; default 0)" },
     .{ .name = "TF_FLASHNEXT_READOUT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
     .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .flashnext, .kind = .size, .min = 1, .max = 16384, .forms = "whole prompt rows a pass, 1 to 16384 (default 3072)" },
-    .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .flashnext, .kind = .size, .max = 16384, .forms = "whole prompt rows a pass with no stream decoding, TF_FLASHNEXT_CHUNK to 16384 (unset: 8192 alone at --parallel 1, else off)" },
+    .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .flashnext, .kind = .size, .max = 16384, .forms = "whole prompt rows a pass with no stream decoding, TF_FLASHNEXT_CHUNK to 16384 (unset: 8192 alone at --parallel 1, else off); an EXL3 pack refuses it" },
     .{ .name = "TF_FLASHNEXT_FACT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
     .{ .name = "TF_FLASHNEXT_KV_PAGE_TEST", .scope = .flashnext, .kind = .size, .forms = "a page size the kernels take, whole blocks of the indexer's ratio up to the window (unset: off)" },
     .{ .name = "TF_FLASHNEXT_CONFIDENCE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite number (default -0.4)" },
@@ -358,7 +348,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 };
 
-pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
+pub const rules = @import("environment_stock_leading_rules.zig").rules ++ stock_prefix_rules ++ @import("environment_exl3_rules.zig").rules ++ stock_suffix_rules ++ @import("environment_safe_rules.zig").rules;
 
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
@@ -532,6 +522,14 @@ pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
     const raw = sys.getenv(name) orelse return null;
     _ = (try checked(name, raw)) orelse return null;
     return raw;
+}
+
+/// A `.path` setting from the process environment, or null when unset or blank; a refusal is logged without its text.
+pub fn readPath(name: [:0]const u8) Error!?[]const u8 {
+    std.debug.assert(rule(name).kind == .path);
+    const raw = sys.getenv(name);
+    _ = (try checked(name, raw)) orelse return null;
+    return std.mem.trim(u8, raw.?, rule(name).trim);
 }
 
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.

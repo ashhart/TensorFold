@@ -99,7 +99,8 @@ test "CUDA startup: every other registered family retains its declared pass size
 test "CUDA startup: Flash Next cache cuts use the loaded cold pass size, and its replies' warm passes wait for quiet" {
     var loaded: flash.native.Loaded = undefined;
     loaded.prompt_rows = 4096;
-    const rules = @import("cuda_snaps.zig").passRules(flash.native, startup.rows(flash.native, loaded));
+    loaded.snap_grid = 0;
+    const rules = @import("cuda_snaps.zig").passRules(flash.native, startup.rows(flash.native, loaded), @import("cuda_snaps.zig").loadedGrid(loaded));
     try std.testing.expectEqual(@as(u32, 4096), rules.chunk);
     try std.testing.expect(!rules.chunk_starts and rules.lookahead == 1);
     try std.testing.expect(rules.warm == .waits and !rules.planned); // a mark one token short of the pass's end
@@ -123,7 +124,7 @@ test "CUDA startup: Qwen's real solo reader reports default 4096 and enabled 819
         const text = try line(qwen.native, loaded);
         defer std.testing.allocator.free(text);
         try std.testing.expectEqualStrings(expected(case[1]), text);
-        const rules = @import("cuda_snaps.zig").passRules(qwen.native, startup.rows(qwen.native, loaded));
+        const rules = @import("cuda_snaps.zig").passRules(qwen.native, startup.rows(qwen.native, loaded), @import("cuda_snaps.zig").loadedGrid(loaded));
         try std.testing.expectEqual(@as(u32, case[1]), rules.chunk);
         try std.testing.expect(rules.planned and rules.grid == 4096);
         try std.testing.expectEqual(@as(u32, 8192), qwen.native.prompt_rows); // the real upper bound stays
@@ -144,10 +145,19 @@ test "CUDA startup: Qwen's context-capped loaded rows survive a later environmen
     const loaded = try qwenRows("8192", 6000);
     try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, "4096", 1));
     try std.testing.expectEqual(@as(u32, 6000), startup.rows(qwen.native, loaded));
-    try std.testing.expectEqual(@as(u32, 6000), @import("cuda_snaps.zig").passRules(qwen.native, startup.rows(qwen.native, loaded)).chunk);
+    try std.testing.expectEqual(@as(u32, 6000), @import("cuda_snaps.zig").passRules(qwen.native, startup.rows(qwen.native, loaded), @import("cuda_snaps.zig").loadedGrid(loaded)).chunk);
     const text = try line(qwen.native, loaded);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(expected(6000), text);
     const tiny = try qwenRows(null, 1);
     try std.testing.expectEqual(@as(u32, 32), startup.rows(qwen.native, tiny));
+}
+
+test "CUDA startup: an EXL3 Flash Next keeps and resumes states on its prefill step only" {
+    var loaded: flash.native.Loaded = undefined;
+    loaded.prompt_rows = 4096;
+    loaded.snap_grid = 4096;
+    const snaps = @import("cuda_snaps.zig");
+    const rules = snaps.passRules(flash.native, startup.rows(flash.native, loaded), snaps.loadedGrid(loaded));
+    try std.testing.expect(rules.planned and rules.grid == 4096 and !rules.chunk_starts);
 }

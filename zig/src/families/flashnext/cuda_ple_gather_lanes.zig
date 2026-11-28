@@ -293,7 +293,7 @@ test "a pooled pass takes 1 to 64 lanes, and the switch decides the rest" {
 }
 
 test "the shared pass takes the pooled gather before its own rows call a stream" {
-    const body = @embedFile("cuda_batch_state.zig");
+    const body = @embedFile("cuda_batch_gather.zig");
     const main = std.mem.indexOf(u8, body, "pub fn main(g: *Gather) void {") orelse return error.TestUnexpectedResult;
     const call = std.mem.indexOfPos(u8, body, main, "if (gather_lanes.early(g)) return;") orelse return error.TestUnexpectedResult;
     const per_lane = std.mem.indexOfPos(u8, body, main, "for (g.lanes) |l| {") orelse return error.TestUnexpectedResult;

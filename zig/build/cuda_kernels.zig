@@ -225,6 +225,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "zonos3_encoder", .flags = glue }, // ours: ZONOS3's codec encoder front end in fp32
     .{ .name = "zonos3_teacher", .flags = glue }, // ours: ZONOS3's SSL teacher's attention and convolution in fp32
     .{ .name = "fn_int4", .flags = &.{"-O3"} }, // GPTQ int4 g128 routed experts and lm_head (fn_int4.cu)
+    // ours: Flash Next's EXL3 glue (an fp16 row split exactly into two bf16)
+    .{ .name = "flashnext_exl3", .src = "flashnext_exl3/flashnext_exl3", .flags = glue },
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.
