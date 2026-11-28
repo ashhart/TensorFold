@@ -63,6 +63,11 @@ pub const Routes = struct {
         .{ .v = .{ .plan = true, .ctl = 2 }, .name = "metal dsv41 route backbone plan control: a NaN key wins" },
         .{ .v = .{ .plan = true, .ctl = 3 }, .name = "metal dsv41 route backbone plan control: the bias in the weight" },
         .{ .v = .{ .plan = true, .ctl = 4 }, .name = "metal dsv41 route backbone plan control: a write past k" },
+        .{ .v = .{ .kind = .drafter, .plan = true }, .name = "metal dsv41 route drafter plan tf_dsv41_route_gate_plan" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 1 }, .name = "metal dsv41 route drafter plan control: a higher id wins a tie" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 2 }, .name = "metal dsv41 route drafter plan control: a NaN key wins" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 3 }, .name = "metal dsv41 route drafter plan control: the bias in the weight" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 4 }, .name = "metal dsv41 route drafter plan control: a write past k" },
     };
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Routes {
