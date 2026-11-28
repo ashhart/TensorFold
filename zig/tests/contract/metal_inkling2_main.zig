@@ -21,6 +21,8 @@ pub const Suites = struct {
     tree: @import("metal_inkling2_tree.zig").Suite,
     dflash2: @import("metal_inkling2_dflash2.zig").Suite,
     sample: @import("metal_inkling2_sample.zig").Suite,
+    small: @import("metal_inkling2_small.zig").Suite,
+    small_dspark: @import("metal_inkling2_small_dspark.zig").Suite,
 
     /// The probes' contexts point into the suites, so the set is built where it stays.
     pub fn init(s: *Suites, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
@@ -42,6 +44,8 @@ pub const Suites = struct {
             .tree = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dflash2 = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .sample = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .small = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .small_dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
         try s.attention.collect(only);
@@ -61,6 +65,8 @@ pub const Suites = struct {
         try s.tree.collect(only);
         try s.dflash2.collect(only);
         try s.sample.collect(only);
+        try s.small.collect(only);
+        try s.small_dspark.collect(only);
     }
 
     pub fn deinit(s: *Suites) void {
@@ -81,6 +87,8 @@ pub const Suites = struct {
         s.tree.deinit();
         s.dflash2.deinit();
         s.sample.deinit();
+        s.small.deinit();
+        s.small_dspark.deinit();
     }
 
     pub fn slidingZeroUlp(s: *const Suites, seed: u64, only: ?[]const u8) !void {

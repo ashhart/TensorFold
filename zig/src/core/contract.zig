@@ -17,6 +17,7 @@ pub const limits = @import("contract/limits.zig");
 pub const inkling2_glue_metal_records = @import("contract/inkling2_glue_metal_records.zig");
 pub const inkling2_dspark_metal_records = @import("contract/inkling2_dspark_metal_records.zig");
 pub const inkling2_dflash2_metal_records = @import("contract/inkling2_dflash2_metal_records.zig");
+pub const inkling2_small_dspark_metal_records = @import("contract/inkling2_small_dspark_metal_records.zig");
 pub const inkling2_loop_metal_records = @import("contract/inkling2_loop_metal_records.zig");
 pub const inkling2_runtime_metal_records = @import("contract/inkling2_runtime_metal_records.zig");
 pub const inkling2_tree_metal_records = @import("contract/inkling2_tree_metal_records.zig");

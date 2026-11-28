@@ -39,6 +39,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
             .{ .name = "inkling2_loop_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig") }) },
             .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
             .{ .name = "inkling2_tree_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/tree_plan.zig") }) },
+            .{ .name = "inkling2_small_ops_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/small_ops_plan.zig") }) },
             .{ .name = "inkling2_experts_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/experts_plan.zig") }) },
         },
     }) }));
@@ -174,7 +175,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 
 /// A compile-only root of metal_main.zig gets tf-kernel-contract's Inkling 2 and H3 image modules, the engine's shared.
 pub fn metalRootImports(b: *std.Build, engine: *std.Build.Module, root: *std.Build.Module) void {
-    inline for (.{ "inkling2_metal", "inkling2_glue_plan", "inkling2_loop_plan" }) |name| root.addImport(name, engine.import_table.get(name).?);
+    inline for (.{ "inkling2_metal", "inkling2_glue_plan", "inkling2_loop_plan", "inkling2_small_ops_plan" }) |name| root.addImport(name, engine.import_table.get(name).?);
     root.addImport("inkling2_runtime_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }));
     for (@import("h3_image_contract.zig").sources(b)) |image| root.addImport(image.name, image.module);
 }
@@ -187,6 +188,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const inkling2_glue_plan = engine.import_table.get("inkling2_glue_plan").?;
     const inkling2_loop_plan = engine.import_table.get("inkling2_loop_plan").?;
     const inkling2_tree_plan = engine.import_table.get("inkling2_tree_plan").?;
+    const inkling2_small_ops_plan = engine.import_table.get("inkling2_small_ops_plan").?;
     const image = @import("h3_image_contract.zig").sources(b);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
@@ -210,6 +212,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "inkling2_loop_plan", .module = inkling2_loop_plan },
             .{ .name = "inkling2_tree_plan", .module = inkling2_tree_plan },
             .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
+            .{ .name = "inkling2_small_ops_plan", .module = inkling2_small_ops_plan },
         },
     }) });
     const mixed_check = b.addExecutable(.{ .name = "tf-q27-mixed", .root_module = b.createModule(.{

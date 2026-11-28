@@ -232,6 +232,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const raw = @import("inkling2_metal").vision;
         return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, raw), .pre_m5 = try preM5(a, "", raw) };
     }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 small_dspark ")) {
+        if (!assemble) return undefined;
+        const m = @import("inkling2_metal");
+        const here = if (device.tensorUnits()) m.inkling2_small_dspark else m.inkling2_small_dspark_pre_m5;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = m.inkling2_small_dspark_pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) {
         if (!assemble) return undefined;
         const m = @import("inkling2_metal");
@@ -248,6 +254,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").runtime
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))
             @import("inkling2_metal").tree
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 small "))
+            @import("inkling2_metal").small_ops
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 loop "))
             @import("inkling2_metal").loop
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
