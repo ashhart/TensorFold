@@ -1,6 +1,7 @@
 //! Named environment validation before model, driver and transport work; successful values keep their old semantics.
 const std = @import("std");
 const sys = @import("sys.zig");
+const words = @import("environment_words.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
@@ -378,10 +379,10 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const text = std.mem.trim(u8, raw.?, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
     if (r.kind == .word) {
-        for (r.words, 0..) |v, i| if (equal(r, text, v)) return if (r.word_values.len == 0) i else r.word_values[i];
+        for (r.words, 0..) |v, i| if (words.equal(r, text, v)) return if (r.word_values.len == 0) i else r.word_values[i];
         return r.word_fallback orelse error.InvalidEnvironment;
     }
-    if (r.kind == .word_set) return try wordSet(r, text);
+    if (r.kind == .word_set) return try words.wordSet(r, text);
     if (r.kind == .pair) {
         var it = std.mem.tokenizeScalar(u8, text, ',');
         const id = std.fmt.parseInt(u32, std.mem.trim(u8, it.next() orelse "", " "), 10) catch return error.InvalidEnvironment;
@@ -440,31 +441,6 @@ fn nameCount(r: Rule, text: []const u8) Error!u64 {
     var it = std.mem.tokenizeScalar(u8, text, ',');
     while (it.next()) |w| n += @intFromBool(std.mem.trim(u8, w, " ").len != 0);
     return if (n == 0 or n > r.max) error.InvalidEnvironment else n;
-}
-fn equal(r: Rule, a: []const u8, b: []const u8) bool {
-    return if (r.fold or r.ignore_case) std.ascii.eqlIgnoreCase(a, b) else std.mem.eql(u8, a, b);
-}
-fn wordSet(r: Rule, text: []const u8) Error!u64 {
-    if (r.set_switch) {
-        if (std.mem.eql(u8, text, "0")) return 0;
-        if (std.mem.eql(u8, text, "1")) return (@as(u64, 1) << @intCast(r.words.len)) - 1;
-    }
-    var it = std.mem.tokenizeAny(u8, text, r.split);
-    var bits: u64 = 0;
-    var count: usize = 0;
-    while (it.next()) |token| {
-        const v = std.mem.trim(u8, token, " ");
-        var found = false;
-        for (r.words, 0..) |word, i| if (equal(r, v, word)) {
-            bits |= @as(u64, 1) << @intCast(i);
-            found = true;
-            break;
-        };
-        if (!found) return error.InvalidEnvironment;
-        count += 1;
-    }
-    if (r.items != 0 and count != r.items) return error.InvalidEnvironment;
-    return bits;
 }
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
 fn toggle(r: Rule, text: []const u8) ?u64 {
