@@ -332,6 +332,26 @@ test "Draft frames: a DFlash2 graph replays the eager launches with this round's
     d.graphs.clear(T.allocator);
     try T.expectEqual(@as(usize, 4), Fake.exec_drops); // two holds and both absorb variants
     try T.expectEqual(@as(usize, 0), d.graphs.holds.count() + d.graphs.absorbs.count());
+    try T.expectEqual(@as(usize, 0), d.graphs.stats.counts.count());
+    d.graphs.stats.on = true;
+    _ = try G.hold(&d, 1, &contexts, true, holdBody);
+    _ = try G.hold(&d, 1, &contexts, true, holdBody);
+    var counts = d.graphs.stats.counts.iterator();
+    while (counts.next()) |entry| if (entry.key_ptr.narrow) {
+        try T.expectEqual(@as(usize, 1), entry.value_ptr.captured);
+        try T.expectEqual(@as(usize, 1), entry.value_ptr.replayed);
+        try T.expectEqual(@as(usize, 1), entry.value_ptr.key_miss);
+        try T.expectEqual(@as(usize, 0), entry.value_ptr.eager);
+        try T.expectEqual(@as(usize, 0), entry.value_ptr.eviction);
+        try T.expectEqual(@as(usize, 0), entry.value_ptr.width_not_graphable);
+    };
+    var stats_buf: [2048]u8 = undefined;
+    var stats_out = std.Io.Writer.fixed(&stats_buf);
+    try G.writeStats(&d.graphs, &stats_out);
+    try T.expect(std.mem.indexOf(u8, stats_out.buffered(), "width_mask=00000000000000000000000000000000 captured=1 replayed=1 eager=0 key_miss=1 eviction=0 width_not_graphable=0") != null);
+    d.graphs.stats.on = false;
+    d.graphs.stats.counts.clearRetainingCapacity();
+    d.graphs.clear(T.allocator);
     var mixed_contexts: [4]q.draft.Ctx = undefined;
     var mixed_refs: [4]*q.draft.Ctx = undefined;
     for (&mixed_contexts, &mixed_refs) |*ctx, *ref| {
@@ -358,6 +378,7 @@ test "Draft frames: a DFlash2 graph replays the eager launches with this round's
     }
     try T.expectEqual(@as(usize, 0), Fake.captures);
     d.graphs.clear(T.allocator);
+    d.graphs.stats.on = true;
     Fake.reset();
     for (1..9) |mask| {
         setWidthMask(&mixed_contexts, mask);
@@ -374,6 +395,15 @@ test "Draft frames: a DFlash2 graph replays the eager launches with this round's
     _ = try G.hold(&d, 4, &mixed_refs, false, mixedHoldBody);
     try T.expectEqual(drops + 1, Fake.exec_drops);
     try T.expectEqual(@as(usize, 8), d.graphs.holds.count());
+    var eviction_total: usize = 0;
+    var eviction_it = d.graphs.stats.counts.iterator();
+    while (eviction_it.next()) |entry| eviction_total += entry.value_ptr.eviction;
+    try T.expectEqual(@as(usize, 1), eviction_total);
+    stats_out = std.Io.Writer.fixed(&stats_buf);
+    try G.writeStats(&d.graphs, &stats_out);
+    try T.expect(std.mem.indexOf(u8, stats_out.buffered(), "eviction=1") != null);
+    d.graphs.stats.on = false;
+    d.graphs.stats.counts.clearRetainingCapacity();
     for ([_]usize{ 9, 8, 9 }) |mask| {
         setWidthMask(&mixed_contexts, mask);
         _ = try G.hold(&d, 4, &mixed_refs, false, mixedHoldBody);
@@ -477,4 +507,18 @@ test "Draft frames: a DFlash2 graph replays the eager launches with this round's
     Fake.reset();
     try T.expectEqual(@as(?u64, 0x5000), try G.hold(&d, 1, &contexts, true, holdBody));
     try T.expectEqual(@as(usize, 1), Fake.eager_n); // off after a refusal: the kernels run eagerly
+    d.graphs.stats.on = true;
+    _ = try G.hold(&d, 1, &contexts, true, holdBody);
+    var eager_total: usize = 0;
+    var eager_it = d.graphs.stats.counts.iterator();
+    while (eager_it.next()) |entry| {
+        eager_total += entry.value_ptr.eager;
+        try T.expectEqual(@as(usize, 0), entry.value_ptr.width_not_graphable);
+    }
+    try T.expectEqual(@as(usize, 1), eager_total);
+    stats_out = std.Io.Writer.fixed(&stats_buf);
+    try G.writeStats(&d.graphs, &stats_out);
+    try T.expect(std.mem.indexOf(u8, stats_out.buffered(), "eager=1 key_miss=0 eviction=0 width_not_graphable=0") != null);
+    d.graphs.stats.on = false;
+    d.graphs.stats.counts.clearRetainingCapacity();
 }

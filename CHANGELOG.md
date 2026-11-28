@@ -36,6 +36,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.
 
 - Metal: the Qwen4 QSA, Flash Next hybrid HC and Qwen4 PLE source rewrites validate threadgroup reservations across the whole original declaration and refuse conflicts and duplicates; generated shader bytes are unchanged (#5441).
+- CUDA: `TF_QWEN_GRAPH_STATS=1` prints per-width DFlash2 hold capture, replay, eager, key-miss and eviction counters at shutdown; default off, with no launch or token changes (#4439).
 - Metal: Qwen4 QSA, HC and PLE source rewrites validate reservations across the whole original declaration, refusing conflicts and duplicates without changing generated shader bytes.
 - HIP: Inkling 2 Mini's HIP family refuses the serve options it does not support before any load, with host tests; nothing serves Inkling 2 Mini on HIP yet (#5034). Thanks to @AbrahamCete.
 
