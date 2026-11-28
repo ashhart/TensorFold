@@ -22,6 +22,8 @@ pub const Table = struct {
     quant: formats.Config,
     /// A bf16 chat checkpoint's projections read as fp32 dense (row-invariant kernels), not as rocBLAS BF16.
     widen: bool = false,
+    /// A ModelOpt checkpoint's own bf16 layers (an lm_head, a linear) read dense: row-invariant, not rocBLAS.
+    modelopt: bool = false,
 
     /// Maps `paths` (later files win a repeated name, as the Python dict does).
     pub fn open(gpa: std.mem.Allocator, io: Io, paths: []const []const u8, strip: []const u8, quant: formats.Config) !Table {
@@ -124,27 +126,24 @@ pub const Files = struct {
             if (std.mem.startsWith(u8, e.name, "mtp")) try side.append(a, path);
             if (!containsLower(e.name, "mtp")) try model.append(a, path);
         }
-        const less = struct {
-            fn f(_: void, x: []const u8, y: []const u8) bool {
-                return std.mem.order(u8, x, y) == .lt;
-            }
-        }.f;
-        std.mem.sort([]const u8, model.items, {}, less);
-        std.mem.sort([]const u8, side.items, {}, less);
+        std.mem.sort([]const u8, model.items, {}, lessPath);
+        std.mem.sort([]const u8, side.items, {}, lessPath);
         return .{ .arena = arena, .model = model.items, .side = side.items };
     }
 
     /// The shards of `model.safetensors.index.json` (else `model.safetensors`) holding a text-tower or head tensor.
-    pub fn indexed(gpa: std.mem.Allocator, io: Io, dir: []const u8) !Files {
+    pub fn indexed(gpa: std.mem.Allocator, io: Io, dir: []const u8, mtp: bool) !Files {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         const a = arena.allocator();
+        var side: std.ArrayList([]const u8) = .empty;
+        if (mtp) try mtpSide(a, io, dir, &side);
         const index = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
         const text = Io.Dir.cwd().readFileAlloc(io, index, a, .limited(1 << 26)) catch |e| switch (e) {
             error.FileNotFound => {
                 const one = try a.alloc([]const u8, 1);
                 one[0] = try std.fs.path.join(a, &.{ dir, "model.safetensors" });
-                return .{ .arena = arena, .model = one, .side = &.{} };
+                return .{ .arena = arena, .model = one, .side = try side.toOwnedSlice(a) };
             },
             else => return e,
         };
@@ -154,23 +153,23 @@ pub const Files = struct {
         var names: std.StringArrayHashMapUnmanaged(void) = .empty;
         for (map.?.object.keys(), map.?.object.values()) |k, v| {
             if (v != .string or std.mem.indexOfScalar(u8, v.string, '/') != null) return error.NoSafetensors;
+            // an `mtp`-named file is the head's own, listed apart, so its tensors are not counted twice
+            if (mtp and containsLower(v.string, "mtp")) continue;
             // a shard of only vision tensors is not the backbone's: it need not exist or parse
-            if (std.mem.startsWith(u8, k, "model.language_model.") or std.mem.startsWith(u8, k, "lm_head.")) try names.put(a, v.string, {});
+            const tower = std.mem.startsWith(u8, k, "model.language_model.") or std.mem.startsWith(u8, k, "lm_head.");
+            const head = mtp and std.mem.startsWith(u8, k, "mtp.");
+            if (tower or head) try names.put(a, v.string, {});
         }
         const model = try a.alloc([]const u8, names.count());
         for (model, names.keys()) |*m, n| m.* = try std.fs.path.join(a, &.{ dir, n });
-        std.mem.sort([]const u8, model, {}, struct {
-            fn f(_: void, x: []const u8, y: []const u8) bool {
-                return std.mem.order(u8, x, y) == .lt;
-            }
-        }.f);
-        return .{ .arena = arena, .model = model, .side = &.{} };
+        std.mem.sort([]const u8, model, {}, lessPath);
+        return .{ .arena = arena, .model = model, .side = try side.toOwnedSlice(a) };
     }
 };
 
 /// The bytes of a bf16 checkpoint's text tower and head (its index's shards): what loads, not the vision tower.
 pub fn textBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
-    var files = try Files.indexed(gpa, io, dir);
+    var files = try Files.indexed(gpa, io, dir, false);
     defer files.deinit();
     var total: u64 = 0;
     for (files.model) |path| {
@@ -179,11 +178,78 @@ pub fn textBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
         var it = shard.names.iterator();
         while (it.next()) |kv| {
             const key = kv.key_ptr.*;
-            if (!std.mem.startsWith(u8, key, "model.language_model.") and !std.mem.eql(u8, key, "lm_head.weight")) continue;
+            const text = std.mem.startsWith(u8, key, "model.language_model.");
+            const head = std.mem.startsWith(u8, key, "lm_head.");
+            const mtp = std.mem.startsWith(u8, key, "mtp.");
+            if (!text and !head and !mtp) continue;
             total += kv.value_ptr.end - kv.value_ptr.begin;
         }
     }
     return total;
+}
+
+/// The bytes a ModelOpt checkpoint takes on the device: codes as stored, a widened tensor at F32, a table at BF16.
+pub fn deviceBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
+    var files = try Files.indexed(gpa, io, dir, true);
+    defer files.deinit();
+    var total: u64 = 0;
+    for (files.model) |path| {
+        var shard = try Shard.open(gpa, io, path);
+        defer shard.close(io);
+        var it = shard.names.iterator();
+        while (it.next()) |kv| {
+            if (!loaded(kv.key_ptr.*)) continue;
+            total += deviceSize(kv.key_ptr.*, kv.value_ptr.*);
+        }
+    }
+    // a ModelOpt head in `mtp*.safetensors` loads from there, not from the model's own shards
+    for (files.side) |path| {
+        var shard = try Shard.open(gpa, io, path);
+        defer shard.close(io);
+        var it = shard.names.iterator();
+        while (it.next()) |kv| total += deviceSize(kv.key_ptr.*, kv.value_ptr.*);
+    }
+    return total;
+}
+
+/// Whether a ModelOpt checkpoint's loader reads this tensor: its text tower, its head, or the MTP head.
+fn loaded(key: []const u8) bool {
+    return std.mem.startsWith(u8, key, "model.language_model.") or
+        std.mem.startsWith(u8, key, "lm_head.") or
+        std.mem.startsWith(u8, key, "mtp.");
+}
+
+/// The bytes one tensor takes on the device: a norm, an `A_log`, a `dt_bias` or a conv widens to F32.
+fn deviceSize(key: []const u8, e: st.Entry) u64 {
+    const stored: u64 = @intCast(e.end - e.begin);
+    const values = stored / @as(u64, @intCast(e.dtype.size()));
+    // an E4M3 group table is widened to BF16 at read, and a code's own byte stays
+    if (std.mem.endsWith(u8, key, ".weight_scale")) return if (e.dtype == .f8_e4m3) 2 * values else stored;
+    return if (widened(key)) 4 * values else stored;
+}
+
+/// Whether the loader reads this tensor through `projection.float`, `centred` or `conv`: an fp32 tensor on the device.
+fn widened(key: []const u8) bool {
+    if (std.mem.endsWith(u8, key, "conv1d.weight")) return true;
+    if (std.mem.endsWith(u8, key, ".A_log") or std.mem.endsWith(u8, key, ".dt_bias")) return true;
+    // every RMS weight, including `pre_fc_norm_embedding` and `norm_e`, reads through float or centred
+    return std.mem.endsWith(u8, key, ".weight") and std.mem.indexOf(u8, key, "norm") != null;
+}
+
+/// The `mtp*.safetensors` files in `dir`, sorted: a head shipped beside the model's own shards.
+fn mtpSide(a: std.mem.Allocator, io: Io, dir: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var d = Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => return,
+        else => return e,
+    };
+    defer d.close(io);
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .file and e.kind != .sym_link) continue;
+        if (!std.mem.startsWith(u8, e.name, "mtp") or !std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        try out.append(a, try std.fs.path.join(a, &.{ dir, e.name }));
+    }
+    std.mem.sort([]const u8, out.items, {}, lessPath);
 }
 
 fn containsLower(name: []const u8, needle: []const u8) bool {
@@ -192,6 +258,10 @@ fn containsLower(name: []const u8, needle: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(name[i..][0..needle.len], needle)) return true;
     }
     return false;
+}
+
+fn lessPath(_: void, x: []const u8, y: []const u8) bool {
+    return std.mem.order(u8, x, y) == .lt;
 }
 
 test "mtp in a file name keeps it out of the model's files" {

@@ -148,14 +148,23 @@ const Check = struct {
     buffers: usize = 0,
     bytes: usize = 0,
 
-    /// Reads `b` back and compares dtype, shape and bytes with the host tensor.
-    fn buf(c: *Check, b: Buf, t: Tensor) !void {
-        if (b.dtype != t.dtype or b.rank != t.rank or !std.mem.eql(u8, std.mem.sliceAsBytes(&b.shape), std.mem.sliceAsBytes(&t.shape)) or b.len != t.bytes.len) return error.ShapeMismatch;
+    /// Reads `b` back and compares dtype, shape and bytes with the host tensor; a bare `[]const f32` is a scale.
+    fn buf(c: *Check, b: Buf, t: anytype) !void {
+        const bytes = switch (@typeInfo(@TypeOf(t))) {
+            .@"struct" => blk: {
+                if (@TypeOf(t) != Tensor) @compileError("a host buffer is a tensor or a number slice, found " ++ @typeName(@TypeOf(t)));
+                if (b.dtype != t.dtype or b.rank != t.rank or !std.mem.eql(u8, std.mem.sliceAsBytes(&b.shape), std.mem.sliceAsBytes(&t.shape)) or b.len != t.bytes.len) return error.ShapeMismatch;
+                break :blk t.bytes;
+            },
+            .pointer => std.mem.sliceAsBytes(t),
+            else => @compileError("a host buffer is a tensor or a number slice, found " ++ @typeName(@TypeOf(t))),
+        };
+        if (b.len != bytes.len) return error.ShapeMismatch;
         const got = try c.gpa.alloc(u8, b.len);
         defer c.gpa.free(got);
         const device: hip.DeviceBuffer = .{ .r = c.driver, .ptr = @ptrFromInt(b.ptr), .len = b.len };
         try device.download(0, got);
-        if (!std.mem.eql(u8, got, t.bytes)) return error.BytesDiffer;
+        if (!std.mem.eql(u8, got, bytes)) return error.BytesDiffer;
         c.buffers += 1;
         c.bytes += b.len;
     }
@@ -166,7 +175,11 @@ const Check = struct {
         switch (@typeInfo(T)) {
             .@"struct" => if (T == Buf) try c.buf(dev, h) else inline for (@typeInfo(T).@"struct".field_names) |name| try c.walk(@field(dev, name), if (@hasField(@TypeOf(h), name)) @field(h, name) else {}),
             .@"union" => switch (dev) {
-                inline else => |payload, tag| try c.walk(payload, @field(h, @tagName(tag))),
+                inline else => |payload, tag| {
+                    if (comptime @hasField(@TypeOf(h), @tagName(tag))) try c.walk(payload, @field(h, @tagName(tag))) else if (comptime std.mem.eql(u8, @tagName(tag), "core")) {
+                        try c.walk(payload, h);
+                    } else return error.TagMismatch;
+                },
             },
             .optional => if (dev) |d| try c.walk(d, h.?) else if (h != null) return error.ShapeMismatch,
             else => {},

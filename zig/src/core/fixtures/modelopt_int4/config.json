@@ -1,0 +1,48 @@
+{
+    "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+    ],
+    "dtype": "bfloat16",
+    "model_type": "qwen3_5",
+    "tie_word_embeddings": false,
+    "text_config": {
+        "hidden_size": 4096,
+        "intermediate_size": 12288,
+        "num_hidden_layers": 8,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 32,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
+        "vocab_size": 248320,
+        "full_attention_interval": 4,
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention"
+        ],
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "rope_theta": 10000000,
+            "partial_rotary_factor": 0.25
+        },
+        "eos_token_id": 248044
+    },
+    "quantization_config": {
+        "quant_algo": "INT4_AWQ",
+        "kv_cache_scheme": null,
+        "producer": {
+            "name": "modelopt",
+            "version": "0.47.0"
+        },
+        "quant_method": "modelopt"
+    }
+}

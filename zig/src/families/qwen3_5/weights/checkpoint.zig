@@ -33,6 +33,12 @@ pub const Names = struct {
     }
 };
 
+/// Why a ModelOpt checkpoint is not read here, or null: its routed experts are a stack with one global scale an expert.
+pub fn modelOptExpertsWhy(cfg: *const config.Config) ?[]const u8 {
+    if (cfg.modelopt and cfg.spec.experts > 0) return "a ModelOpt checkpoint with routed experts is not read on this backend: its experts carry a global scale each";
+    return null;
+}
+
 pub const Checkpoint = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -45,19 +51,25 @@ pub const Checkpoint = struct {
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checkpoint {
         var cfg = try config.Config.read(gpa, io, dir);
         errdefer cfg.deinit();
+        if (modelOptExpertsWhy(&cfg)) |why| {
+            std.log.err("{s}", .{why});
+            return error.UnsupportedQuantization;
+        }
         const bf16 = cfg.quant == .bf16;
         // a bf16 checkpoint's own shards are the index's: side files (a joint head) stay out of the table
-        var files = try if (bf16) table.Files.indexed(gpa, io, dir) else table.Files.list(gpa, io, dir);
+        var files = try if (bf16) table.Files.indexed(gpa, io, dir, cfg.modelopt) else table.Files.list(gpa, io, dir);
         errdefer files.deinit();
         if (files.model.len == 0) return error.NoSafetensors;
         var main = try Table.open(gpa, io, files.model, "", cfg.quant);
         errdefer main.close(io);
+        main.modelopt = cfg.modelopt;
         const names = Names.of(&main);
         if (names.refusal(bf16)) |why| {
             std.log.err("{s}", .{why});
             return error.UnexpectedTensor;
         }
-        if (bf16) if (mixed(&main, names)) |key| {
+        // ModelOpt stores FP8 and NVFP4 tensors beside bf16 ones; the loader reads both as stored.
+        if (bf16 and !cfg.modelopt) if (mixed(&main, names)) |key| {
             std.log.err("{s}: {t} in a bf16 checkpoint, whose text tensors are all BF16", .{ key, (try main.get(key)).dtype });
             return error.UnexpectedTensor;
         };
@@ -166,25 +178,31 @@ pub const Checkpoint = struct {
 
     /// The MTP layer from `mtp*.safetensors` or the model's own shards; null when absent.
     pub fn mtp(c: *const Checkpoint) !?host.Mtp {
-        if (c.config.quant == .bf16) {
+        if (c.config.quant == .bf16 and !c.config.modelopt) {
             if (c.spec().mtp_layers == 0) return null;
             std.log.err("a bf16 checkpoint's MTP head is not read: its config declares {d} MTP layers", .{c.spec().mtp_layers});
             return error.UnexpectedTensor;
         }
-        const side = c.files.side;
-        const shards = if (side.len > 0) side else c.files.model;
-        if (shards.len == 0) return null;
         const own = c.main.has("mtp.norm_e.weight") or c.main.has("mtp.pre_fc_norm_embedding.weight");
         var opened: ?Table = null;
         errdefer if (opened) |*o| o.close(c.io);
-        var t = &c.main;
-        if (side.len > 0 or !own) {
-            opened = try Table.open(c.gpa, c.io, shards, "language_model.", c.config.quant);
-            t = &opened.?;
-        }
-        if (side.len == 0 and !t.has("mtp.norm_e.weight") and !t.has("mtp.pre_fc_norm_embedding.weight")) {
-            if (opened) |*o| o.close(c.io);
-            return null;
+        var t: *const Table = &c.main;
+        if (!own) {
+            // the head ships apart (`mtp*.safetensors`), or in a model shard the index keeps it in when declared
+            const declared = c.config.modelopt or c.spec().mtp_layers > 0;
+            const shard_sets = if (declared) [_][]const []const u8{ c.files.side, c.files.model } else [_][]const []const u8{ c.files.side, &.{} };
+            for (shard_sets) |shards| {
+                if (shards.len == 0) continue;
+                var cand = try Table.open(c.gpa, c.io, shards, "language_model.", c.config.quant);
+                cand.modelopt = c.config.modelopt;
+                if (cand.has("mtp.norm_e.weight") or cand.has("mtp.pre_fc_norm_embedding.weight")) {
+                    opened = cand;
+                    t = &opened.?;
+                    break;
+                }
+                cand.close(c.io);
+            }
+            if (opened == null) return null;
         }
         var arena: std.heap.ArenaAllocator = .init(c.gpa);
         errdefer arena.deinit();
