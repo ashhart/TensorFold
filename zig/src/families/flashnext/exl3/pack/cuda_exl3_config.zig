@@ -1,6 +1,7 @@
 //! EXL3 admission for the Flash Next CUDA family: config.json's quantization_config names quant_method "exl3" and the
 
 const std = @import("std");
+const wt = @import("../../cuda_prompt_wt.zig");
 
 /// The one codebook the family reads (the kernels' `mul1`, cuda.exl3.Codebook.mul1).
 pub const codebook = "mul1";
@@ -15,6 +16,11 @@ fn object(o: std.json.ObjectMap, name: []const u8) ?std.json.ObjectMap {
 fn word(o: std.json.ObjectMap, name: []const u8) ?[]const u8 {
     const v = o.get(name) orelse return null;
     return if (v == .string) v.string else null;
+}
+
+fn integer(o: std.json.ObjectMap, name: []const u8) ?i64 {
+    const v = o.get(name) orelse return null;
+    return if (v == .integer) v.integer else null;
 }
 
 /// config.json's quantization_config: top level, else the text config's.
@@ -38,6 +44,9 @@ pub fn mismatch(root: std.json.ObjectMap, text: std.json.ObjectMap, comptime geo
     if (!std.mem.eql(u8, m, "exl3")) return "quantization_config.quant_method";
     const book = word(q, "codebook") orelse return "quantization_config.codebook";
     if (!std.mem.eql(u8, book, codebook)) return "quantization_config.codebook";
+    // The grouped kernel and scratch have one expert width; unlike the native path, EXL3 has no top-5/wide-shared path.
+    if (integer(text, "num_experts_per_tok") != wt.slots - 1) return "num_experts_per_tok";
+    if (integer(text, "shared_expert_intermediate_size") != wt.moe_w) return "shared_expert_intermediate_size";
     return geometry(text);
 }
 
@@ -100,6 +109,28 @@ test "exl3: the shapes and semantics checks still apply to an EXL3 checkpoint" {
         const text = &root.getPtr("text_config").?.object;
         try text.put(a, c.field, c.value);
         try std.testing.expectEqualStrings(c.refused, mismatch(root, text.*, config.geometry) orelse "accepted");
+    }
+}
+
+test "exl3: supported native top-5, wide-shared and learned-pocket shapes are refused before weight loading" {
+    const config = @import("../../cuda_config.zig");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { top_k: i64, shared: i64, learned: i64, field: []const u8 };
+    const cases = [_]Case{
+        .{ .top_k = 5, .shared = 1280, .learned = 0, .field = "num_experts_per_tok" },
+        .{ .top_k = 10, .shared = 1280, .learned = 0, .field = "shared_expert_intermediate_size" },
+        .{ .top_k = 10, .shared = 704, .learned = 64, .field = "shared_expert_intermediate_size" },
+    };
+    for (cases) |c| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+        const root = parsed.value.object;
+        const text = &root.getPtr("text_config").?.object;
+        try text.put(a, "num_experts_per_tok", .{ .integer = c.top_k });
+        try text.put(a, "shared_expert_intermediate_size", .{ .integer = c.shared });
+        try text.put(a, "tensorfold_learned_neurons", .{ .integer = c.learned });
+        try std.testing.expectEqualStrings(c.field, mismatch(root, text.*, config.geometry) orelse "accepted");
     }
 }
 
