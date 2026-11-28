@@ -93,6 +93,7 @@ test {
     _ = @import("geometry_test.zig");
     _ = @import("slot_pages_test.zig");
     _ = sn_mtp;
+    _ = @import("sn_mtp_scratch.zig");
 }
 
 pub const residency = @import("residency.zig");
