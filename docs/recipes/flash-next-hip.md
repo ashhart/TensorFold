@@ -54,3 +54,18 @@ HIP_VISIBLE_DEVICES=<card> tensorfold-native serve TensorFold/Qwen3.8-Flash-Next
 Not measured by those receipts: other card counts, `--tp 8`, worlds other than 2 and 4, multi-host ranks,
 other checkpoints or revisions, other context or parallel windows, fp8 KV, and drafter checkpoints. A host
 build does not establish checkpoint fidelity, qualify later `main` commits, or qualify other gfx12 variants.
+
+## Experimental decode tail graphs
+
+`TF_FLASHNEXT_HIP_TAIL_GRAPH=1` captures the post-verify residual copies and greedy argmax, window keeps, and
+the serial MTP forwards and draws on one admitted stream and one rank, with the normal graph policy enabled.
+Unset or0 keeps the eager tail. Each submission records current arguments and updates its executable graph;
+a topology change instantiates a replacement. Draw-result waits remain, and a keep's event protects its
+pinned plan source when no later draw has drained it. This changes no kernel or arithmetic.
+
+This is an unqualified opt-in. Host recording tests do not prove GPU token equality or a speedup. Before enabling
+it for serving, compare the same checkpoint with baseline, flag0 and flag1: greedy and seeded sampled tokens,
+drafts0/3/7, cache resume and cancellation, cold2k/8k prompts, and graph-off controls. Require identical token
+hashes before measuring. Record eager/captured calls, copies, full waits and event waits separately; graph
+refresh still makes CPU recording calls. On gfx1151, require at least3% paired primary decode gain and no
+guard-cell regression above1%. Other HIP devices and multi-stream/multi-rank tail capture are unqualified.

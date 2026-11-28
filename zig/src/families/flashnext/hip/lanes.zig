@@ -175,6 +175,7 @@ pub const Fx = struct {
 
     fn free(f: *Fx, l: *Lane) void {
         f.e.stream.synchronize() catch {};
+        if (f.e.tail) |*t| t.clear();
         f.e.unlease(l.caches);
         if (l.head) |*h| h.deinit(f.gpa);
         l.streams.free();
@@ -436,19 +437,21 @@ pub const Fx = struct {
             try f.send(f.msg.items);
         }
         const done = try e.round(segs[0..windows.len], pick);
-        const fw = done.out;
-        const row_bytes = m.dims.wide() * m.act.size();
-        var off: usize = 0;
-        for (windows) |w| {
-            const lane = f.lanes.get(w.stream).?;
-            try hip.raw.copy(lane.streams, 0, fw.streams.ptr + off * row_bytes, w.rows() * row_bytes, e.stream.handle);
-            off += w.rows();
+        if (e.tail == null) {
+            const fw = done.out;
+            const row_bytes = m.dims.wide() * m.act.size();
+            var copy_off: usize = 0;
+            for (windows) |w| {
+                const lane = f.lanes.get(w.stream).?;
+                try hip.raw.copy(lane.streams, 0, fw.streams.ptr + copy_off * row_bytes, w.rows() * row_bytes, e.stream.handle);
+                copy_off += w.rows();
+            }
         }
         const o = e.ops(&e.arena);
         const logits = done.logits;
         var reqs: [forward.max_segs * cache.max_window]draw.Request = undefined;
         var drawn: [forward.max_segs * cache.max_window]u32 = undefined;
-        off = 0;
+        var off: usize = 0;
         for (windows) |w| {
             const n = w.rows();
             const words = if (w.masks.len > 0) w.masks.len / n else 0;
@@ -460,7 +463,10 @@ pub const Fx = struct {
             off += n;
         }
         if (total > e.drawer.rows) return error.WindowTooWide;
-        try e.drawer.draw(o, e.stream, logits, reqs[0..total], drawn[0..total], false);
+        const argmaxed = e.tail != null and draw.needsArgmax(reqs[0..total]);
+        if (e.tail != null) try @import("tail.zig").verify(f, windows, done, argmaxed);
+        try e.drawer.draw(o, e.stream, logits, reqs[0..total], drawn[0..total], argmaxed);
+        @import("tail.zig").afterRead(e);
         off = 0;
         for (windows, out, 0..) |w, *v, i| {
             const n = w.rows();

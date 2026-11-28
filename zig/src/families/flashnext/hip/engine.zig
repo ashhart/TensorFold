@@ -77,6 +77,7 @@ pub const Engine = struct {
     eos: i64,
     /// Rounds replay their shape's graph unless the policy says `graphs=off`.
     graphed: bool,
+    tail: ?@import("tail.zig").Tail = null,
     graphs: Graphs,
     chosen: ?*Graphs.Entry = null,
     /// Streams' caches at the full capacity, kept between streams so their graphs stay valid.
@@ -105,11 +106,13 @@ pub const Engine = struct {
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
         var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
         const steps = o.startup orelse &own;
+        const tail_on = try @import("sys").environment.read(bool, "TF_FLASHNEXT_HIP_TAIL_GRAPH", false);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
         e.io = io;
         e.o = o;
+        e.tail = null;
         e.stopped = false;
         e.driver = try hip.Runtime.open();
         errdefer e.driver.close();
@@ -180,6 +183,8 @@ pub const Engine = struct {
         errdefer if (e.votes) |*v| v.deinit();
         e.graphed = o.policy.graphs != .off;
         e.graphs = Graphs.init(gpa);
+        if (@import("tail.zig").Tail.enabled(tail_on, e.graphed, o.world, o.want, o.policy.failsCapture(o.rank))) e.tail = try @import("tail.zig").Tail.init(gpa, &e.driver);
+        errdefer if (e.tail) |*t| t.deinit();
         e.chosen = null;
         e.pool = .{};
         // a window runs from the plan where its shapes are the plan kernels': else a snapshot a row stays
@@ -212,6 +217,7 @@ pub const Engine = struct {
             },
         );
         e.graphs.deinit();
+        if (e.tail) |*t| t.deinit();
         if (e.gdn) |p| {
             p.deinit();
             e.gpa.destroy(p);
@@ -359,13 +365,21 @@ pub const Engine = struct {
     /// The first `kept` rows of a window from `c.len` become the stream's: DeltaNet states, n-gram tail and history.
     pub fn keepWindow(e: *Engine, c: *cache.Caches, tokens: []const u32, kept: usize) !void {
         if (kept == 0 or kept > tokens.len) return error.BadKeep;
+        try @import("tail.zig").keep(e, c, kept, tokens.len);
+        c.history = @import("ngram.zig").after(c.history, tokens[0..kept]);
+        c.len += kept;
+        c.pooled = @min(c.pooled, c.len / e.cfg.index_ratio);
+    }
+
+    /// The original keep's device work, separate from host history updates so capture fallback cannot double them.
+    pub fn keepDevice(e: *Engine, c: *cache.Caches, kept: usize, window_rows: usize) !void {
         const l = c.layout;
         const s = e.stream.handle;
         const plan = if (e.weights.model.gdn) |p| p.planFor(c.id) else null;
         // a plan leaves the state where its window began, so a keep always runs; a one-row window wrote it back
         if (plan) |p| {
             try p.keep(e.ops(&e.arena), kept);
-        } else if (kept < tokens.len) {
+        } else if (kept < window_rows) {
             for (c.linear, 0..) |linear, i| {
                 if (!linear) continue;
                 const from = c.snapshot(i, kept - 1);
@@ -391,9 +405,6 @@ pub const Engine = struct {
             l.tail_bytes,
             s,
         ));
-        c.history = @import("ngram.zig").after(c.history, tokens[0..kept]);
-        c.len += kept;
-        c.pooled = @min(c.pooled, c.len / e.cfg.index_ratio);
     }
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
@@ -403,6 +414,7 @@ pub const Engine = struct {
 
     /// `prompt`, the state before each of `marks`' rows written aside (forward.Mark, rows ascending).
     pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, marks: []const forward.Mark) !forward.Out {
+        if (e.tail) |*t| t.host_done = false;
         if (e.stopped) return error.GroupStopped;
         // the staging is reused: the last forward's uploads must have left it
         try e.stream.synchronize();
@@ -437,7 +449,7 @@ pub const Engine = struct {
         defer for (segs) |g| {
             g.c.pooled = (g.pos + g.tokens.len) / e.cfg.index_ratio;
         };
-        try e.stream.synchronize();
+        try @import("tail.zig").beforeRound(e);
         e.host.used = 0;
         e.arena.reset();
         const staged = try forward.stage(&e.weights.model, &e.host, segs, true);
