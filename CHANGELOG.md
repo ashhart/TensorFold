@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 on CUDA: MTP admission charges the target tap ring once per stream, and native inference reserves only its 64-row recurrent log unless slide learning needs rollback snapshots, so the admission bound matches what the engine allocates (fixes #5134). Thanks to @tacosta for the report.
+
 - Metal: Inkling 2 with a DFlash 2 drafter now saves and restores the drafter's lane state in the prompt cache, so warm cache hits restore the drafter alongside the target (#5032, thanks @gilby).
 
 - Qwen3.8-27B on Metal: Q and K head norm and RoPE run as one `q27_qk_norm_rope` dispatch instead of two head-norm launches, the barrier between them and two RoPE launches, on every chip and pass, keys-only prompt tails included; on an M5 Ultra every cache row and `qa` byte and the served replies match the previous path (#2955, part of #2940).
