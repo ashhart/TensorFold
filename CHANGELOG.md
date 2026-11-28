@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kolibri 1.1: the cache-cap comments now say K and V are rounded to NVFP4 as the reference does, not kept in bf16; comments only (#5445). Thanks to @jschmied.
+
 - Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.
 
 - Metal: the Qwen4 QSA, Flash Next hybrid HC and Qwen4 PLE source rewrites validate threadgroup reservations across the whole original declaration and refuse conflicts and duplicates; generated shader bytes are unchanged (#5441).
