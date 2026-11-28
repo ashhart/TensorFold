@@ -17,6 +17,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: `serve --confidential` disables prompt retention without requesting checkpoint slots and omits generated OCR text from error logs; CUDA families that keep no prompts accept a zero cache budget (#5426).
 
 
+- Qwen3.8-27B: a GB10 can work through the long start of a prompt and hand the state to a Mac over ConnectX; the Mac finishes the prompt and writes the reply. Off unless the Mac is started with `--prefill-from` and `--mcdma-link` and the GB10 with `--mcdma-produce`. On a 120,832-token first message the first token came after 136 s instead of 385 s on an M5 Max; a GB10 serving the chat alone was quicker still. Replies can differ from the Mac's own where the top two choices are close (#2648, step 2b of #1594).
 
 - Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
 

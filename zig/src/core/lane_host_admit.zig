@@ -14,6 +14,7 @@ pub fn pick(h: *LaneHost) ?usize {
     if (pressure.holds(h)) return hold(h, .memory_pressure); // under memory pressure nothing starts or is read ahead
     if (h.disk.holding()) return null; // a flush waits for the requests in flight: nothing starts or is read ahead
     if (!h.stale.load(.acquire)) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
+    if (!h.stale.load(.acquire)) @import("lane_remote.zig").queue(h);
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead
     if (h.stale.load(.acquire)) return hold(h, .engine_unavailable);
     if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return hold(h, .engine_busy);
@@ -41,6 +42,7 @@ fn passed(h: *LaneHost, job: *const Job) bool {
 fn passedFor(h: *LaneHost, job: *const Job) ?Wait {
     if (prefix.waiting(job)) return .prefix_cut;
     if (fetch.held(h, job)) return .state_read;
+    if (@import("lane_remote.zig").held(job)) return .state_read;
     return null;
 }
 

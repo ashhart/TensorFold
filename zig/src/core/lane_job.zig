@@ -52,6 +52,11 @@ pub const Job = struct {
     memory_prompt: []u32 = &.{}, // [M virtual prefix zeros ++ stripped user prompt] (gpa-owned)
     memory_refused: bool = false, // its memory prefix could not be restored: it runs its own prompt instead
     memory_version: ?u64 = null, // the published memory version its routing saw, which its reply reports
+    remote: ?@import("lane_remote.zig").Filled = null, // a prefix another machine filled, until it is restored
+    ticket: ?*@import("lane_remote.zig").Ticket = null, // its fill under way while it is queued
+    remote_looked: bool = false, // queued, it was weighed for a remote fill once
+    exported: bool = false, // a handoff request's state went to the exporter (or its failure did)
+    cut: [1]u32 = .{0}, // a handoff request's one chunk start: its prompt's last token
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {
@@ -78,12 +83,28 @@ pub const Job = struct {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
+        const store = job.host.cache orelse return;
+        if (s.reuse.remote and !s.reuse_failed and !job.host.handoff.keep_remote) return; // TF_PREFILL_KEEP=0: nothing on a pulled prefix
+        const previous_remote = store.keep_remote;
+        store.keep_remote = s.reuse.remote and !s.reuse_failed;
+        defer store.keep_remote = previous_remote;
         const cache = @import("lane_cache_queue.zig");
         if (cancelled) cache.interrupted(job.host, job, s, at) else cache.keep(job.host, job, s, at);
     }
 
+    /// The warm pass's keep of `s`'s state at `at`, kept as remote when it stands on a remote prefix.
+    pub fn keep(job: *Job, s: *lanes.Stream, at: u32) void {
+        const store = job.host.cache orelse return;
+        if (s.reuse.remote and !s.reuse_failed and !job.host.handoff.keep_remote) return; // TF_PREFILL_KEEP=0
+        store.keep_remote = s.reuse.remote and !s.reuse_failed; // on another machine's prefix (a refused copy prefilled here)
+        defer store.keep_remote = false;
+        _ = store.keepBornFrame(job.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request), job.request.images, job.frame);
+    }
+
     /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
     pub fn reported(job: *Job) void {
+        @import("lane_remote.zig").drop(job);
+        @import("lane_export.zig").unexported(job);
         const e = job.entry orelse return;
         job.entry = null;
         const store = job.host.cache orelse return;

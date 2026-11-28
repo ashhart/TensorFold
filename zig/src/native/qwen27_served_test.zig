@@ -126,3 +126,7 @@ test "qwen27 reply cache: warm work preserves both client histories within round
 test "qwen27 reply cache: three reasoning-free turns resume with a full 16 GiB cache" {
     try @import("qwen27_reply_cache_test.zig").fullCache(served.keepEnd, slot_state.opening);
 }
+
+test "a reply's end is born with its request's prompt, and remote only with TF_PREFILL_KEEP" {
+    try @import("qwen27_reply_cache_test.zig").born(served.keepEnd);
+}

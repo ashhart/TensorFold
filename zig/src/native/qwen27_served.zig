@@ -17,6 +17,7 @@ pub const lanes_backend = lb;
 const startup = @import("qwen27_startup.zig");
 const reserve = @import("qwen27_reserve.zig");
 const StartupLine = startup.StartupLine;
+pub const remote = @import("qwen27_remote.zig"); // #1594 step 2b: prompt prefixes the GB10 prefills
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
@@ -48,6 +49,8 @@ pub const Options = struct {
     rope_yarn: ?f64 = null,
     slide: bool = false, // --slide: Folded Memory Weights v3 live learning
     dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
+    remote: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
+    remote_id: []const u8 = "", // the checkpoint's name both ends give the hand-off (lane_remote.checkpointId)
 };
 
 pub const Host = struct {
@@ -73,15 +76,14 @@ pub const Host = struct {
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
     folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v3 controller
+    link: ?*remote.Link = null, // --prefill-from's link to the GB10
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
     }
-
     fn of(ptr: *anyopaque) *Host {
         return @ptrCast(@alignCast(ptr));
     }
-
     fn lone(ptr: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         return of(ptr).back.lone(s, hooks);
     }
@@ -102,7 +104,7 @@ pub const Host = struct {
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
-        if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
+        if (h.cache) |*store| keepEnd(store, h.host.handoff.keep_remote, h.gpa, s, h.runner.offsets[slot]);
     }
 
     /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.
@@ -122,7 +124,8 @@ pub const Host = struct {
 };
 
 /// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit.
-pub fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+pub fn keepEnd(store: *pc.Store, keep_remote: bool, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+    if (s.reuse.remote and !s.reuse_failed and !keep_remote) return; // on another machine's prefix: only with TF_PREFILL_KEEP
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
@@ -132,6 +135,8 @@ pub fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) 
     const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
     defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
     if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
+    store.keep_remote = s.reuse.remote and !s.reuse_failed; // a turn resuming it is remote too (#1594 step 2b)
+    defer store.keep_remote = false;
     // Keep the history too when both copies fit; otherwise the reply end keeps its ordinary priority.
     const history = if (s.history_len > 0) store.find(keyed[0..@min(keyed.len, @as(usize, s.history_len) + 1)], s.chunks, spans) else null;
     const pin = if (history) |e| if (@import("qwen27_resume.zig").pinReplyHistory(store, e, s.history_len, stands)) e else null else null;
@@ -351,6 +356,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.sn_mtp = null;
     h.wrap = null;
     h.cache = null;
+    h.link = null; // gpa.create leaves fields undefined: a default never applies here
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
@@ -447,6 +453,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     }
     errdefer if (h.folded_mem) |fm| fm.deinit();
     if (model.idle_release) |owner| @import("qwen27_idle.zig").attach(h, owner);
+    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = slot_state.resumeAt }, why); // --prefill-from
+    errdefer if (h.link) |l| l.stop(h.gpa);
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
@@ -503,6 +511,7 @@ pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
     if (h.folded_mem) |fm| fm.deinit();
+    if (h.link) |l| l.stop(h.gpa);
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
@@ -531,5 +540,6 @@ test {
         _ = @import("qwen27_served_test.zig");
         _ = @import("qwen27_startup_test.zig");
         _ = @import("qwen27_startup_line.zig");
+        _ = @import("qwen27_handoff_test.zig"); // "qwen27 hand-off:", run by test-qwen27-reply-cache-host
     }
 }

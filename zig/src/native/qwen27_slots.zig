@@ -10,6 +10,10 @@ const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
+pub const slotResumeEnv = @import("qwen27_slot_rules.zig").slotResumeEnv;
+pub const adaptiveBlockEnv = @import("qwen27_slot_rules.zig").adaptiveBlockEnv;
+const plain = @import("qwen27_slot_rules.zig").plain;
+const keepsEnd = @import("qwen27_slot_rules.zig").keepsEnd;
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
 pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
@@ -63,7 +67,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
-    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at, replay) };
+    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and !s.reuse.remote and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at, replay) };
 }
 
 /// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
@@ -226,29 +230,9 @@ pub fn endFill(b: *Metal, s: *lanes.Stream) void {
     if (b.fills.remove(s)) closing(b, s);
 }
 
-/// Slot 0 resumes a later prompt from where its last stream left it unless TF_QWEN27_SLOT_RESUME=0 (read at start).
-pub fn slotResumeEnv() !bool {
-    return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
-}
-
-/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
-pub fn adaptiveBlockEnv() !bool {
-    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
-}
-
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
 fn slotResume(b: *const Metal) bool {
     return b.slot_resume and b.vision == null;
-}
-
-/// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
-fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and !s.memory_active and s.embedding == null and resume_rules.plain(s.cache_salt);
-}
-
-/// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
-fn keepsEnd(s: *const lanes.Stream) bool {
-    return std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(s.prompt().len)) != null;
 }
 
 /// Slot 0 and its drafter stand at `at`, with no failure or round pending.
@@ -264,41 +248,55 @@ fn resumable(b: *const Metal, s: *const lanes.Stream, kept_at: u32) resume_rules
     return b.standing.plan(s.prompt(), s.decode_spans, kept_at);
 }
 
-/// Slot 0's position for `s` when it resumes there (0: not); the record is used up, its rewind point carried on.
-fn takeStanding(b: *Metal, s: *const lanes.Stream, kept_at: u32) !u32 {
+/// Slot 0's position for `s` when it resumes there (0: not); the record is used up, its point and origin carried on.
+fn takeStanding(b: *Metal, s: *lanes.Stream, kept_at: u32) !u32 {
     const plan = resumable(b, s, kept_at);
     b.standing.take(b.gpa, plan);
-    errdefer b.standing = .{ .wide = b.standing.wide }; // tokens and spans freed by take: the point and reply go too
+    errdefer b.standing = b.standing.settings(); // tokens and spans freed by take: the point and reply go too
     // rows [0, rewind_at) and the buffer hold only while slot 0 just extends past it: a restore, reset or move drops it
-    switch (plan) {
+    const at: u32 = switch (plan) {
         .none => return 0,
-        .here => |n| {
+        .here => |n| here: {
             if (b.draft) |d| {
                 try d.model.reset(); // a new session over the kept taps, as after a restore
                 d.model.committed_end = n;
             }
-            return n;
+            break :here n;
         },
-        .back => |h| {
+        .back => |h| back: {
             const buf = b.rewind orelse return dropRewind(b);
             if (b.draft) |d| try d.model.reset();
             q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), h, buf) catch return dropRewind(b); // starts at 0
-            return h;
+            break :back h;
         },
-    }
+    };
+    resume_rules.inherit(&s.reuse, plan, b.standing.remote); // here or back: its rows' origin, not a pull it skipped
+    return at;
 }
 
 /// A pass that could not rewind slot 0 starts it afresh, keeping no rewind point (0: resumed nowhere).
 fn dropRewind(b: *Metal) u32 {
     b.standing.rewind_at = 0;
+    b.standing.remote = false;
     return 0;
 }
 
+/// How far slot 0 would resume `prompt` in place, for the lane host's remote prefill (0: no resume); engine thread.
+pub fn resumeAt(ptr: *anyopaque, prompt: []const u32, spans: []const [2]u32) u32 {
+    const b: *Metal = @ptrCast(@alignCast(ptr));
+    if (!slotResume(b) or b.owners[0] != null or !standsAt(b, b.standing.tokens.len)) return 0;
+    return switch (b.standing.plan(prompt, spans, 0)) {
+        .none => 0,
+        .here => |n| n,
+        .back => |at| if (b.rewind != null) at else 0,
+    };
+}
+
 /// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.
-fn leave(b: *Metal, s: *lanes.Stream) void {
+pub fn leave(b: *Metal, s: *lanes.Stream) void {
     var at = b.runner.offsets[0];
     const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
-    if (!slotResume(b) or !plain(s) or !standsAt(b, at)) return b.standing.deinit(b.gpa);
+    if (!slotResume(b) or !plain(s) or !standsAt(b, at) or !b.standing.keeps(resume_rules.leftRemote(s))) return b.standing.deinit(b.gpa);
     var landed = s.fill_at.load(.monotonic);
     if (s.reason == .cancelled or s.isCancelled()) {
         const point = resume_rules.cancelPoint(at, landed, b.standing.rewind_at);
@@ -311,13 +309,13 @@ fn leave(b: *Metal, s: *lanes.Stream) void {
         }
         s.keepInterruptedPrefill(at);
     }
-    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = landed, .ended = ended }, s.context.items, s.decode_spans);
+    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = landed, .ended = ended, .remote = resume_rules.leftRemote(s) }, s.context.items, s.decode_spans);
 }
 
 /// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
-fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize, replay: resume_rules.Replay) u32 {
-    if (slot != 0 or b.rewind == null or !slotResume(b) or !plain(s) or replay.holds(at)) return 0;
-    return if (s.history_len > at and s.history_len < s.prompt().len) s.history_len else 0;
+pub fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize, replay: resume_rules.Replay) u32 {
+    if (slot != 0 or b.rewind == null or !slotResume(b) or replay.holds(at)) return 0;
+    return b.standing.point(s, at);
 }
 
 /// Slot 0 stands at its prompt's history end: its DeltaNet states and taps go to the rewind buffer (none if it fails).

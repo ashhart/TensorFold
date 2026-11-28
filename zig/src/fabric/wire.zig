@@ -1,8 +1,10 @@
-//! MCDMA KV handoff protocol 1 (docs/kv-handoff.md): the 128-byte little-endian header before every message.
+//! KV handoff headers, protocol 1 (MCDMA's docs/kv-handoff.md) and 2 (#1594 step 2b): 128 little-endian bytes.
 const std = @import("std");
 
 pub const magic = "MKVH";
 pub const version: u16 = 1;
+/// Protocol 2: an export that holds recurrent state; a protocol 1 reader refuses its headers as foreign.
+pub const recurrent_version: u16 = 2;
 pub const header_bytes = 128;
 /// Header flag: `crc` holds the zlib CRC-32 of the payload.
 pub const checked: u32 = 1;
@@ -11,6 +13,7 @@ pub const checked: u32 = 1;
 pub const Kind = enum(u16) { open = 1, manifest = 2, wait = 3, @"error" = 4, pull = 5, data = 6, close = 7, ack = 8 };
 
 pub const Header = struct {
+    version: u16 = version,
     kind: Kind,
     handoff: [16]u8,
     frame: u32 = 0,
@@ -43,7 +46,7 @@ pub const Malformed = enum {
 pub fn pack(h: Header) [header_bytes]u8 {
     var out = std.mem.zeroes([header_bytes]u8);
     @memcpy(out[0..4], magic);
-    std.mem.writeInt(u16, out[4..6], version, .little);
+    std.mem.writeInt(u16, out[4..6], h.version, .little);
     std.mem.writeInt(u16, out[6..8], @backingInt(h.kind), .little);
     @memcpy(out[8..24], &h.handoff);
     std.mem.writeInt(u32, out[24..28], h.frame, .little);
@@ -59,14 +62,20 @@ pub fn pack(h: Header) [header_bytes]u8 {
 
 pub const Unpacked = union(enum) { ok: Header, bad: struct { why: Malformed, kind: u16 = 0 } };
 
-/// Parse the header at the start of `msg` with wire.py's checks, in its order.
+/// Parse the header at the start of `msg` with wire.py's checks, in its order: a protocol 1 reader.
 pub fn unpack(msg: []const u8) Unpacked {
+    return unpackUpTo(msg, version);
+}
+
+/// As unpack, accepting protocols 1 to `most`; a later protocol's header is foreign, as protocol 1 readers find it.
+pub fn unpackUpTo(msg: []const u8, most: u16) Unpacked {
     if (msg.len < header_bytes) return .{ .bad = .{ .why = .short } };
-    if (!std.mem.eql(u8, msg[0..4], magic) or std.mem.readInt(u16, msg[4..6], .little) != version)
-        return .{ .bad = .{ .why = .foreign } };
+    const v = std.mem.readInt(u16, msg[4..6], .little);
+    if (!std.mem.eql(u8, msg[0..4], magic) or v < version or v > most) return .{ .bad = .{ .why = .foreign } };
     const raw = std.mem.readInt(u16, msg[6..8], .little);
     const kind = std.enums.fromInt(Kind, raw) orelse return .{ .bad = .{ .why = .kind, .kind = raw } };
     const h: Header = .{
+        .version = v,
         .kind = kind,
         .handoff = msg[8..24].*,
         .frame = std.mem.readInt(u32, msg[24..28], .little),
@@ -94,7 +103,7 @@ pub fn body(msg: []const u8, h: Header) []const u8 {
 
 /// zlib's CRC-32, as the producer computes over each DATA payload.
 pub fn crc32(bytes: []const u8) u32 {
-    return std.hash.Crc32.hash(bytes);
+    return @import("crc32.zig").hash(bytes);
 }
 
 /// SHA-256 of the prompt's token IDs as little-endian uint32 values, in lowercase hex.
@@ -132,6 +141,17 @@ test "malformed headers are refused with wire.py's reasons" {
     try std.testing.expectEqualStrings("unknown handoff message kind 42", bad.why.text(bad.kind, &buf));
     const pull = pack(.{ .kind = .pull, .handoff = @splat(0), .nbytes = 99 });
     try std.testing.expectEqual(Kind.pull, unpack(&pull).ok.kind);
+}
+
+test "a protocol 2 header is foreign to a protocol 1 reader and read by a protocol 2 one" {
+    const h: Header = .{ .version = recurrent_version, .kind = .manifest, .handoff = @splat(7) };
+    const b = pack(h);
+    try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, b[4..6], .little));
+    try std.testing.expectEqual(Malformed.foreign, unpack(&b).bad.why);
+    try std.testing.expectEqual(h, unpackUpTo(&b, recurrent_version).ok);
+    var v3 = b;
+    std.mem.writeInt(u16, v3[4..6], 3, .little);
+    try std.testing.expectEqual(Malformed.foreign, unpackUpTo(&v3, recurrent_version).bad.why);
 }
 
 test "the prompt digest is over little-endian uint32 ids" {

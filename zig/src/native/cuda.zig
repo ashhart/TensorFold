@@ -28,7 +28,7 @@ const cuda_witness = @import("cuda_witness.zig");
 pub const registry = cuda_families.registry;
 pub const records = true; // --record opens here (engines.zig refuses it for a backend without this)
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
+pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib", "--mcdma-produce" };
 pub const families = cuda_families.families;
 /// `tensorfold device`: the SMs this build's kernels are for, and every GPU the driver lists (cuda_device.zig).
 pub const kernel_sms = cuda_device.kernel_sms;
@@ -68,6 +68,7 @@ pub const Host = struct { // One loaded model behind the lane host: everything t
     kv_count: ?*@import("core").kv_pool.Pool = null, // the paged pool the lane host's ledger admits (#1943)
     kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
+    produce: ?*@import("cuda_produce.zig").Produce = null, // --mcdma-produce: handoff states for the Mac (#1594 step 2b)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
@@ -399,30 +400,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         cache_text, if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels", try @import("cuda_pool_after_warmup.zig").text(a, pool_sizing),
     });
     errdefer gpa.free(h.startup);
-    if (@hasDecl(F, "snap_save") and cache > 0 and !kv_pages.ownCache(loaded) and !share) {
-        const pc = api.prompt_cache;
-        const store = try gpa.create(pc.Store);
-        errdefer gpa.destroy(store);
-        // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
-        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (F == @import("glm_cuda").native) &@import("cuda_glm_disk.zig").image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
-        const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
-        var rules = snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded));
-        if (o.tp != 1) rules.warm = .off; // no warm passes across ranks: the cache keeps as without warm turns
-        store.* = pc.Store.init(gpa, copies, rules, if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
-        errdefer {
-            const disk = store.disk;
-            store.deinit();
-            if (disk) |rows| rows.deinit();
-            h.store = null;
-        }
-        try kv_pages.store(F, store, loaded, kept); // its snapshot slots, before a disk probe takes one
-        h.store = store;
-        if (o.learn_conversations) if (o.learn) |root| {
-            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store) else if (F == @import("glm_cuda").native) try @import("cuda_glm_disk.zig").attach(a, io, &g.ctx, o, root, kernels, loaded, store);
-            if (comptime cuda_disk.keptDisk(F)) |K| try cuda_disk.attachKept(K, F.model_type, a, io, &g.ctx, o, root, kernels, loaded, store);
-        };
-    }
+    try @import("cuda_host_store.zig").open(h, F, gpa, loaded, o, a, io, g, kernels, kept, cache, share);
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
+    if (!try @import("cuda_produce.zig").attach(h, F, gpa, loaded, o, a, io, problem)) return null;
+    errdefer if (h.produce) |x| x.stop();
     const share_limit = if (!share) 0 else if (counted.slots != null) paged.?.snaps else try @import("core").kv_prompts.sharing(); // what its slots hold
     if (comptime @hasDecl(F, "share_attach")) if (@import("cuda_streams.zig").opensStore(F, share, cache, share_limit)) {
         h.prompts = try prompt_pages.Adapter.open(F, gpa, loaded.target, @intCast(layout.?.page_tokens), share_limit);
@@ -577,7 +558,6 @@ test "Learner ownership: direct Nemotron trainer destruction drains before its f
 test "Save recovery: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }

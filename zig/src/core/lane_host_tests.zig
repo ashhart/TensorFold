@@ -43,4 +43,7 @@ test {
     _ = @import("lane_memory_test.zig");
     _ = @import("lane_wait_reason_test.zig");
     _ = @import("wait_reason.zig");
+    _ = @import("lane_remote_test.zig");
+    _ = @import("lane_remote_provenance_test.zig");
+    _ = @import("lane_remote_cut_test.zig");
 }
