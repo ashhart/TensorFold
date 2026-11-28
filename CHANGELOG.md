@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on CUDA: `tf-dsv41 follow` and `tf-dsv41 generate` catch SIGTERM and SIGINT once the model has loaded and take the fail-fast path, so the stopped rank aborts its own collectives, every rank gets the reason and exits with code 70; a second stop signal takes the default action (#3232).
+
 - DeepSeek V4.1 on CUDA: in replay prefill, the decoder pass's mHC boundaries over a short tail (16 rows or fewer) write the second streams buffer instead of the streams in place, so a short prompt's reply no longer depends on which kernel block runs first; longer tails take the same path as before (#3630, refs #2715).
 
 - Qwen3.8-27B on Metal: Q and K head norm and RoPE run as one `q27_qk_norm_rope` dispatch instead of two head-norm launches, the barrier between them and two RoPE launches, on every chip and pass, keys-only prompt tails included; on an M5 Ultra every cache row and `qa` byte and the served replies match the previous path (#2955, part of #2940).
