@@ -81,6 +81,7 @@ test {
     _ = @import("cuda_request_starts_test.zig");
     _ = @import("dflash_load.zig");
     _ = @import("dflash.zig");
+    _ = @import("dflash_select.zig");
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
     _ = prompt_pair;

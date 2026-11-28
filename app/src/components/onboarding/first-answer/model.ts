@@ -11,8 +11,8 @@ export function readFirstAnswerStarter(replaying = false): FirstAnswerStarterId 
   if (replaying) return 'blank'
   try {
     const value = localStorage.getItem(STARTER_KEY)
-    return FIRST_ANSWER_STARTERS.find((starter) => starter.id === value)?.id ?? 'plan'
-  } catch { return 'plan' }
+    return FIRST_ANSWER_STARTERS.find((starter) => starter.id === value)?.id ?? 'blank'
+  } catch { return 'blank' }
 }
 export function saveFirstAnswerStarter(id: FirstAnswerStarterId): void {
   if (!FIRST_ANSWER_STARTERS.some((starter) => starter.id === id)) return
