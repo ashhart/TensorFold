@@ -113,6 +113,7 @@ reports the setting's own value, does not count as logging.
 | `FZ_ROUND_TIMES` | release, tool, test | logs |
 | `FZ_SETTLE_SYNC` | release, tool, test | other |
 | `FZ_SKIP` | release, tool, test | other |
+| `FZ_TFQ3_SERIAL_ROUTE` | release, tool, test | other |
 | `FZ_TREE` | release, tool, test | other |
 | `FZ_VERIFY_OVERLAP` | release, tool, test | other |
 | `GEMMA_DRAFT_BF16` | release, tool, test | other |

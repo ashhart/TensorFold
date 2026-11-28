@@ -48,7 +48,7 @@ pub fn moeDecode(
         .sh_gu_group = sh[1],
         .sh_dn_bits = sh[2],
         .sh_dn_group = sh[3],
-        .flags = if (rows == 1) 2 else 0,
+        .flags = if (rows == 1) 2 else if (p.serial_route) 0 else 4, // 4: fwht_x_fwd routes every live row
     };
 
     e.setPipeline(p.get(.fwht_x_fwd));
@@ -59,7 +59,7 @@ pub fn moeDecode(
     e.setBuffer(lg.b, lg.off, 4);
     e.setBuffer(pick.b, pick.off, 5);
     e.setBuffer(wts.b, wts.off, 6);
-    e.dispatchGroups(mtl.Size.of(if (rows == 1) 21 else 20, rows, 1), mtl.Size.of(32, 1, 1));
+    e.dispatchGroups(mtl.Size.of(if (rows == 1 or !p.serial_route) 21 else 20, rows, 1), mtl.Size.of(32, 1, 1));
     barrier(r);
 
     if (rows == 1) {
@@ -103,16 +103,27 @@ pub fn moeDecode(
         e.dispatchGroups(mtl.Size.of(80, 14, 1), mtl.Size.of(64, 1, 1));
         barrier(r);
     } else {
-        e.setPipeline(p.get(.route_dedup));
-        e.setBuffer(lg.b, lg.off, 0);
-        e.setBuffer(rows_buf.b, rows_buf.off, 1);
-        e.setBuffer(pick.b, pick.off, 2);
-        e.setBuffer(wts.b, wts.off, 3);
-        e.setBuffer(p.uids_buf, 0, 4);
-        e.setBuffer(p.umem_buf, 0, 5);
-        e.setBuffer(p.ucount_buf, 0, 6);
-        e.setValue(d, 7);
-        e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(32, 1, 1));
+        if (p.serial_route) {
+            e.setPipeline(p.get(.route_dedup));
+            e.setBuffer(lg.b, lg.off, 0);
+            e.setBuffer(rows_buf.b, rows_buf.off, 1);
+            e.setBuffer(pick.b, pick.off, 2);
+            e.setBuffer(wts.b, wts.off, 3);
+            e.setBuffer(p.uids_buf, 0, 4);
+            e.setBuffer(p.umem_buf, 0, 5);
+            e.setBuffer(p.ucount_buf, 0, 6);
+            e.setValue(d, 7);
+            e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(32, 1, 1));
+        } else { // fwht_x_fwd's group 20 routed every live row; the lists as route_dedup writes them, in parallel
+            e.setPipeline(p.get(.dedup_par));
+            e.setBuffer(pick.b, pick.off, 0);
+            e.setBuffer(rows_buf.b, rows_buf.off, 1);
+            e.setBuffer(p.uids_buf, 0, 2);
+            e.setBuffer(p.umem_buf, 0, 3);
+            e.setBuffer(p.ucount_buf, 0, 4);
+            e.setValue(d, 5);
+            e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(tfq3.max_decode_slots, 1, 1));
+        }
         barrier(r);
 
         e.setPipeline(if (tl.has_5b) p.get(.dec_gu_dedup_543) else p.get(.dec_gu_dedup_43));

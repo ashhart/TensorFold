@@ -422,10 +422,11 @@ fn parity(units: bool) !void {
         ck.widths[r * 11 + 10] = 8;
     }
 
-    // Run B=4 deduplicated in one pass, twice: the repeat gives the same output bytes.
+    // Run B=4 deduplicated in one pass, three times: route_dedup, then the default twice, all the same output bytes.
     var first: ?[]u16 = null;
     defer if (first) |f| a.free(f);
-    for (0..2) |pass| {
+    for (0..3) |pass| {
+        pipes.serial_route = pass == 0; // pass 0: main's route_dedup; 1, 2: the default, the same bytes, last
         const cb = queue.commandBuffer();
         run.enc = cb.compute(.serial);
         tfq3.dispatch.moeDecode(
