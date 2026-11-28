@@ -19,7 +19,7 @@ pub fn run(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) 
     // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
     if (r.tail != null and r.reduce != null) return error.TailOnRank;
     for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
-    if (stage_planes.on) if (stage_planes.active != null) try stage_planes.admit(round.windows); // refused before the round touches any state
+    if (stage_planes.on) if (stage_planes.active != null) try stage_planes.admit(round.windows); // refusal is atomic
     for (round.slots, round.windows) |slot, window| try r.cover(slot, window.start + @as(u32, @intCast(window.parents.len)));
     for (round.slots, round.windows) |slot, window| try r.reserve(slot, window.start + @as(u32, @intCast(window.parents.len)));
     const paths = try r.allocator.alloc([]const u32, round.windows.len);
@@ -95,5 +95,5 @@ pub fn run(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) 
     if (accepted) {
         for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
     } else r.active = fingerprint(round);
-    if (stage_planes.on) if (stage_planes.active) |planes| try planes.end(round.windows[0].start); // after the round is committed, so a refusal leaves it whole
+    if (stage_planes.on) if (stage_planes.active) |planes| try planes.end(round.windows[0].start); // refusal is atomic
 }
