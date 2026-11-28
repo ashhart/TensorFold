@@ -117,12 +117,13 @@ pub const Engine = struct {
         errdefer e.graphs.deinit();
         e.graphs.name = "inkling2 decode";
         e.graphs.agree = .{ .ctx = e, .all = agreeAll }; // a capture or room failure on any rank sends every rank eager
+        errdefer cuda.completion.drain(d, e.stream, "inkling2 engine setup did not drain before its buffers were freed");
         try e.stream.synchronize();
         return e;
     }
 
     pub fn deinit(e: *Engine) void {
-        e.stream.synchronize() catch {};
+        cuda.completion.drain(e.d, e.stream, "inkling2 engine work did not drain before its buffers were freed");
         e.graphs.deinit();
         e.states.deinit();
         if (e.serial) |x| x.deinit(e.gpa);
@@ -382,7 +383,7 @@ pub const Engine = struct {
     }
 
     pub fn dropState(e: *Engine, id: u64) void {
-        e.stream.synchronize() catch {};
+        cuda.completion.drain(e.d, e.stream, "inkling2 kept-state work did not drain before the state was freed");
         e.states.drop(id);
     }
 };

@@ -179,6 +179,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         const mine: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
         var rooms = try cuda.DeviceBuffer.alloc(ctx.d, 8 * p.world);
         defer rooms.free();
+        errdefer cuda.completion.drain(ctx.d, own.e.stream, "the ranks' room gather did not drain before its buffer was freed");
         try rooms.upload(p.rank * 8, std.mem.asBytes(&mine));
         try own.lib.?.check(own.lib.?.api.ncclAllGather(rooms.ptr + p.rank * 8, rooms.ptr, 8, .u8, own.comm, own.e.stream.handle), "ncclAllGather");
         try own.e.stream.synchronize();
