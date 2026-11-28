@@ -29,17 +29,17 @@ const Walk = struct {
         if ((w.seen_mods.getOrPut(w.b.allocator, m) catch @panic("OOM")).found_existing) return;
         const target = m.resolved_target orelse inherited orelse w.b.graph.host;
         // only TensorFold's own sources see it; the sys module itself and generated modules do not
-        if (m.root_source_file) |root| if (root == .src_path and !m.import_table.contains("sys") and !std.mem.endsWith(u8, root.src_path.sub_path, "platform/sys.zig"))
+        if (m.root_source_file) |root| if (root == .src_path and !m.import_table.contains("sys") and !ends(root.src_path.sub_path, "platform/sys.zig"))
             m.addImport("sys", w.sys(target));
         if (m.root_source_file) |root| if (root == .src_path) {
             const path = root.src_path.sub_path;
-            if ((std.mem.endsWith(u8, path, "native/metal.zig") or std.mem.endsWith(u8, path, "tests/contract/metal_main.zig")) and !m.import_table.contains("qwen4"))
+            if ((ends(path, "native/metal.zig") or ends(path, "tests/contract/metal_main.zig")) and !m.import_table.contains("qwen4"))
                 @import("qwen4.zig").metalNative(w.b, target, m);
             const needs_memory = std.mem.indexOf(u8, path, "flashnext") != null or
-                std.mem.indexOf(u8, path, "residency") != null or std.mem.endsWith(u8, path, "cli/tests.zig") or
-                std.mem.endsWith(u8, path, "src/tensorfold.zig") or std.mem.endsWith(u8, path, "cli/cli.zig") or
-                std.mem.endsWith(u8, path, "native/metal.zig") or std.mem.endsWith(u8, path, "src/main.zig");
-            if (needs_memory and !std.mem.endsWith(u8, path, "flashnext/load_memory.zig") and !m.import_table.contains("flashnext_memory"))
+                std.mem.indexOf(u8, path, "residency") != null or ends(path, "cli/tests.zig") or
+                ends(path, "src/tensorfold.zig") or ends(path, "cli/cli.zig") or
+                ends(path, "native/metal.zig") or ends(path, "src/main.zig");
+            if (needs_memory and !ends(path, "flashnext/load_memory.zig") and !m.import_table.contains("flashnext_memory"))
                 m.addImport("flashnext_memory", w.memory(target));
         };
         for (m.import_table.values()) |dep| w.module(dep, target);
@@ -59,3 +59,11 @@ const Walk = struct {
         return slot.value_ptr.*;
     }
 };
+
+/// `std.mem.endsWith` for a module's sub_path, with '\\' matching '/': on a Windows host the build gives sub_paths with
+/// backslashes, so "cli/cli.zig" never matched there and cli.zig went without flashnext_memory (compile-native-cuda-windows).
+fn ends(path: []const u8, suffix: []const u8) bool {
+    if (path.len < suffix.len) return false;
+    for (path[path.len - suffix.len ..], suffix) |a, b| if (a != b and !(a == '\\' and b == '/')) return false;
+    return true;
+}
