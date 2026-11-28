@@ -63,7 +63,6 @@ pub const Quiet = struct {
         return false;
     }
 };
-
 fn keyedDraft(s: lanes.Sampling, position: u32, vocab: u32) fwd.Draws {
     var d: fwd.Draws = .{ .n = 1 };
     d.rules[0] = @import("draw_rule.zig").draftRule(s, position, vocab);
