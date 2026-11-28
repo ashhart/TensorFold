@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the CUDA kernel-contract runner takes opt-in `--jobs N` and `--shard I/N`; four jobs run the served suites in 1:11:50 against 3:17:59 one at a time, with identical summaries (#3093). Thanks to @BlivionIaG.
+
 - Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
 
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
