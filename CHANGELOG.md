@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: the DFlash2 draft selector skips candidate ids outside the vocabulary and treats an invalid anchor as token 0 instead of reading past the table; in-range drafts are unchanged (#5449). Thanks to @kelchm.
+
 - Kolibri 1.1: the cache-cap comments now say K and V are rounded to NVFP4 as the reference does, not kept in bf16; comments only (#5445). Thanks to @jschmied.
 
 - GLM on CUDA: the DFlash2 draft selector skips candidate ids outside the vocabulary and treats an invalid anchor as token 0 instead of reading past the table; in-range drafts are unchanged (#5449). Thanks to @kelchm.
