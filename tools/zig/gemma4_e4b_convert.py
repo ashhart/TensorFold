@@ -55,6 +55,15 @@ def quantize(w: np.ndarray, bits: int):
     return packed, bf16_round(scale), bf16_round(bias), q
 
 
+def unpack(words: np.ndarray, groups: int) -> np.ndarray:
+    """Words [rows, K * bits / 32] of `groups` groups a row back to codes [rows, K], bits (4 or 8) from the shapes."""
+    bits, rest = divmod(words.shape[1] * 32, groups * GROUP)
+    if rest or bits not in (4, 8):
+        raise ValueError(f"{words.shape[1]} words for {groups} groups of {GROUP} are neither 4- nor 8-bit codes")
+    shifts = bits * np.arange(32 // bits, dtype=np.uint32)
+    return ((words.astype(np.uint32)[:, :, None] >> shifts) & np.uint32((1 << bits) - 1)).reshape(words.shape[0], -1)
+
+
 def dequantize(q: np.ndarray, scales: np.ndarray, biases: np.ndarray) -> np.ndarray:
     return (q.astype(np.float32) * bf16_float(scales)[..., None] + bf16_float(biases)[..., None]).reshape(q.shape[0], -1)
 

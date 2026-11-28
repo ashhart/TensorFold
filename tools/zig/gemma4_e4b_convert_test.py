@@ -49,6 +49,16 @@ class Quantizer(unittest.TestCase):
         self.assertEqual(biases.tolist(), [[0], [int(bf16([3.0])[0])]])
         np.testing.assert_array_equal(c.dequantize(q, scales, biases), w)
 
+    def test_unpack_reads_both_widths_and_refuses_other_shapes(self):
+        # the oracles' unpacker: 8 codes a word at 4 bits, 4 at 8 bits, the width from the words and groups of a row
+        w = c.bf16_float(bf16(np.random.default_rng(1127).normal(size=(4, 128))))
+        for bits in (4, 8):
+            words, scales, _, q = c.quantize(w, bits)
+            np.testing.assert_array_equal(c.unpack(words, scales.shape[1]), q.reshape(4, -1))
+        for n in (3, 12, 64):  # 1.5, 6 and 32 bits a code over 2 groups
+            with self.assertRaises(ValueError):
+                c.unpack(np.zeros((1, n), np.uint32), 2)
+
     def test_bf16_rounds_ties_to_even(self):
         # 1 + 2^-8 is half a step above 1 (to the even 1); 1 + 3 * 2^-8 is half above 1 + 2^-7 (to 1 + 2^-6)
         self.assertEqual(bf16([1 + 2**-8, 1 + 3 * 2**-8, -(1 + 2**-8)]).tolist(), [0x3F80, 0x3F82, 0xBF80])
@@ -162,6 +172,22 @@ class Converter(unittest.TestCase):
         self.assertEqual(config["quantization"][p + "layers.0.self_attn.q_proj"], {"group_size": 64, "bits": 8, "mode": "affine"})
         self.assertEqual(header[p + "layers.0.self_attn.q_proj.weight"]["shape"], [64, 32])
         self.assertEqual(header[p + "layers.0.mlp.up_proj.weight"]["shape"], [128, 16])  # the MLP stays 4-bit
+
+    def test_unpack_gives_the_converter_codes_of_an_eight_bit_attention_checkpoint(self):
+        out, header, _, _ = self.convert(attn_bits=8)
+        raw = np.memmap(out / "model.safetensors", mode="r", dtype=np.uint8)
+        base = 8 + int(raw[:8].view(np.uint64)[0])
+
+        def get(name: str, dtype) -> np.ndarray:
+            a, b = header[name]["data_offsets"]
+            return np.asarray(raw[base + a : base + b]).view(dtype).reshape(header[name]["shape"])
+
+        src = c.Source(out.parent / "src")
+        widths = (("layers.0.self_attn.q_proj", 8), ("layers.3.self_attn.v_proj", 8), ("layers.0.mlp.up_proj", 4))
+        for name, bits in widths:
+            words, scales = get(c.PREFIX + name + ".weight", np.uint32), get(c.PREFIX + name + ".scales", np.uint16)
+            _, _, _, q = c.quantize(c.bf16_float(src.bf16(c.HF_PREFIX + name + ".weight")), bits)
+            np.testing.assert_array_equal(c.unpack(words, scales.shape[1]), q.reshape(words.shape[0], -1), name)
 
     def test_two_runs_write_the_same_bytes(self):
         a, _, _, _ = self.convert(dense_ple=True, attn_bits=8)

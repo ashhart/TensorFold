@@ -16,13 +16,15 @@ from transformers import AutoTokenizer
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
+from gemma4_e4b_convert import unpack
+
 STOPS = {1, 106, 50}
 TEXT = "model.language_model."
 TEXTS = (TEXT, "language_model.model.")  # the second: the prefix of the MLX 4/64 checkpoint
 
 
-def dequantized(raw: np.memmap, base: int, header: dict, name: str, bits: int = 4, fp32: bool = False) -> torch.Tensor:
-    """A weight of the MLX 4/64 checkpoint back to bf16: bf16(q * scale + bias) in fp32, as the XPU gathers do."""
+def dequantized(raw: np.memmap, base: int, header: dict, name: str, fp32: bool = False) -> torch.Tensor:
+    """A 4- or 8-bit weight of the MLX checkpoint to bf16: bf16(q * scale + bias) in fp32, as the XPU gathers do."""
     stem = name.removesuffix(".weight")
 
     def get(n: str, dtype) -> np.ndarray:
@@ -30,10 +32,10 @@ def dequantized(raw: np.memmap, base: int, header: dict, name: str, bits: int = 
         return raw[base + a : base + b].view(dtype).reshape(header[n]["shape"])
 
     w, s, bi = get(name, np.uint32), get(stem + ".scales", np.uint16), get(stem + ".biases", np.uint16)
-    out = np.empty((w.shape[0], w.shape[1] * 8), dtype=np.float32 if fp32 else np.uint16)
+    out = np.empty((w.shape[0], s.shape[1] * 64), dtype=np.float32 if fp32 else np.uint16)
     for r in range(0, w.shape[0], 4096):
         blk = w[r : r + 4096]
-        q = ((blk[:, :, None] >> (4 * np.arange(8, dtype=np.uint32))) & 15).reshape(blk.shape[0], -1).astype(np.float32)
+        q = unpack(blk, s.shape[1]).astype(np.float32)
         sc = (s[r : r + 4096].astype(np.uint32) << 16).view(np.float32).repeat(64, axis=1)
         bs = (bi[r : r + 4096].astype(np.uint32) << 16).view(np.float32).repeat(64, axis=1)
         if fp32:  # --fp32: q * scale + bias as it is, no bf16 rounding

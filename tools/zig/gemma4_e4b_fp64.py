@@ -2,6 +2,7 @@
 import os, sys
 import numpy as np
 import mlx.core as mx
+from gemma4_e4b_convert import unpack
 
 model, dump = sys.argv[1], sys.argv[2]
 # weights dequantized in float64 (scale * code + bias), one float64 sum, against the decode path's and tiles' outputs
@@ -13,9 +14,7 @@ def f64(a):
     return np.array(a.astype(mx.float32)).astype(np.float64)
 
 def dequant(prefix):
-    words = np.array(w[prefix + '.weight']).astype(np.uint32)
-    n = words.shape[0]
-    codes = np.stack([(words >> (4 * j)) & 0xF for j in range(8)], -1).reshape(n, -1).astype(np.float64)
+    codes = unpack(np.array(w[prefix + '.weight']), w[prefix + '.scales'].shape[1]).astype(np.float64)
     s = f64(w[prefix + '.scales']).repeat(GROUP, 1)
     b = f64(w[prefix + '.biases']).repeat(GROUP, 1)
     return codes * s + b
@@ -29,9 +28,7 @@ def bf16r(a):
 
 def dequant32(prefix):
     # scale * code + bias in fp32 (a bf16 scale times a code is exact in fp32: one rounding, as the kernel's fma)
-    words = np.array(w[prefix + '.weight']).astype(np.uint32)
-    n = words.shape[0]
-    codes = np.stack([(words >> (4 * j)) & 0xF for j in range(8)], -1).reshape(n, -1).astype(np.float32)
+    codes = unpack(np.array(w[prefix + '.weight']), w[prefix + '.scales'].shape[1]).astype(np.float32)
     s_ = np.array(w[prefix + '.scales'].astype(mx.float32)).repeat(GROUP, 1)
     b_ = np.array(w[prefix + '.biases'].astype(mx.float32)).repeat(GROUP, 1)
     return codes * s_ + b_
