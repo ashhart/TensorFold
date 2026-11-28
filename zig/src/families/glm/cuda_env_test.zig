@@ -9,6 +9,7 @@ const t = std.testing;
 const Name = struct { name: [:0]const u8, default: bool = false };
 const switches = [_]Name{
     .{ .name = "TF_GLM_KEEP_SEQS" },
+    .{ .name = "TF_GLM_STARTUP_WARMUP" },
     .{ .name = "TF_GLM_HOST_CACHE" },
     .{ .name = "TF_GLM_VISION_HOST" },
     .{ .name = "TF_GLM_VISION_FUSED" },

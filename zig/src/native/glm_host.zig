@@ -10,6 +10,7 @@ const glm_disk = @import("glm_disk.zig");
 const cache_fit = @import("cache_fit.zig");
 const order = @import("glm_order.zig");
 const Allocator = std.mem.Allocator;
+const platform = @import("sys");
 
 /// The warm-up reply's draft depth: every rank of a pair pays a process's first-round costs at the same step.
 const DEPTH = 2;
@@ -44,6 +45,11 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.ContextFull => "the prompt and max_tokens do not fit this server's --context",
         else => null,
     };
+}
+
+/// Startup-only warm-up policy, checked against the one registered flag on Metal too.
+fn startupWarmRequested(raw: ?[]const u8) !bool {
+    return (try platform.environment.parse("TF_GLM_STARTUP_WARMUP", raw) orelse 0) == 1;
 }
 
 /// Streams fitting beside the weights under the load limit, at most `want` (`fixed`: all or none); pooled: KDA only.
@@ -87,6 +93,10 @@ fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *const ge.Eng
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, decode_share: ?f64, learn: ?Learn, vision: ?api.VisionOpen, drafter: ?[]const u8, drafter_name: ?[]const u8, drafter_bits: u8) !*Host {
+    const startup_warm = startupWarmRequested(platform.environment.rawText("TF_GLM_STARTUP_WARMUP")) catch {
+        std.log.err("TF_GLM_STARTUP_WARMUP must be 0 or 1; unset or blank keeps startup warm-up off", .{});
+        return error.InvalidEnvironment;
+    };
     // a prompt's tower rows and images: the images' budget, and every video's frame groups beside it
     const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens + v.video_tokens, .max_images = v.max_images + v.max_videos * ((v.max_frames + 1) / 2) } else null;
     const pool_tokens = try glm.pool_size.fromEnv();
@@ -178,6 +188,18 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.explain = .{ .text = words };
     h.warm = eng.keepalive_target;
+    if (startup_warm) {
+        const probe_at = std.Io.Clock.awake.now(io);
+        try h.warm.drain();
+        const probe_ms = @as(f64, @floatFromInt(probe_at.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+        std.log.info("glm: startup residency probe {d:.2} ms", .{probe_ms});
+        if (eng.dflash == null and eng.hasMtp()) {
+            const mtp_at = std.Io.Clock.awake.now(io);
+            try h.slots.warmServedMtp(toks[0..2]);
+            const mtp_ms = @as(f64, @floatFromInt(mtp_at.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+            std.log.info("glm: startup served MTP warm-up {d:.2} ms", .{mtp_ms});
+        }
+    }
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start(); // the host thread first: once the follower runs, nothing after it can fail
     errdefer h.host.stop();
@@ -286,4 +308,11 @@ test "a 3.5k-token prompt keeps its shared system cut, a planned chunk start" {
     // a 3,523-token system prompt: the server cuts at 3,522 and names 1,475, 3,011 and 3,523 as shared cuts
     const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{ 1475, 3011, 3523 }, &.{3522}, &.{});
     try std.testing.expectEqualSlices(u32, &.{3522}, marks);
+}
+
+test "GLM startup warm-up: unset and blank stay off, exact one opts in, malformed values refuse" {
+    for ([_]?[]const u8{ null, "", "0", " \t" }) |raw| try std.testing.expect(!try startupWarmRequested(raw));
+    try std.testing.expect(try startupWarmRequested("1"));
+    for ([_][]const u8{ "00", "01", "yes", "true", "2", " 0", "1 " }) |raw|
+        try std.testing.expectError(error.InvalidEnvironment, startupWarmRequested(raw));
 }

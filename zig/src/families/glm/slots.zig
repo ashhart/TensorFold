@@ -534,6 +534,36 @@ pub const Slots = struct {
         rp.report(sl.prof);
         sl.flush() catch |err| std.log.err("glm: the slots' last command buffer failed: {s}", .{@errorName(err)});
     }
+
+    /// Before readiness: real served depth-two draft/ahead/verify and one reap, then no request-visible state.
+    pub fn warmServedMtp(sl: *Slots, prompt: []const u32) !void {
+        if (!sl.e.hasMtp() or sl.e.dflash != null) return;
+        if (prompt.len < 2) return error.WarmupPromptTooShort;
+        const saved_slot = sl.slots[0];
+        const saved_windows = sl.windows;
+        const saved_digest = sl.digest;
+        const saved_end = sl.last_end;
+        const saved_ret = sl.last_ret;
+        const saved_ahead = sl.ahead;
+        defer {
+            sl.release(0);
+            sl.slots[0] = saved_slot;
+            sl.windows = saved_windows;
+            sl.digest = saved_digest;
+            sl.last_end = saved_end;
+            sl.last_ret = saved_ret;
+            sl.ahead = saved_ahead;
+        }
+        try sl.begin(0, prompt, true);
+        try sl.chunk(0, 0, @intCast(prompt.len), null);
+        const first = Engine.u32s(sl.e.sc.picks, 1)[0];
+        const initial: Draft = .{ .slot = 0, .prompt = true, .follow = &.{first}, .depth = 2 };
+        try sl.draftAll(&.{initial});
+        const win: Win = .{ .slot = 0, .pending = first, .held = 2, .tokens = &.{} };
+        try sl.window(&.{win}, null);
+        try sl.keep(0, 1);
+        try sl.flush();
+    }
 };
 
 /// `n` u32 words from `src` to `dst` on the GPU.
