@@ -33,6 +33,7 @@ test {
     _ = @import("weights_cut.zig");
     _ = @import("weights_size.zig");
     _ = @import("weights_bias_test.zig");
+    _ = @import("weights_marker_test.zig");
     _ = @import("names_test.zig");
     _ = @import("synth.zig");
     _ = ops;

@@ -160,8 +160,14 @@ pub const Reader = struct {
         const np = if (n % 128 == 0) n else std.mem.alignForward(usize, n, 128);
         if (t.dtype != .i16 or t.rank != 3 or t.shape[0] != k / 16 or t.shape[1] != np / 16 or t.shape[2] % 8 != 0 or halves < 2 or halves > 16 or k % 128 != 0) return wrong(module, .exl3, t, n, k);
         var codebook: cuda.exl3.Codebook = .inst3;
+        var marked = false;
         for (core.exl3_load.markers) |m| if (ck.has(try std.fmt.bufPrint(&b, "{s}.{s}", .{ module, m.name }))) {
             const v = try ck.get(try std.fmt.bufPrint(&b, "{s}.{s}", .{ module, m.name }));
+            if (marked) { // exl3_load refuses such a group too
+                std.log.warn("{s}: both the mcg and the mul1 codebook markers", .{module});
+                return error.TwoCodebookMarkers;
+            }
+            marked = true;
             if (v.bytes.len != 4 or std.mem.readInt(u32, v.bytes[0..4], .little) != m.value) return wrong(module, .exl3, v, n, k);
             codebook = switch (m.codebook) {
                 .inst3 => .inst3,
