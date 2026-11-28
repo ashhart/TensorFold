@@ -171,6 +171,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA kernels: ERNIE 5.5's MultiMax on the head's fp32 logits (`tf_ernie55_multimax`, in a new `ernie5_5_head` image), each step rounded once in the vendor's order with nothing fused, under the kernel contract against the host's replay of those steps; nothing launches it yet, so served output is unchanged (#5202, part of #4926). Thanks to @Bizuayeu.
 
+- CUDA kernels: ERNIE 5.5's DSA key lists (`tf_ernie55_window_merge`, in a new `ernie5_5_index` image): each row's indexer top-k picks, then its 128-position sliding window, with the row's count, as the sparse MLA reads them; under the kernel contract against the host's lists; nothing launches it yet, so served output is unchanged (#5211, part of #4926).
+
+- CUDA kernels: ERNIE 5.5's mHC pre side (`tf_ernie55_mhc_pre`, in a new `ernie5_5_mhc` image): a row's 24 mixes over its 4 streams with ERNIE's mix RMS, 1 / (sqrt(mean) + eps), Sinkhorn's comb, and the collapse's RMSNorm with the layer's norm weight, rounded to bf16 once; under the kernel contract against float64, each output alone; nothing launches it yet, so served output is unchanged (#5301, part of #4926).
+
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: 3:1 GQA decode and verify read each key/value head once for its three query heads, and multi-stream attention batches across shared descriptors, with tokens unchanged; on an M3 Ultra four-stream decode is 12-14% faster and a 2K-token prompt 6% faster (#5206, refs #5191). Thanks to @gilby.
