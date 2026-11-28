@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: drafted Qwen3.8-27B gains opt-in `TF_QWEN_DRAFT_FULL_HEAD=1`, which sends a draft hold with any wide stream through the full head in one pass; on one GB10 it wins back the 1.3.7 loss at 4 greedy streams (+3.1%) with identical tokens. Default off, as are the `TF_DFLASH_GRAPH` mixed-width graph keys and `TF_QWEN_GRAPH_STATS` counters added with it (#5481, refs #4439).
+
 - Server: `serve --confidential` disables prompt retention without requesting checkpoint slots and omits generated OCR text from error logs; CUDA families that keep no prompts accept a zero cache budget (#5426).
 
 
@@ -36,8 +38,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
 
-
-
 - Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
 
 - GLM on CUDA: the DFlash2 draft selector skips candidate ids outside the vocabulary and treats an invalid anchor as token 0 instead of reading past the table; in-range drafts are unchanged (#5449). Thanks to @kelchm.
@@ -52,8 +52,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.
 
 - Metal: the Qwen4 QSA, Flash Next hybrid HC and Qwen4 PLE source rewrites validate threadgroup reservations across the whole original declaration and refuse conflicts and duplicates; generated shader bytes are unchanged (#5441).
-- CUDA: `TF_QWEN_GRAPH_STATS=1` prints per-width DFlash2 hold capture, replay, eager, key-miss and eviction counters at shutdown; default off, with no launch or token changes (#4439).
-- CUDA: `TF_QWEN_DRAFT_FULL_HEAD=1` opts Qwen3.5 DFlash2 holds with any wide stream into one full-head projection, top-k and readback; default off, with host equality coverage (#4439).
 - Metal: Qwen4 QSA, HC and PLE source rewrites validate reservations across the whole original declaration, refusing conflicts and duplicates without changing generated shader bytes.
 - HIP: Inkling 2 Mini's HIP family refuses the serve options it does not support before any load, with host tests; nothing serves Inkling 2 Mini on HIP yet (#5034). Thanks to @AbrahamCete.
 
