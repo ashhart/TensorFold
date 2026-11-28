@@ -199,8 +199,11 @@ pub fn main(init: std.process.Init) !void {
         const source = try q.simd_attention.grouped(a, units, true, 6, 4, pages);
         defer a.free(source);
         const needle = "q27_round(value * inverse[0], 0)";
-        if (std.mem.count(u8, source, needle) != 1) return error.MixedControlEdit;
-        const body = if (mutant) try std.mem.replaceOwned(u8, a, source, needle, "(value * inverse[0])") else try a.dupe(u8, source);
+        const end = std.mem.indexOf(u8, source, "kernel void q27_qk_cache_rope(") orelse return error.MixedControlEdit;
+        if (std.mem.count(u8, source[0..end], needle) != 1) return error.MixedControlEdit;
+        const edited = try std.mem.replaceOwned(u8, a, source[0..end], needle, "(value * inverse[0])");
+        defer a.free(edited);
+        const body = if (mutant) try std.mem.concat(a, u8, &.{ edited, source[end..] }) else try a.dupe(u8, source);
         defer a.free(body);
         const lib = try mtl.Library.fromSource(device, body, mtl.CompileOptions.mlx());
         defer lib.deinit();

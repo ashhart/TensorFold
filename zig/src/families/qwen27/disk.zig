@@ -6,6 +6,9 @@ pub fn sourceHash() u64 {
     var h = std.hash.Wyhash.init(0x7127);
     texts(&h, @import("qwen_runtime_sources"));
     texts(&h, @import("kernel_sources"));
+    const qk = @import("kernel_sources").qwen27_qk_cache;
+    h.update(comptime qk.source(false));
+    h.update(comptime qk.source(true));
     return h.final();
 }
 
