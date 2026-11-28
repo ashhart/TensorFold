@@ -5,7 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Inkling 2 Mini: different requests on one server get different tool-call IDs, and whole and streamed replies agree; generated tokens are unchanged (#5401). Thanks @fcossutta. Thanks @fcossutta for the report.
-
+- Inkling 2 Mini: different requests on one server get different tool-call IDs, and whole and streamed replies agree; generated tokens are unchanged (fixes #5361). Thanks to @fcossutta for the report.
 - Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5400). Thanks @cwschroeder. Thanks @cwschroeder for the report.
 - Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5371). Thanks @cwschroeder.
 - TFQ3: CUDA prompt projections use a tiled BM=64, BN=128 prefill kernel (Qwen3.8-27B-TFQ3 prefill about 3.2x faster on a GB10); TFQ3 pack sections are checked with XXH64 at load; Inkling 2 TFQ3 routed experts load on CUDA and Metal with softcapped SwiGLU; and GLM `--keep-nonmoe-bf16` loads BF16 or block-FP8 non-MoE weights on CUDA (#5350).
@@ -31,10 +31,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#5353, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
-
-- Inkling 2 Mini: different requests on one server get different tool-call IDs, and whole and streamed replies agree; generated tokens are unchanged (fixes #5361). Thanks to @fcossutta for the report.
-
-
 
 - CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
 
