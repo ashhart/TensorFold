@@ -68,7 +68,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         job.frame = f;
         if (f != 0) {
             job.key = h.gpa.dupe(u32, r.cacheKey()) catch return !h.drop(job, "out of memory");
-            job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
+            job.key[0] = @import("cache_images.zig").framed(job.key[0], f);
         }
     };
     if (!memory_active and h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught) reuse = kept(h, job);
