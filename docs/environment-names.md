@@ -644,6 +644,7 @@ reports the setting's own value, does not count as logging.
 | `TF_LFM3_METAL_WARM_TURNS` | release, tool, test | other |
 | `TF_LOAD_DIRECT` | release, tool, test | other |
 | `TF_LOAD_PREFETCH` | release, tool, test | other |
+| `TF_LORA_DIR` | release, tool, test | loads |
 | `TF_METAL4` | tool, test | other |
 | `TF_METAL4_TIMELINE` | release, tool, test | logs |
 | `TF_MINIMAX_COPIES` | release, tool, test | other |
