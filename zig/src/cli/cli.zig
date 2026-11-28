@@ -18,6 +18,7 @@ const usage =
     \\usage: tensorfold models [--all] [--json]
     \\       tensorfold start [--yes] [--check] [--startup-timeout SECONDS]
     \\       tensorfold info MODEL [--context N] [--parallel N|auto]
+    \\       tensorfold info --hexagon FILE.gguf
     \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
@@ -50,6 +51,13 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     const args = try a.alloc([]const u8, argv.len);
     for (args, argv) |*x, y| x.* = y;
     const env = init.environ_map;
+    if (args.len >= 2 and std.mem.eql(u8, args[0], "info") and std.mem.eql(u8, args[1], "--hexagon")) {
+        if (args.len != 3) {
+            try err.interface.writeAll(usage);
+            return 2;
+        }
+        return @import("info_hexagon.zig").run(a, init.io, &out.interface, &err.interface, args[2]);
+    }
     if (std.mem.eql(u8, args[0], "models")) {
         var opts: models.Options = .{};
         for (args[1..]) |flag| {

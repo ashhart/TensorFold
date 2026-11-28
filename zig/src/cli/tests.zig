@@ -4,6 +4,7 @@ test {
     _ = @import("models.zig");
     _ = @import("catalog.zig");
     _ = @import("info.zig");
+    _ = @import("info_hexagon.zig");
     _ = @import("pull.zig");
     _ = @import("plan.zig");
     _ = @import("pull_parts.zig");
