@@ -22,8 +22,8 @@ pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop,
 pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
-    depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2), a capped step's rows (from bit 2); verify, shared: whole rows; snapshots: pages shared
+    depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts; begin: the stream's owner class
+    flags: u32 = 0, // pool: TF_GLM_KV_SPLIT; begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2), a capped step's rows (from bit 2); verify, shared: whole rows; snapshots: pages shared
     a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -209,6 +209,9 @@ pub const Leader = struct {
         try x.flush();
         const c = sampler.check(s);
         var h: Header = .{ .kind = @backingInt(Kind.begin), .a = kept };
+        if (pages.len > 0) if (x.e.pages) |p| { // TF_GLM_KV_SPLIT: the owner class every id is of (0 otherwise)
+            h.depth = p.leases[x.e.slot].owner;
+        };
         if (c) |v| {
             h.flags = 1;
             h.seed = v.seed;
@@ -229,7 +232,7 @@ pub const Leader = struct {
 
     /// The other ranks make rank 0's pool: `streams` paged sequences and `pages` pages, each page's bytes checked.
     pub fn pool(x: Leader, streams: u32, pages: usize, page_bytes: u64) !void {
-        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
+        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes, .flags = @intFromBool(x.e.settings.kv_split) }, &.{});
     }
 
     /// Rank 0's tower encodes the bound slot's images past `from` with the other ranks asleep (#3614), then their rows.
@@ -400,12 +403,12 @@ pub fn follow(e: *Engine, link: *Link) !void {
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
             .begin => {
-                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep);
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).mapOwned(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep, h.depth);
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
             },
             .pool => {
                 if (e.pages != null) return error.BadStep;
-                e.pages = try pages_mod.Pages.follow(e.gpa, e, h.depth, @intCast(h.a), h.seed);
+                e.pages = try pages_mod.Pages.followFlagged(e.gpa, e, h.depth, @intCast(h.a), h.seed, h.flags & 1 != 0);
             },
             .cuts => try prompt_cuts.set(e.gpa, &e.cur.cuts, step.ids), // the bound sequence's, before its first prompt step
             .prefill => {
@@ -572,4 +575,17 @@ test "flag 2 on a chunk splits its indexer rows across the ranks, beside flag 1'
     try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.chunk), .flags = 3, .depth = 65536, .top_k = 70000 }));
     try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 65536, .top_k = 70000 }));
     try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.prefill), .flags = 2 }));
+}
+
+// Enough words for every offered frame pair and image, even with a small text context.
+pub fn linkCapacity(cap: usize, media: ?images_mod.Limits) !usize {
+    const lim = media orelse return cap;
+    const frames: usize = (@as(usize, lim.max_frames) + 1) / 2;
+    const pairs = std.math.mul(usize, frames, lim.max_videos) catch return error.TooManyImages;
+    const spans = std.math.add(usize, pairs, lim.max_images) catch return error.TooManyImages;
+    const words = std.math.mul(usize, spans, 3) catch return error.TooManyImages;
+    return @max(cap, words);
+}
+test "a small text context still sizes the link for every offered media span" {
+    try std.testing.expectEqual(@as(usize, 792), try linkCapacity(64, .{ .image_tokens = 2048, .max_images = 8, .video_tokens = 4096, .max_videos = 2, .max_frames = 256 }));
 }

@@ -94,6 +94,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "GLM_POOL_TOKENS", "2k" },                             .{ "GLM_POOL_TOKENS", "+2000000" },
         .{ "GLM_POOL_TOKENS", "-1" },                             .{ "GLM_POOL_TOKENS", "1e6" },
         .{ "GLM_POOL_TOKENS", "lots" },                           .{ "TF_MTP_BITS", "8" },
+        .{ "TF_GLM_KV_SPLIT", "ON" },                             .{ "TF_GLM_KV_SPLIT", "true" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));

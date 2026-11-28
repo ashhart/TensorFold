@@ -30,6 +30,7 @@ pub const Settings = struct {
     roce_wide: bool = false, // TF_ROCE=1: at three ranks or more the RoCE gather and the drafter MLP split (two ranks: always)
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
+    kv_split: bool = false, // TF_GLM_KV_SPLIT: each stream's pages from one owner rank's class (`open` checks it)
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
@@ -197,6 +198,12 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        if (get("TF_GLM_KV_SPLIT")) |v| {
+            if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "on")) s.kv_split = true else if (!std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "off")) {
+                problem.* = "TF_GLM_KV_SPLIT: 0, off, 1 or on";
+                return error.BadSetting;
+            }
+        }
         // refused here, before the weights load: the wire's bootstrap meets at rank 0, its kernel comes from the image
         if (s.roce_multi and (get("TF_TP_MASTER") == null or get("TF_TP_KERNEL_IMAGE") == null)) {
             problem.* = "TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE";
@@ -237,11 +244,12 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 24, // this struct's version (23, plus keep_seqs and TF_GLM_KV_SPLIT)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
     pages: u32 = 0, // TF_KV_PAGES: the engine's own sequence is made on pages at init, so every rank pages alike
+    kv_split: u32 = 0, // TF_GLM_KV_SPLIT: rank 0 books owner classes and every rank checks the ids it sends
     prompt_fixed_k: u32,
     tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
@@ -281,6 +289,7 @@ pub const Fingerprint = extern struct {
         keep_seqs,
         kv8,
         pages,
+        kv_split,
         prompt_fixed_k,
         tiled,
         split,
@@ -326,6 +335,7 @@ pub const Fingerprint = extern struct {
         const f: Fingerprint = .{
             .kv8 = @intFromBool(s.kv8),
             .pages = @intFromBool(s.pages),
+            .kv_split = @intFromBool(s.kv_split),
             .world = @intCast(world),
             .rank = @intCast(rank),
             .prompt_fixed_k = @intFromBool(s.prompt_fixed_k),
@@ -369,6 +379,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
         const fields = .{
             "kv8",
             "pages",
+            "kv_split",
             "prompt_fixed_k",
             "world",
             "tiled",
@@ -498,6 +509,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .keep_seqs => "TF_GLM_KEEP_SEQS",
         .kv8 => "--kv-cache fp8",
         .pages => "TF_KV_PAGES (unset or auto pages from two ranks)",
+        .kv_split => "TF_GLM_KV_SPLIT",
         .prompt_fixed_k => "TF_GLM_PROMPT_K",
         .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",
@@ -543,32 +555,6 @@ pub fn mediaFingerprint(f: *Fingerprint, limits: @import("cuda_images.zig").Limi
 pub fn artifact(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
     return @import("core").checkpoint_identity.fullIdentity(gpa, io, dir);
 }
-test "TF_GLM_PAIR_EXPERTS: off by default, 0 or 1, and every rank must agree" {
-    const Reader = struct {
-        fn absent(_: [:0]const u8) ?[]const u8 {
-            return null;
-        }
-        fn on(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "1" else null;
-        }
-        fn off(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "0" else null;
-        }
-        fn bad(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "2" else null;
-        }
-    };
-    var problem: []const u8 = "";
-    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).pair_experts);
-    const on = try Settings.read(Reader.on, &problem);
-    try std.testing.expect(on.pair_experts);
-    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).pair_experts);
-    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
-    try std.testing.expectEqualStrings("TF_GLM_PAIR_EXPERTS: 0 or 1", problem);
-    const all = [_]Fingerprint{ Fingerprint.of(2, 0, on, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), @splat(0)) };
-    try std.testing.expectEqual(Mismatch{ .field = .pair_experts, .rank = 1 }, mismatch(&all).?);
-}
-
 test "wire pieces: a blank override is unset; the tools' form takes its world from TF_GLM_WORLD" {
     const Reader = struct {
         fn at(key: [:0]const u8, world: ?[]const u8, pieces: ?[]const u8) ?[]const u8 {

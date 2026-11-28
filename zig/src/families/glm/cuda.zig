@@ -38,6 +38,7 @@ pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const pages = @import("cuda_pages.zig");
+pub const start = @import("cuda_start.zig");
 pub const share = @import("cuda_share.zig");
 pub const open_owner = @import("cuda_open_owner.zig");
 pub const images = @import("cuda_images.zig");
@@ -69,6 +70,9 @@ test {
     _ = @import("cuda_pages_test.zig");
     _ = @import("cuda_keep_seqs_test.zig");
     _ = @import("cuda_snapshot_layout_test.zig");
+    _ = @import("cuda_pages_split_test.zig");
+    _ = @import("cuda_follow_split_test.zig");
+    _ = @import("cuda_regions_test.zig");
     _ = @import("cuda_ranks_test.zig");
     _ = @import("cuda_ranks_roce_test.zig");
     _ = @import("cuda_env.zig");
