@@ -35,7 +35,7 @@ const MockTri = struct {
     own: ?*const @import("../../cuda_glue.zig").Glue = null,
 
     pub fn routerMany(_: MockTri, _: u64, _: u64, _: u64, _: usize, _: usize) !void {}
-    pub fn topkMany(_: MockTri, _: u64, _: u64, _: u64, _: usize) !void {}
+    pub fn topkMany(_: MockTri, _: u64, _: u64, _: u64, _: usize, _: usize) !void {}
 };
 
 test "exl3: Keep dispatch rejects an unattached expert bank before legacy copy" {
