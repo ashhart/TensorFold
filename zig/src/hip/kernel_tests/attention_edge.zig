@@ -225,3 +225,41 @@ test "a non-finite value past a row's causal edge adds nothing to that row, in b
         try shiftedPlanted(t, &rng, 237, 87);
     }
 }
+
+/// A NaN query on head 0's row 0 and a NaN first page on kv head 1: NaN in every dim of their rows, the rest finite.
+fn nanRows(t: *Rig, rng: *rig.Rng) !void {
+    const q_pos0 = 87;
+    const qlen = 150;
+    const span = 256;
+    const c = try Cache.make(t, rng, kv_heads, span, d);
+    defer c.free();
+    for (0..64) |key| c.k[(1 * span + key) * d] = t.bits(std.math.nan(f32));
+    const hq = try gpa.alloc(f32, heads * qlen * d);
+    defer gpa.free(hq);
+    for (hq) |*x| x.* = rng.unit();
+    hq[3] = std.math.nan(f32); // head 0, row 0
+    const r = try run(t, c, hq, qlen, span, q_pos0);
+    defer for ([_][2][]f32{ r.paged, r.flat }) |pair| for (pair) |x| gpa.free(x);
+    try std.testing.expectEqualSlices(u32, @ptrCast(r.flat[0]), @ptrCast(r.paged[0]));
+    for (0..heads) |h| for (0..qlen) |i| for (0..d) |e| {
+        const o = (h * qlen + i) * d + e;
+        const want: Class = if ((h == 0 and i == 0) or h / group == 1) .nan else .finite;
+        if (classOf(r.paged[0][o]) != want) {
+            std.debug.print("head {d} row {d} dim {d}: {d} where float64 gives {t}\n", .{ h, i, e, r.paged[0][o], want });
+            return error.TestUnexpectedResult;
+        }
+    };
+}
+
+test "a row whose scores are NaN before any finite one gives NaN in every dim, in both cache types, paged and flat" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x1821 };
+    const act = t.bf16;
+    defer t.bf16 = act;
+    for ([_]bool{ false, true }) |bf16| {
+        if (bf16 and !act) continue; // RDNA2 has no bf16 dot2 and serves fp16 caches only
+        t.bf16 = bf16;
+        try nanRows(t, &rng);
+    }
+}

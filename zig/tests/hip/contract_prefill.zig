@@ -60,10 +60,9 @@ const control_names = [2][2][]const u8{
 /// The served entry, or an edge entry: its own plant and a span a page past its last row.
 pub const Mode = enum { served, edge };
 
-/// What gate 1 finds on the tile: NaN scores leave its max, and its P x V takes a seen key whose weight underflows.
-const finding = "a row whose every score is NaN writes 0 where float64 gives NaN (its running max is fmaxf, " ++
-    "which drops NaN, and a row at max -inf takes p = 0), and an infinite value at a key the row sees under " ++
-    "fp32's least weight gives NaN where float64 gives inf, as 0 x inf enters P x V";
+/// What gate 1 finds on the tile: its P x V takes a seen key whose weight underflows.
+const finding = "an infinite value at a key the row sees under fp32's least weight gives NaN where float64 " ++
+    "gives inf, as 0 x inf enters P x V";
 
 /// A row's P x V chain: a dot2 a key pair and a fold a tile, under its keys plus a tile.
 fn keyChain(s: c.Shape) usize {
