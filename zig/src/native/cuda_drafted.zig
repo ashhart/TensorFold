@@ -91,6 +91,8 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
         return null;
     };
     drafted_initialized = true;
+    // a family whose Opened asks for it serves logprobs' first rows through the wrapper; others keep main's table
+    if (@hasField(@TypeOf(opened), "first_rows")) h.drafted.first_rows = opened.first_rows;
     s.source = .{ .kind = opened.drafter.kind, .name = o.drafter_name orelse dir };
     s.backend = h.drafted.backend();
     s.facts = h.drafted.facts(loaded.facts);
@@ -153,4 +155,50 @@ test "--mtp-drafts 0 reaches drafter selection so an MTP refusal does not suppre
     const served = (try wrap(F, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(called);
     try std.testing.expect(served.held == null);
+}
+
+/// A drafter with facts and nothing else: wrap reads its facts and kind before any stream.
+const FactsOnly = struct {
+    fn taps(_: *anyopaque) []const u32 {
+        return &.{};
+    }
+    fn facts(_: *anyopaque) lanes.drafter.Facts {
+        return .{ .depth = 1, .step_ms = 1 };
+    }
+    fn close(_: *anyopaque) void {}
+    fn reserve(_: *anyopaque, _: u32) anyerror!void {}
+};
+
+fn firstRowServed(comptime rows: ?bool, drafts: bool) !bool {
+    var vt: lanes.drafter.Drafter.VTable = undefined;
+    vt.taps = FactsOnly.taps;
+    vt.facts = FactsOnly.facts;
+    var drafter: lanes.drafter.Drafter = .{ .ptr = &vt, .vtable = &vt };
+    const Opened = if (rows) |r| struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void, first_rows: bool = r } else struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void };
+    const F = struct {
+        pub const model_type = "test";
+        pub fn openDrafter(_: Allocator, _: std.Io, p: *anyopaque, _: []const u8, _: u8) !Opened {
+            return .{ .drafter = @as(*lanes.drafter.Drafter, @ptrCast(@alignCast(p))).*, .ctx = p, .close = FactsOnly.close, .reserve = FactsOnly.reserve };
+        }
+    };
+    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    defer target.deinit();
+    const Loaded = struct { backend: lanes.backend.Backend, facts: lanes.Model, stream_bytes: usize, ctx: *anyopaque };
+    const loaded: Loaded = .{ .backend = target.backend(), .facts = .{}, .stream_bytes = 0, .ctx = &drafter };
+    const o: api.Open = .{ .dir = "target", .model_type = F.model_type, .drafter = "drafter", .drafts = drafts };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    var served = (try wrap(F, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) orelse return error.TestUnexpectedResult;
+    defer served.close(std.testing.allocator);
+    try std.testing.expectEqual(drafts, served.held != null);
+    return served.backend.vtable.first_row != null;
+}
+
+test "--drafter: a family whose Opened asks for first rows serves logprobs' first row drafted and plain" {
+    try std.testing.expect(try firstRowServed(true, false)); // plain: the family's own table
+    try std.testing.expect(try firstRowServed(true, true)); // drafted: the wrapper forwards first_row
+    // a family that does not ask keeps main's wrapper table, without first_row
+    try std.testing.expect(!try firstRowServed(null, true));
+    try std.testing.expect(try firstRowServed(null, false));
 }

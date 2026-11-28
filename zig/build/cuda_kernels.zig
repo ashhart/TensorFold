@@ -180,8 +180,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_rows", .src = "inkling2/rows", .flags = glue }, // ours: Inkling 2's router row dots on prompt rows
     // ours: Inkling 2's DSpark drafter glue
     .{ .name = "inkling2_dspark", .src = "inkling2/dspark", .flags = glue },
+    .{ .name = "ricursive_dflash2_attn", .flags = glue }, // ours: Ripple's DFlash2 draft attention (split over keys, merged) and top-32
     .{ .name = "ricursive", .flags = glue }, // ours: Ripple's glue (embed, add-norms, output gate, FFN activation), glue.metal step for step
     .{ .name = "ricursive_prep", .flags = glue }, // ours: Ripple's attention prep (q/k head norms, RoPE, K and V into rings or pages)
+    .{ .name = "ricursive_dflash2", .flags = glue }, // ours: Ripple's DFlash2 drafter glue (norms, attention prep, block conv, SiLU), dflash2.metal step for step
     // ours: Inkling 2's Mini ModelOpt reference helpers
     .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
     .{ .name = "inkling2_modelopt", .src = "inkling2/modelopt", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // Mini packed experts on BF16 activations

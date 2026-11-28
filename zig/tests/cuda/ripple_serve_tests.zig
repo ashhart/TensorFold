@@ -16,6 +16,7 @@ const Verified = lanes.backend.Verified;
 const LogRow = lanes.LogprobRow;
 
 const fixture = @import("ripple_forward_tests.zig"); // the release-width weights on 10 layers
+const masks = @import("ripple_mask_tests.zig"); // draws under grammar masks (check 7)
 
 const Spec = struct { name: []const u8, prompt: usize };
 
@@ -34,15 +35,15 @@ const shared = [_]usize{ D, A, E };
 
 /// Draws a stream makes: the first (the prompt's last row), then one a round.
 const steps = 8;
-const max_new = 64;
+pub const max_new = 64;
 const slots = 4;
 
 /// Each draw of a stream (the token at prompt length + i) and the bf16 logits it was drawn from.
-const Trace = struct {
+pub const Trace = struct {
     tokens: [steps]u32 = undefined,
     logits: [steps][]u8 = undefined,
 
-    fn init(gpa: std.mem.Allocator, vocab: usize) !Trace {
+    pub fn init(gpa: std.mem.Allocator, vocab: usize) !Trace {
         var t: Trace = .{};
         var made: usize = 0;
         errdefer for (t.logits[0..made]) |l| gpa.free(l);
@@ -53,7 +54,7 @@ const Trace = struct {
         return t;
     }
 
-    fn deinit(t: *Trace, gpa: std.mem.Allocator) void {
+    pub fn deinit(t: *Trace, gpa: std.mem.Allocator) void {
         for (t.logits) |l| gpa.free(l);
     }
 };
@@ -74,7 +75,7 @@ fn sameTrace(comptime what: []const u8, args: anytype, got: *const Trace, want: 
     return true;
 }
 
-const Rig = struct {
+pub const Rig = struct {
     gpa: std.mem.Allocator,
     m: *fwd.Model,
     x: *be.Ripple,
@@ -85,14 +86,22 @@ const Rig = struct {
     }
 
     /// The prompt pass; the slot the stream took.
-    fn open(r: Rig, s: *Stream) !usize {
+    pub fn open(r: Rig, s: *Stream) !usize {
         try r.b.prefill(s);
         return r.x.lanes.getPtr(s).?.slot;
     }
 
     /// The first draw and its logits (the prompt's last row, kept in the stream's slot).
-    fn first(r: Rig, s: *Stream, t: *Trace) !u32 {
+    pub fn first(r: Rig, s: *Stream, t: *Trace) !u32 {
         const tok = try r.b.read(try r.b.first(s, s.prompt().len));
+        t.tokens[0] = tok;
+        try r.m.download(r.x.lanes.getPtr(s).?.last, t.logits[0]);
+        return tok;
+    }
+
+    /// The first draw under a grammar row's bits (first_masked), and the row's logits as the model gave them.
+    pub fn firstUnder(r: Rig, s: *Stream, t: *Trace, mask: []const u32) !u32 {
+        const tok = try r.b.read(try r.b.vtable.first_masked.?(r.b.ptr, s, s.prompt().len, mask));
         t.tokens[0] = tok;
         try r.m.download(r.x.lanes.getPtr(s).?.last, t.logits[0]);
         return tok;
@@ -116,8 +125,8 @@ const Rig = struct {
         return slot;
     }
 
-    /// Streams `ss` together: their prompt passes, first draws, then one-row windows by verify and keep (no drafts).
-    fn together(r: Rig, ss: []const *Stream, ts: []Trace) !void {
+    /// Streams `ss` together: prompt passes, first draws, one-row verify windows; `under[j]`: stream j's grammar bits.
+    fn together(r: Rig, ss: []const *Stream, ts: []Trace, under: []const []const u32) !void {
         const v2 = r.m.c.vocab * 2;
         var opened: usize = 0;
         defer for (ss[0..opened]) |s| r.b.release(s);
@@ -126,7 +135,7 @@ const Rig = struct {
             opened += 1;
         }
         var pending: [shared.len]u32 = undefined;
-        for (ss, ts, 0..) |s, *t, j| pending[j] = try r.first(s, t);
+        for (ss, ts, under, 0..) |s, *t, mk, j| pending[j] = if (mk.len == 0) try r.first(s, t) else try r.firstUnder(s, t, mk);
         var windows: [shared.len]Window = undefined;
         var out: [shared.len]Verified = undefined;
         var pos: [shared.len][1]u64 = undefined;
@@ -138,7 +147,7 @@ const Rig = struct {
         for (1..steps) |i| {
             for (ss, 0..) |s, j| {
                 pos[j] = .{s.prompt().len + i};
-                windows[j] = .{ .stream = s, .pending = pending[j], .held = 0, .tokens = &.{}, .parents = null, .positions = &pos[j] };
+                windows[j] = .{ .stream = s, .pending = pending[j], .held = 0, .tokens = &.{}, .parents = null, .positions = &pos[j], .masks = under[j] };
                 out[j] = .{ .sampled = &sampled[j], .drafts = drafts[j][0..0] };
             }
             try r.b.verify(windows[0..n], out[0..n]);
@@ -152,8 +161,8 @@ const Rig = struct {
     }
 };
 
-/// Check 1 and 2: three streams together == each alone (`sp` null: greedy), their slots 0 to 2 against slot 0 alone.
-fn sharedRounds(r: Rig, prompts: []const []u32, alone: []const Trace, sp: ?lanes.Sampling, label: []const u8) !usize {
+/// Checks 1 and 2: three streams together == each alone (`sp` null: greedy); with `mask`, stream A draws under it.
+fn sharedRounds(r: Rig, prompts: []const []u32, alone: []const Trace, sp: ?lanes.Sampling, label: []const u8, mask: []const u32) !usize {
     var ss: [shared.len]Stream = undefined;
     var made: usize = 0;
     defer for (ss[0..made]) |*s| s.deinit(r.gpa);
@@ -172,10 +181,20 @@ fn sharedRounds(r: Rig, prompts: []const []u32, alone: []const Trace, sp: ?lanes
         t.* = try Trace.init(r.gpa, r.m.c.vocab);
         traced += 1;
     }
-    try r.together(&ptrs, &ts);
+    var under: [shared.len][]const u32 = @splat(&.{});
+    if (mask.len != 0) under[std.mem.indexOfScalar(usize, &shared, A).?] = mask;
+    try r.together(&ptrs, &ts, &under);
     var bad: usize = 0;
     for (shared, &ts) |j, *t| {
+        if (mask.len != 0 and j == A) {
+            for (t.tokens) |tok| bad += @intFromBool(!lanes.grammar.allows(mask, tok));
+            continue;
+        }
         if (!sameTrace("{s} stream {s} together vs alone", .{ label, specs[j].name }, t, &alone[j], 0)) bad += 1;
+    }
+    if (bad == 0 and mask.len != 0) {
+        check.pass("ripple-serve {s} rounds beside a grammar: streams D and E == each alone, {d} draws and their logits each, with stream A's {d} draws under a mask (each an allowed token)", .{ label, steps, steps });
+        return 0;
     }
     if (bad == 0) {
         check.pass("ripple-serve {s} shared rounds: streams D, A, E ({d}, {d}, {d} prompt tokens) together == each alone, {d} draws and their logits each", .{ label, specs[D].prompt, specs[A].prompt, specs[E].prompt, steps });
@@ -276,11 +295,11 @@ fn keptStates(r: Rig, name: []const u8, p: []const u32, ats: []const u32, notes:
 const tol: f64 = 2e-6;
 
 /// A float64 log-softmax of one bf16 logits row.
-const Host = struct {
+pub const Host = struct {
     vals: []align(1) const u16,
     lse: f64,
 
-    fn init(row: []const u8) Host {
+    pub fn init(row: []const u8) Host {
         var h: Host = .{ .vals = std.mem.bytesAsSlice(u16, row), .lse = 0 };
         var most = -std.math.inf(f64);
         for (0..h.vals.len) |i| most = @max(most, h.at(i));
@@ -323,7 +342,7 @@ const Host = struct {
 };
 
 /// A backend row against the host's: the pick, its best ids exactly, their log probabilities within `tol`.
-fn rowMatches(h: Host, row: LogRow, pick: u32, k: u8, ranked: bool, worst: *f64) bool {
+pub fn rowMatches(h: Host, row: LogRow, pick: u32, k: u8, ranked: bool, worst: *f64) bool {
     var ok = row.token == pick and row.count == k;
     const e0 = @abs(@as(f64, row.logprob) - h.lp(pick));
     worst.* = @max(worst.*, e0);
@@ -474,11 +493,21 @@ pub fn run(gpu: check.Gpu) !void {
     }
 
     var fails: usize = 0;
-    fails += try sharedRounds(r, &prompts, &greedy, null, "greedy");
-    fails += try sharedRounds(r, &prompts, &sampled, sampling, "sampled (temperature 1, top-p 0.95, top-k 20)");
+    fails += try sharedRounds(r, &prompts, &greedy, null, "greedy", &.{});
+    fails += try sharedRounds(r, &prompts, &sampled, sampling, "sampled (temperature 1, top-p 0.95, top-k 20)", &.{});
     fails += try copiedDrafts(r, prompts[A], &greedy[A]);
     fails += try keptStates(r, "E", prompts[E], &.{3500}, &.{"past the 3,072-row ring's wrap"}, &greedy[E]);
     fails += try keptStates(r, "C", prompts[C], &.{ 510, 514 }, &.{ "two rows before a 512-row page edge", "two rows across a 512-row page edge" }, &greedy[C]);
     fails += try logprobRows(r, prompts[A], &greedy[A], prompts[E][0..300]);
+    // grammar masks: stream A's draws under them, then D and E in rounds beside a masked A
+    var of_a = sampling;
+    of_a.seed +%= A;
+    fails += try masks.maskedDraws(r, prompts[A], &greedy[A], null, "greedy");
+    fails += try masks.maskedDraws(r, prompts[A], &sampled[A], of_a, "sampled");
+    const half = try a.alloc(u32, be.Ripple.maskWords(c.vocab));
+    defer a.free(half);
+    masks.maskRow(half, prng.random(), .half, c.vocab, 0);
+    fails += try sharedRounds(r, &prompts, &greedy, null, "greedy", half);
+    fails += try sharedRounds(r, &prompts, &sampled, sampling, "sampled", half);
     try check.expect(fails == 0, "ripple-serve: {d} checks differ", .{fails});
 }

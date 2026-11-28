@@ -143,6 +143,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA kernels: the shared router tiles (`common/router_tiles.cuh`) read each 16-byte shared-memory row as four 32-bit words, which gave `tf_moe_router_tiles`, `tf_nemo_router_tiles` and the router control one PTX form in every compile measured on GB10 and x86-64 with nvcc 13.0.88 and 13.3.73; their images, register counts and outputs are unchanged (#5360, refs #5123, #5157). Thanks to @Bizuayeu.
 
+- CUDA: Ripple-65B-Preview (ricursive) takes the publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) with `--drafter`, with drafted replies equal to plain ones; several streams' shared rounds are priced by times taken at load, and structured output (`response_format`) and forced tool calls are served with the drafter as without it (#2475, fixes #2474). Thanks to @jrb-ai.
+
+- Ripple-65B-Preview on CUDA serves structured output (`response_format`) and forced tool calls (`tool_choice` `"required"` or a named function): a grammar's rows are drawn on the GPU from a copy with the disallowed tokens at -inf, by the same draw and argmax kernels, and logprob rows read the unmasked logits; a request with no grammar runs the launches it ran before (#5363, fixes #5252). Thanks to @jrb-ai.
+
 ## 1.3.6
 
 - Input checks: GLM on CUDA refuses token IDs outside its embedding on every path (ordinary, MTP, paired prompts, DFlash) and refuses startup when the tokenizer has more tokens than the model's vocabulary; ERNIE 5.5 refuses configs whose attention dimensions do not add up and bounds its expected-tensor reports; living memory replays only regular journal files and checks a saved prefix length before allocating; request records redact inline document payloads and file containers. Valid inputs produce the same output.

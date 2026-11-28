@@ -50,7 +50,7 @@ const Lane = struct {
 pub const Ripple = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
-    m: *const fwd.Model,
+    m: *fwd.Model, // mutable for setTaps (prepare_features)
     st: fwd.Seq = .{}, // slot 0's positions when the CLI drives the forward itself (cli/cuda_ricursive.zig)
     tok: cuda.DeviceBuffer, // int32 drawn tokens: the handle ring, then a round's rows
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
@@ -59,6 +59,8 @@ pub const Ripple = struct {
     slot_bufs: cuda.DeviceBuffer, // a slot's last-row logits, then its rule, a slot each
     sample: cuda.Module,
     draws: cuda.sample.Draws,
+    mask_fn: cuda.Function, // sample.cu's tf_grammar_mask: structured output's disallowed tokens to -inf
+    masked: ?cuda.DeviceBuffer = null, // rows under their grammars, then the grammars' bits; the first such row opens it
     lanes: std.AutoHashMapUnmanaged(*const Stream, Lane) = .empty,
     free: []bool, // slot i is free
     next: u64 = 0,
@@ -73,7 +75,7 @@ pub const Ripple = struct {
         return (ring + round_rows) * 4 + round_rows * 16 + word_rows * row_words * 4 + fwd.head_rows * 4 + slots * slotStride(vocab);
     }
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *const fwd.Model) !Ripple {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model) !Ripple {
         const slots = m.arena.slots;
         const free = try gpa.alloc(bool, slots);
         errdefer gpa.free(free);
@@ -91,7 +93,8 @@ pub const Ripple = struct {
         var sample = try cuda.Module.load(d, cuda.kernels.sample);
         errdefer sample.unload();
         const draws = try cuda.sample.Draws.resolve(sample);
-        return .{ .gpa = gpa, .d = d, .m = m, .tok = tok, .meta = meta, .words = words, .picks = picks, .slot_bufs = slot_bufs, .sample = sample, .draws = draws, .free = free };
+        const mask_fn = try sample.function("tf_grammar_mask");
+        return .{ .gpa = gpa, .d = d, .m = m, .tok = tok, .meta = meta, .words = words, .picks = picks, .slot_bufs = slot_bufs, .sample = sample, .draws = draws, .mask_fn = mask_fn, .free = free };
     }
 
     pub fn deinit(x: *Ripple) void {
@@ -99,6 +102,7 @@ pub const Ripple = struct {
         while (it.next()) |l| l.rows.deinit(x.gpa);
         x.lanes.deinit(x.gpa);
         x.gpa.free(x.free);
+        if (x.masked) |*b| b.free();
         x.sample.unload();
         x.slot_bufs.free();
         x.picks.free();
@@ -112,7 +116,7 @@ pub const Ripple = struct {
         return .{ .ptr = x, .vtable = &vtable, .chunk_invariant = true }; // chunk cuts give the same bits
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_row = firstRow, .prompt_rows = true, .reports_fill = true };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_row = firstRow, .prepare_features = prepareFeatures, .features = features, .prompt_rows = true, .reports_fill = true };
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a round.
     pub fn facts(x: *const Ripple) lanes.Model {
@@ -132,14 +136,39 @@ pub const Ripple = struct {
         return x.tok.ptr + i * 4;
     }
 
-    /// `rows` bf16 logits rows drawn into `out`, row r at `position0 + r` (argmax when greedy).
-    fn drawRows(x: *Ripple, l: *const Lane, logits: u64, rows: usize, position0: u64, out: u64, meta_at: usize) !void {
+    /// `rows` bf16 logits rows drawn into `out`, row r at `position0 + r` (argmax when greedy); public for GPU tests.
+    pub fn drawRows(x: *Ripple, l: *const Lane, logits: u64, rows: usize, position0: u64, out: u64, meta_at: usize) !void {
         const v = x.m.c.vocab;
         if (!l.sampled) return x.m.k.argmaxRows(x.m.s, logits, rows, v, v, out);
         const meta = [4]i32{ @intCast(position0 - 1), 0, 0, 0 };
         const mp = x.meta.ptr + meta_at * 16;
         try x.upload(mp, std.mem.asBytes(&meta));
         try x.draws.draw(x.m.s, logits, v, l.rule, mp, 0, out, rows, null, null);
+    }
+
+    /// A row's allowed-token words (lanes/grammar.zig: token t at bit t % 32 of word t / 32).
+    pub fn maskWords(vocab: usize) usize {
+        return (vocab + 31) / 32;
+    }
+
+    /// `rows` logits rows copied to row `row` of the grammar scratch, the tokens `masks` disallows at -inf there.
+    fn maskedRows(x: *Ripple, logits: u64, rows: usize, masks: []const u32, row: usize) !u64 {
+        const v = x.m.c.vocab;
+        const nw = maskWords(v);
+        if (masks.len != rows * nw or row + rows > round_rows) return error.InvalidGrammarMasks;
+        if (x.masked == null) x.masked = try cuda.DeviceBuffer.alloc(x.d, round_rows * (v * 2 + nw * 4));
+        const dst = x.masked.?.ptr + row * v * 2;
+        const bits = x.masked.?.ptr + round_rows * v * 2 + row * nw * 4;
+        // the rows at `logits` keep their bits: the logprob rows read them
+        try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(dst, logits, rows * v * 2, x.m.s.handle), "cuMemcpyDtoDAsync");
+        try x.upload(bits, std.mem.sliceAsBytes(masks));
+        var a: cuda.Args = .{};
+        a.add(dst);
+        a.add(@as(u32, @intCast(v)));
+        a.add(bits);
+        a.add(@as(u32, @intCast(nw)));
+        try cuda.launch.launch(x.mask_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, x.m.s, &a);
+        return dst;
     }
 
     /// The stream's caches at `at` for the prompt cache, copied behind the chunk that ends there.
@@ -178,7 +207,6 @@ pub const Ripple = struct {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
         if (!fits(x.m.context, p.len, @as(usize, s.max_new))) return error.PastContext;
-        if (s.grammar != null) return error.StructuresUnsupported;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
             const slot = x.freeSlot() orelse {
@@ -300,11 +328,21 @@ pub const Ripple = struct {
 
     /// The prompt's last row drawn at `position`; with logprobs, its row kept for first_row.
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
-        const x = self(ptr);
+        return self(ptr).firstAt(s, position, &.{});
+    }
+
+    /// The first token under a grammar: the draw reads the row with its disallowed tokens at -inf.
+    fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
+        if (mask.len == 0) return error.InvalidGrammarMasks;
+        return self(ptr).firstAt(s, position, mask);
+    }
+
+    fn firstAt(x: *Ripple, s: *Stream, position: u64, mask: []const u32) !u64 {
         const l = try x.laneOf(s);
         if (position != l.len or l.fill != null) return error.PositionMismatch;
+        const from = if (mask.len == 0) l.last else try x.maskedRows(l.last, 1, mask, 0);
         const h = x.handle();
-        try x.drawRows(l, l.last, 1, position, x.tokAt(h % ring), 0);
+        try x.drawRows(l, from, 1, position, x.tokAt(h % ring), 0);
         if (s.logprobs) |k| {
             try x.draws.logprobRows(x.m.s, l.last, x.m.c.vocab, x.tokAt(h % ring), k, false, x.words.ptr, 1);
             var w: [row_words]u32 = undefined;
@@ -360,7 +398,7 @@ pub const Ripple = struct {
         for (windows, chains) |w, *c| {
             if (w.held != 0) return error.NoHeldDrafts; // no draft head: every draft comes from the host
             if (w.parents != null) return error.ChainsOnly;
-            if (w.masks.len != 0) return error.StructuresUnsupported;
+            if (w.masks.len != 0 and w.masks.len != w.rows() * maskWords(v)) return error.InvalidGrammarMasks;
             const l = try x.laneOf(w.stream);
             if (w.rows() > max_window) return error.WindowTooWide;
             if (total + w.rows() > @min(round_rows, x.m.round_rows)) return error.RoundTooWide;
@@ -382,7 +420,9 @@ pub const Ripple = struct {
             const l = x.lanes.getPtr(w.stream).?;
             const n = l.rows.items.len;
             const logits = x.m.b.rows + at * v * 2;
-            try x.drawRows(l, logits, n, w.positions[0], x.tokAt(ring + at), i);
+            // a grammar's rows are drawn from a copy; the logprob rows below read the model's
+            const from = if (w.masks.len == 0) logits else try x.maskedRows(logits, n, w.masks, at);
+            try x.drawRows(l, from, n, w.positions[0], x.tokAt(ring + at), i);
             if (o.rows.len > 0) {
                 try x.draws.logprobRows(x.m.s, logits, v, x.tokAt(ring + at), w.stream.logprobs.?, false, x.words.ptr + at * row_words * 4, n);
                 scored = true;
@@ -434,6 +474,25 @@ pub const Ripple = struct {
     fn release(ptr: *anyopaque, s: *Stream) void {
         self(ptr).dropLane(s);
     }
+
+    /// A drafter's tapped layers, before any stream: each chunk and round writes their rows into its slot's ring after.
+    fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const x = self(ptr);
+        if (x.lanes.count() != 0) return error.TapsAfterStreams;
+        try x.m.setTaps(taps);
+    }
+
+    /// Rows [start, start + count) of a stream's tap ring as Qwen's target gives them; the newest tap_rows are held.
+    fn features(ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        const x = self(ptr);
+        if (taps.len != x.m.n_taps or !std.mem.eql(u32, taps, x.m.taps[0..x.m.n_taps])) return error.TapsMismatch;
+        const l = try x.laneOf(s);
+        // `offset` is the position `start`; the drafter reads position p at row p % tap_rows of the slot's ring
+        const at = x.m.tapRing(l.slot) orelse return error.NoTaps;
+        const held_from = l.hi -| fwd.tap_rows;
+        if (count == 0 or start + count > l.hi or start + count <= held_from) return error.RowsNotHeld;
+        return .{ .buffer = at, .offset = start, .rows = count, .row_bytes = @intCast(x.m.tapRowBytes()), .space = .device, .dtype = .bf16 };
+    }
 };
 
 test "ricursive cuda backend: the verify reserve past a reply; positions opened for a context" {
@@ -451,7 +510,7 @@ test "ricursive cuda backend: windows of 16 rows, a stream a slot, rows a round"
     var m: fwd.Model = undefined;
     m.round_rows = round_rows;
     m.arena.slots = 6;
-    const x: Ripple = .{ .gpa = std.testing.allocator, .d = undefined, .m = &m, .tok = undefined, .meta = undefined, .words = undefined, .picks = undefined, .slot_bufs = undefined, .sample = undefined, .draws = undefined, .free = &.{} };
+    const x: Ripple = .{ .gpa = std.testing.allocator, .d = undefined, .m = &m, .tok = undefined, .meta = undefined, .words = undefined, .picks = undefined, .slot_bufs = undefined, .sample = undefined, .draws = undefined, .mask_fn = undefined, .free = &.{} };
     const f = x.facts();
     try std.testing.expectEqual(@as(u32, 16), f.exact_width);
     try std.testing.expectEqual(@as(u32, 6), f.max_streams);
@@ -459,6 +518,44 @@ test "ricursive cuda backend: windows of 16 rows, a stream a slot, rows a round"
     try std.testing.expect(f.hidden_rows and f.copy_drafts and !f.mtp and !f.gpu_tokens);
     try std.testing.expect(Ripple.slotStride(100352) >= 100352 * 2 + @sizeOf(cuda.sample.Rule));
     std.testing.refAllDecls(Ripple);
+}
+
+test "ricursive cuda backend: a grammar row's words cover the vocabulary, a bit a token" {
+    try std.testing.expectEqual(@as(usize, 3136), Ripple.maskWords(100352)); // the release's logits, 32 tokens a word
+    try std.testing.expectEqual(@as(usize, 1), Ripple.maskWords(1));
+    try std.testing.expectEqual(@as(usize, 2), Ripple.maskWords(33));
+    // the grammar scratch holds a round's rows, then their bits: the bits start at a whole 16 bytes
+    try std.testing.expectEqual(@as(usize, 0), (round_rows * 100352 * 2) % 16);
+}
+
+test "ricursive cuda backend: features name a stream's held tap rows by position; taps before streams" {
+    const a = std.testing.allocator;
+    var m: fwd.Model = undefined;
+    m.c.hidden = 5120;
+    m.n_taps = 0;
+    m.tap = null;
+    var x: Ripple = .{ .gpa = a, .d = undefined, .m = &m, .tok = undefined, .meta = undefined, .words = undefined, .picks = undefined, .slot_bufs = undefined, .sample = undefined, .draws = undefined, .mask_fn = undefined, .free = &.{} };
+    defer x.lanes.deinit(a);
+    var s: Stream = undefined;
+    const taps = [_]u32{ 1, 20, 39, 58, 77 };
+    try std.testing.expectError(error.TapsMismatch, Ripple.features(&x, &s, &taps, 0, 1));
+    m.taps[0..5].* = taps;
+    m.n_taps = 5;
+    try std.testing.expectError(error.UnknownStream, Ripple.features(&x, &s, &taps, 0, 1));
+    try x.lanes.put(a, &s, .{ .slot = 2, .last = 0, .rule = 0, .hi = 3000 });
+    try std.testing.expectError(error.NoTaps, Ripple.features(&x, &s, &taps, 2990, 10));
+    m.tap = .{ .d = undefined, .ptr = 1 << 20, .len = 0 }; // features reads only the address
+    const f = try Ripple.features(&x, &s, &taps, 2990, 10);
+    try std.testing.expectEqual(@as(u64, (1 << 20) + 2 * fwd.tap_rows * 51200), f.buffer);
+    try std.testing.expectEqual(@as(u64, 2990), f.offset); // a position: the drafter reads row 2990 % 2064
+    try std.testing.expectEqual(@as(u32, 51200), f.row_bytes);
+    try std.testing.expect(f.space == .device and f.dtype == .bf16 and f.rows == 10);
+    _ = try Ripple.features(&x, &s, &taps, 900, 2048); // the newest rows of a chunk that reaches past the ring's oldest
+    try std.testing.expectError(error.RowsNotHeld, Ripple.features(&x, &s, &taps, 2995, 10)); // past what was written
+    try std.testing.expectError(error.RowsNotHeld, Ripple.features(&x, &s, &taps, 0, 936)); // every row overwritten
+    try std.testing.expectError(error.RowsNotHeld, Ripple.features(&x, &s, &taps, 2990, 0));
+    try std.testing.expectError(error.TapsMismatch, Ripple.features(&x, &s, &.{ 1, 20, 39, 58, 76 }, 2990, 10));
+    try std.testing.expectError(error.TapsAfterStreams, Ripple.prepareFeatures(&x, &taps));
 }
 
 test {

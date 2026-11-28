@@ -1,4 +1,4 @@
-//! Ripple's CUDA kernels under the contract, with controls (ricursive-contract): glue, attention prep, attention.
+//! Ripple's CUDA kernels under the contract, with controls (ricursive-contract): glue, prep, attention, grammar mask.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -7,6 +7,7 @@ const check = @import("check.zig");
 const glue = @import("contract_ricursive_glue.zig");
 const prep = @import("contract_ricursive_prep.zig");
 const attn = @import("contract_ricursive_attn.zig");
+const mask = @import("contract_ricursive_mask.zig");
 
 const g = core.contract.gates;
 
@@ -17,6 +18,7 @@ pub const Set = struct {
     glue: glue.Set = .{},
     prep: *prep.Set = undefined, // its own image, and contract_controls' tf_ctl_rc_prep
     attn: *attn.Set = undefined, // window_attention's image (WindowAttention owns it), tree_attention's (GlobalDecode)
+    mask: mask.Set = .{}, // sample's image, and contract_controls' tf_ctl_rc_grammar_mask (prep's module)
 
     /// The set, its kernels appended to `list`.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -29,10 +31,13 @@ pub const Set = struct {
         set.prep = try prep.Set.init(gpu, s, a, list);
         errdefer set.prep.deinit();
         set.attn = try attn.Set.init(gpu, s, a, list);
+        errdefer set.attn.deinit();
+        try set.mask.init(gpu, s, set.prep.ctl, a, list);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.mask.deinit();
         set.attn.deinit();
         set.prep.deinit();
         set.glue.deinit();
