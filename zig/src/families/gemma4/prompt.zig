@@ -98,7 +98,17 @@ pub const Span = struct { at: usize, n: u32, rows: Ref };
 
 /// `ids` (at most 512) at the cache's length, `images`' rows over theirs (a span wholly in or out); s.logits: the last.
 pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span) !void {
+    return pass(m, s, c, ids, images, true);
+}
+
+/// run for a chunk nothing reads: the cache and the taps fill; Model.deepFrom's layers and the head are left out.
+pub fn fill(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span) !void {
+    return pass(m, s, c, ids, images, false);
+}
+
+fn pass(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span, last: bool) !void {
     const rows = ids.len;
+    if (m.config.geo.layer_input != 0) return error.BadChunk; // the E-series' prompt runs in decode windows (#2273)
     if (rows == 0 or rows > R) return error.BadChunk;
     if (c.len + rows > c.capacity) return error.ContextFull;
     const p0 = c.len;
@@ -137,17 +147,19 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
     e.setValue(cfg.eps, 3);
     noSums(e, s, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
+    const used = if (last) geo.layers else m.deepFrom();
     var cur: usize = 0;
-    for (0..geo.layers) |i| {
+    for (0..used) |i| {
         try layer(m, e, s, c, i, cur, r32, .{});
         cur = 1 - cur;
     }
-    // the head on the last row only (the lane kernel's one-row bits), soft-capped
-    try projectHead(m.gpa, m.device, &m.projections, e, w.head, s.normed[cur], s.logits, rows);
-    e.setPipeline(ks.softcap);
-    bind(e, &.{s.logits}, 0);
-    e.setValue(cfg.softcap, 1);
-    e.dispatchThreads(.{ .width = cfg.vocab }, .{ .width = 256 });
+    if (last) { // the head on the last row only (the lane kernel's one-row bits), soft-capped
+        try projectHead(m.gpa, m.device, &m.projections, e, w.head, s.normed[cur], s.logits, rows);
+        e.setPipeline(ks.softcap);
+        bind(e, &.{s.logits}, 0);
+        e.setValue(cfg.softcap, 1);
+        e.dispatchThreads(.{ .width = cfg.vocab }, .{ .width = 256 });
+    }
     e.end();
     cb.commit();
     cb.wait();
@@ -196,13 +208,13 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         bind(e, &.{ if (global) m.inv_global else m.inv_sliding, s.pos }, 3);
         e.setValue(cfg.eps, 5);
         bind(e, &.{ s.q, s.k, s.v, c.k[i], c.v[i] }, 6); // keys and values straight into the cache too
-        e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
+        e.setValue([3]i32{ if (global) 0 else @intCast(state.ringOf(c.geo)), @intCast(state.slotsOfGeo(c.geo, i, c.capacity)), 0 }, 11);
         e.dispatchGroups(.{ .width = geo.query_heads + 2 * nk, .height = rows }, .{ .width = 32 });
     }
     if (st.attn) {
         e.setPipeline(kd.prompt_attn);
         bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
-        e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
+        e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOfGeo(c.geo, i, c.capacity)) }, 4);
         bind(e, &.{s.hi}, 5);
         e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = geo.query_heads }, .{ .width = 32 * dh / 64 });
     }

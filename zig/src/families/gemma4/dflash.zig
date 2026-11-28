@@ -94,7 +94,7 @@ pub const Drafter = struct {
         d.io = io;
         d.target = target;
         d.options = options;
-        d.projections = .{ .geo = target.config.geo };
+        d.projections = .{ .gpa = gpa, .geo = target.config.geo };
         d.lanes = .empty;
         d.step_ms = 0;
         d.block_ms = .{ 0, 0 };

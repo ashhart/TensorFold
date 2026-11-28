@@ -88,7 +88,15 @@ fn simdPipes() row.simd_bits.Pipelines {
     for (&p.built) |*a| for (a) |*b| for (b) |*c| for (c) |*v| {
         v.* = .{ .id = 101 };
     };
+    // The scalar twin one- and two-row windows take, prebuilt too: the fake compiles nothing.
+    for (&p.scalar) |*a| for (a) |*b| for (b) |*c| for (c) |*v| {
+        v.* = .{ .id = 102 };
+    };
     return p;
+}
+
+fn cacheTwin(ps: *weights.Projections, l: weights.Linear) !void {
+    if (l.raw) |raw| try ps.bit_twins.put(ps.gpa, .{ raw.bits, raw.n, raw.k, 0 }, true);
 }
 fn projection() lane.Projection {
     return .{ .pipe = .{ .id = 201 }, .n = D, .k = D, .group_count = 1, .weight_bytes = D * D / 2, .metadata_bytes = D * 4, .output_bytes = 2, .y_stride = D, .tile_count = 2, .sk = 1, .reg = true, .sums_pipe = .{ .id = 200 }, .sums_buffer = buf(7) };
@@ -114,7 +122,9 @@ test "gemma prompt head: both paths equal all-row matrix logits on the last synt
         var both: [2]Row = undefined;
         for ([_]bool{ true, false }, 0..) |raw, pi| {
             const l = linear(raw);
-            var ps = weights.Projections{ .geo = cfg.unified12b, .row_simd = simdPipes() };
+            var ps = weights.Projections{ .gpa = a, .geo = cfg.unified12b, .row_simd = simdPipes() };
+            try cacheTwin(&ps, l);
+            defer ps.bit_twins.deinit(a);
             try ps.list.append(a, .{ .x = l, .p = projection() });
             defer ps.list.deinit(a);
             var record: mtl.Record = .{};
@@ -146,12 +156,14 @@ test "gemma prompt head: both paths equal all-row matrix logits on the last synt
 
 test "gemma prompt head: a selected input ref survives the real row encoder at each code width" {
     for (row.simd_bits.bit_widths) |bits| for ([_]usize{ 1, 2, 16, 17 }) |rows| {
-        var ps = weights.Projections{ .geo = cfg.unified12b, .row_simd = simdPipes() };
+        var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = cfg.unified12b, .row_simd = simdPipes() };
+        defer ps.bit_twins.deinit(std.testing.allocator);
         var l = linear(true);
         l.format.bits = bits;
         l.raw.?.bits = bits;
         l.col = 32;
         l.y_stride = 128;
+        try cacheTwin(&ps, l);
         var record: mtl.Record = .{};
         try weights.projectRow(&ps, .{}, .{ .r = &record }, l.raw.?, l, .{ .buf = buf(1), .off = 256 }, buf(5), rows);
         const p = record.passes[0];
@@ -163,12 +175,18 @@ test "gemma prompt head: a selected input ref survives the real row encoder at e
 }
 
 test "gemma prompt head: zero rows refused and first decode starts from its own row" {
-    var ps = weights.Projections{ .geo = cfg.unified12b, .row_simd = simdPipes() };
+    var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = cfg.unified12b, .row_simd = simdPipes() };
+    defer ps.bit_twins.deinit(std.testing.allocator);
     var record: mtl.Record = .{};
     const e = mtl.ComputeEncoder{ .r = &record };
     const l = linear(true);
-    try std.testing.expectError(error.BadChunk, prompt.projectHead(std.testing.allocator, .{}, &ps, e, l, buf(1), buf(5), 0));
+    try cacheTwin(&ps, l);
+    // The public prompt-head entry refuses an empty prompt on its row and lane paths before it binds or dispatches.
+    for ([_]weights.Linear{ l, linear(false) }) |head| {
+        try std.testing.expectError(error.BadChunk, prompt.projectHead(std.testing.allocator, .{}, &ps, e, head, buf(1), buf(5), 0));
+    }
     try std.testing.expectEqual(@as(usize, 0), record.n);
+    try std.testing.expectEqualDeep(mtl.Pass{}, record.current);
     // The production decode caller supplies this zero-offset Ref for its first (or window's first) row.
     try weights.projectRow(&ps, .{}, e, l.raw.?, l, .{ .buf = buf(6) }, buf(5), 1);
     try std.testing.expectEqual(mtl.Bound{ .id = 6 }, record.passes[0].buffers[0]);
@@ -177,16 +195,57 @@ test "gemma prompt head: zero rows refused and first decode starts from its own 
 
 test "gemma prompt head: actual 12B and 31B hidden widths select the final chunk row" {
     for ([_]cfg.Geometry{ cfg.unified12b, cfg.dense31b }) |geo| for ([_]usize{ 2, 511, 512 }) |rows| {
-        var ps = weights.Projections{ .geo = geo, .row_simd = simdPipes() };
+        var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = geo, .row_simd = simdPipes() };
+        defer ps.bit_twins.deinit(std.testing.allocator);
         var l = linear(true);
         l.n = cfg.vocab;
         l.k = geo.hidden;
         l.raw.?.n = l.n;
         l.raw.?.k = l.k;
+        try cacheTwin(&ps, l);
         var record: mtl.Record = .{};
         try prompt.projectHead(std.testing.allocator, .{}, &ps, .{ .r = &record }, l, buf(1), buf(5), rows);
         try std.testing.expectEqual(mtl.Bound{ .id = 1, .off = (rows - 1) * geo.hidden * 2 }, record.passes[0].buffers[0]);
         try std.testing.expectEqual(@as(i32, 1), args(record.passes[0]).r);
         try std.testing.expectEqual(@as(i32, cfg.vocab), args(record.passes[0]).n);
     };
+}
+
+// A group of 64 in simd_qmm_bits' order: x as a tree of eight 8-sums, codes in slices of 8 (input 8k + s), then fmas.
+fn rowGroup(x: [64]f32, codes: [64]u8, scale: f32, bias: f32) f32 {
+    var t: [8]f32 = undefined;
+    for (&t, 0..) |*v, c| {
+        v.* = x[8 * c];
+        for (1..8) |e| v.* += x[8 * c + e];
+    }
+    const xs = ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
+    var p: f32 = 0;
+    for (0..8) |s| for (0..8) |k| {
+        p = @mulAdd(f32, x[8 * k + s], @as(f32, @floatFromInt(codes[8 * k + s])), p);
+    };
+    return @mulAdd(f32, bias, xs, @mulAdd(f32, scale, p, 0));
+}
+
+// The tile kernel's arithmetic before this change: each weight scale * code + bias rounded once to bf16, then the dot.
+fn roundedGroup(x: [64]f32, codes: [64]u8, scale: f32, bias: f32) f32 {
+    var acc: f32 = 0;
+    for (x, codes) |v, c| acc = @mulAdd(f32, v, value(bf(@mulAdd(f32, scale, @as(f32, @floatFromInt(c)), bias))), acc);
+    return acc;
+}
+
+test "gemma E4B chunk: a cancelling bias is where a bf16-rounded weight and the stored scale and bias part" {
+    // x = +1/-1 sums to 0, codes 3 on +1: stored 2^-9 * 96 = 0.1875; bf16(1 + 3 * 2^-9) = 1.0078125 gives 0.25
+    var x: [64]f32 = undefined;
+    var codes: [64]u8 = undefined;
+    for (&x, &codes, 0..) |*v, *c, i| {
+        v.* = if (i % 2 == 0) 1 else -1;
+        c.* = if (i % 2 == 0) 3 else 0;
+    }
+    const scale: f32 = 0x1p-9;
+    try std.testing.expectEqual(@as(f32, 0.1875), rowGroup(x, codes, scale, 1.0));
+    try std.testing.expectEqual(@as(f32, 0.25), roundedGroup(x, codes, scale, 1.0));
+    try std.testing.expect(bf(rowGroup(x, codes, scale, 1.0)) != bf(roundedGroup(x, codes, scale, 1.0)));
+    // all x = 1: the bias contributes 64 and the codes 96 * 2^-9, both kept
+    for (&x) |*v| v.* = 1;
+    try std.testing.expectEqual(@as(f32, 64.1875), rowGroup(x, codes, scale, 1.0));
 }

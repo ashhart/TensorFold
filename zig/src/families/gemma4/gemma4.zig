@@ -2,6 +2,7 @@
 pub const config = @import("config.zig");
 pub const kernels = @import("kernels.zig");
 pub const weights = @import("weights.zig");
+pub const weight_loader = @import("weight_loader.zig");
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const prompt = @import("prompt.zig");
@@ -26,9 +27,11 @@ test {
     _ = config;
     _ = dflash_weights;
     _ = image;
+    _ = @import("model.zig");
     _ = snapshot;
     _ = vision;
     _ = weights;
+    _ = weight_loader;
 }
 
 pub const affine_mm = @import("affine_mm.zig");

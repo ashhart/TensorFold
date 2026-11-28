@@ -21,6 +21,8 @@ pub fn tests(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     const config_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/gemma4_config_test.zig"), .target = b.graph.host, .link_libc = true }) }));
     config_run.has_side_effects = true;
     b.step("test-gemma4-config", "Real Gemma parser fixtures without GPU dependencies").dependOn(&config_run.step);
+    const ple_host = b.addExecutable(.{ .name = "tf-gemma4-e4b-ple-host", .root_module = b.createModule(.{ .root_source_file = b.path("zig/gemma4_e4b_ple_host.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .link_libc = true }) });
+    b.step("tf-gemma4-e4b-ple-host", "Build the host side of the E4B per-layer input check: layer_input.zig against tf-gemma4-e4b-ple's GPU dump").dependOn(&b.addInstallArtifact(ple_host, .{}).step);
     const fake = b.createModule(.{ .root_source_file = b.path("zig/gemma4_recording_metal.zig"), .target = b.graph.host });
     const root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_shared_affine_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "kernel_sources", .module = sources } } });
     const filter = b.option([]const u8, "gemma4-host-filter", "One portable shared affine regression");

@@ -3,13 +3,14 @@ const std = @import("std");
 const lanes = @import("lanes");
 const Stream = lanes.Stream;
 
-/// A chunk from `at`: `rows` at most, cut at planned starts and kept marks, never inside an image's span.
-pub fn chunkEnd(len: usize, at: usize, rows: usize, chunks: []const u32, marks: []const u32, spans: anytype) usize {
+/// A chunk from `at`, `rows` at most, cut at starts, marks and image spans; `alone`: the last row runs by itself.
+pub fn chunkEnd(len: usize, at: usize, rows: usize, chunks: []const u32, marks: []const u32, spans: anytype, alone: bool) usize {
     var end = @min(len, at + rows);
     // planned chunk starts and kept marks cut a chunk (resumed and fresh passes cut alike past them)
     for ([_][]const u32{ chunks, marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
         end = x;
     };
+    if (alone and end == len and end - at > 1) end -= 1;
     // an image's rows see each other on sliding layers: no cut inside one (before it, or past it when it leads)
     for (spans) |span| if (span.at < end and span.at + span.n > end) {
         end = if (span.at > at) span.at else span.at + span.n;
@@ -17,8 +18,8 @@ pub fn chunkEnd(len: usize, at: usize, rows: usize, chunks: []const u32, marks: 
     return end;
 }
 
-/// A stream's pass in progress: its next chunk's first row, and a mark kept once its drafter has absorbed the chunk.
-pub const Fill = struct { at: usize, mark: ?u32 = null };
+/// A pass in progress: next chunk's first row, its absorbed mark, `until` (a first phase's end, 0: none), `alone`.
+pub const Fill = struct { at: usize, mark: ?u32 = null, until: usize = 0, alone: bool = false };
 
 /// One chunk of `s` from `f.at` through `r` (`run`, `keep`); `later` keeps marks at the next call. True once all in.
 pub fn step(r: anytype, s: *Stream, f: *Fill, rows: usize, spans: anytype, later: bool) !bool {
@@ -26,7 +27,7 @@ pub fn step(r: anytype, s: *Stream, f: *Fill, rows: usize, spans: anytype, later
     f.mark = null;
     if (s.isCancelled()) return error.Cancelled;
     const len = s.prompt().len;
-    const end = chunkEnd(len, f.at, rows, s.chunks, s.reuse.marks, spans);
+    const end = chunkEnd(if (f.until != 0) f.until else len, f.at, rows, s.chunks, s.reuse.marks, spans, f.alone);
     try r.run(s, f.at, end);
     s.fill_at.store(@intCast(end), .monotonic);
     f.at = end;

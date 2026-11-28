@@ -58,6 +58,26 @@ pub const Device = struct {
     pub fn tensorUnits(d: @This()) bool {
         return d.tensor;
     }
+    pub fn queue(_: @This()) !Queue {
+        return error.UnexpectedQueue;
+    }
+};
+/// A queue and its command buffers exist only for code that never records: `Device.queue` refuses first.
+pub const Queue = struct {
+    pub fn deinit(_: @This()) void {}
+    pub fn commandBuffer(_: @This()) CommandBuffer {
+        @panic("recording fixture: no command buffers");
+    }
+};
+pub const CommandBuffer = struct {
+    pub fn compute(_: @This(), _: anytype) ComputeEncoder {
+        @panic("recording fixture: no command buffers");
+    }
+    pub fn commit(_: @This()) void {}
+    pub fn wait(_: @This()) void {}
+    pub fn failure(_: @This()) ?[]const u8 {
+        return null;
+    }
 };
 pub const Buffer = struct {
     id: usize,
@@ -65,6 +85,10 @@ pub const Buffer = struct {
     pub fn deinit(_: @This()) void {}
     pub fn length(b: @This()) usize {
         return b.bytes;
+    }
+    /// No contents: `Device.buffer` refuses every allocation, so nothing reaches here.
+    pub fn slice(_: @This(), comptime T: type, _: usize) []T {
+        @panic("recording fixture: buffers have no contents");
     }
 };
 pub const Size = struct {
@@ -113,4 +137,5 @@ pub const ComputeEncoder = struct {
         e.dispatch(g, t, true);
     }
     pub fn barrier(_: @This()) void {}
+    pub fn end(_: @This()) void {}
 };

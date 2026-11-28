@@ -92,6 +92,47 @@ test "Gemma Metal steps: one call runs one chunk at today's cut, and the calls' 
     try t.expectEqualSlices([2]usize, resumed, got.items);
 }
 
+/// The E-series' cuts: windows of 128 all through (backend.zig opening), cut at starts and marks, the last row alone.
+fn eCuts(a: std.mem.Allocator, len: usize, from: usize, chunks: []const u32, marks: []const u32) ![][2]usize {
+    var out: std.ArrayList([2]usize) = .empty;
+    var at = from;
+    while (at < len) {
+        var end = @min(len, at + 128);
+        for ([_][]const u32{ chunks, marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
+            end = x;
+        };
+        if (end == len and end - at > 1) end -= 1; // the deep layers are skipped: the last row runs alone
+        try out.append(a, .{ at, end });
+        at = end;
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "Gemma Metal steps: the E-series' whole prompt in windows, a window a call, the last row alone" {
+    var ids: [prompt_len]u32 = undefined;
+    for (&ids, 0..) |*x, i| x.* = @intCast(i % 97 + 3);
+    for ([_]struct { len: usize, from: usize }{
+        .{ .len = 300, .from = 0 }, // short prompt
+        .{ .len = prompt_len, .from = 0 }, // long: windows past 128 too, no chunks
+        .{ .len = prompt_len, .from = 700 }, // resumed at the planned start
+    }) |c| {
+        const want = try eCuts(gpa, c.len, c.from, &planned, &kept);
+        defer gpa.free(want);
+        var s = try stream(ids[0..c.len], "e");
+        defer s.deinit(gpa);
+        var log: std.ArrayList(Event) = .empty;
+        defer log.deinit(gpa);
+        var f: steps.Fill = .{ .at = c.from, .until = c.len, .alone = true };
+        var done = false;
+        while (!done) done = try steps.step(Rec{ .log = &log }, &s, &f, 128, &[_]Span{}, false);
+        var got: std.ArrayList([2]usize) = .empty;
+        defer got.deinit(gpa);
+        for (log.items) |e| if (e == .chunk) try got.append(gpa, .{ e.chunk.at, e.chunk.end });
+        try t.expectEqualSlices([2]usize, want, got.items);
+        try t.expectEqual(@as(u32, @intCast(c.len)), s.fill_at.load(.monotonic));
+    }
+}
+
 /// The lanes fake with Gemma's stepping in front: its prompt passes a chunk a call at `rows` (4 here), logged.
 const Gem = struct {
     fake: lanes.fake.Fake,
@@ -255,4 +296,47 @@ test "Gemma Metal steps: a drafter absorbs every chunk's tapped rows, and a mark
     };
     try t.expectEqual(want.len, gem.log.items.len);
     for (want, gem.log.items) |w, g| try t.expectEqual(w, g);
+}
+
+/// Starts as the server plans them (chunk_plan.zig Plan.starts): `step` past the last start, or a message point first.
+fn planStarts(a: std.mem.Allocator, len: usize, step: usize, min_chunk: usize, points: []const u32) ![]u32 {
+    var out: std.ArrayList(u32) = .empty;
+    var last: usize = 0;
+    var i: usize = 0;
+    while (true) {
+        while (i < points.len and points[i] < last + min_chunk) i += 1;
+        var next = last + step;
+        if (i < points.len and points[i] < next) next = points[i];
+        if (next >= len) return out.toOwnedSlice(a);
+        try out.append(a, @intCast(next));
+        last = next;
+    }
+}
+
+test "Gemma Metal steps: every E-series window ends where the prompt cache resumes, the step and grid being the window's" {
+    const window = 128; // state.prompt_rows: the E-series' prefill_step and resume grid (native/gemma4.zig resumeRows)
+    for ([_]usize{ 129, 130, 255, 640, 1000, 1300, 6422 }) |len| for ([_]bool{ false, true }) |planned_starts| {
+        const starts = if (planned_starts) try planStarts(gpa, len, window, 256, &.{ 37, 517, 900, 1201 }) else try gpa.alloc(u32, 0);
+        defer gpa.free(starts);
+        // a pass from 0, and from every resume point the cache may offer (a start, else a grid line)
+        var froms: std.ArrayList(usize) = .empty;
+        defer froms.deinit(gpa);
+        try froms.append(gpa, 0);
+        if (planned_starts) {
+            for (starts) |x| try froms.append(gpa, x);
+        } else {
+            var x: usize = window;
+            while (x < len) : (x += window) try froms.append(gpa, x);
+        }
+        for (froms.items) |from| {
+            var at = from;
+            while (at < len) {
+                const end = steps.chunkEnd(len, at, window, starts, &.{}, &[_]Span{}, true);
+                try t.expect(end > at and end - at <= window);
+                // the last row alone and the prompt's end are no resume points; every other window end is one
+                if (end < len - 1) try t.expect(if (planned_starts) std.mem.indexOfScalar(u32, starts, @intCast(end)) != null else end % window == 0);
+                at = end;
+            }
+        }
+    };
 }

@@ -79,7 +79,7 @@ test "residency owner Gemma4: real host inventory and later stream constructors 
         defer model.inv_sliding.deinit();
         model.inv_global = try device.buffer(32, mtl.ResourceOptions.shared);
         defer model.inv_global.deinit();
-        model.projections = .{ .geo = model.config.geo };
+        model.projections = .{ .gpa = a, .geo = model.config.geo };
         defer model.projections.list.deinit(a);
         var projection: @import("src/core/lane_projection.zig").Projection = undefined;
         const sums = try device.buffer(64, mtl.ResourceOptions.shared);
