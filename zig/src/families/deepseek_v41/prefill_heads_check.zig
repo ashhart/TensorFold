@@ -1,7 +1,4 @@
-//! One GPU: production padding/copy calls and the unchanged fused core against a direct 32-head launch, for
-//! four-rank shares (16 heads) and three-rank shares (24 and 16). The direct launch holds 32 real heads: the rank's
-//! own first and nonzero queries and sinks in the rest, as a two-rank rank computes them, so the rank's bytes must
-//! not depend on what the padding holds.
+//! One GPU: production padding and core at 16 and 24 heads against a direct 32-head launch with nonzero padding heads.
 const std = @import("std");
 const cuda = @import("cuda");
 const calls = @import("block_calls.zig");

@@ -318,8 +318,7 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
     }
     const real_sink = try e.weight("L{d}.attn.sink", .{L}, .f32, &.{real_heads});
     const sink = if (pad) try pf_heads.sink(e, real_sink) else real_sink;
-    // a padded rank's 32 heads are whole groups of its own group width (attention() refuses a width that does not
-    // divide 32): its own groups lead, the zero heads follow
+    // a padded rank's 32 heads are whole groups of its width (attention() refuses others): its own lead, zeros follow
     const output = if (pad) try e.buf("L.pf.o32", .{}, .bf16, &.{ @divExact(H, hg), total, hg * hd }) else o;
     const out_view = try e.view(output.t.role, .bf16, &.{ @divExact(H, hg), n, hg * hd }, &.{ total * hg * hd, hg * hd, 1 }, e.row0 * hg * hd * 2);
     try e.triton("_fused", .{ n, @divExact(H, bmq), 1 }, &.{

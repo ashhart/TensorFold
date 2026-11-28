@@ -1,5 +1,4 @@
-//! Sixteen or twenty-four real heads through the unchanged 32-head prefill core; copies preserve the run's
-//! group-major layout. A rank's heads are the leading heads of the 32 and the rest are zero.
+//! Sixteen or twenty-four real heads lead the unchanged 32-head prefill core's, the rest zero, in group-major layout.
 const std = @import("std");
 const cuda = @import("cuda");
 const calls = @import("block_calls.zig");
