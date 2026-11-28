@@ -1,4 +1,4 @@
-//! Contract probe and red control for Inkling 2 draft-only 4-bit/64 logits (tf_ink2_dspark_logits_q4).
+//! Contract probes, red controls, and FailingAllocator OOM tests for Inkling 2 4-bit/64 draft logits.
 const std = @import("std");
 const mtl = @import("metal");
 const controls = @import("metal_inkling2_dspark_controls.zig");
@@ -11,24 +11,53 @@ const c = contract.spec;
 const g = contract.gates;
 const Affine = contract.affine.Affine;
 
+pub const Mode = enum { dspark_q4, batch_q4 };
+
 fn depth(s: c.Shape) usize {
     return 64 + s.k / 32 + 8;
 }
 
-const served = [_]c.Shape{
+const dspark_served = [_]c.Shape{
     .{ .rows = 7, .n = 129, .k = 2304 },
     .{ .rows = 9, .n = 17, .k = 256 },
     .{ .rows = 1, .n = 5, .k = 64 },
 };
 
-pub fn spec(name: []const u8) c.Spec {
-    return .{
-        .name = name,
-        .accum = .f32,
-        .depth = depth,
-        .out = .bf16,
-        .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 256, .step = 64, .min = 64 } },
-        .served = &served,
+const batch_served = [_]c.Shape{
+    .{ .rows = 32, .n = 129, .k = 2304 },
+    .{ .rows = 17, .n = 67, .k = 256 },
+    .{ .rows = 9, .n = 17, .k = 256 },
+    .{ .rows = 1, .n = 5, .k = 64 },
+};
+
+const batch_from = "const uint q1 = (byte_val >> 4u) & 0xfu;";
+const batch_to = "const uint q1 = (byte_val >> 4u) & 0x7u;";
+const batch_label = "metal inkling2 draft_head_q4 batch tf_ink2_draft_head_q4_logits";
+const batch_control = "control: metal inkling2 draft_head_q4 batch";
+
+pub fn batchControlSource(a: std.mem.Allocator, production: []const u8) ![]u8 {
+    if (std.mem.count(u8, production, batch_from) != 1) return error.ControlEditMissing;
+    return std.mem.replaceOwned(u8, a, production, batch_from, batch_to);
+}
+
+pub fn spec(mode: Mode, name: []const u8) c.Spec {
+    return switch (mode) {
+        .dspark_q4 => .{
+            .name = name,
+            .accum = .f32,
+            .depth = depth,
+            .out = .bf16,
+            .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 256, .step = 64, .min = 64 } },
+            .served = &dspark_served,
+        },
+        .batch_q4 => .{
+            .name = name,
+            .accum = .f32,
+            .depth = depth,
+            .out = .bf16,
+            .tiles = .{ .{ .size = 32, .step = 1, .min = 1 }, .{ .size = 64, .step = 1, .min = 1 }, .{ .size = 256, .step = 64, .min = 64 } },
+            .served = &batch_served,
+        },
     };
 }
 
@@ -36,6 +65,7 @@ pub const Probe = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
+    mode: Mode,
     name: []const u8,
     control: bool,
     f: ?Affine = null,
@@ -45,13 +75,19 @@ pub const Probe = struct {
     y: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
-    pub fn initSource(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, text: []const u8, name: []const u8, control: bool) !Probe {
-        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+    pub fn initSource(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mode: Mode, text: []const u8, name: []const u8, control: bool) !Probe {
+        const opts: mtl.CompileOptions = if (mode == .dspark_q4) .mlx() else .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise };
+        const lib = try mtl.Library.fromSource(device, text, opts);
         defer lib.deinit();
+        const sym = switch (mode) {
+            .dspark_q4 => q4.symbol,
+            .batch_q4 => q4.batch_symbol,
+        };
         return .{
             .a = a,
             .rig = .{ .a = a, .device = device, .queue = queue },
-            .pipe = try mtl.Pipeline.init(device, lib, q4.symbol, false),
+            .pipe = try mtl.Pipeline.init(device, lib, sym, false),
+            .mode = mode,
             .name = name,
             .control = control,
         };
@@ -66,7 +102,7 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .spec = spec(p.name), .ctx = p, .vt = &vt, .control = if (p.control) .shapes else null };
+        return .{ .spec = spec(p.mode, p.name), .ctx = p, .vt = &vt, .control = if (p.control) .shapes else null };
     }
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -109,7 +145,10 @@ pub const Probe = struct {
     pub fn run(p: *Probe) !void {
         const f = p.f.?;
         const pass = p.rig.begin();
-        q4.dispatch(p.pipe, pass.e, q4Ref(p.w), q4Ref(p.s), q4Ref(p.b), q4Ref(p.y), q4Ref(p.out), @intCast(f.shape.rows), @intCast(f.shape.n), @intCast(f.shape.k), false);
+        switch (p.mode) {
+            .dspark_q4 => q4.dispatch(p.pipe, pass.e, q4Ref(p.w), q4Ref(p.s), q4Ref(p.b), q4Ref(p.y), q4Ref(p.out), @intCast(f.shape.rows), @intCast(f.shape.n), @intCast(f.shape.k), false),
+            .batch_q4 => q4.dispatchBatch(p.pipe, pass.e, q4Ref(p.w), q4Ref(p.s), q4Ref(p.b), q4Ref(p.y), q4Ref(p.out), @intCast(f.shape.rows), @intCast(f.shape.n), @intCast(f.shape.k), false),
+        }
         try p.rig.finish(pass);
     }
 
@@ -133,25 +172,45 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
 
-    fn add(s: *Suite, control: bool, only: ?[]const u8) !void {
-        const name = if (control) controls.name(.logits_q4) else @import("tensorfold").inkling2_dspark_host.Kind.logits_q4.label();
+    fn add(s: *Suite, mode: Mode, control: bool, only: ?[]const u8) !void {
+        const name = switch (mode) {
+            .dspark_q4 => if (control) controls.name(.logits_q4) else @import("tensorfold").inkling2_dspark_host.Kind.logits_q4.label(),
+            .batch_q4 => if (control) batch_control else batch_label,
+        };
         if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
         const probe = try s.a.create(Probe);
         errdefer s.a.destroy(probe);
-        if (control) {
-            const text = try controls.source(s.a, sources.inkling2_dspark, .logits_q4);
-            defer s.a.free(text);
-            probe.* = try Probe.initSource(s.a, s.device, s.queue, text, name, true);
-        } else {
-            probe.* = try Probe.initSource(s.a, s.device, s.queue, sources.inkling2_dspark, name, false);
+        switch (mode) {
+            .dspark_q4 => {
+                const raw = if (s.device.tensorUnits()) sources.inkling2_dspark else sources.inkling2_dspark_pre_m5;
+                if (control) {
+                    const text = try controls.source(s.a, raw, .logits_q4);
+                    defer s.a.free(text);
+                    probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, text, name, true);
+                } else {
+                    probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, raw, name, false);
+                }
+            },
+            .batch_q4 => {
+                const raw = if (s.device.tensorUnits()) sources.inkling2_dflash2_fast else sources.inkling2_dflash2_fast_pre_m5;
+                if (control) {
+                    const text = try batchControlSource(s.a, raw);
+                    defer s.a.free(text);
+                    probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, text, name, true);
+                } else {
+                    probe.* = try Probe.initSource(s.a, s.device, s.queue, mode, raw, name, false);
+                }
+            },
         }
         errdefer probe.deinit();
         try contract.register(s.a, &s.probes, s.kernels, probe, probe.kernel());
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
-        try s.add(false, only);
-        try s.add(true, only);
+        for ([_]Mode{ .dspark_q4, .batch_q4 }) |mode| {
+            try s.add(mode, false, only);
+            try s.add(mode, true, only);
+        }
     }
 
     pub fn deinit(s: *Suite) void {
@@ -162,3 +221,22 @@ pub const Suite = struct {
         s.probes.deinit(s.a);
     }
 };
+
+test "32-row Q4 draft head and pre-M5 planted controls apply once and reject duplicates" {
+    const a = std.testing.allocator;
+    const prod = sources.inkling2_dflash2_fast;
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prod, batch_from));
+    const edited = try batchControlSource(a, prod);
+    defer a.free(edited);
+    try std.testing.expectError(error.ControlEditMissing, batchControlSource(a, edited));
+    try std.testing.expectError(error.ControlEditMissing, batchControlSource(a, ""));
+    const twice = try std.mem.concat(a, u8, &.{ prod, prod });
+    defer a.free(twice);
+    try std.testing.expectError(error.ControlEditMissing, batchControlSource(a, twice));
+    const pre_batch = try batchControlSource(a, sources.inkling2_dflash2_fast_pre_m5);
+    defer a.free(pre_batch);
+    try std.testing.expect(std.mem.startsWith(u8, pre_batch, "#define TF_SIMD_FRAGS 1\n"));
+    const pre_dspark = try controls.source(a, sources.inkling2_dspark_pre_m5, .logits_q4);
+    defer a.free(pre_dspark);
+    try std.testing.expect(std.mem.startsWith(u8, pre_dspark, "#define TF_SIMD_FRAGS 1\n"));
+}

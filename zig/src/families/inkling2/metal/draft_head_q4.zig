@@ -9,6 +9,9 @@ pub const env_name: [:0]const u8 = "TF_INKLING2_DRAFT_HEAD_Q4";
 pub const Ref = @import("inkling2_metal_ref").Ref;
 pub const LogitsArgs = extern struct { rows: u32, vocab: u32, k: u32, softcap: u32 };
 pub const symbol = "tf_ink2_dspark_logits_q4";
+pub const legacy_threads: u32 = 256;
+pub const batch_symbol = "tf_ink2_draft_head_q4_logits";
+pub const batch_threads: u32 = 128;
 pub const group_size: usize = 64;
 pub const max_workers: usize = 16;
 
@@ -103,10 +106,52 @@ pub fn maybeInit(device: mtl.Device, unembed_bf16: []const u16, n: u32, k: u32, 
     return try init(device, unembed_bf16, n, k);
 }
 
+fn loadNamedPipeline(device: mtl.Device, text: []const u8, sym: [:0]const u8, min_threads: u32) !mtl.Pipeline {
+    const opts = mtl.CompileOptions{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise };
+    const lib = try mtl.Library.fromSource(device, text, opts);
+    defer lib.deinit();
+    const pipe = try mtl.Pipeline.init(device, lib, sym, false);
+    errdefer pipe.deinit();
+    if (pipe.maxThreads() < min_threads) return error.MetalThreadgroupTooSmall;
+    return pipe;
+}
+
 pub fn loadPipeline(device: mtl.Device) !mtl.Pipeline {
-    const lib = try mtl.Library.fromSource(device, sources.inkling2_dspark, mtl.CompileOptions.mlx());
+    const text = if (device.tensorUnits()) sources.inkling2_dspark else sources.inkling2_dspark_pre_m5;
+    const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer lib.deinit();
     return try mtl.Pipeline.init(device, lib, symbol, false);
+}
+
+pub fn loadBatchPipeline(device: mtl.Device) !mtl.Pipeline {
+    const text = if (device.tensorUnits()) sources.inkling2_dflash2_fast else sources.inkling2_dflash2_fast_pre_m5;
+    return loadNamedPipeline(device, text, batch_symbol, batch_threads);
+}
+
+fn encodeDispatch(
+    pipeline: mtl.Pipeline,
+    e: mtl.ComputeEncoder,
+    w: Ref,
+    scales: Ref,
+    biases: Ref,
+    y: Ref,
+    out: Ref,
+    rows: u32,
+    vocab_count: u32,
+    k: u32,
+    softcap: bool,
+    tile_n: usize,
+    tile_m: usize,
+    threads: usize,
+) void {
+    std.debug.assert(rows > 0 and vocab_count > 0 and k > 0 and k % group_size == 0);
+    e.setPipeline(pipeline);
+    const refs = [_]Ref{ w, scales, biases, y, out };
+    for (refs, 0..) |item, slot| e.setBuffer(item.buf, item.off, slot);
+    e.setValue(LogitsArgs{ .rows = rows, .vocab = vocab_count, .k = k, .softcap = @intFromBool(softcap) }, 5);
+    const groups_x = (@as(usize, vocab_count) + tile_n - 1) / tile_n;
+    const groups_y = (@as(usize, rows) + tile_m - 1) / tile_m;
+    e.dispatchGroups(mtl.Size.of(groups_x, groups_y, 1), mtl.Size.of(threads, 1, 1));
 }
 
 pub fn dispatch(
@@ -132,6 +177,23 @@ pub fn dispatch(
     e.dispatchGroups(mtl.Size.of(groups_x, groups_y, 1), mtl.Size.of(256, 1, 1));
 }
 
+/// Dispatch the 32-row batched Q4 logits kernel (single weight read across up to 32 rows).
+pub fn dispatchBatch(
+    pipeline: mtl.Pipeline,
+    e: mtl.ComputeEncoder,
+    w: Ref,
+    scales: Ref,
+    biases: Ref,
+    y: Ref,
+    out: Ref,
+    rows: u32,
+    vocab_count: u32,
+    k: u32,
+    softcap: bool,
+) void {
+    encodeDispatch(pipeline, e, w, scales, biases, y, out, rows, vocab_count, k, softcap, 64, 32, batch_threads);
+}
+
 pub fn tf_ink2_draft_head_q4_logits(
     pipeline: mtl.Pipeline,
     e: mtl.ComputeEncoder,
@@ -142,6 +204,18 @@ pub fn tf_ink2_draft_head_q4_logits(
     softcap: bool,
 ) void {
     dispatch(pipeline, e, head.wordsRef(), head.scalesRef(), head.biasesRef(), y, out, rows, head.n, head.k, softcap);
+}
+
+pub fn encodeBatchHead(
+    pipeline: mtl.Pipeline,
+    e: mtl.ComputeEncoder,
+    head: *const DraftHeadQ4,
+    y: Ref,
+    out: Ref,
+    rows: u32,
+    softcap: bool,
+) void {
+    dispatchBatch(pipeline, e, head.wordsRef(), head.scalesRef(), head.biasesRef(), y, out, rows, head.n, head.k, softcap);
 }
 
 pub fn quantizeParallel(src_bf16: [*]const u16, dst_w: [*]u32, dst_s: [*]u16, dst_b: [*]u16, groups: usize) QuantizeError!void {
@@ -302,16 +376,14 @@ test "quantizeGroups avoids FP32 overflow on full-span BF16 group (0xff7f, 0x7f7
     try std.testing.expectEqual(@as(u16, 0x7f7f), bf.bits(@mulAdd(f32, s, 15.0, b)));
 }
 
-test "maybeInit respects opt-in flag, malformed refusal, budget and Metal Q4 logits" {
+test "maybeInit respects opt-in flag, malformed refusal, budget and both Metal Q4 kernels" {
     const saved = sys.environment.rawText(env_name);
     const saved_copy = if (saved) |val| try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{val}, 0) else null;
     defer {
         if (saved_copy) |val| {
             _ = sys.env.setenv(env_name, val.ptr, 1);
             std.testing.allocator.free(val);
-        } else {
-            _ = sys.env.unsetenv(env_name);
-        }
+        } else _ = sys.env.unsetenv(env_name);
     }
     _ = sys.env.unsetenv(env_name);
     try std.testing.expect(!try enabled());
@@ -333,9 +405,13 @@ test "maybeInit respects opt-in flag, malformed refusal, budget and Metal Q4 log
     defer q.deinit();
     const pipe = try loadPipeline(dev);
     defer pipe.deinit();
-    const n: u32 = 17;
+    const batch_pipe = try loadBatchPipeline(dev);
+    defer batch_pipe.deinit();
+    const pre_batch_pipe = try loadNamedPipeline(dev, sources.inkling2_dflash2_fast_pre_m5, batch_symbol, batch_threads);
+    defer pre_batch_pipe.deinit();
+    const n: u32 = 67;
     const k: u32 = 128;
-    const rows: u32 = 9;
+    const rows: u32 = 33;
     const w_bf = try std.testing.allocator.alloc(u16, n * k);
     defer std.testing.allocator.free(w_bf);
     var prng = std.Random.DefaultPrng.init(77);
@@ -353,31 +429,38 @@ test "maybeInit respects opt-in flag, malformed refusal, budget and Metal Q4 log
     const dst_s = @as([*]const u16, @ptrCast(@alignCast(head.buf.contents() + head.scales_off)));
     const dst_b = @as([*]const u16, @ptrCast(@alignCast(head.buf.contents() + head.biases_off)));
     const dst_w = @as([*]const u32, @ptrCast(@alignCast(head.buf.contents())));
-    for ([_]bool{ false, true }) |softcap| {
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = q.commandBuffer();
-        const e = cb.compute(.serial);
-        tf_ink2_draft_head_q4_logits(pipe, e, &head, .{ .buf = y_buf }, .{ .buf = out_buf }, rows, softcap);
-        e.end();
-        cb.commit();
-        cb.wait();
-        try std.testing.expect(cb.failure() == null);
-        const got_slice = out_buf.slice(u16, rows * n);
-        const ng = k / 64;
-        for (0..rows) |r_idx| {
-            for (0..n) |v_idx| {
-                var acc: f64 = 0;
-                for (0..k) |d_idx| {
-                    const g = v_idx * ng + d_idx / 64;
-                    const q4 = (dst_w[v_idx * (k / 8) + d_idx / 8] >> @as(u5, @intCast(4 * (d_idx % 8)))) & 0xf;
-                    const wv = @mulAdd(f32, asFloat(dst_s[g]), @floatFromInt(q4), asFloat(dst_b[g]));
-                    acc += @as(f64, wv) * @as(f64, asFloat(y_slice[r_idx * k + d_idx]));
+    for ([_]mtl.Pipeline{ pipe, batch_pipe, pre_batch_pipe }) |p| {
+        const use_batch = (p.id != pipe.id);
+        for ([_]bool{ false, true }) |softcap| {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = q.commandBuffer();
+            const e = cb.compute(.serial);
+            if (use_batch) {
+                encodeBatchHead(p, e, &head, .{ .buf = y_buf }, .{ .buf = out_buf }, rows, softcap);
+            } else {
+                tf_ink2_draft_head_q4_logits(p, e, &head, .{ .buf = y_buf }, .{ .buf = out_buf }, rows, softcap);
+            }
+            e.end();
+            cb.commit();
+            cb.wait();
+            try std.testing.expect(cb.failure() == null);
+            const got_slice = out_buf.slice(u16, rows * n);
+            const ng = k / 64;
+            for (0..rows) |r_idx| {
+                for (0..n) |v_idx| {
+                    var acc: f64 = 0;
+                    for (0..k) |d_idx| {
+                        const g = v_idx * ng + d_idx / 64;
+                        const q4 = (dst_w[v_idx * (k / 8) + d_idx / 8] >> @as(u5, @intCast(4 * (d_idx % 8)))) & 0xf;
+                        const wv = @mulAdd(f32, asFloat(dst_s[g]), @floatFromInt(q4), asFloat(dst_b[g]));
+                        acc += @as(f64, wv) * @as(f64, asFloat(y_slice[r_idx * k + d_idx]));
+                    }
+                    const raw = roundBf(acc);
+                    const want = if (softcap) roundBf(30.0 * std.math.tanh(raw / 30.0)) else raw;
+                    const got: f64 = asFloat(got_slice[r_idx * n + v_idx]);
+                    try std.testing.expect(@abs(want - got) <= @max(@abs(want) * 1e-2, 0.05));
                 }
-                const raw = roundBf(acc);
-                const want = if (softcap) roundBf(30.0 * std.math.tanh(raw / 30.0)) else raw;
-                const got: f64 = asFloat(got_slice[r_idx * n + v_idx]);
-                try std.testing.expect(@abs(want - got) <= @max(@abs(want) * 1e-2, 0.05));
             }
         }
     }

@@ -18,3 +18,6 @@ pub const inkling2_dspark_pre_m5 = owner.inkling2_dspark_pre_m5;
 pub const vision = owner.vision;
 pub const inkling2_dflash2 = owner.inkling2_dflash2;
 pub const sample = owner.sample;
+
+pub const inkling2_dflash2_fast = owner.inkling2_dflash2_fast;
+pub const inkling2_dflash2_fast_pre_m5 = owner.inkling2_dflash2_fast_pre_m5;
