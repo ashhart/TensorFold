@@ -2,7 +2,9 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const dr = @import("lanes").drafter;
+const lanes = @import("lanes");
 const draft = @import("cuda_draft.zig");
+const engine = @import("cuda_engine.zig");
 const tree = @import("cuda_draft_tree.zig");
 const layers = @import("cuda_layers.zig");
 const sig = @import("cuda_signatures.zig");
@@ -77,6 +79,52 @@ pub fn publish(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try d.selectHold(ctx, it);
     }
 }
+
+/// Whether the head's projections refuse a frame at the fused tile's rows: the ModelOpt lane, not the affine-4 one.
+pub fn rowLimited(projection: layers.Proj) bool {
+    return projection == .ql;
+}
+
+/// Streams one row-limited frame takes: the most whose (block - 1) rows stay under the fused tile, at least one.
+pub fn headStreams(block: usize) usize {
+    return if (block < 2) 1 else (cuda.qmmf.fused_rows - 1) / (block - 1);
+}
+
+/// Items a frame takes from `total` at `at`: the capacity, a fused tile's worth when row-limited, else what is left.
+pub fn frameLen(total: usize, at: usize, block: usize, capacity: usize, row_limited: bool) usize {
+    const most = if (row_limited) @min(capacity, headStreams(block)) else capacity;
+    return @min(most, total - at);
+}
+
+/// Clears every context's drafts: a hold that failed leaves none behind.
+pub fn clearDrafts(contexts: []const *draft.Ctx) void {
+    for (contexts) |ctx| {
+        ctx.held_n = 0;
+        ctx.grown = 0;
+    }
+}
+
+/// One frame's trace slots: its indexes restart at zero, as its staged rows do.
+pub fn traceStart(t: anytype, contexts: []const *draft.Ctx, block: usize) void {
+    for (contexts, 0..) |ctx, i| {
+        ctx.trace_base = i * (block - 1);
+        t.captures[i] = .{ .nodes = t.steps[i * (engine.most_window + 1) * lanes.draft_tree.branch ..][0 .. (engine.most_window + 1) * lanes.draft_tree.branch] };
+    }
+}
+
+/// The frame's grown trees, saved after its projection rolls.
+pub fn traceSave(d: anytype, t: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx) void {
+    for (items, contexts, 0..) |it, ctx, i| {
+        ctx.trace_active = !t.broken and it.lanes == null and it.depth > 0 and ctx.grown > 0;
+        if (ctx.trace_active) {
+            ctx.trace_snapshot.save(d.gpa, d.traceCandidates(ctx), &t.captures[i], it.position, it.pending, it.sampling) catch {
+                ctx.trace_active = false;
+                t.recordDrop();
+            };
+        }
+    }
+}
+
 pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx) !void {
     const c = d.c;
     const e = d.e;

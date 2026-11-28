@@ -478,20 +478,19 @@ pub const Draft = struct {
             ctx.* = d.streams.get(it.stream) orelse return error.UnknownStream;
             frame.scan(ctx.*, it.tokens);
         }
-        if (d.trace) |t| if (d.c.kind == .dflash2) for (contexts[0..items.len], 0..) |ctx, i| {
-            ctx.trace_base = i * (d.c.block - 1);
-            t.captures[i] = .{ .nodes = t.steps[i * (engine.most_window + 1) * lanes.draft_tree.branch ..][0 .. (engine.most_window + 1) * lanes.draft_tree.branch] };
-        };
-        try d.forward(items, contexts[0..items.len]);
-        if (d.trace) |t| if (d.c.kind == .dflash2) for (items, contexts[0..items.len], 0..) |it, ctx, i| {
-            ctx.trace_active = !t.broken and it.lanes == null and it.depth > 0 and ctx.grown > 0;
-            if (ctx.trace_active) {
-                ctx.trace_snapshot.save(d.gpa, d.traceCandidates(ctx), &t.captures[i], it.position, it.pending, it.sampling) catch {
-                    ctx.trace_active = false;
-                    t.recordDrop();
-                };
-            }
-        };
+        // a hold lands whole or not at all: any failed frame clears every context's drafts
+        errdefer frame.clearDrafts(contexts[0..items.len]);
+        const split = d.c.kind == .dflash2 and frame.rowLimited(d.e.head); // only the ModelOpt head is row-limited
+        var at: usize = 0;
+        while (at < items.len) {
+            const n = frame.frameLen(items.len, at, d.c.block, d.frame_streams, split);
+            const held = items[at..][0..n];
+            const frame_contexts = contexts[at..][0..n];
+            if (d.trace) |t| if (d.c.kind == .dflash2) frame.traceStart(t, frame_contexts, d.c.block);
+            try d.forward(held, frame_contexts);
+            if (d.trace) |t| if (d.c.kind == .dflash2) frame.traceSave(d, t, held, frame_contexts);
+            at += n;
+        }
     }
 
     fn heldFn(p: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void {
