@@ -58,8 +58,8 @@ fn fixture(family: Family) !Fixture {
 fn begin(family: Family, f: *Fixture, layer: usize, count: usize) !ahead.Scope {
     return switch (family) {
         .nemotron, .bolt => @import("src/families/nemotron/cuda_load_prefetch.zig").begin(&f.ck, if (family == .bolt) "language_model." else "", layer, count),
-        .glm => @import("src/families/glm/cuda_load_prefetch.zig").begin(&f.ck, "model.language_model.", layer, count),
-        .glm_dsa => @import("src/families/glm/cuda_load_prefetch.zig").begin(&f.ck, "model.", layer, count),
+        .glm => @import("src/families/glm/cuda_load_prefetch.zig").begin(&f.ck, "model.language_model.", layer, count, .{ .lo = 0, .hi = 0 }),
+        .glm_dsa => @import("src/families/glm/cuda_load_prefetch.zig").begin(&f.ck, "model.", layer, count, .{ .lo = 0, .hi = 0 }),
         .minimax => @import("src/families/minimax_m3/cuda_load_prefetch.zig").begin(&f.ck, layer, count),
         .kolibri => @import("src/families/kolibri1/cuda_load_prefetch.zig").begin(&f.ck, layer, count),
         .spark => @import("src/families/spark25/cuda_load_prefetch.zig").begin(&f.ck, layer, count),
@@ -115,6 +115,46 @@ test "load prefetch: GLM Flash spans are unchanged and full GLM uses the model p
             try t.expectEqual(file.data + info.end, spans[i].hi);
         }
     }
+}
+
+test "load prefetch: GLM's EXL3 layer reads the rank's tile columns, none of the half its loader leaves out" {
+    const a = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // one layer: a gate trellis [8, 8, 32] int16 (8 tile rows of 512 bytes), its marker, and a name the cut keeps whole
+    const stem = "model.language_model.layers.1.";
+    var header: std.ArrayList(u8) = .empty;
+    defer header.deinit(a);
+    try header.append(a, '{');
+    try header.print(a, "\"{s}mlp.experts.0.gate_proj.trellis\":{{\"dtype\":\"I16\",\"shape\":[8,8,32],\"data_offsets\":[0,4096]}},", .{stem});
+    try header.print(a, "\"{s}mlp.experts.0.mcg\":{{\"dtype\":\"I32\",\"shape\":[1],\"data_offsets\":[4096,4100]}},", .{stem});
+    try header.print(a, "\"{s}self_attn.q_proj\":{{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[4100,4104]}}", .{stem});
+    try header.append(a, '}');
+    const bytes = try a.alloc(u8, 8 + header.items.len + 4104);
+    defer a.free(bytes);
+    std.mem.writeInt(u64, bytes[0..8], header.items.len, .little);
+    @memcpy(bytes[8..][0..header.items.len], header.items);
+    @memset(bytes[8 + header.items.len ..], 3);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors", .data = bytes });
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(dir);
+    var ck = try core.Checkpoint.openModel(a, t.io, dir);
+    defer ck.close();
+    // the rank's tile 3 of 8 across: bytes 192 to 256 of every 512-byte tile row, and never the rest
+    var reading = try @import("src/families/glm/cuda_load_prefetch.zig").begin(&ck, "model.language_model.", 1, 3, .{ .lo = 48, .hi = 64 });
+    defer reading.deinit();
+    const spans = reading.reader.work.?.spans;
+    const file = &ck.files.items[0];
+    const gate = file.names.get(stem ++ "mlp.experts.0.gate_proj.trellis").?;
+    const marker = file.names.get(stem ++ "mlp.experts.0.mcg").?;
+    try t.expectEqual(@as(usize, 9), spans.len); // eight runs, then the marker and projection joined where they touch
+    for (spans[0..8], 0..) |s, r| {
+        try t.expectEqual(file.data + gate.begin + r * 512 + 192, s.lo);
+        try t.expectEqual(@as(u64, 64), s.hi - s.lo);
+    }
+    try t.expectEqual(file.data + marker.begin, spans[8].lo);
+    try t.expectEqual(@as(u64, 8), spans[8].hi - spans[8].lo);
+    try t.expectEqual(@as(u64, 8 * 64 + 4 + 4), try reading.check());
 }
 
 test "load prefetch: each family's failed reader names its source and frees the scope" {
@@ -207,9 +247,18 @@ test "load prefetch: malformed options and truncated data refuse without changin
 }
 
 test "load prefetch: actual GLM loop follows a rank's layer order and stops on failed reads" {
+    const glm_cfg = @import("src/families/glm/config.zig");
     const Fake = struct {
         ck: *core.Checkpoint,
-        w: struct { config: struct { layers: u32 = 3 } = .{} } = .{},
+        w: struct {
+            config: glm_cfg.Config = .{ .layers = 3 },
+            share: struct {
+                moe: struct { lo: usize, hi: usize } = .{ .lo = 0, .hi = 0 },
+                pub fn moeAt(s: @This(), _: *const glm_cfg.Config, _: usize) !@TypeOf(s.moe) {
+                    return s.moe;
+                }
+            } = .{},
+        } = .{},
         calls: [3]u32 = @splat(99),
         n: usize = 0,
         pub fn layer(f: *@This(), i: u32) !u32 {

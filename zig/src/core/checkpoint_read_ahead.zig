@@ -5,6 +5,8 @@ const Checkpoint = @import("checkpoint.zig").Checkpoint;
 pub const Span = prefetch.Span;
 pub const chunk = prefetch.chunk;
 pub const readerCount = prefetch.readerCount;
+/// A family's own subset of the tensors a layer will read (see prefetch.Keep).
+pub const Keep = prefetch.Keep;
 const none = std.math.maxInt(usize);
 
 pub fn readers() !usize {
@@ -153,9 +155,9 @@ fn refusal(prefix: []const u8, err: anyerror) anyerror {
     return err;
 }
 
-pub fn checkpoint(ck: *const Checkpoint, prefix: []const u8, count: usize) !Scope {
+pub fn checkpoint(ck: *const Checkpoint, prefix: []const u8, count: usize, keep: ?Keep) !Scope {
     if (count == 0) return .{};
-    const spans = prefetch.cut(ck, prefix) catch |err| return refusal(prefix, err);
+    const spans = prefetch.cut(ck, prefix, keep) catch |err| return refusal(prefix, err);
     return .{ .reader = start(ck.gpa, ck.io, spans, count) catch |err| return refusal(prefix, err) };
 }
 

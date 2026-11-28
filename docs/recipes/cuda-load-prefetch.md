@@ -12,6 +12,8 @@
 
 GLM retains `TF_GLM_LOAD_PREFETCH` when the universal option is unset. An explicit `TF_LOAD_PREFETCH` takes precedence, including 0. The default with both options unset is 16. For a no-reader comparison against an older GLM build, set its existing `TF_GLM_LOAD_PREFETCH=0`; that build's unset option starts readers.
 
+GLM's EXL3 loader keeps only the rank's part of each expert trellis: the rank's tile columns of every tile row for gate and up, its tile rows for down, and its half of the matching scales. The readers are given those byte runs instead of the whole tensors, so a rank reads the roughly 91 GiB it loads out of a 163.6 GiB checkpoint rather than all 163.6 GiB (#5256). Every other name in the layer prefix, and every checkpoint without EXL3 trellises, is read whole as before. Strided reads may still pull in the skipped half of a row through the kernel's readahead; load time with the narrower runs has not been measured.
+
 The new adapters read file intervals only. Upload order, stored formats, conversions and existing page-release positions stay with each family. Each reader owns its temporary buffer and descriptor, and the loader joins readers before a source closes or its existing release runs. Disabled adapters allocate no reader state and read no intervals. The checked adapters refuse a failed open or short read with the source path. A refused load joins its readers and frees their state.
 
 DeepSeek's production loader keeps its prepared-image cache and per-layer upload completion. A cache hit skips original pack read-ahead; a miss reads the planned layer prefix during image construction. Its low-level whole-model loader also keeps the existing builder/upload order. No CUDA kernel or launch changes.

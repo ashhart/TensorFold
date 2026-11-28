@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
 const Checkpoint = @import("checkpoint.zig").Checkpoint;
+const Entry = @import("safetensors.zig").Entry;
 
 /// The bytes of one reader's pread.
 pub const chunk = 8 << 20;
@@ -25,6 +26,13 @@ pub fn configured() !usize {
 
 /// A piece of one file: its path lives in the checkpoint's arena, which outlives the readers.
 pub const Span = struct { path: [*:0]const u8, lo: u64, hi: u64 };
+
+/// The tensor bytes a loader takes, when it takes less than the whole tensor: a family's answer, by name.
+pub const Keep = struct {
+    ctx: *anyopaque,
+    /// Appends the file ranges of `name` the loader will read; appending nothing keeps the whole tensor.
+    ranges: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, name: []const u8, entry: Entry, at: u64, out: *std.ArrayList([2]u64)) anyerror!void,
+};
 
 const Work = struct {
     gpa: std.mem.Allocator,
@@ -57,7 +65,7 @@ pub const Ahead = struct {
 pub fn start(ck: *const Checkpoint, prefix: []const u8, readers: usize) Ahead {
     var a: Ahead = .{};
     if (builtin.os.tag != .linux or readers == 0) return a;
-    const spans = cut(ck, prefix) catch return a;
+    const spans = cut(ck, prefix, null) catch return a;
     const w = ck.gpa.create(Work) catch {
         ck.gpa.free(spans);
         return a;
@@ -69,7 +77,7 @@ pub fn start(ck: *const Checkpoint, prefix: []const u8, readers: usize) Ahead {
 }
 
 /// The byte ranges of `prefix`'s tensors in each mapped file, joined where they touch and cut into `chunk` pieces.
-pub fn cut(ck: *const Checkpoint, prefix: []const u8) ![]Span {
+pub fn cut(ck: *const Checkpoint, prefix: []const u8, keep: ?Keep) ![]Span {
     const gpa = ck.gpa;
     var out: std.ArrayList(Span) = .empty;
     errdefer out.deinit(gpa);
@@ -79,9 +87,26 @@ pub fn cut(ck: *const Checkpoint, prefix: []const u8) ![]Span {
         if (f.map.section == null) continue; // a heap copy (no mmap) holds its bytes already
         ranges.clearRetainingCapacity();
         var it = f.names.iterator();
-        while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, prefix)) {
-            try ranges.append(gpa, .{ f.data + e.value_ptr.begin, f.data + e.value_ptr.end });
-        };
+        while (it.next()) |e| {
+            if (!std.mem.startsWith(u8, e.key_ptr.*, prefix)) continue;
+            const at: u64 = f.data + e.value_ptr.begin;
+            const end: u64 = f.data + e.value_ptr.end;
+            const had = ranges.items.len;
+            if (keep) |k| k.ranges(k.ctx, gpa, e.key_ptr.*, e.value_ptr.*, at, &ranges) catch ranges.shrinkRetainingCapacity(had);
+            if (ranges.items.len == had) try ranges.append(gpa, .{ at, end }); // nothing named: the whole tensor
+            for (ranges.items[had..]) |*r| { // a family's ranges stay inside its own tensor
+                r[0] = @max(r[0], at);
+                r[1] = @min(r[1], end);
+            }
+            var n = had;
+            for (ranges.items[had..]) |r| {
+                if (r[0] >= r[1]) continue;
+                ranges.items[n] = r;
+                n += 1;
+            }
+            ranges.shrinkRetainingCapacity(n);
+            if (n == had) try ranges.append(gpa, .{ at, end });
+        }
         std.mem.sort([2]u64, ranges.items, {}, lower);
         var k: usize = 0;
         while (k < ranges.items.len) {
@@ -160,7 +185,7 @@ test "readers read every byte named under a prefix, a piece at a time, and none 
     var path: [64]u8 = undefined;
     var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
     defer ck.close();
-    const spans = try cut(&ck, "layers.1.");
+    const spans = try cut(&ck, "layers.1.", null);
     defer gpa.free(spans);
     try std.testing.expectEqual(@as(usize, 3), spans.len); // layers.1.a whole, then layers.1.c as 8 MiB and 3 bytes
     try std.testing.expectEqual(@as(u64, chunk), spans[1].hi - spans[1].lo);
@@ -193,4 +218,40 @@ test "a map that fell back to reads (no mmap) is not read again" {
     defer ck.close();
     var ahead = start(&ck, "layers.0.", 4);
     try std.testing.expectEqual(@as(u64, 0), ahead.join());
+}
+
+/// The second half of every row of the tensor named: a loader that takes a rank's half of a row.
+fn halfRows(_: *anyopaque, gpa: std.mem.Allocator, _: []const u8, entry: Entry, at: u64, out: *std.ArrayList([2]u64)) !void {
+    const row: u64 = entry.dim(1);
+    for (0..entry.dim(0)) |r| try out.append(gpa, .{ at + r * row + row / 2, at + (r + 1) * row });
+}
+
+/// A family that cannot name its ranges: the whole tensor is read, as before Keep.
+fn refuse(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: Entry, _: u64, _: *std.ArrayList([2]u64)) !void {
+    return error.NotKept;
+}
+
+test "kept ranges: the readers take the bytes a loader names, none in the half it skips, and all of a tensor it cannot name" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const rows: [64]u8 = @splat(9); // four rows of sixteen bytes
+    try fixture.write(gpa, io, tmp.dir, "model.safetensors", &.{.{ .name = "layers.1.k", .shape = &.{ 4, 16 }, .bytes = &rows }});
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    var none: u8 = 0;
+    const spans = try cut(&ck, "layers.1.", .{ .ctx = @ptrCast(&none), .ranges = halfRows });
+    defer gpa.free(spans);
+    try std.testing.expectEqual(@as(usize, 4), spans.len); // one run of eight bytes a row, the first half never named
+    for (spans, 0..) |s, i| {
+        try std.testing.expectEqual(@as(u64, 8), s.hi - s.lo);
+        try std.testing.expectEqual(spans[0].lo + i * 16, s.lo);
+    }
+    const whole = try cut(&ck, "layers.1.", .{ .ctx = @ptrCast(&none), .ranges = refuse });
+    defer gpa.free(whole);
+    try std.testing.expectEqual(@as(usize, 1), whole.len);
+    try std.testing.expectEqual(@as(u64, rows.len), whole[0].hi - whole[0].lo);
 }

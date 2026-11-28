@@ -1,0 +1,1 @@
+- GLM load: `TF_LOAD_PREFETCH`'s reader threads now take only the rank's part of an EXL3 checkpoint — its tile columns of every tile row for gate and up, its tile rows for down, and its half of the scales — instead of every tensor a layer prefix names whole (#5455, refs #5256).
