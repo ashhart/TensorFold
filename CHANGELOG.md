@@ -9,6 +9,14 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
 - Qwen3.8-27B on Metal: with `--glp` and MTP drafts both enabled, the control vector's last-layer direction is no longer applied a second time inside the MTP head; the head reads the steered target rows with its own final norm, and output is unchanged without `--glp` (#1835).
 - Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
+- CLI: `tensorfold tfq3 MODEL` pulls, converts and inspects TFQ3 checkpoints for the dedicated families and any Safetensors architecture, encoding natively in Zig when the external `tfq3` GPU binary is not installed; serving paths are unchanged (#5018).
+
+- CUDA: drafted Qwen3.8-27B gains opt-in `TF_QWEN_DRAFT_FULL_HEAD=1`, which sends a draft hold with any wide stream through the full head in one pass; on one GB10 it wins back the 1.3.7 loss at 4 greedy streams (+3.1%) with identical tokens. Default off, as are the `TF_DFLASH_GRAPH` mixed-width graph keys and `TF_QWEN_GRAPH_STATS` counters added with it (#5481, refs #4439).
+
+- Server: `serve --confidential` disables prompt retention without requesting checkpoint slots and omits generated OCR text from error logs; CUDA families that keep no prompts accept a zero cache budget (#5426).
+
+
+
 - Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
 
 - Desktop: a ready attachment can start a local or remote conversation without typed text, and folder guidance clears after a successful selection or launch (#4836). Thanks @taylorarndt for the report.
@@ -36,8 +44,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
 
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
-
-
 
 - Core: a stream whose setup fails after its reply grammar is built (out of memory) now frees the grammar and its matcher instead of leaking them (#5448). Thanks to @kelchm.
 

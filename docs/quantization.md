@@ -182,3 +182,20 @@ such as BF16 `[1024, 3, 2, 14, 14]`. It still rejects ranks above five, invalid 
 overflowing byte counts, and offsets that disagree with tensor size or exceed the data region.
 Namespace selection remains available to text loaders that do not interpret a vision tower's layouts.
 Reading this metadata does not qualify a vision encoder, checkpoint or device.
+
+## TFQ3 conversion (`tensorfold tfq3`)
+
+`tensorfold tfq3 MODEL` converts a local or Hugging Face Safetensors checkpoint into a cross-platform TFQ3 (3-, 4-, or
+5-bit 2D-FWHT vector quantization) directory that loads unmodified on both Apple Silicon Metal and NVIDIA CUDA.
+
+- `MODEL` may be a local checkpoint folder or a Hugging Face repo id (`owner/name[@revision]`); when a repo id is not
+  yet in the local Hugging Face cache, conversion pulls it with the ordinary authentication and integrity checks,
+  admitting model types without an inference family. `--no-pull` prevents downloads.
+- Known families (`qwen3_5`, `qwen4_exp`, `glm5_next`) dispatch to their dedicated GPU converters when `tfq3`
+  (`https://github.com/ashhart/TFQ`) is installed; any other Safetensors architecture, or invocations passing
+  `--bits 3|4|5`, `--target-gib GB`, `--fit auto|GB`, `--quantize-vision`, `--quantize-drafter`, or `--quantize-embed`,
+  routes to the external model-agnostic converter with mixed-bit budget allocation.
+- When the external `tfq3` GPU binary is not installed (or `--native` is passed), conversion is refused because
+  the experimental native dense layout has no production loader. The direct Zig encoder
+  API rejects quantized tensors whose rows or columns are not multiples of 128; it does not zero-pad them.
+  `tensorfold tfq3 inspect DIR` still validates `pw_v3_tables.bin` and every 16 KiB–aligned `.tffpw` shard natively.
