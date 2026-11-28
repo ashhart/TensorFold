@@ -16,6 +16,9 @@ const x3w = @import("cuda_exl3_weights.zig");
 const tfq3w = @import("cuda_tfq3_weights.zig");
 const hosted = @import("cuda_host_embed.zig");
 const MtpPromptModule = @import("cuda_mtp_prompt.zig");
+const lever7 = @import("cuda_lever7.zig");
+const tables_upload = @import("cuda_tables_upload.zig");
+const land_graph = @import("cuda_land.zig");
 pub const PromptTapMode = MtpPromptModule.Mode;
 pub const recurrent = @import("cuda_recurrent.zig");
 pub const stage_fwd = @import("cuda_stage_forward.zig");
@@ -150,6 +153,9 @@ pub const Engine = struct {
     tokens: [most_verify]u32 = undefined, // kept rows' device draws
     penalties: @import("cuda_penalties.zig").Rows = .{}, // presence/frequency penalties
     graphs: std.AutoHashMapUnmanaged(u64, cuda.graph.Exec) = .empty, // captured forwards by Shape.key
+    lever7: lever7.Options = .{},
+    active_staged: ?cuda.copy_source.Buffer = null,
+    land_graphs: land_graph.Graphs = .empty,
     taps: [8]u32 = undefined, // drafter's tapped layers (setTaps)
     n_taps: usize = 0,
     mtp_prompt: MtpPromptModule.State = .{},
@@ -207,6 +213,9 @@ pub const Engine = struct {
         e.scratch_rows = S.scratchRows(try S.rows(span != null), prompt_rows_limit); // refused before device memory
         errdefer if (e.scratch_buf) |*b| b.free();
         e.graphs = .empty;
+        e.land_graphs = .empty;
+        e.active_staged = null;
+        e.lever7 = try lever7.Options.load();
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
         errdefer @import("cuda_rope_table.zig").free(e);
         e.penalties = .{};
@@ -318,6 +327,8 @@ pub const Engine = struct {
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
+        if (e.active_staged) |*b| b.free();
+        land_graph.deinit(e);
         if (e.scratch_buf) |*b| b.free();
         e.scratch_buf = null;
         e.scratch_capacity = 0;
@@ -423,19 +434,9 @@ pub const Engine = struct {
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
 
-    /// Logits rows first..first + n's greedy tokens into toks: the highest logit, ties to the lower id.
-    fn argmax(e: *Engine, first: usize, n: usize, toks: u64) !void {
-        if (n == 0) return;
-        const slices = argmaxSlices(e.g.vocab);
-        const pv = e.amax;
-        const pi = e.amax + n * slices * 4;
-        try e.run(e.fns.argmax_slices, .{ slices, n, 1 }, .{ 256, 1, 1 }, .{ e.logits + first * e.g.vocab * 2, @as(c_int, @intCast(e.g.vocab)), pv, pi });
-        try e.run(e.fns.argmax_merge, .{ n, 1, 1 }, .{ 32, 1, 1 }, .{ pv, pi, @as(c_int, @intCast(slices)), toks + first * 4 });
-    }
-
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.norm);
-        try e.runPdl(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
+        try e.runPdl(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, lever7.groupSums(e, false, rows) });
     }
 
     /// Refuse the whole frame before settling any prior window or launching work.
@@ -518,7 +519,7 @@ pub const Engine = struct {
             @memcpy(std.mem.bytesAsSlice(i32, st[src_at..][0 .. total * 4]), im.src[p0..][0..total]);
             Round.stageImageTables(st, im, p0, total);
         }
-        try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
+        try tables_upload.upload(e, st, total, parts.len, record, if (keep == .draws) total else 0, images != null);
         const taps_active = e.n_taps > 0 and (record or e.mtp_prompt.mode != .none);
         var shape = Shape.init(total, parts.len, record, taps_active, @intCast(Round.variant(slot_peak)));
         if (!record and taps_active) shape.tap_from = e.mtp_prompt.tapFrom(parts[0].cache.len, total);
@@ -553,16 +554,7 @@ pub const Engine = struct {
             .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them
             .draws => |pk| {
                 const toks = e.tables.ptr + tokens_at;
-                var i: usize = 0; // runs of greedy rows argmaxed together, runs of sampled rows drawn together
-                while (i < pk.len) {
-                    const sampled = pk[i].rule != null;
-                    var n: usize = 1;
-                    while (i + n < pk.len and (pk[i + n].rule != null) == sampled) n += 1;
-                    if (sampled) {
-                        try e.draws.drawRows(e.stream, e.logits + i * g.vocab * 2, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, toks + i * 4, n, e.picks);
-                    } else try e.argmax(i, n, toks);
-                    i += n;
-                }
+                try land_graph.run(e, pk, total);
                 try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(e.host_logits.bytes.ptr, toks, total * 4, e.stream.handle), "cuMemcpyDtoHAsync");
                 try e.stream.synchronize();
                 @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
@@ -594,4 +586,9 @@ pub const Engine = struct {
 };
 test {
     _ = @import("cuda_engine_test.zig");
+    _ = @import("cuda_lever7.zig");
+    _ = @import("cuda_tables_upload.zig");
+    _ = @import("cuda_land.zig");
+    _ = @import("cuda_keep_capture.zig");
+    _ = @import("cuda_lever7_test.zig");
 }

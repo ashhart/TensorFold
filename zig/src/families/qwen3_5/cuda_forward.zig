@@ -8,6 +8,7 @@ const attention = @import("cuda_attention.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
 const modelopt = @import("cuda_modelopt.zig");
+const lever7 = @import("cuda_lever7.zig");
 const head_dim = geometry.head_dim;
 const max_chunks = 64;
 /// Prompt experts keep the shipped arithmetic boundary, independently of verification capacity.
@@ -75,7 +76,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
     if (g.embeds) try e.embed(t_ids, e.h, total, t_params); // a later stage's h and r came over the ring
     // the producers of the out, o and down inputs write their group sums; a prompt GEMM past 16 rows needs none
-    const sums: u64 = if (prompt and total > 16) 0 else e.xs;
+    const sums = lever7.groupSums(e, prompt, total);
     // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
     const mpos: u64 = if (e.features != 0) e.tables.ptr + mpos_at else 0;
     if (e.features != 0) try e.run(e.fns.splice, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.features, e.tables.ptr + src_at, @as(c_int, @intCast(g.hidden)), t_params });

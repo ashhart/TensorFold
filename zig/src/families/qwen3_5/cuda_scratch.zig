@@ -138,6 +138,7 @@ pub fn ensureScratch(e: anytype, rows: usize) !void {
     var it = e.graphs.valueIterator();
     while (it.next()) |graph| graph.deinit();
     e.graphs.clearRetainingCapacity();
+    @import("cuda_land.zig").clear(e);
     const previous = e.scratch_buf;
     const previous_capacity = e.scratch_capacity;
     e.scratch_buf = replacement;

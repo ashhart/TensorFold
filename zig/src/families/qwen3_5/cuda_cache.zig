@@ -159,6 +159,7 @@ pub const Cache = struct {
     pend: c_int = 0,
     /// The pending heads (pendBytes), allocated at the first deferred keep.
     pbuf: ?DeviceBuffer = null,
+    keep_graph: @import("cuda_keep_capture.zig").Capture = .{},
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, cap: usize) !Cache {
         const test_pages = try pageTest();
@@ -288,6 +289,7 @@ pub const Cache = struct {
 
     pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
         recurrent.release(self);
+        self.keep_graph.deinit();
         if (self.owner) |p| p.cap -= self.scratch;
         self.state.free();
         if (self.before) |*b| b.free();
@@ -344,11 +346,8 @@ pub const Cache = struct {
         try recurrent.mark(self, false);
         // the path's rows join the pending ones; without a log, with the switch off or past pend_cap they land now
         const deferred = keepLate() and self.log.len > 0 and path.len <= pend_cap;
-        if (!deferred) {
-            try self.flush(e);
-            try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
-        }
-        try e.run(e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
+        if (!deferred) try self.flush(e);
+        if (e.lever7.capture and !deferred and prefix) try self.keep_graph.run(e, sg, p) else try @import("cuda_keep_capture.zig").launches(e, sg, p, !deferred);
         if (!prefix and g.attentions() > 0) try e.run(if (e.kv8) e.fp8.compact else e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });
         if (deferred) try self.pendRows(e, sg.log, path);
         self.last = null;

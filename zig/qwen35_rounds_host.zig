@@ -108,6 +108,7 @@ test "Verify width calibration: actual keep launches carry the complete 64-row p
     e.scratch_rows = q.engine.grid_rows;
     e.kit = null;
     e.d = &d;
+    e.lever7 = .{};
     e.stream = .{ .d = &d, .handle = null };
     e.g = .{ .hidden = 512, .intermediate = 256, .layers = 2, .vocab = 248320, .k_heads = 2, .v_heads = 4, .q_heads = 4, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
     e.g.linear[1] = false;

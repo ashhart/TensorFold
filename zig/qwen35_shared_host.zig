@@ -46,6 +46,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.scratch_rows = q.engine.grid_rows;
     e.kit = null;
     e.d = d;
+    e.lever7 = .{};
     e.stream = .{ .d = d, .handle = null };
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 32, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.n_taps = 0;
