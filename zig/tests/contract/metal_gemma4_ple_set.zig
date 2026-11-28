@@ -13,6 +13,7 @@ pub const Set = struct {
     embed: ?ple.Embed = null,
     combine: ?ple.Combine = null,
     control: ?ple.Dense = null,
+    combine_control: ?ple.Combine = null,
 
     pub fn register(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, only: ?[]const u8, kernels: *std.ArrayList(g.Kernel)) !*Set {
         const s = try a.create(Set);
@@ -38,6 +39,10 @@ pub const Set = struct {
             s.control = try ple.Dense.initControl(a, device, queue);
             try kernels.append(a, s.control.?.kernel());
         }
+        if (wanted(only, ple.combine_control_name)) {
+            s.combine_control = try ple.Combine.initControl(a, device, queue);
+            try kernels.append(a, s.combine_control.?.kernel());
+        }
         return s;
     }
 
@@ -47,6 +52,7 @@ pub const Set = struct {
         if (s.embed) |*x| x.deinit();
         if (s.combine) |*x| x.deinit();
         if (s.control) |*x| x.deinit();
+        if (s.combine_control) |*x| x.deinit();
         a.destroy(s);
     }
 };

@@ -19,6 +19,7 @@ pub const gate_name = "gemma4 E4B per-layer gate gemma_dense4_gate";
 pub const control_name = "control: gemma4 E4B dense bf16 gemma_dense4 drops the last 256-deep step of K";
 pub const embed_name = "gemma4 E4B per-layer table gemma_ple_embed";
 pub const combine_name = "gemma4 E4B per-layer inputs gemma_ple_combine";
+pub const combine_control_name = "control: gemma4 E4B per-layer inputs gemma_ple_combine adds layer 0's table slice at every layer";
 
 /// A lane's chain: K / 32 fmas (a lane takes 8 values of every 256), then the simdgroup's five-level sum.
 fn denseDepth(s: c.Shape) usize {
@@ -291,6 +292,7 @@ pub const Embed = struct {
 pub const Combine = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
+    control: bool = false,
     pipe: mtl.Pipeline,
     served: [2]c.Shape,
     rows: usize = 0,
@@ -311,6 +313,20 @@ pub const Combine = struct {
         const text = try kernels.Ple.source(a, geo);
         defer a.free(text);
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, text, "gemma_ple_combine"), .served = .{ .{ .rows = 1, .n = wide, .k = P }, .{ .rows = 9, .n = wide, .k = P } } };
+    }
+
+    /// The planted control: gemma_ple_combine adding the row's layer 0 table slice at each layer, red at gate shapes.
+    pub fn initControl(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !Combine {
+        const real = try kernels.Ple.source(a, geo);
+        defer a.free(real);
+        const text = try std.mem.replaceOwned(u8, a, real, "nrm + float(TOK[at])", "nrm + float(TOK[at - size_t(layer) * P])");
+        defer a.free(text);
+        if (std.mem.eql(u8, text, real)) return error.ControlNotPlanted;
+        var p = try init(a, device, queue);
+        p.pipe.deinit();
+        p.pipe = try rig_.pipeline(device, text, "gemma_ple_combine");
+        p.control = true;
+        return p;
     }
 
     fn drop(p: *Combine) void {
@@ -336,7 +352,7 @@ pub const Combine = struct {
     }
 
     pub fn kernel(p: *Combine) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .spec = .{ .name = combine_name, .accum = .f32, .depth = depth, .ops = 6, .mids = 5, .out = .bf16, .served = &p.served, .sums = .{ .f16 = 0, .bf16 = 0, .why = "the sum of squares feeds a normalization; margins reported, no precision qualification claimed" } } };
+        return .{ .ctx = p, .vt = &vt, .control = if (p.control) .shapes else null, .spec = .{ .name = if (p.control) combine_control_name else combine_name, .accum = .f32, .depth = depth, .ops = 6, .mids = 5, .out = .bf16, .served = &p.served, .sums = .{ .f16 = 0, .bf16 = 0, .why = "the sum of squares feeds a normalization; margins reported, no precision qualification claimed" } } };
     }
 
     pub fn prepare(p: *Combine, s: c.Shape, fill: g.Fill, seed: u64) !bool {
