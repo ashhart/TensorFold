@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA, TP=2: opt-in `TF_GLM_PREFILL_TRACE=PATH` writes a per-rank cold-prefill stage ledger (attention, experts, MTP, exchanges, host gaps); tokens are unchanged, and unset keeps the untraced launches.
+
 - Server: `logit_bias` is applied on Qwen3.8-27B and Qwen3.5-MoE on CUDA, Qwen3.5-2B on Metal and Nemotron Parse on HIP: before each draw, greedy or sampled, a listed token's logit gains its value (-100 to 100, at most 300 entries) and exactly -100 bans the token, and drafted replies equal undrafted ones; other engines now refuse a non-empty `logit_bias` with 400 instead of ignoring it, and each `/v1/models` entry's capabilities report `logit_bias` (#3146, closes #3110).
 
 - Tools: the environment-names check passes again after #5408: `LD_AUDIT` and `LD_PRELOAD` are recognised as the prefixes `--confidential` refuses instead of names read nowhere; no engine code changes (#5477). Thanks to @kotevcode.
