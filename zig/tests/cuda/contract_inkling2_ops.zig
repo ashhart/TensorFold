@@ -25,7 +25,7 @@ pub const Set = struct {
     topks: [2]K(route.Topk) = undefined,
     gateups: [2]G(route.Gateup) = undefined,
     tails: [3]G(route.Tail) = undefined,
-    convs: [8]G(conv.Conv) = undefined,
+    convs: [9]G(conv.Conv) = undefined,
     rewinds: [2]K(conv.Rewind) = undefined,
     top1s: [2]K(pick.Top1) = undefined,
     races: [2]K(pick.Race) = undefined,
@@ -35,9 +35,10 @@ pub const Set = struct {
     /// Every registration, each control after the kernel it breaks, appended to `list`.
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
         set.k = try ref.Kernels.load(gpu.d);
-        errdefer set.k.unload();
-        set.ex = try cuda.exl3_experts.Experts.load(gpu.d);
-        set.loaded = true;
+        set.ex = cuda.exl3_experts.Experts.load(gpu.d) catch |err| {
+            set.k.unload();
+            return err;
+        };
         const k = &set.k;
         const rig: @import("contract_rig.zig").Rig = .{ .gpu = gpu, .s = s };
         const forms = [_]mix.Form{ .attn, .mlp, .first, .attn, .mlp, .first, .mlp };
@@ -49,13 +50,15 @@ pub const Set = struct {
         for (&set.topks, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .unbiased = i == 1 } };
         for (&set.gateups, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .capped = set.ex.capped, .swapped = i == 1 } };
         for (&set.tails, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .f32_out = i == 1, .shifted = i == 2 } };
-        const cf = [_]conv.Form{ .kv_static, .kv_dynamic, .attn, .attn_boundary, .mlp, .kv_static, .attn, .kv_static };
-        for (&set.convs, cf, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .form = f, .view = if (i == 5 or i == 6) .state else .out, .fault = if (i == 7) .one_slot else .none } };
+        const cf = [_]conv.Form{ .kv_static, .kv_dynamic, .attn, .attn_boundary, .mlp, .kv_static, .attn, .kv_static, .attn };
+        for (&set.convs, cf, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .form = f, .view = if (i == 5 or i == 6) .state else .out, .fault = if (i == 7) .one_slot else if (i == 8) .same_part else .none } };
         for (&set.rewinds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .long = i == 1 } };
         for (&set.top1s, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .short = i == 1 } };
         for (&set.races, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .late = i == 1 } };
         for (&set.tobfs, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .unpadded = i == 1 } };
         for (&set.words, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .short = i == 1 } };
+        set.loaded = true;
+        errdefer set.deinit();
         inline for (groups) |f| for (&@field(set, f)) |*x| try list.append(a, x.kernel());
     }
 

@@ -126,8 +126,8 @@ pub const Vision = struct {
     eps: f32, // layer_norm_eps
 };
 
-/// Checkpoint quantization declared by config.json: official ModelOpt NVFP4 or a kortexa EXL3 pack.
-pub const Quant = enum { modelopt_nvfp4, exl3_kortexa_v1 };
+/// Checkpoint quantization: ModelOpt NVFP4, standard EXL3, or kortexa EXL3.
+pub const Quant = enum { modelopt_nvfp4, exl3_kortexa_v1, exl3 };
 
 pub const Config = struct {
     text: Text,
@@ -400,7 +400,7 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
     return m;
 }
 
-/// Quantization in config.json must be ModelOpt NVFP4 or, on Inkling 2 Small, kortexa-inkling2-exl3-v1.
+/// Quantization in config.json must be ModelOpt NVFP4, standard EXL3, or, on Inkling 2 Small, kortexa-inkling2-exl3-v1.
 fn quantization(o: std.json.ObjectMap, small: bool, why: *Why) !Quant {
     const v = o.get("quantization_config") orelse return .modelopt_nvfp4;
     const q = if (v == .object) v.object else {
@@ -409,20 +409,23 @@ fn quantization(o: std.json.ObjectMap, small: bool, why: *Why) !Quant {
     };
     const method = text(q, "quant_method") orelse "";
     if (std.ascii.eqlIgnoreCase(method, "exl3")) {
-        if (!small) {
-            why.set("quantization_config: kortexa-inkling2-exl3-v1 is admitted for Inkling 2 Small only", .{});
-            return error.Quant;
+        if (q.get("format") != null) {
+            if (!small) {
+                why.set("quantization_config: kortexa-inkling2-exl3-v1 is admitted for Inkling 2 Small only", .{});
+                return error.Quant;
+            }
+            if (!std.mem.eql(u8, text(q, "format") orelse "", "kortexa-inkling2-exl3-v1")) {
+                why.set("quantization_config: EXL3 format must be kortexa-inkling2-exl3-v1", .{});
+                return error.Quant;
+            }
+            return .exl3_kortexa_v1;
         }
-        if (!std.mem.eql(u8, text(q, "format") orelse "", "kortexa-inkling2-exl3-v1")) {
-            why.set("quantization_config: EXL3 format must be kortexa-inkling2-exl3-v1", .{});
-            return error.Quant;
-        }
-        return .exl3_kortexa_v1;
+        return .exl3; // Standard EXL3 tensors carry their own records.
     }
     const ok = std.ascii.eqlIgnoreCase(method, "modelopt") and
         std.ascii.eqlIgnoreCase(text(q, "quant_algo") orelse "", "NVFP4");
     if (!ok) {
-        why.set("quantization_config: the loader reads ModelOpt NVFP4 experts (MXFP8 layers follow from their tensors)", .{});
+        why.set("quantization_config: the loader reads ModelOpt NVFP4 experts or an EXL3 pack", .{});
         return error.Quant;
     }
     return .modelopt_nvfp4;

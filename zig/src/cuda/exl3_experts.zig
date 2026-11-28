@@ -42,8 +42,8 @@ pub const Layer = struct {
     shared_input: bool = false, // the loader verified identical gate/up input scales across every expert
     gu_stride: usize = 0, // gate/up trellis row stride in tiles (0: contiguous per projection)
     limit: f32 = 0, // the SwiGLU clamp (0: none)
-    // 0: GLM's bf16 roundings (RED-SNOW), 1: fp32, 2: SwiGLU-OAI (Grouped only)
-    act_mode: i32 = 0, // 3: softcaps
+    // 0: GLM's bf16 roundings (the route RED-SNOW runs), 1: fp32, 2: SwiGLU-OAI (Grouped only), 3: softcaps
+    act_mode: i32 = 0,
     alpha: f32 = 0, // SwiGLU-OAI's sigmoid scale (act_mode 2)
     caps: [2]f32 = .{ 0, 0 }, // the gate and up softcaps (act_mode 3, Inkling 2)
 };

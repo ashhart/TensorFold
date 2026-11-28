@@ -658,3 +658,39 @@ against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` reb
 `Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
 The drafter's weights ship in Thinking Machines' Inkling 2 Small release under Apache-2.0. The kernels are TensorFold's
 own.
+
+## Inkling 2 EXL3 packs
+
+`zig/src/families/inkling2/exl3.zig` and `zig/src/families/inkling2/pack_weights.zig` read packs in the EXL3 format of
+[turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3) 1.x (MIT): the trellis layout, the `mul1` codebook
+and the per-tensor records. Packs carry the tensor names of an `inkling2` architecture added to exllamav3 for this
+model. The loader and its two-rank cuts are TensorFold's own.
+
+## Inkling 2 serving
+
+`zig/src/families/inkling2/forward.zig`, `engine.zig` and the files they call run the decoder in the layer order of
+Hugging Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): `Inkling2SlidingDecoderLayer`,
+`Inkling2FullDecoderLayer` and `Inkling2TextModel`. The two-rank engine, the lanes and the prompt path are TensorFold's
+own.
+
+## Inkling 2 Mini loop kernels
+
+`zig/kernels/cuda/inkling2/loop.cu` and `zig/src/families/inkling2/loop_ops.zig` compute the loop layers of Hugging Face
+transformers' `src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` at commit `046bdb8cc2ce`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): the cross-pass message from
+`Inkling2LoopMessageAttentionResidual`, the rank-64 gates from `Inkling2LoopMessageGate`, and their norms from
+`Inkling2LoopUnweightedRMSNorm`. The kernels, their fixed sum order and their rounding points are TensorFold's own.
+
+## Inkling 2 Mini serving
+
+`zig/src/families/inkling2/visits.zig` and the loop in `zig/src/families/inkling2/forward.zig` run the passes of
+`Inkling2LoopTextModel` from Hugging Face transformers'
+`src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` at commit `046bdb8cc2ce`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): the looped core's
+`Inkling2LoopSlidingLoopDecoderLayer` and `Inkling2LoopFullLoopDecoderLayer` visits and their cross-pass messages.
+The rows of the two cross-pass query tables a core layer reads (`queryRow` in `visits.zig`, used by
+`zig/src/families/inkling2/pack_weights.zig`) follow `Inkling2LoopModel.process_weights_after_loading` in vLLM's
+`vllm/models/inkling2/nvidia/loop.py` at commit `ab18334a4f60`
+([vllm-project/vllm](https://github.com/vllm-project/vllm), Apache-2.0). The visit plan and the two-rank runtime are
+TensorFold's own.

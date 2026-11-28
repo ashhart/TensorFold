@@ -176,7 +176,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .not_mine => {},
         .opened => |engine| return engine,
     }
-    const at = @import("cuda_alias.zig").which(o.model_type);
+    // Checkpoint-sensitive Mini routing goes first; the ordinary alias fallback remains.
+    const at = @import("cuda_alias.zig").pick(registry, a, io, o.model_type, o.dir) orelse @import("cuda_alias.zig").which(o.model_type);
     inline for (registry, 0..) |F, i| if (at == i) return openWith(F, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;

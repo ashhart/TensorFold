@@ -274,4 +274,6 @@ pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std
     b.step("test-family-copies-host", "Actual CUDA family copy policies through the lane core").dependOn(&family_copies.step);
     b.step("test-glm-copies-host", "GLM copy facts, confidence and costs through the production lane core").dependOn(&family_copies.step);
     step.dependOn(&family_copies.step);
+    // which engine opens an Inkling 2 Mini checkpoint: the two-rank runtime or main's one-GPU engine
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"inkling2_loop routing:"} })).step);
 }

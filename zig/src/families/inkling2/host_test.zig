@@ -5,6 +5,7 @@ test {
     _ = @import("exl3_config.zig");
     _ = @import("exl3_pack.zig");
     _ = @import("exl3_pack_test.zig");
+    _ = @import("loop_test.zig");
     _ = @import("names.zig");
     _ = @import("names_test.zig");
     _ = @import("plan.zig");
@@ -14,4 +15,5 @@ test {
     _ = @import("prompt.zig");
     _ = @import("template_test.zig");
     _ = @import("tokenizer_test.zig");
+    _ = @import("visits.zig");
 }

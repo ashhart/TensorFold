@@ -3,7 +3,7 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub, inkling2 };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
 pub const alias_retire = "1.4.0";
@@ -195,6 +195,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
     .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_INKLING2_RANK", .scope = .inkling2, .kind = .u32, .forms = "a whole rank index, 0 or 1 at two ranks (unset with TF_INKLING2_WORLD gives one rank)" },
+    .{ .name = "TF_INKLING2_WORLD", .scope = .inkling2, .kind = .u32, .min = 1, .forms = "a whole rank count, 2 on CUDA (unset with TF_INKLING2_RANK gives one rank)" },
     .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_MINIMAX_GRAPHS", .scope = .minimax_m3, .kind = .flag, .forms = "0 or 1 (1 records one-stream decode verify windows as CUDA graphs; default 0)" },
     .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
