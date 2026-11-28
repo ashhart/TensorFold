@@ -38,9 +38,8 @@ pub fn from(a: std.mem.Allocator, g: qsa.Geometry, texts: [6][]const u8) ![]u8 {
     const mem = arena.allocator();
     var body: [6][]const u8 = undefined;
     for (texts, old_names, names, 0..) |text, old, name, i| {
-        body[i] = try edit.once(mem, try edit.function(text, old), old, name);
         const threads: usize = if (i == 3) 1024 else if (i == 1) 128 else 256;
-        body[i] = try edit.reserve(mem, body[i], "[[kernel]]", threads);
+        body[i] = try edit.once(mem, try edit.reservedFunction(mem, text, old, "[[kernel]]", threads), old, name);
     }
     body[0] = try integer(mem, body[0], "NQ", 24, g.heads);
     body[0] = try integer(mem, body[0], "NKV", 2, g.kv);

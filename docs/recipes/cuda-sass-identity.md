@@ -39,9 +39,11 @@ nvcc 13.0.88 also varied `nemotron_route.cu`. Its observed `tf_moe_router_tiles`
 193, 199 or 200 at sm_80 and 238 at sm_86, rather than 182. Disabling randomization produced 100 identical
 compute_80 compiles with nvcc 13.0.88.
 
-With randomization enabled, nvcc 13.3.73 produced other `tf_moe_router_tiles` forms in 8 of 100 `compute_80`
+With randomization enabled, nvcc 13.3.73 produced other `tf_moe_router_tiles` PTX forms in 8 of 100 `compute_80`
 compiles and 9 of 50 `compute_86` compiles on GB10. The `compute_80` alternates used 182 or 193 registers; all nine
-`compute_86` alternates used 182, the common form's count, so a register count alone does not establish stability.
+`compute_86` alternates used 182, the common form's count. Assembled with the same release's ptxas, each alternate
+that kept the common count gave the common cubin byte for byte, so the image changed in 1 of 100 `compute_80` and
+0 of 50 `compute_86` compiles. In every observed form, with either release, the image changed only with the count.
 The same 13.3.73 wheels on x86-64 gave one form in 100 and in 50; the earlier x86-64 nvcc 13.0.88 control did too.
 The instability is not 13.0-only: it appeared on GB10 with both compiler versions, not on those x86-64 controls.
 
