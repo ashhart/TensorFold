@@ -214,7 +214,6 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Ripple streams than asked (each stream's caches are allocated at load): lower --parallel or --context, serve --parallel auto, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
         error.SegmentsUnsupported => "--segments: Ripple on CUDA runs its prompt chunks one after another: serve without --segments",
         error.NoDraftHead => "Ripple on CUDA has no draft head: drafts come from the prompt's own text only",
-        error.StructuresUnsupported => "structured output is not built for Ripple on CUDA yet",
         error.CapturedKernels => "Ripple runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.BuiltWithoutKernels => "this build carries no CUDA kernel images: build with -Dnvcc",
         error.RicursiveCudaNeedsNvfp4 => "Ripple on CUDA serves the NVFP4 release (ModelOpt W4A16 MLPs, bf16 attention): the BF16 checkpoint's 130 GB do not fit GB10",
@@ -231,10 +230,10 @@ test "ricursive cuda native: a reply thinks or answers bare, with no thinking bu
 }
 
 test "ricursive cuda native: every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoStreamFits, error.ParallelPastRound, error.ParallelPastMemory, error.SegmentsUnsupported, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.BuiltWithoutKernels, error.RicursiveCudaNeedsNvfp4, error.UnsupportedRicursiveCudaShape, error.Unimplemented }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoStreamFits, error.ParallelPastRound, error.ParallelPastMemory, error.SegmentsUnsupported, error.NoDraftHead, error.CapturedKernels, error.BuiltWithoutKernels, error.RicursiveCudaNeedsNvfp4, error.UnsupportedRicursiveCudaShape, error.Unimplemented }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
-    for ([_]anyerror{ error.OutOfMemory, error.SamplingUnsupported, error.LogprobsUnsupported, error.WindowTooWide }) |e| {
+    for ([_]anyerror{ error.OutOfMemory, error.SamplingUnsupported, error.LogprobsUnsupported, error.StructuresUnsupported, error.InvalidGrammarMasks, error.WindowTooWide }) |e| {
         try std.testing.expect(explain(null, e) == null);
     }
 }
