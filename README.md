@@ -86,6 +86,7 @@ See [the chat command](docs/chat.md) for its flags and the serve flags it passes
   Cortheon mode, every serve flag, the Mac app and TensorFold Starlight.
 - [Supported models](docs/supported-models.md): which checkpoints run on which machines, models on disk and model discovery.
 - [Living Weights (experimental)](docs/living-weights.md): teach a running model new facts in its own weights.
+- [Control vectors](docs/control-vectors.md): steer Qwen3.8-27B on Metal with `--glp FILE` and `--glp-alpha ALPHA`, the vector file's format and how one is brought.
 - [Installation runbook](RUNBOOK.md): macOS and CUDA installation, paired Metal serving and troubleshooting.
 - [Windows](docs/WINDOWS.md), [TensorFold Web](docs/web.md) and [the Mac app](app/README.md).
 - [API](docs/api.md), [Cortheon mode](docs/cortheon.md) and [known issues](docs/known-issues.md).

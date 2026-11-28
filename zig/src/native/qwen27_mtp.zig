@@ -419,3 +419,21 @@ pub const Mtp = struct {
         return .{ .buffer = x.stage };
     }
 };
+
+test "qwen27 MTP: its own block does not reapply the target's last-layer direction" {
+    // A control vector that covers the target's last block (63 of 64), as the format allows.
+    var dirs = [_]mtl.Buffer{.{ .id = @ptrFromInt(0x5150) }};
+    var ids = [_]u32{63};
+    var cover: [64]?usize = @splat(null);
+    cover[63] = 0;
+    var plan = q.steer.Plan{ .allocator = std.testing.allocator, .alpha = 0.5, .hidden = 1, .ids = &ids, .dirs = &dirs, .cover = &cover };
+    var m: q.model.Model = undefined;
+    m.steer = &plan;
+    const fake = Ref{ .buffer = .{ .id = @ptrFromInt(0x5160) } };
+    const s = q.mtp.headStages(&m, 1, undefined, .all, null, fake, fake, fake);
+    // The target's own stages read the direction; the head's must not, or layer 63 is added twice.
+    var target = s;
+    target.steer = true;
+    try std.testing.expect(target.direction(63) != null);
+    try std.testing.expect(s.direction(63) == null);
+}

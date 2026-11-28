@@ -9,6 +9,7 @@ const wts = @import("gpu_weights.zig");
 const quant = @import("quant_gpu.zig");
 const glue = @import("glue_gpu.zig");
 const moe_gpu = @import("moe_gpu.zig");
+const steer = @import("steer.zig");
 const Frame = @import("gpu_frame.zig").Frame;
 const ane_mlp = @import("ane_mlp.zig");
 const idle_release = @import("idle_release.zig");
@@ -37,6 +38,8 @@ pub const Model = struct {
     ane: ?*ane_mlp.Share = null,
     /// A deferred share still needs the checkpoint mappings, until loadShare decides and closes them.
     share_pending: bool = false,
+    /// The control vector in force, when one was loaded at open; null: the model runs unsteered.
+    steer: ?*steer.Plan = null,
     /// widths.Widths.tag: 0 for a uniform 4-bit g64 checkpoint.
     widths_tag: u64 = 0,
     /// Opt-in prepared extents; checkpoint aliases and task/KV/MTP/ANE storage are intentionally excluded.
@@ -186,6 +189,7 @@ pub const Model = struct {
         errdefer m.frame.deinit();
         allocation.end();
         m.ane = null;
+        m.steer = null;
         m.share_pending = true;
         if (!later) try m.finishShare(null, share_fits);
         return m;
@@ -249,6 +253,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.steer) |plan| plan.deinit();
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
         if (m.mhc) |*p| p.deinit();

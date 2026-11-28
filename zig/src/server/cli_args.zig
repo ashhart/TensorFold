@@ -115,4 +115,5 @@ pub const Args = struct {
     vision_image_tokens_set: bool = false, // --vision-image-tokens given: a family's own default no longer applies
     vision_image_share: api.ImageShare = .request, // --vision-image-share: the request's own count, or the fixed share
     vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
+    glp: ?@import("glp_startup.zig").Vec = null, // --glp: the control vector file and the strength in force
 };
