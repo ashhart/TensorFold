@@ -327,7 +327,7 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
         return 2;
     }
 
-    const out_dir = if (o.out_dir) |d| try expandHome(ctx.a, ctx.env, d) else try defaultOutDir(ctx.a, o.model, expanded, from_repo);
+    const out_dir = if (o.out_dir) |d| try expandHome(ctx.a, ctx.env, d) else try defaultOutDir(ctx.a, ctx.io, o.model, expanded, from_repo);
     var family = o.family;
     var residual = o.residual;
     var model_type: []const u8 = "unknown";
@@ -355,7 +355,7 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
     } else if (family.? == .flashnext) {
         try argv.appendSlice(ctx.a, &.{ "--ple-bits", o.ple_bits });
     } else if (family.? == .generic) {
-        try argv.appendSlice(ctx.a, &.{ "--profile", o.profile, "--head-bits", o.head_bits });
+        try argv.appendSlice(ctx.a, &.{ "--profile", o.profile, "--residual", residual.name(), "--head-bits", o.head_bits });
     }
     if (o.bits) |b| try argv.appendSlice(ctx.a, &.{ "--bits", b });
     if (o.target_gib) |g| try argv.appendSlice(ctx.a, &.{ "--target-gib", g });
@@ -446,11 +446,12 @@ fn parsePosF64(s: []const u8) ?f64 {
     return if (std.math.isFinite(v) and v > 0.0 and v < max_gib) v else null;
 }
 
-fn splitRepoSpec(spec: []const u8) ?struct { repo: []const u8, rev: []const u8 } {
+fn splitRepoSpec(spec: []const u8) ?struct { repo: []const u8, rev: ?[]const u8 } {
     const at = std.mem.indexOfScalar(u8, spec, '@');
     const repo = if (at) |idx| spec[0..idx] else spec;
-    const rev = if (at) |idx| spec[idx + 1 ..] else "main";
-    if (!hub.isRepoIdLike(repo) or !hub.revisionOk(rev)) return null;
+    const rev: ?[]const u8 = if (at) |idx| spec[idx + 1 ..] else null;
+    if (!hub.isRepoIdLike(repo)) return null;
+    if (rev) |r| if (!hub.revisionOk(r)) return null;
     return .{ .repo = repo, .rev = rev };
 }
 
@@ -460,13 +461,14 @@ fn expandHome(a: Allocator, env: ?*const Environ, path: []const u8) ![]const u8 
     return std.fs.path.join(a, &.{ home, path[2..] });
 }
 
-fn defaultOutDir(a: Allocator, raw: []const u8, expanded: []const u8, from_repo: bool) ![]const u8 {
+fn defaultOutDir(a: Allocator, io: std.Io, raw: []const u8, expanded: []const u8, from_repo: bool) ![]const u8 {
     if (from_repo) {
         const spec = splitRepoSpec(raw).?;
         const slash = std.mem.indexOfScalar(u8, spec.repo, '/').?;
         return std.fmt.allocPrint(a, "./{s}-TFQ3", .{spec.repo[slash + 1 ..]});
     }
-    return std.fmt.allocPrint(a, "{s}-TFQ3", .{std.mem.trimEnd(u8, expanded, "/\\")});
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", a);
+    return std.fmt.allocPrint(a, "{s}-TFQ3", .{try std.fs.path.resolveAlloc(a, &.{ cwd, expanded })});
 }
 
 /// Reads root `model_type` or `text_config.model_type` from config.json.
@@ -492,7 +494,7 @@ fn isFile(io: std.Io, path: []const u8) bool {
 }
 
 fn defaultPull(ctx: *const Context, spec: []const u8) anyerror!u8 {
-    return pull.run(ctx.a, ctx.io, ctx.out, ctx.err, ctx.env, ctx.cache_override, spec);
+    return pull.runForConversion(ctx.a, ctx.io, ctx.out, ctx.err, ctx.env, ctx.cache_override, spec);
 }
 
 fn defaultFindConverter(ctx: *const Context, explicit: ?[]const u8) anyerror!?[]const u8 {

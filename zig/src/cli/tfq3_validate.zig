@@ -51,9 +51,9 @@ pub fn shard(a: std.mem.Allocator, io: std.Io, path: []const u8, file_size: u64)
     var head: [@sizeOf(glm.LayerHeader)]u8 = undefined;
     if ((try f.readPositionalAll(io, &head, 0)) != head.len) return error.Tfq3Truncated;
     const h = std.mem.bytesToValue(glm.LayerHeader, &head);
-    const named_layer = try filenameLayer(path);
+    const named_layer: ?u32 = if (std.mem.eql(u8, std.fs.path.basename(path), "mtp_00.tffpw")) null else try filenameLayer(path);
     if (h.hidden_size == glm.expert_hidden and h.moe_inter == glm.expert_inter) {
-        const want: glm.LayerWant = .{ .layer = named_layer, .experts = h.num_experts, .hidden = h.hidden_size, .inter = h.moe_inter };
+        const want: glm.LayerWant = .{ .layer = named_layer orelse return error.Tfq3Layer, .experts = h.num_experts, .hidden = h.hidden_size, .inter = h.moe_inter };
         var layout = try glm.layerHeader(&head, file_len, want);
         const meta = try readAt(a, io, f, layout.meta.off, layout.meta.len);
         defer a.free(meta);
