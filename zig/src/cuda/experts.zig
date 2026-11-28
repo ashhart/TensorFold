@@ -366,12 +366,12 @@ pub const Nvfp4Experts = struct {
         pub const prompt = [3][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down" };
         pub const fact = [2][:0]const u8{ "tf_nvfp4_fact_swiglu", "tf_nvfp4_fact_down_f32" };
         pub const pair_prompt = [2][:0]const u8{ "tf_nvfp4_pair_prompt_swiglu", "tf_nvfp4_pair_prompt_down" };
-        pub const fact128 = [2][:0]const u8{ "tf_nvfp4_fact128_swiglu", "tf_nvfp4_fact128_down_f32" };
+        pub const fact128 = @import("experts_fact128.zig").symbols;
     };
 
     /// The fact entries' WN warps a CTA (32-column blocks): SwiGLU gate-up, fp32 down; their parts, 2 and 1.
     pub const fact_wn = [2]usize{ 4, 8 };
-    pub const fact128_wn = [2]usize{ 4, 4 }; // WM=2, RT=4: 128 rows and 256 threads for both entries
+    pub const fact128_wn = @import("experts_fact128.zig").wn;
 
     /// The prompt entries' warps (32-column blocks) a CTA: relu^2 up, SwiGLU gate-up, down (GB10's fastest tiles).
     pub const prompt_wn = [3]usize{ 8, 4, 8 };
@@ -421,10 +421,7 @@ pub const Nvfp4Experts = struct {
             f.* = try mod.function(name);
             try f.allowDynamicShared(prompt_layout.promptSmem(parts, wn));
         }
-        for (symbols.fact128, &e.fact128_fns, [2]usize{ 2, 1 }, fact128_wn) |name, *f, parts, wn| {
-            f.* = try mod.function(name);
-            try f.allowDynamicShared(prompt_layout.promptSmemWM(parts, 2, wn));
-        }
+        try @import("experts_fact128.zig").load(&mod, &e);
         return e;
     }
 
