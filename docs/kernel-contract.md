@@ -755,6 +755,14 @@ is 1, with 2^15, 3/16 and -2^15 at three positions all rows see and 1/16 elsewhe
 exact (`ernie5_5-hca-attn`; three controls: the sinks left out, the sinks times the scale, and the compressed rows not
 counted).
 
+CUDA also checks ERNIE 5.5's VHA (`ernie5_5/hca.cu`, `tf_ernie55_vha`): each dim of a token's 64 attention heads mixed as
+o + V (U^T o) at rank 16, z = U^T o over the heads and V z in fp32, then o added and the sum rounded to bf16 once. Each
+output must be within the float64 bound of the host's (`ernie5_5/hca.zig`, whose host test holds it to the matrix form
+and to the fold I + V U^T), at a decode token, four tokens and a prompt chunk of 512 dims, four tokens of DSA's 256, and
+widths at and around a block of 256 threads; gate 4 sets U to 1 and V to 1/16, with 2^20, 24 and -2^20 at a dim's first
+three heads and 1/4 at the rest, so z is 39.25 and its sums exact, where bf16's lose the 24 to 2^20 and fp16's overflow
+(`ernie5_5-vha`; two controls: o left out, and U and V read rank-major).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

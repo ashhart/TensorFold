@@ -1,4 +1,4 @@
-// ERNIE 5.5's HCA compressor: a block's 128 tokens pooled per channel, the RMSNorm, GPT-J's rope at the block's start.
+// ERNIE 5.5's HCA: the compressor (a block's 128 tokens pooled per channel, RMSNorm, GPT-J's rope) and VHA's head mix.
 
 #include <cuda_bf16.h>
 
@@ -67,6 +67,42 @@ __device__ __forceinline__ void compress(const float* __restrict__ st, long long
     *reinterpret_cast<__nv_bfloat162*>(out + row * os + 2 * t) = __floats2bfloat162_rn(x0, x1);
 }
 
+constexpr int VH = 64, VR = 16;
+
+enum VhaFault { mix, no_skip, transposed };
+
+// Token i / d's dim i % d: z = U^T o, then V z + o_h, fmaf in order, bf16 once (controls: no o_h; U and V as [16][64]).
+template <VhaFault F>
+__device__ __forceinline__ void vha(const __nv_bfloat16* __restrict__ o, const __nv_bfloat16* __restrict__ u,
+                                    const __nv_bfloat16* __restrict__ v, __nv_bfloat16* __restrict__ out,
+                                    long long cols, int d) {
+    __shared__ float su[VH * VR], sv[VH * VR];
+    for (int k = threadIdx.x; k < VH * VR; k += blockDim.x) {
+        const int at = F == transposed ? (k % VR) * VH + k / VR : k;
+        su[k] = __bfloat162float(u[at]);
+        sv[k] = __bfloat162float(v[at]);
+    }
+    __syncthreads();
+    const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= cols) return;
+    const long long base = i / d * VH * d + i % d;
+    float z[VR];
+#pragma unroll
+    for (int r = 0; r < VR; ++r) z[r] = 0.0f;
+    for (int h = 0; h < VH; ++h) {
+        const float a = __bfloat162float(o[base + static_cast<long long>(h) * d]);
+#pragma unroll
+        for (int r = 0; r < VR; ++r) z[r] = fmaf(su[h * VR + r], a, z[r]);
+    }
+    for (int h = 0; h < VH; ++h) {
+        float y = 0.0f;
+#pragma unroll
+        for (int r = 0; r < VR; ++r) y = fmaf(sv[h * VR + r], z[r], y);
+        const long long at = base + static_cast<long long>(h) * d;
+        out[at] = __float2bfloat16_rn(F == no_skip ? y : __fadd_rn(y, __bfloat162float(o[at])));
+    }
+}
+
 }  // namespace ernie55h
 
 // 128-token blocks (kv then score, fp32, ts apart), ape, w, freq [32], row r at pos[0] + 128 r: bf16 rows os apart.
@@ -93,4 +129,27 @@ extern "C" __global__ void __launch_bounds__(256)
                                               const int* __restrict__ pos, __nv_bfloat16* __restrict__ out,
                                               long long os, float eps) {
     ernie55h::compress<ernie55h::last_position>(st, ts, ape, w, freq, pos, out, os, eps);
+}
+
+// cols = tokens x d columns of bf16 [tokens][64][d], mixed by U and V (bf16 [64][16]) into out, 256 a block.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ernie55_vha(const __nv_bfloat16* __restrict__ o, const __nv_bfloat16* __restrict__ u,
+                   const __nv_bfloat16* __restrict__ v, __nv_bfloat16* __restrict__ out, long long cols, int d) {
+    ernie55h::vha<ernie55h::mix>(o, u, v, out, cols, d);
+}
+
+// The contract's planted control: VHA without o_h, the identity of m = I + V U^T.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_vha_no_skip(const __nv_bfloat16* __restrict__ o, const __nv_bfloat16* __restrict__ u,
+                               const __nv_bfloat16* __restrict__ v, __nv_bfloat16* __restrict__ out, long long cols,
+                               int d) {
+    ernie55h::vha<ernie55h::no_skip>(o, u, v, out, cols, d);
+}
+
+// The contract's planted control: U and V read as [16][64], rank-major.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_vha_transposed(const __nv_bfloat16* __restrict__ o, const __nv_bfloat16* __restrict__ u,
+                                  const __nv_bfloat16* __restrict__ v, __nv_bfloat16* __restrict__ out,
+                                  long long cols, int d) {
+    ernie55h::vha<ernie55h::transposed>(o, u, v, out, cols, d);
 }

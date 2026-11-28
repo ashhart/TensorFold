@@ -116,6 +116,31 @@ pub fn attend(q: *const [head_dim]f64, kv: []const f64, sink: f64, scale: f64, s
     }
 }
 
+/// VHA's heads and rank (vLLM's VHAPostMix, VHA_RANK): U and V are bf16 [heads][rank].
+pub const vha_heads = 64;
+pub const vha_rank = 16;
+
+/// One dim of a token's heads, vLLM's TP form: o + V (U^T o), each z_r = sum_h U_hr o_h first, then o_h added last.
+pub fn vha(o: *const [vha_heads]f64, u: *const [vha_heads * vha_rank]f64, v: *const [vha_heads * vha_rank]f64, sum: anytype, t: *[vha_heads]f64, out: *[vha_heads]f64) void {
+    var z: [vha_rank]f64 = undefined;
+    for (&z, 0..) |*zr, r| {
+        for (t, o, 0..) |*x, a, i| x.* = u[i * vha_rank + r] * a;
+        zr.* = sum.of(t);
+    }
+    for (out, 0..) |*y, i| {
+        for (t[0..vha_rank], &z, 0..) |*x, b, r| x.* = v[i * vha_rank + r] * b;
+        t[vha_rank] = o[i];
+        y.* = sum.of(t[0 .. vha_rank + 1]);
+    }
+}
+
+/// rows tokens of d dims: a width in (0, 2^31) and a grid of 256-thread blocks that fits, which keeps offsets in i64.
+pub fn vhaCheck(rows: usize, d: usize) error{HcaShape}!void {
+    if (d == 0 or d > std.math.maxInt(i32)) return error.HcaShape;
+    const cols = std.math.mul(u64, rows, d) catch return error.HcaShape;
+    if (cols > @as(u64, std.math.maxInt(i32)) * 256) return error.HcaShape;
+}
+
 /// Float64 sums in order.
 pub const exact = struct {
     pub fn of(_: @This(), t: []const f64) f64 {

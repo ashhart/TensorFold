@@ -108,6 +108,7 @@ pub const usage =
     \\  ernie5_5-mhc              ERNIE 5.5's mHC: pre side (mixes, Sinkhorn, collapse, norm), post side, hc_head, broadcast: contract gates 1-4, controls red
     \\  ernie5_5-hca              ERNIE 5.5's HCA compressor (a block's softmax pool, RMSNorm, GPT-J RoPE): contract gates 1-4, controls red
     \\  ernie5_5-hca-attn         ERNIE 5.5's HCA attention (window and compressed rows, fp32 sinks): contract gates 1-4, controls red
+    \\  ernie5_5-vha              ERNIE 5.5's VHA (the attention output's 64 heads mixed at rank 16): contract gates 1-4, controls red
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)

@@ -212,3 +212,92 @@ test "check refuses strides past i64, and ts or os whose furthest offset at thes
     try std.testing.expectError(error.HcaShape, h.check(.{ .rows = 2, .ts = ts }));
     try std.testing.expectError(error.HcaShape, h.check(.{ .rows = 2, .os = os }));
 }
+
+/// vLLM's TP form as matrices, written apart from hca.vha: z = U^T o over the heads, then V z + o.
+fn vendorVha(o: []const f64, u: []const f64, v: []const f64, out: []f64) void {
+    var z: [h.vha_rank]f64 = @splat(0);
+    for (&z, 0..) |*zr, r| for (o, 0..) |a, i| {
+        zr.* += u[i * h.vha_rank + r] * a;
+    };
+    for (out, 0..) |*y, i| {
+        var s: f64 = 0;
+        for (z, 0..) |b, r| s += v[i * h.vha_rank + r] * b;
+        y.* = s + o[i];
+    }
+}
+
+fn randomVha(seed: u64, o: []f64, u: []f64, v: []f64) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    for (o) |*x| x.* = rng.float(f64) * 2 - 1;
+    for (u) |*x| x.* = (rng.float(f64) * 2 - 1) * 0.25;
+    for (v) |*x| x.* = (rng.float(f64) * 2 - 1) * 0.25;
+}
+
+test "VHA is vLLM's TP form: o + V (U^T o) over the 64 heads at rank 16, each dim alone" {
+    var o: [h.vha_heads]f64 = undefined;
+    var u: [h.vha_heads * h.vha_rank]f64 = undefined;
+    var v: [h.vha_heads * h.vha_rank]f64 = undefined;
+    var t: [h.vha_heads]f64 = undefined;
+    var got: [h.vha_heads]f64 = undefined;
+    var want: [h.vha_heads]f64 = undefined;
+    for (0..8) |seed| {
+        randomVha(seed, &o, &u, &v);
+        h.vha(&o, &u, &v, h.exact, &t, &got);
+        vendorVha(&o, &u, &v, &want);
+        for (got, want) |g, w| try std.testing.expectApproxEqAbs(w, g, 1e-12);
+    }
+}
+
+test "VHA is the fold m = I + V U^T applied to o, in exact arithmetic (the fold vLLM forms in bf16 at TP 1)" {
+    var o: [h.vha_heads]f64 = undefined;
+    var u: [h.vha_heads * h.vha_rank]f64 = undefined;
+    var v: [h.vha_heads * h.vha_rank]f64 = undefined;
+    var t: [h.vha_heads]f64 = undefined;
+    var got: [h.vha_heads]f64 = undefined;
+    randomVha(11, &o, &u, &v);
+    h.vha(&o, &u, &v, h.exact, &t, &got);
+    for (got, 0..) |g, i| {
+        var s: f64 = 0;
+        for (o, 0..) |a, k| {
+            var m: f64 = if (i == k) 1 else 0;
+            for (0..h.vha_rank) |r| m += v[i * h.vha_rank + r] * u[k * h.vha_rank + r];
+            s += m * a;
+        }
+        try std.testing.expectApproxEqAbs(s, g, 1e-12);
+    }
+}
+
+test "VHA leaves o when U or V is zero, and one rank's U e_3 and V e_9 add head 3 to head 9" {
+    var o: [h.vha_heads]f64 = undefined;
+    var u: [h.vha_heads * h.vha_rank]f64 = undefined;
+    var v: [h.vha_heads * h.vha_rank]f64 = undefined;
+    var t: [h.vha_heads]f64 = undefined;
+    var got: [h.vha_heads]f64 = undefined;
+    randomVha(5, &o, &u, &v);
+    @memset(&u, 0);
+    h.vha(&o, &u, &v, h.exact, &t, &got);
+    try std.testing.expectEqualSlices(f64, &o, &got);
+    randomVha(5, &o, &u, &v);
+    @memset(&v, 0);
+    h.vha(&o, &u, &v, h.exact, &t, &got);
+    try std.testing.expectEqualSlices(f64, &o, &got);
+    @memset(&u, 0);
+    u[3 * h.vha_rank + 7] = 1;
+    v[9 * h.vha_rank + 7] = 1;
+    h.vha(&o, &u, &v, h.exact, &t, &got);
+    for (got, o, 0..) |g, a, i| try std.testing.expectEqual(if (i == 9) a + o[3] else a, g);
+}
+
+test "vhaCheck refuses a width of 0 or past i32, columns past the grid of 256-thread blocks, and rows x d overflowing" {
+    const no = error.HcaShape;
+    try h.vhaCheck(0, 512);
+    try h.vhaCheck(4, 256);
+    try h.vhaCheck(65536, 512);
+    try std.testing.expectError(no, h.vhaCheck(4, 0));
+    try std.testing.expectError(no, h.vhaCheck(0, @as(usize, std.math.maxInt(i32)) + 1));
+    // the most 512-wide rows the grid holds, then one more
+    try h.vhaCheck(@as(usize, std.math.maxInt(i32)) / 2, 512);
+    try std.testing.expectError(no, h.vhaCheck(@as(usize, std.math.maxInt(i32)) / 2 + 1, 512));
+    try std.testing.expectError(no, h.vhaCheck(std.math.maxInt(usize), 2));
+}

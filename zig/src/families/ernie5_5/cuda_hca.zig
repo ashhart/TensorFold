@@ -1,4 +1,4 @@
-//! ERNIE 5.5's HCA kernels: the C128 compressor (ernie5_5/hca.cu), the attention's chunk tiles (hca_attn.cu).
+//! ERNIE 5.5's HCA kernels: the C128 compressor and VHA (ernie5_5/hca.cu), the attention's chunk tiles (hca_attn.cu).
 const cuda = @import("cuda");
 pub const hca = @import("hca.zig");
 
@@ -48,11 +48,12 @@ pub fn attendWith(f: cuda.Function, m: *const cuda.mla.Mla, s: cuda.Stream, q: u
 pub const Hca = struct {
     mod: cuda.Module,
     compress_fn: cuda.Function,
+    vha_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Hca {
         var mod = try cuda.Module.load(d, cuda.kernels.ernie5_5_hca);
         errdefer mod.unload();
-        return .{ .mod = mod, .compress_fn = try mod.function("tf_ernie55_hca_compress") };
+        return .{ .mod = mod, .compress_fn = try mod.function("tf_ernie55_hca_compress"), .vha_fn = try mod.function("tf_ernie55_vha") };
     }
 
     pub fn unload(x: *Hca) void {
@@ -62,6 +63,11 @@ pub const Hca = struct {
     /// Blocks of 128 token rows (kv, score fp32), ape f32 [128][512], bf16 w, freq [32], pos: bf16 rows (hca.compress).
     pub fn compress(x: *const Hca, s: cuda.Stream, st: u64, ape: u64, w: u64, freq: u64, pos: u64, out: u64, sh: hca.Shape, eps: f32) !void {
         try launch(x.compress_fn, s, st, ape, w, freq, pos, out, sh, eps);
+    }
+
+    /// rows tokens of 64 heads at d dims (bf16 [rows][64][d]) mixed by U and V (bf16 [64][16]): bf16 out (hca.vha).
+    pub fn vha(x: *const Hca, s: cuda.Stream, o: u64, u: u64, v: u64, out: u64, rows: usize, d: usize) !void {
+        try vhaWith(x.vha_fn, s, o, u, v, out, rows, d);
     }
 };
 
@@ -76,4 +82,16 @@ pub fn launch(f: cuda.Function, s: cuda.Stream, st: u64, ape: u64, w: u64, freq:
     a.add(@as(i64, @intCast(sh.os)));
     a.add(eps);
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(sh.rows) }, .block = .{ .x = threads } }, s, &a);
+}
+
+/// `f`, tf_ernie55_vha or an entry of the image with its arguments, a column (a token's dim) a thread, 256 a block.
+pub fn vhaWith(f: cuda.Function, s: cuda.Stream, o: u64, u: u64, v: u64, out: u64, rows: usize, d: usize) !void {
+    try hca.vhaCheck(rows, d);
+    const cols = rows * d;
+    if (cols == 0) return;
+    var a: cuda.Args = .{};
+    inline for (.{ o, u, v, out }) |p| a.add(p);
+    a.add(@as(i64, @intCast(cols)));
+    a.add(@as(c_int, @intCast(d)));
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((cols + threads - 1) / threads) }, .block = .{ .x = threads } }, s, &a);
 }
