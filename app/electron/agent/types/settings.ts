@@ -157,6 +157,8 @@ export interface Settings {
   // Native notification when a run finishes, fails or needs approval while the window is in the
   // background. Optional: absent means on.
   notifyRuns?: boolean
+  // System sound when a foreground run finishes. Optional: absent means off.
+  completionSound?: boolean
   // SSH remote workspaces: host library + pinned server keys (no secrets stored)
   sshHosts: SshHost[]
   trustedSshHostKeys: TrustedSshHostKey[]

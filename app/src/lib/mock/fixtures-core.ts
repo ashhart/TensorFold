@@ -233,6 +233,7 @@ mockState.settings = {
   pointerCursors: true,
   doomTodos: true,
   notifyRuns: true,
+  completionSound: false,
   sshHosts: [],
   trustedSshHostKeys: [],
 }

@@ -93,6 +93,7 @@
   "Planning only": "Chỉ lập kế hoạch",
   "Planning only.": "Chỉ lập kế hoạch.",
   "Playback speed": "Tốc độ phát",
+  "Play a system sound when a run finishes while TensorFold is focused.": "Phát âm thanh hệ thống khi lượt chạy hoàn tất và TensorFold đang là cửa sổ được focus.",
   "Plugin categories": "Nhóm plugin",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "Đăng ký không cách ly mã hay xác nhận nạp thành công. Xem nguồn trước khi tin cậy.",
   "Plugins": "Plugin",

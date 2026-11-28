@@ -1,8 +1,10 @@
+import { shell } from 'electron'
 import type { AgentEvent } from '../../agent/types'
+import { store } from '../state'
 
 // Native attention for thread runs: a notification when a run finishes, fails or needs approval
 // while the window is in the background, and a dock badge counting threads that need the user.
-// The decisions are pure; the host supplies the Electron sinks.
+// Notification and badge sinks stay injected; completion playback has a test seam.
 
 export type AttentionKind = 'finished' | 'failed' | 'approval' | 'question'
 
@@ -36,9 +38,11 @@ export function badgeText(count: number): string {
 export interface RunAttentionDeps {
   isIncognito?(threadId: string): boolean
   enabled(): boolean
+  completionSoundEnabled?(): boolean
   focused(): boolean
   supported(): boolean
   threadTitle(threadId: string): string | null | undefined
+  playCompletionSound?(): void
   notify(notice: AttentionNotice): void
   setBadge(text: string): void
 }
@@ -92,10 +96,13 @@ export function createRunAttention(deps: RunAttentionDeps) {
         if (notifiedRuns.has(key)) return
         notifiedRuns.add(key)
         if (notifiedRuns.size > 500) notifiedRuns.delete(notifiedRuns.values().next().value as string)
-        const title = deps.threadTitle(event.threadId) ?? null
+        const title = deps.threadTitle(event.threadId)
+        if (event.type === 'done' && deps.focused() && title !== undefined && (deps.completionSoundEnabled?.() ?? store.settings?.completionSound === true)) {
+          try { if (deps.playCompletionSound) deps.playCompletionSound(); else shell.beep() } catch { /* system sounds are best effort */ }
+        }
         maybeNotify(event.type === 'done'
-          ? attentionNotice('finished', event.threadId, title)
-          : attentionNotice('failed', event.threadId, title, event.message))
+          ? attentionNotice('finished', event.threadId, title ?? null)
+          : attentionNotice('failed', event.threadId, title ?? null, event.message))
       }
     },
     // Fired only when an approval is genuinely waiting (not auto-resolved by a saved rule).

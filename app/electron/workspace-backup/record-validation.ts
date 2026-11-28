@@ -187,10 +187,10 @@ export function validatePortableData(data: WorkspaceBackupData): void {
   }
   for (const draft of data.drafts) { backupFields(draft, ['id', 'scope', 'snapshot']); backupId(draft.id); validateComposerDraftSnapshot(draft.snapshot); if (draft.scope !== undefined) { const scope = validateComposerDraftScope(draft.scope); if (scope.incognito) invalidRecord() } }
   const settings = data.settings
-  backupFields(settings, ['uiPreferences', 'modelHelperDefaults', 'theme', 'themeMode', 'themePreset', 'desktopMode', 'desktopOnboardingComplete', 'activeModel', 'activeProviderId', 'engineModelProfiles', 'notifyRuns', 'showGitInitPrompt', 'confidentialTerms'])
+  backupFields(settings, ['uiPreferences', 'modelHelperDefaults', 'theme', 'themeMode', 'themePreset', 'desktopMode', 'desktopOnboardingComplete', 'activeModel', 'activeProviderId', 'engineModelProfiles', 'notifyRuns', 'completionSound', 'showGitInitPrompt', 'confidentialTerms'])
   optionalText(settings, ['themeMode', 'themePreset']); if (settings.theme !== undefined) enumValue(settings.theme, ['light', 'dark', 'system'])
   if (settings.desktopMode !== undefined) enumValue(settings.desktopMode, ['minimal', 'full'])
-  for (const key of ['desktopOnboardingComplete', 'notifyRuns', 'showGitInitPrompt']) if (settings[key] !== undefined) bool(settings[key])
+  for (const key of ['desktopOnboardingComplete', 'notifyRuns', 'completionSound', 'showGitInitPrompt']) if (settings[key] !== undefined) bool(settings[key])
   for (const key of ['activeModel', 'activeProviderId']) if (settings[key] !== undefined && settings[key] !== null) backupText(settings[key], 4096, false)
   if (settings.engineModelProfiles !== undefined) validateEngineModelProfileSets(settings.engineModelProfiles)
   if (settings.confidentialTerms !== undefined) { backupList(settings.confidentialTerms, 200); for (const term of settings.confidentialTerms) backupText(term, 4_096) }

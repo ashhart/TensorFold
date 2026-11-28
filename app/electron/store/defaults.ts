@@ -199,7 +199,7 @@ export function defaultSettings(): Settings {
     dark: PRESETS.tensorfold.dark,
     pointerCursors: true,
     doomTodos: true,
-    notifyRuns: true,
+    notifyRuns: true, completionSound: false,
     sshHosts: [],
     trustedSshHostKeys: [],
     showGitInitPrompt: true,

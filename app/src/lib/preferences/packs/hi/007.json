@@ -93,6 +93,7 @@
   "Planning only": "केवल योजना",
   "Planning only.": "केवल योजना।",
   "Playback speed": "प्लेबैक गति",
+  "Play a system sound when a run finishes while TensorFold is focused.": "जब TensorFold फ़ोकस में हो और रन पूरा हो, तब सिस्टम ध्वनि बजाएँ।",
   "Plugin categories": "प्लगइन श्रेणियाँ",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "पंजीकरण कोड अलग नहीं करता और लोड सफल होना नहीं बताता। भरोसा देने से पहले स्रोत जाँचें।",
   "Plugins": "प्लगइन",

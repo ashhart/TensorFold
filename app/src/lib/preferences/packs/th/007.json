@@ -93,6 +93,7 @@
   "Planning only": "วางแผนเท่านั้น",
   "Planning only.": "วางแผนเท่านั้น",
   "Playback speed": "ความเร็วเล่น",
+  "Play a system sound when a run finishes while TensorFold is focused.": "เล่นเสียงระบบเมื่อการทำงานเสร็จสิ้นขณะที่ TensorFold เป็นหน้าต่างที่มีโฟกัส",
   "Plugin categories": "หมวดปลั๊กอิน",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "การลงทะเบียนไม่แยกโค้ดหรือยืนยันว่าโหลดสำเร็จ ตรวจโค้ดต้นทางก่อนอนุมัติความเชื่อถือ",
   "Plugins": "ปลั๊กอิน",

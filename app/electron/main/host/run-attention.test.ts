@@ -3,12 +3,21 @@
 // Native attention for runs: when to notify, what it says, and the needs-you dock badge.
 import assert from 'node:assert/strict'
 import { attentionNotice, badgeText, createRunAttention, nextNeedsYou, shouldNotify, type AttentionNotice } from './run-attention'
+import { pairedSettingsDefaults } from '../../../src/lib/paired-settings'
 import type { AgentEvent } from '../../agent/types'
+import { store } from '../state'
 
 let passed = 0
 const ok = (name: string) => { passed++; console.log(`  ✓ ${name}`) }
 
 console.log('run-attention tests:')
+
+{
+  const defaults = pairedSettingsDefaults()
+  assert.equal(defaults.completionSound, false, 'a fresh profile does not opt in to completion sounds')
+  assert.equal(defaults.notifyRuns, true, 'background notifications keep their existing default')
+  ok('completion sound is opt-in and independent of background notifications')
+}
 
 {
   assert.equal(shouldNotify({ enabled: true, focused: false, supported: true, knownThread: true }), true)
@@ -42,14 +51,21 @@ console.log('run-attention tests:')
 {
   const notices: AttentionNotice[] = []
   const badges: string[] = []
+  const sounds: string[] = []
   let focused = false
   let enabled = true
+  let completionSoundEnabled = false
+  let supported = true
+  let incognito = false
   const titles: Record<string, string> = { t1: 'Fix login', t2: 'Rotate keys' }
   const attention = createRunAttention({
+    isIncognito: () => incognito,
     enabled: () => enabled,
+    completionSoundEnabled: () => completionSoundEnabled,
     focused: () => focused,
-    supported: () => true,
+    supported: () => supported,
     threadTitle: (id) => titles[id],
+    playCompletionSound: () => sounds.push('beep'),
     notify: (n) => notices.push(n),
     setBadge: (text) => badges.push(text),
   })
@@ -66,18 +82,72 @@ console.log('run-attention tests:')
   ev({ threadId: 't1', type: 'done' })
   ev({ threadId: 't1', type: 'done' })
   assert.equal(notices.filter((n) => n.kind === 'finished').length, 1)
+  assert.equal(sounds.length, 0, 'background completion uses a native notice and no sound')
 
   ev({ threadId: 't2', type: 'error', message: 'build failed' })
   assert.equal(notices.at(-1)?.body, 'Rotate keys: build failed')
+  assert.equal(sounds.length, 0, 'errors never play the completion sound')
 
   focused = true
+  supported = false
   ev({ runId: 'r2', threadId: 't1', type: 'done' })
-  focused = false
-  enabled = false
+  ev({ runId: 'r2', threadId: 't1', type: 'done' })
+  assert.equal(sounds.length, 0, 'completion sound stays off by default even with notifications enabled')
+  assert.equal(notices.filter((n) => n.kind === 'finished').length, 1, 'focused completion has no native notice')
+  completionSoundEnabled = true
   ev({ runId: 'r3', threadId: 't1', type: 'done' })
-  ev({ runId: 'r4', threadId: 'unknown', type: 'done' })
-  assert.equal(notices.length, 3)
-  ok('the runtime notifies once per run, keeps the badge current and respects focus and the setting')
+  ev({ runId: 'r3', threadId: 't1', type: 'done' })
+  assert.equal(sounds.length, 1, 'an opted-in focused completion plays once without native notification support')
+  enabled = false
+  ev({ runId: 'r4', threadId: 't1', type: 'done' })
+  assert.equal(sounds.length, 2, 'run notifications do not disable an explicitly enabled completion sound')
+  completionSoundEnabled = false
+  ev({ runId: 'r5', threadId: 't1', type: 'done' })
+  completionSoundEnabled = true
+  ev({ runId: 'r6', threadId: 'unknown', type: 'done' })
+  incognito = true
+  ev({ runId: 'r7', threadId: 't1', type: 'done' })
+  assert.equal(sounds.length, 2, 'disabled, unknown and incognito threads never play a sound')
+  incognito = false
+  focused = false
+  supported = true
+  enabled = true
+  ev({ runId: 'r8', threadId: 't1', type: 'done' })
+  assert.equal(sounds.length, 2, 'an opted-in background completion never plays a sound')
+  focused = true
+  ev({ runId: 'r9', threadId: 't1', type: 'error', message: 'focused failure' })
+  assert.equal(sounds.length, 2, 'an opted-in focused error never plays a sound')
+  assert.equal(notices.length, 4)
+  ok('completion sound is opt-in, deduplicated and independent of notifications, with foreground and privacy gates unchanged')
+}
+
+{
+  const previous = store.settings
+  const notices: AttentionNotice[] = [], badges: string[] = [], sounds: string[] = []
+  let focused = false
+  const attention = createRunAttention({
+    enabled: () => true,
+    focused: () => focused,
+    supported: () => true,
+    threadTitle: () => 'Ordinary chat',
+    playCompletionSound: () => sounds.push('beep'),
+    notify: (notice) => notices.push(notice),
+    setBadge: (text) => badges.push(text),
+  })
+  try {
+    store.settings = {} as typeof store.settings
+    attention.observe({ threadId: 'ordinary', runId: 'background', type: 'done' })
+    focused = true
+    attention.observe({ threadId: 'ordinary', runId: 'absent-setting', type: 'done' })
+    assert.equal(sounds.length, 0, 'a legacy fixture and absent preference stay silent without a callback')
+    assert.deepEqual(notices.map((notice) => notice.kind), ['finished'], 'the ordinary background done path still notifies')
+    store.settings = { completionSound: true } as typeof store.settings
+    attention.observe({ threadId: 'ordinary', runId: 'opted-in', type: 'done' })
+    assert.equal(sounds.length, 1, 'the compliant composition boundary reads an explicit opt-in')
+    ok('legacy consumers need no sound callback; live settings remain off when absent and honor opt-in')
+  } finally {
+    store.settings = previous
+  }
 }
 
 {

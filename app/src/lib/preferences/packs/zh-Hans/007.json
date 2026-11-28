@@ -93,6 +93,7 @@
   "Planning only": "仅规划",
   "Planning only.": "仅规划。",
   "Playback speed": "播放速度",
+  "Play a system sound when a run finishes while TensorFold is focused.": "当 TensorFold 处于焦点状态时，运行完成后播放系统提示音。",
   "Plugin categories": "插件分类",
   "Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.": "注册插件不会隔离代码，也不能确认加载成功；批准信任前请审核来源。",
   "Plugins": "插件",

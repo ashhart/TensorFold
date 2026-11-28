@@ -111,6 +111,12 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
               </div>
             </Field>
 
+            <Field label={tx("Completion sound")} hint={draft.completionSound === true ? tx("On") : tx("Off")}>
+              <div className="flex items-center gap-3 rounded-lg border border-line bg-card px-3 py-2.5">
+                <span className="flex-1 text-[13px] leading-snug text-ink-3">{tx("Play a system sound when a run finishes while TensorFold is focused.")}</span>
+                <Toggle label={tx("Completion sound")} checked={draft.completionSound === true} onChange={(v) => patch({ completionSound: v })} />
+              </div>
+            </Field>
             <Field label={tx("Suggest Git on new folder projects")} hint={draft.showGitInitPrompt === false ? tx("Off") : tx("On")}>
               <div className="flex items-center gap-3 rounded-lg border border-line bg-card px-3 py-2.5">
                 <span className="flex-1 text-[13px] leading-snug text-ink-3">{tx("When you add a project from an existing folder that isn’t a Git repo, offer to initialize Git (rooms use isolated worktrees). Turn off to create folder projects without the prompt.")}</span>
