@@ -104,7 +104,7 @@ pub const Drafter = struct {
     fn open(ptr: *anyopaque, s: *lanes.Stream) !void {
         const d = self(ptr);
         if (d.lanes.contains(s)) return error.DraftStreamOpen;
-        const context = try rt.Context.init(d.a, d.model, true);
+        const context = try rt.Context.initGrow(d.a, d.model, true, null);
         errdefer context.deinit(d.a);
         context.setResident(d.follow);
         try d.lanes.put(d.a, s, .{ .context = context });

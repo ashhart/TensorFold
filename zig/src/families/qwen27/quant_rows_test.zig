@@ -1,4 +1,4 @@
-//! Prompt passes past 128 rows through raw mixed-width projections equal their rows decoded one at a time.
+//! Prompt passes through mixed-width and byte-code projections equal their rows decoded one at a time.
 const std = @import("std");
 const mtl = @import("metal");
 const checkpoint = @import("core").checkpoint_metal;
@@ -41,6 +41,11 @@ fn synth(device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), n: usize, bits: 
 
 /// One call over every row, then one call a row; both outputs' bytes must match.
 fn expectRowsEqual(device: mtl.Device, kern: *quant.Kernels, lin: projection.Linear) !void {
+    return expectPassesEqual(device, kern, lin, lin);
+}
+
+/// `whole_lin` over every row as a prompt pass, `lin` one decoded row a call; both outputs' bytes must match.
+fn expectPassesEqual(device: mtl.Device, kern: *quant.Kernels, whole_lin: projection.Linear, lin: projection.Linear) !void {
     const queue = try device.queue();
     defer queue.deinit();
     const n: usize = lin.n;
@@ -59,7 +64,7 @@ fn expectRowsEqual(device: mtl.Device, kern: *quant.Kernels, lin: projection.Lin
     var open = true;
     errdefer if (open) e.end(); // a refused call still ends its encoder
     kern.prompt = true;
-    try kern.quant(e, lin, .{ .buffer = x }, null, .{ .buffer = x }, .{ .buffer = whole }, rows);
+    try kern.quant(e, whole_lin, .{ .buffer = x }, null, .{ .buffer = x }, .{ .buffer = whole }, rows);
     kern.prompt = false;
     for (0..rows) |r| try kern.quant(e, lin, .{ .buffer = x, .offset = r * k * 2 }, null, .{ .buffer = x }, .{ .buffer = single, .offset = r * n * 2 }, 1);
     e.end();
@@ -222,4 +227,30 @@ test "chunk pairs on the prepass's sums keep simd_qmm's bits at an odd row count
     try std.testing.expectEqualSlices(u16, outs[0].slice(u16, r * n), outs[1].slice(u16, r * n));
     // the control: the sums left at zero, so every output loses its bias term
     try std.testing.expect(!std.mem.eql(u16, outs[0].slice(u16, r * n), outs[2].slice(u16, r * n)));
+}
+test "5-bit byte codes give the lane kernel's bits, prompt rows and decoded rows" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var r = try Rig.init();
+    defer r.deinit();
+    // The byte product runs the tensor op on uint8 codes: chips with tensor units only.
+    if (!r.device.tensorUnits()) return error.SkipZigTest;
+    const env = @import("sys").env;
+    const flag = "TF_Q27_FIVE_BYTES";
+    const saved = if ((@import("sys").environment.Process{}).get(flag)) |v| try std.testing.allocator.dupeSentinel(u8, v, 0) else null;
+    defer {
+        if (saved) |v| {
+            _ = env.setenv(flag, v, 1);
+            std.testing.allocator.free(v);
+        } else _ = env.unsetenv(flag);
+    }
+    const t = try synth(r.device, &r.owned, 64, 5, 4);
+    // Lane-versus-byte parity needs the flag unset while the lane comparison is prepared.
+    _ = env.unsetenv(flag);
+    const lanes = try projection.prepare(r.device, std.testing.allocator, &r.owned, &.{t}, 32);
+    _ = env.setenv(flag, "1", 1);
+    const bytes = try projection.prepare(r.device, std.testing.allocator, &r.owned, &.{t}, 32);
+    try std.testing.expect(bytes.bytes and !lanes.bytes); // separately, the enabled flag really selects dispatch
+    try expectPassesEqual(r.device, &r.kern, bytes, lanes);
+    try expectPassesEqual(r.device, &r.kern, lanes, bytes);
 }

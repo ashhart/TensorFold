@@ -44,6 +44,7 @@ pub const Trace = struct {
             if (t.calls[i] == 0) continue;
             std.log.info("gpu profile: {s:<18} {d:>6} calls {d:>9.2} ms {d:>8.3} ms/round", .{ @tagName(kind), t.calls[i], t.seconds[i] * 1e3, t.seconds[i] * 1e3 / @as(f64, @floatFromInt(t.rounds)) });
         }
+        for (t.shapes[0..t.shape_count]) |s| std.log.info("gpu profile: dense {d}x{d} {d}-bit sk {d}: {d} calls {d:.2} ms", .{ s.n, s.k, s.bits, s.sk, s.calls, s.gpu_seconds * 1e3 });
     }
     /// At close: the totals, unless the last round just logged them.
     pub fn reportRest(t: *const Trace) void {
