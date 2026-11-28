@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: controls expose their visible names, and Settings exposes its navigation state, to assistive technology (#4825) Thanks @taylorarndt for the report.
+
 - Desktop setup's first-chat starter prompts are optional toggle buttons, and the first draft starts empty (#4817). Thanks @taylorarndt for the report.
 
 
