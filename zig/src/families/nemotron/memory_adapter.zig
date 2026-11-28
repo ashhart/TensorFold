@@ -290,7 +290,7 @@ pub const Adapter = struct {
             const follow: u32 = if (suffix_ids.len > 0) suffix_ids[0] else 0;
             try self.runForwardIntoCache(&cache, suffix_ids, follow);
         }
-        const snap = try snapshot.save(b, &cache, @intCast(cache.len));
+        const snap = try snapshot.save(b, &cache, @intCast(cache.len), false);
         try b.drain();
         return .{ .saved = @ptrCast(snap), .at = snap.at };
     }
