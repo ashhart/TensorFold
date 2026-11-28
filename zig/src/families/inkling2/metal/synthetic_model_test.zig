@@ -186,4 +186,3 @@ pub fn buildSyntheticModel(gpa: std.mem.Allocator) !*model_.Model {
     std.debug.assert(pool_off <= dense_bytes);
     return m;
 }
-

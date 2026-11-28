@@ -54,18 +54,11 @@ const RArgs = extern struct { count: u32, boundary: u32 = 0 };
 const NormArgs = extern struct { rows: u32, width: u32, heads: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 };
 pub const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 
-pub fn r(t: ck.Tensor) Ref {
-    return .{ .buf = t.buffer, .off = t.offset };
-}
-pub fn at(buf: mtl.Buffer, off: usize) Ref {
-    return .{ .buf = buf, .off = off };
-}
-pub fn row(buf: mtl.Buffer, i: usize, row_bytes: usize) Ref {
-    return at(buf, i * row_bytes);
-}
-pub fn a(x_: Ref) attention.Ref {
-    return .{ .buf = x_.buf, .off = x_.off };
-}
+const ref_helpers = @import("forward_refs.zig");
+pub const r = ref_helpers.r;
+pub const at = ref_helpers.at;
+pub const row = ref_helpers.row;
+pub const a = ref_helpers.a;
 fn x(x_: Ref) experts.Ref {
     return .{ .buf = x_.buf, .off = x_.off };
 }

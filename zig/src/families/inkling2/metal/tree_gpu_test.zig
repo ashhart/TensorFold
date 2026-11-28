@@ -6,6 +6,7 @@ const layer_plan = @import("../plan.zig");
 const tree = @import("tree.zig");
 const st = @import("state.zig");
 const backend_ = @import("backend.zig");
+const model_ = @import("model.zig");
 const synth = @import("synthetic_model_test.zig");
 const tp = @import("inkling2_tree_plan");
 
