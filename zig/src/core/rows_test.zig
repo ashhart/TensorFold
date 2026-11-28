@@ -481,7 +481,7 @@ test "TF_IMPRINT_VERIFY's read-back finds every written state byte-equal to the 
 test "a learn dir that is a regular file is refused, and open frees what it made once" {
     const gpa = std.testing.allocator;
     var buf: [128]u8 = undefined;
-    const path = root(&buf, "file");
+    const path = root(&buf, "regular-file");
     var zbuf: [129]u8 = undefined;
     const z = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0);
     const fd = platform.c.open(z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
