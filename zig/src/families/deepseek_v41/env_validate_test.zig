@@ -36,17 +36,18 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     }
     try t.expectError(error.InvalidEnvironment, env_validate.check(fx));
     try t.expect(std.mem.startsWith(u8, why.?, name));
-    if (std.mem.trim(u8, raw, " \t\r\n").len != 0) try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
+    if (std.mem.trim(u8, raw, " \t\r\n").len != 0) try t.expect((std.mem.indexOf(u8, why.?, raw) != null) == (e.rule(name).kind != .path));
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "DeepSeek strict env: the shared table holds all 107 settings: 54 switches, 24 integers, 19 reals and 10 structured" {
+test "DeepSeek strict env: the shared table holds all 108 settings: 54 switches, 24 integers, 19 reals and 11 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .dsv41) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_") or std.mem.eql(u8, r.name, "TF_EXPERIMENTAL"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 54, 24, 19, 10 }, counts);
+    try t.expectEqual([4]usize{ 54, 24, 19, 11 }, counts);
+    try t.expectEqual(e.Kind.path, e.rule("TF_DSV41_LAYER_HASH").kind);
 }
 
 test "DeepSeek strict env: unset and each rule's permitted blank settings read as the caller's default" {
@@ -66,6 +67,18 @@ test "DeepSeek strict env: profiling rows preserve legacy whitespace-only refusa
     for ([_][]const u8{ "", " ", "   " }) |raw| try t.expect((try env_validate.profilingRows(raw)) == null);
     const rows = (try env_validate.profilingRows("1 4 8")) orelse return error.TestUnexpectedResult;
     try t.expectEqualSlices(u8, "1 4 8", rows);
+}
+
+test "DeepSeek strict env: the trace path keeps text and refuses controls by name without echoing it" {
+    const name = "TF_DSV41_LAYER_HASH";
+    for ([_][]const u8{ "relative/layer-hashes", " nan ", "mistyped value" }) |raw| {
+        try check(name, raw, true);
+        try t.expectEqualStrings(raw, (try e.path(name, raw)).?);
+    }
+    for ([_][]const u8{ "private\npath", "private\x00path", "private\x1bpath", "private\x7fpath" }) |raw| {
+        try check(name, raw, false);
+        try t.expectError(error.InvalidEnvironment, e.path(name, raw));
+    }
 }
 
 test "DeepSeek strict env: every switch refuses garbage and keeps 0, 1 and its existing word forms" {
