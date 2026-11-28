@@ -127,6 +127,8 @@ pub const Sets = struct {
             a,
             list,
         );
+        errdefer sparse_attn.deinit();
+        errdefer hy4_route_rows.deinit();
         const ling = try @import("contract_ling.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
