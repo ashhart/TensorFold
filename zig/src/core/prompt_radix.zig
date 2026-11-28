@@ -202,10 +202,15 @@ pub const Store = struct {
 
     /// Every kept state and page dropped (a flush, or weights that moved): what it held, as `report` counts it.
     pub fn clear(s: *Store) Cleared {
-        const out: Cleared = .{ .states = s.tree.snaps, .bytes = s.tree.held() };
-        s.tree.clear();
+        return s.flush(0);
+    }
+
+    /// A flush keeps the newest complete states and every prefix page they need; called only between passes.
+    pub fn flush(s: *Store, retain: u32) Cleared {
+        const before: Cleared = .{ .states = s.tree.snaps, .bytes = s.tree.held() };
+        @import("prompt_radix_flush.zig").retain(&s.tree, retain);
         s.shared_keys.clearRetainingCapacity();
-        return out;
+        return .{ .states = before.states - s.tree.snaps, .bytes = before.bytes - s.tree.held() };
     }
 
     /// The tree may hold `limits` from now on: what passes them goes first.

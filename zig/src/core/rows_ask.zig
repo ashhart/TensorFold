@@ -58,12 +58,12 @@ pub const Ask = struct {
         a.out = rows.read.resumable(s, a.prompt, starts, spans);
     }
 
-    /// The answer from TF_KV_SHARE's store over pool pages: no disk; a flush drops every state, its pages back.
+    /// The answer from TF_KV_SHARE's store over pool pages: no disk; flush keeps its newest `retain` states.
     pub fn answerShared(a: *Ask, s: *radix.Store) void {
         if (a.op == .flush and a.claim.cmpxchgStrong(.queued, .taken, .acq_rel, .acquire) != null) return; // withdrawn
         defer a.done.store(true, .release);
         if (a.op == .flush) {
-            const c = s.clear();
+            const c = s.flush(a.retain);
             a.dropped = @intCast(c.states);
             a.ram_freed = c.bytes;
             return;

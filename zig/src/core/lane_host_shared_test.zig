@@ -181,3 +181,44 @@ test "TF_KV_SHARE lane host: a flush is taken without a host cache and drops the
     var none: api.ImprintAsk = .{ .op = .flush };
     try t.expect(!rows.ask(&f.host, &none));
 }
+
+test "TF_KV_SHARE lane host: retain flush keeps a recently resumed parent and frees older branches" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const branch = [_]u32{ 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    var owner: u8 = 0;
+    var path: [2]u32 = undefined;
+    for (0..4) |id| Pool.retain(&f.pool, @intCast(id));
+    try t.expect(f.store.keep(.of(&prompt), 4, &owner, &.{0}, path[0..1]).held);
+    try t.expect(f.store.keep(.of(&prompt), 8, &owner, &.{ 0, 1 }, &path).held);
+    try t.expect(f.store.keep(.of(&branch), 8, &owner, &.{ 2, 3 }, &path).held);
+    for (0..4) |id| Pool.release(&f.pool, @intCast(id));
+    try t.expectEqual(@as(usize, 3), f.family.live);
+    const parent = f.store.find(.of(prompt[0..5])).?;
+    try t.expectEqual(@as(u32, 4), parent.at());
+    f.store.resumed(parent, &prompt, true);
+    var flush: api.ImprintAsk = .{ .op = .flush, .retain = 1 };
+    try t.expect(rows.ask(&f.host, &flush));
+    rows.answer(&f.host);
+    try t.expect(flush.done.load(.acquire));
+    try t.expectEqual(@as(u32, 2), flush.dropped);
+    try t.expectEqual(@as(u64, 5), flush.ram_freed);
+    try t.expectEqual(@as(u32, 4), try f.where(&prompt));
+    try t.expectEqual(@as(u32, 0), try f.where(&branch));
+    try t.expectEqual(@as(usize, 1), f.family.live);
+    try t.expectEqual(@as(usize, 7), Pool.available(&f.pool));
+    var excess: api.ImprintAsk = .{ .op = .flush, .retain = 9 };
+    try t.expect(rows.ask(&f.host, &excess));
+    rows.answer(&f.host);
+    try t.expectEqual(@as(u32, 0), excess.dropped);
+    try t.expectEqual(@as(u64, 0), excess.ram_freed);
+    try t.expectEqual(@as(u32, 4), try f.where(&prompt));
+    var all: api.ImprintAsk = .{ .op = .flush };
+    try t.expect(rows.ask(&f.host, &all));
+    rows.answer(&f.host);
+    try t.expectEqual(@as(u32, 1), all.dropped);
+    try t.expectEqual(@as(u64, 2), all.ram_freed);
+    try t.expectEqual(@as(usize, 0), f.family.live);
+    try t.expectEqual(@as(usize, 8), Pool.available(&f.pool));
+}
