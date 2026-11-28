@@ -34,6 +34,7 @@ const silu_k = @import("contract_silu_fuse.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
 const route_k = @import("contract_route.zig");
+const index_k = @import("contract_flashnext_index.zig");
 const kit = @import("contract_kit.zig");
 const item_k = @import("contract_wmma_item.zig");
 const embed_k = @import("contract_embed.zig");
@@ -336,6 +337,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&routes, route_k.cases) |*x, case| x.* = .init(a, &r, s, &l, case);
     defer for (&routes) |*x| x.deinit();
     for (&routes) |*x| try kernels.append(a, x.kernel());
+    // series 6: tf_fn_idx_select's held and global cut branches, plus its planted control
+    var idx_select: [3]index_k.Select = undefined;
+    for (&idx_select, [_]index_k.Which{ .held, .global, .control }) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&idx_select) |*m| m.deinit();
+    for (&idx_select) |*m| try kernels.append(a, m.kernel());
     // the few-row matrix-core tiles run on gfx11's matrix cores only
     const matrix = if (hip.Caps.of(arch)) |v| v.matrix == .wmma11 else false;
     // the last one is the few-row passes' control, on its case's geometry

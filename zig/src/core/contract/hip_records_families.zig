@@ -22,6 +22,7 @@ test "HIP record counts stay pinned in their owning files" {
     const hip = @import("hip_records.zig");
     const counts = .{
         @import("hip_records_apply_rows.zig").records.len,
+        @import("hip_records_flashnext_index.zig").records.len,
         @import("hip_records_columns.zig").records.len,
         @import("hip_records_dense_text.zig").records.len,
         @import("hip_records_draft.zig").records.len,

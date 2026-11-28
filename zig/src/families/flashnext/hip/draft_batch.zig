@@ -54,6 +54,7 @@ fn serial(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
         const start = lane.caches.len - follow.len;
         try e.stream.synchronize();
         e.host.used = 0;
+        e.stage_from = 0;
         e.arena.reset();
         const o = e.ops(&e.arena);
         const seg = [_]forward.Seg{.{ .c = hc, .tokens = follow, .pos = start }};
