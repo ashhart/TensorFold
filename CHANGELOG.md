@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the lane host explore test's replay holds under load: once every request sent has ended, the test thread sends the next only once a whole engine turn has run after the one that ended the last (turns counted through the host's activity scope), so each send meets no prompt visit and lands at the same point on every run (#5386, fixes #5367).
+
 - Vulkan on Apple silicon: submits batch dispatches into one command buffer per batch instead of one submission per dispatch, with hazard-tracked barriers between conflicting dispatches and one barrier owed to the previous submission at the next batch's start; the same logits, 2% to 20% less run time on a 13-inch M1 and a 16-inch M1 Max (#2038, part of #1420). Thanks to @joshuaswarren.
 
 - Server: `"kept_probs": true` on `/v1/chat/completions` (with `logprobs: true`) and `/v1/completions` (with a `logprobs` count) adds a `kept_probs` list for each reply token: the tokens left after temperature, `top_k`, `top_p` and `min_p`, renormalized to sum to 1; a sampled request needs `top_k` from 1 to 20, and a nonzero `presence_penalty` or `frequency_penalty` or a grammar returns HTTP 400; the reply's tokens and every other field are the same with the option on or off (#3207, fixes #3182).
@@ -42,8 +44,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the prompt-imprint key-index test starts from an empty temporary directory, so a run interrupted on Windows (which reuses process IDs) no longer leaves a later run a stale starting state (#5406).
 
 - CLI: `tensorfold log` also reads the request log `TENSORFOLD_REQUEST_LOG` writes: `list`, `show ID`, `follow` and `--json` show each reply beside its request, and a bare body is numbered by reader order, never keyed by fields inside it (#5246, refs #3666). Thanks to @devopsfortunato.
-
-
 
 - Server: `--confidential` also refuses library search-path variables.
 - Server: `--confidential` also refuses accelerator plugin and kernel library-path variables.
@@ -160,8 +160,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
 
 - CUDA: Linux release archives include Thor (sm_110) SASS and apply the Qwen3.8-27B-only admission rules when serving on Thor (#5053). Thanks to @yguanrong.
-
-- Tests: the lane host explore test's replay holds under load: once every request sent has ended, the test thread sends the next only once a whole engine turn has run after the one that ended the last (turns counted through the host's activity scope), so each send meets no prompt visit and lands at the same point on every run (#5386, fixes #5367).
 
 - CUDA: Kolibri 1.1 (`kolibri1_1`) serves up to 2,048 tokens, exact, and capabilities, model information and managed benchmarks list every CUDA-only alias with its family's formats (#4941, refs #4846). Thanks to @jschmied.
 
