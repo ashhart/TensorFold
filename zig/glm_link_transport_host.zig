@@ -167,6 +167,8 @@ test "GLM link transport: waited uploads and unwaited puts carry zero, 48 and 49
 test "GLM link transport: Kind.draft_shared carries a 3-stream round in one broadcast and decodes exact parts" {
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
     d.api.cuLaunchKernel = Recording.launch;
+    d.api.cuLaunchKernelEx = @import("glm").pdl.forwardEx(Recording.launch);
+    d.func_name = null;
     d.api.cuMemcpyHtoDAsync_v2 = Recording.upload;
     d.api.cuMemHostAlloc = Recording.hostAlloc;
     d.api.cuMemFreeHost = Recording.hostFree;

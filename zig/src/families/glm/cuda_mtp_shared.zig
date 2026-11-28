@@ -7,7 +7,6 @@ const glue = @import("cuda_glue.zig");
 const b16 = @import("cuda_b16.zig");
 const latent = @import("cuda_latent.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
-const q4 = @import("cuda_q4.zig");
 const engine = @import("cuda_engine.zig");
 const types = @import("cuda_engine_types.zig");
 const pick = @import("cuda_engine_pick.zig");
@@ -103,7 +102,7 @@ pub fn mtpMode(f: *const fw.Forward, ids: []const i32, hidden: []const u64, prop
             src = b.normed;
         }
         try glue.rmsnorm(f.set(), f.stream, src, D, m.norm, b.fnormed, D, b.fxs, c.eps, k_prop, D);
-        try q4.matmul(&f.m.q4, f.stream, b.fnormed, D, b.fxs, m.draft, b.logits, k_prop);
+        try m.draft.project(f.set(), &f.m.q4, if (f.m.tfq3) |*x| x else null, f.stream, b.fnormed, b.fxs, b.logits, k_prop);
     }
 }
 
