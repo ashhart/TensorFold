@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const fwd = @import("forward.zig");
 const wts = @import("weights.zig");
+const kernels = @import("kernels.zig");
 const Ref = wts.Ref;
 
 fn add(x: *const fwd.Ctx, e: mtl.ComputeEncoder, a: Ref, b: Ref, out: Ref, n: u32) void {
@@ -34,10 +35,14 @@ pub fn absorb(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, 
     const D = c.hidden;
     const L = &x.w.layers[c.layers];
     const m = x.w.mtp.?;
-    fwd.embedRows(x, e, next, sc.m_emb, rows);
-    fwd.inject(x, e, sc.m_emb, rows, pos + 1); // the head reads each row's next token: an image's rows one place on
-    fwd.rms(x, e, sc.m_emb, m.enorm, sc.m_eh, rows, D, D, 2 * D, c.eps);
-    fwd.rms(x, e, h, m.hnorm, sc.m_eh.at(@as(usize, D) * 2), rows, D, D, 2 * D, c.eps);
+    if (x.inject == null and x.w.embed.more == 0 and x.w.embed.group == 64 and (x.w.embed.bits == 4 or x.w.embed.bits == 8) and D % 4 == 0 and D <= 4096) {
+        kernels.mtpPrep(x.k, e, x.w.embed.bits, next, x.w.embed, m.enorm, m.hnorm, h, sc.m_eh, rows, D, c.eps);
+    } else {
+        fwd.embedRows(x, e, next, sc.m_emb, rows);
+        fwd.inject(x, e, sc.m_emb, rows, pos + 1); // the head reads each row's next token: an image's rows one place on
+        fwd.rms(x, e, sc.m_emb, m.enorm, sc.m_eh, rows, D, D, 2 * D, c.eps);
+        fwd.rms(x, e, h, m.hnorm, sc.m_eh.at(@as(usize, D) * 2), rows, D, D, 2 * D, c.eps);
+    }
     if (m.eh_bf16) |eh| { // stored unquantized (mlx-lm's): fp32 sums of its bf16 rows
         @import("wide.zig").bf16(&x.k.wide.?, e, eh, D, 2 * D, .{ .in = sc.m_eh, .ldx = 2 * D, .out = sc.m_x, .ldo = D, .rows = rows });
     } else fwd.qmv(x, e, x.k.qmv_kda_out, sc.m_eh, m.eh_proj, sc.m_x, rows);

@@ -38,8 +38,8 @@ pub const Ctx = struct {
     draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
     moe_branch: bool = false, // the pending branch is the last MoE block's ye and wts: the next expand combines them
     q_normed: bool = false, // mlaKeys normed the rows' queries into qr (with the cache writes): mlaAttend's projection next
+    keep_logits: bool = false, // GLM_RANKS=1 keeps full m_logits for draft rank inspection
 };
-
 pub const Inject = struct { rows: Ref, spans: []const Span }; // tower rows: [at,at+n) -> [row,row+n)
 pub const Span = struct { at: u32, n: u32, row: u32 };
 /// The image rows among `rows` embedding rows (positions pos..) written over `out`; nothing without an injection.
@@ -559,6 +559,7 @@ pub fn headWith(x: *const Ctx, e: mtl.ComputeEncoder, hw: wts.Affine, in: Ref, l
     const part = x.c.vocabPart(); // TP2: this Mac's half, its picks merged with the peer's
     const n: u32 = if (vocab > part[0]) @min(vocab, part[1]) - part[0] else 0;
     if (n > 0) {
+        if (@import("kernels.zig").tryHeadTop1(x.k, e, in, hw, logits, picks, rows, n, x.c.tp, x.m_row, greedy and !x.keep_logits and on(x, "head_qmv") and on(x, "head_argmax"))) return;
         var q = hw;
         q.n = n;
         if (on(x, "head_qmv")) qmv(x, e, if (x.c.tp > 1) x.k.qmv_head_tp else x.k.qmv_head, in, q, logits, rows);
@@ -569,7 +570,6 @@ pub fn headWith(x: *const Ctx, e: mtl.ComputeEncoder, hw: wts.Affine, in: Ref, l
     }
     if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
 }
-
 /// A judged window's first `keep` of `rows` in each KDA layer, replayed from the round's entry state on a rejection.
 pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
     keepKdaAt(x, e, 0, rows, keep);

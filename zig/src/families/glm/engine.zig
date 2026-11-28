@@ -323,7 +323,7 @@ pub const Engine = struct {
     }
 
     pub fn ctx(e: *Engine) fwd.Ctx {
-        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .taps = if (e.dflash) |d| d.taps else null, .draft_vocab = e.draft_vocab };
+        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .taps = if (e.dflash) |d| d.taps else null, .draft_vocab = e.draft_vocab, .keep_logits = e.rank_log };
     }
 
     /// A command buffer ordered after the last one this engine committed.

@@ -479,13 +479,16 @@ pub const Slots = struct {
         x.segs = segs[0..reqs.len];
         mtp.absorb(&x, enc, sl.rows, sl.ids, row, 0); // every row's cache entries; only last rows go on to draft
         var drafting: u32 = 0;
+        var solo_row: u32 = 0;
         var lasts: [st.max_rows]fwd.Seg = undefined;
         for (order[0..reqs.len], segs[0..reqs.len], 0..) |k, g, i| {
             const slot = &sl.slots[reqs[k].slot];
             slot.s.mtp_pos += g.rows;
             slot.held_n = reqs[k].depth;
             if (reqs[k].depth == 0) continue;
-            const at = (g.row0 + g.rows - 1) * D * 2;
+            const at_r = g.row0 + g.rows - 1;
+            if (drafting == 0) solo_row = at_r;
+            const at = at_r * D * 2;
             copyWords(&x, enc, e.sc.m_x.at(at), sl.lasts.at(i * D * 2), @intCast(D / 2));
             copyWords(&x, enc, e.sc.m_xn.at(at), sl.rows.at(i * D * 2), @intCast(D / 2));
             lasts[i] = .{ .s = &slot.s, .row0 = @intCast(i), .rows = 1, .pos = slot.s.mtp_pos - 1 };
@@ -494,7 +497,22 @@ pub const Slots = struct {
         if (drafting == 0) return;
         x.s = lasts[0].s;
         x.segs = lasts[0..drafting];
-        mtp.finish(&x, enc, sl.lasts, sl.rows, drafting, 0, true);
+        if (drafting == 1 and e.c.xProj() % 2 == 0 and e.c.i_heads % 2 == 0 and e.c.q_lora % 2 == 0) {
+            if (solo_row == 0) {
+                mtp.finish(&x, enc, e.sc.m_x, e.sc.m_xn, 1, 0, false);
+            } else {
+                const iw_row = @as(usize, solo_row) * e.c.i_heads * 2;
+                copyWords(&x, enc, e.sc.iw.at(iw_row), e.sc.iw, @intCast(e.c.i_heads / 2));
+                if (x.q_normed) {
+                    const qr_row = @as(usize, solo_row) * e.c.q_lora * 2;
+                    copyWords(&x, enc, e.sc.qr.at(qr_row), e.sc.qr, @intCast(e.c.q_lora / 2));
+                } else {
+                    const xp_row = @as(usize, solo_row) * e.c.xProj() * 2;
+                    copyWords(&x, enc, e.sc.xp.at(xp_row), e.sc.xp, @intCast(e.c.xProj() / 2));
+                }
+                mtp.finish(&x, enc, sl.lasts, sl.rows, 1, 0, false);
+            }
+        } else mtp.finish(&x, enc, sl.lasts, sl.rows, drafting, 0, true);
         const y = e.ctx();
         mtp.drafts(&y, enc, e.sc.m_x, drafting, sl.picks);
         sl.hold(enc, order[0..drafting], reqs, 0);

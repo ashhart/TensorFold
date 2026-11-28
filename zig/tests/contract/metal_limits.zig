@@ -355,6 +355,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         if (!assemble) return undefined;
         text = @import("h3_kernels").source;
+    } else if (std.mem.startsWith(u8, d.name, "glm mtp ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_mtp_opt;
     } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ") or std.mem.startsWith(u8, d.name, "glm moe rows ")) {
         if (!assemble) return undefined;
         text = tf.glm.wide.gather_source;

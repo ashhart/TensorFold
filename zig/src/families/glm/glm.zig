@@ -101,4 +101,5 @@ test {
     _ = metal_dflash_inline;
     _ = metal_dflash_head_depth;
     _ = @import("draft_head_q4.zig");
+    _ = @import("mtp_opt_test.zig");
 }
