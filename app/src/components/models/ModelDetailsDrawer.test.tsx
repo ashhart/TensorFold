@@ -58,6 +58,7 @@ try {
   assert.equal(documentState.body.style.overflow, 'hidden')
   assert.match(renderToStaticMarkup(frame), /aria-modal="true"/)
   assert.match(renderToStaticMarkup(frame), /aria-describedby="test-title-description"/)
+  assert.equal(all(frame, (entry) => entry.type === 'header').length, 0, 'dialog header does not add a banner landmark')
   function key(extra: any) { const event = { key: '', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, prevented: 0, stopped: 0, preventDefault() { this.prevented++ }, stopPropagation() { this.stopped++ }, ...extra }; winListeners.get('keydown')(event); return event }
   documentState.activeElement = last; assert.equal(key({ key: 'Tab' }).prevented, 1); assert.equal(documentState.activeElement, first)
   documentState.activeElement = first; assert.equal(key({ key: 'Tab', shiftKey: true }).prevented, 1); assert.equal(documentState.activeElement, last)
