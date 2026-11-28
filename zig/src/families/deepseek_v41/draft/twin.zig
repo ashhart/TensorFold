@@ -45,6 +45,8 @@ pub const Twin = struct {
     bigram: []f32,
     slots: []Slot,
     windows: u64 = 0, // rows' passes run (tests)
+    rows: u64 = 0, // all rows submitted to those passes (tests)
+    window_hash: u64 = 14695981039346656037, // FNV-1a over each pass's row count (tests)
     widest: usize = 0, // the most rows one forward held
     trees: u64 = 0, // windows with parents: draft trees (tests)
 
@@ -195,6 +197,8 @@ pub const Twin = struct {
             try s.v.appendSlice(a, s.rows.items[r * 2 * d + d ..][0..d]);
         }
         t.windows += 1;
+        t.rows += n;
+        t.window_hash = (t.window_hash ^ n) *% 1099511628211;
     }
 
     pub fn target(t: *Twin) iface.Target {

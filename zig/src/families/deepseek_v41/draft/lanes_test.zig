@@ -11,7 +11,7 @@ const gpa = std.testing.allocator;
 
 const Case = struct { prompt: []const u32, max_new: u32 = 60, sampling: ?lanes.Sampling = null, drafts: bool = true, copies: bool = false };
 
-const Setup = struct { siblings: u32 = 0, joint: u2 = 1, skip: bool = true, costs: Prices = .served, slots: u32 = 4, dims: twin.Dims = .{}, depth: depth.Settings = .{}, spec: bool = false };
+const Setup = struct { siblings: u32 = 0, joint: u2 = 1, skip: bool = true, costs: Prices = .served, slots: u32 = 4, dims: twin.Dims = .{}, depth: depth.Settings = .{}, spec: bool = false, lane_alloc: bool = false };
 
 const Prices = enum { served, flat, cheap };
 
@@ -33,6 +33,9 @@ const Run = struct {
     joint: u64,
     kept: [16]u64, // drafts kept by position (depth.Stats)
     widest: usize, // the most rows one forward held
+    rows: u64, // all verify rows: priced copies must not submit every match whole
+    passes: u64, // DSpark proposal passes: root copies skip these
+    window_hash: u64, // exact allocated-width sequence for same-control replay
     expanded: u64,
     spec: spec_mod.Stats = .{}, // the speculative pass's counts (Setup.spec)
 
@@ -62,7 +65,7 @@ fn run(cases: []const Case, setup: Setup) !Run {
         set.joint = setup.joint;
         set.skip = setup.skip;
         break :d set;
-    }, .spec = .{ .on = setup.spec } });
+    }, .spec = .{ .on = setup.spec }, .lane_alloc = setup.lane_alloc });
     defer x.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -89,7 +92,7 @@ fn run(cases: []const Case, setup: Setup) !Run {
     const spec_stats: spec_mod.Stats = if (x.spec) |sp| sp.stats else .{};
     const out = try gpa.alloc([]u32, cases.len);
     for (out, streams) |*o, *s| o.* = try gpa.dupe(u32, s.emitted());
-    return .{ .out = out, .drafted = e.drafted, .accepted = e.accepted, .zero = x.policy.depth.stats.zero, .trees = x.policy.trees, .sib_wins = x.policy.sib_wins, .joint = x.policy.depth.stats.joint[0], .kept = x.policy.depth.stats.kept, .widest = t.widest, .expanded = x.policy.depth.expanded_rounds, .spec = spec_stats };
+    return .{ .out = out, .drafted = e.drafted, .accepted = e.accepted, .zero = x.policy.depth.stats.zero, .trees = x.policy.trees, .sib_wins = x.policy.sib_wins, .joint = x.policy.depth.stats.joint[0], .kept = x.policy.depth.stats.kept, .widest = t.widest, .rows = t.rows, .passes = d.passes, .window_hash = t.window_hash, .expanded = x.policy.depth.expanded_rounds, .spec = spec_stats };
 }
 
 /// The twin's own serial decode of a case (no lanes at all).
@@ -260,4 +263,29 @@ test "Draft state: every draft depth preserves plain output and concurrent equal
             if (cap > 0) try std.testing.expect(both.drafted > 0);
         }
     }
+}
+
+test "lane allocator: priced copies preserve serial tokens and the same control replays the same widths" {
+    const cases = [_]Case{
+        .{ .prompt = &p3, .copies = true, .max_new = 120 },
+        .{ .prompt = &p2, .copies = true, .sampling = warm, .max_new = 100 },
+    };
+    const setup: Setup = .{ .slots = 2, .lane_alloc = true };
+    const off = try run(&cases, .{ .slots = 2 });
+    defer off.deinit();
+    const on = try run(&cases, setup);
+    defer on.deinit();
+    const replay = try run(&cases, setup);
+    defer replay.deinit();
+    try expectSerial(&cases, on, .{});
+    for (off.out, on.out, replay.out) |a, b, c| {
+        try std.testing.expectEqualSlices(u32, a, b);
+        try std.testing.expectEqualSlices(u32, b, c);
+    }
+    try std.testing.expect(on.passes < off.passes); // root copies did not run and discard DSpark proposals
+    try std.testing.expect(on.rows < off.rows); // learned copy rates trimmed verified copy rows
+    // rank 0's control replay, never independent clocks
+    try std.testing.expectEqual(on.window_hash, replay.window_hash);
+    try std.testing.expectEqual(on.rows, replay.rows);
+    try std.testing.expectEqual(on.passes, replay.passes);
 }
