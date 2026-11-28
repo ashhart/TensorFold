@@ -167,3 +167,41 @@ test "confidential: the same request gets the same reply with the output rule on
     try t.expectEqualStrings(reply.of(off), reply.of(on));
     try t.expectEqualStrings(try json.stringify(a, off.get("usage").?, .{}), try json.stringify(a, on.get("usage").?, .{}));
 }
+
+test "confidential: protocol shapes survive: Anthropic's top-level type and response.steer.failed's own type" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const json = @import("json");
+    output.confine();
+    defer output.release();
+    const anthropic = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"" ++ marker ++ "\"}}";
+    const body = (try json.parse(a, try output.httpBody(a, 400, anthropic, "req-1"))).ok;
+    try t.expectEqualStrings("error", body.strField("type").?);
+    try t.expectEqualStrings("invalid_request_error", body.get("error").?.strField("type").?);
+    const steer = (try json.parse(a, "{\"type\":\"response.steer.failed\",\"steer\":{\"input\":\"" ++ marker ++ "\"}," ++
+        "\"error\":{\"type\":\"invalid_request_error\",\"code\":\"steering_not_supported\",\"message\":\"x\"}}")).ok;
+    const shown = try output.event(a, steer, "req-1");
+    try t.expectEqualStrings("response.steer.failed", shown.strField("type").?);
+    try t.expectEqualStrings("steering_not_supported", shown.get("error").?.strField("code").?);
+    try t.expect(std.mem.indexOf(u8, try json.stringify(a, shown, .{}), marker) == null);
+}
+
+test "confidential: every fixed code a producer writes is kept, tied to the file that writes it" {
+    const Produced = struct { code: []const u8, source: []const u8 };
+    const produced = [_]Produced{
+        .{ .code = "insufficient_scope", .source = @embedFile("auth_scope_reply.zig") },
+        .{ .code = "max_inflight_per_key_exceeded", .source = @embedFile("request_admission.zig") },
+        .{ .code = "admission_capacity_exceeded", .source = @embedFile("request_admission.zig") },
+        .{ .code = "requests_per_second_exceeded", .source = @embedFile("request_admission.zig") },
+        .{ .code = "background_limit_exceeded", .source = @embedFile("responses_background.zig") },
+        .{ .code = "reasoning_loop", .source = @embedFile("loop_stop.zig") },
+        .{ .code = "not_supported", .source = @embedFile("cache_flush.zig") },
+        .{ .code = "invalid_request_error", .source = @embedFile("cache_flush.zig") },
+    };
+    for (produced) |p| {
+        // the producer still writes the word (as a Zig string or inside an escaped JSON string)
+        try t.expect(std.mem.indexOf(u8, p.source, p.code) != null);
+        try t.expectEqualStrings(p.code, output.allowedCode(p.code).?);
+    }
+}

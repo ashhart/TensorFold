@@ -1,5 +1,6 @@
 //! Ollama's HTTP API on the native server: chat, generate, embeddings and discovery, translated onto the OpenAI seam.
 const std = @import("std");
+const output = @import("confidential_output.zig");
 const json = @import("json");
 const openai = @import("openai.zig");
 const embeddings = @import("embeddings.zig");
@@ -159,8 +160,9 @@ const Wire = struct {
                 e.string
             else
                 "the request failed";
+            const shown = if (output.active()) output.lineMessage(null, e) else message; // fixed words, same line
             const o = json.newObject(w.a) catch return error.Closed;
-            o.put(w.a, "error", .{ .string = message }) catch return error.Closed;
+            o.put(w.a, "error", .{ .string = shown }) catch return error.Closed;
             w.line(.{ .object = o }) catch return error.Closed;
             w.finished = true;
             return;
@@ -186,7 +188,8 @@ const Wire = struct {
                 (if (payload.get("error")) |e| (if (e == .object) e.strField("message") else e.str()) else payload.strField("message")) orelse "the request failed"
             else
                 "the request failed";
-            o.put(w.a, "error", .{ .string = message }) catch return;
+            const shown = if (output.active()) output.lineMessage(status, payload.get("error")) else message;
+            o.put(w.a, "error", .{ .string = shown }) catch return;
             w.line(.{ .object = o }) catch return;
             w.finished = true;
             return;

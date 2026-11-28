@@ -23,6 +23,9 @@ pub fn active() bool {
     return on.load(.acquire);
 }
 
+/// A request's --confidential state on its connection: its number, the status sent, an access line still due.
+pub const State = struct { serial: u64 = 0, status: u16 = 0, access_due: bool = false };
+
 var serials: std.atomic.Value(u64) = .init(0);
 
 /// Numbers each request in the process: a request is named by it until it has a reply id.
@@ -32,20 +35,20 @@ pub fn nextSerial() u64 {
 
 /// The access line a response still owes, for a route that writes its head itself (whole audio).
 pub fn flushAccess(c: *Conn) void {
-    if (!c.access_due) return;
-    c.access_due = false;
+    if (!c.hidden.access_due) return;
+    c.hidden.access_due = false;
     var buf: [32]u8 = undefined;
-    log.confidentialAccess(requestId(c, &buf), c.status, null, null);
+    log.confidentialAccess(requestId(c, &buf), c.hidden.status, null, null);
 }
 
 /// The connection's own request number: a persistent socket's error names this, as a turn's reply id dies with it.
 pub fn serialId(c: *const Conn, buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "req-{d}", .{c.serial}) catch "req";
+    return std.fmt.bufPrint(buf, "req-{d}", .{c.hidden.serial}) catch "req";
 }
 
 /// The request id an error names: the reply id once there is one, else the request's number.
 pub fn requestId(c: *const Conn, buf: []u8) []const u8 {
-    return c.id orelse std.fmt.bufPrint(buf, "req-{d}", .{c.serial}) catch "req";
+    return c.id orelse std.fmt.bufPrint(buf, "req-{d}", .{c.hidden.serial}) catch "req";
 }
 
 /// The error types an error object keeps: every other `type` value is written as null.
@@ -56,12 +59,14 @@ const types = [_][]const u8{
 
 /// The error codes an error object keeps: fixed words clients key on. Any other `code` value is written as null.
 const codes = [_][]const u8{
-    "context_length_exceeded",            "invalid_prompt",                 "server_error",          "timeout",
-    "model_unloaded",                     "model_not_found",                "request_not_found",     "steering_not_supported",
-    "loopback_only",                      "invalid_api_key",                "invalid_event",         "invalid_stream_id",
-    "previous_response_not_found",        "request_quarantined",            wait.restarting.code,    wait.loading.code,
-    wait.reload_failed.code,              wait.engine_busy,                 wait.engine_unavailable, wait.memory_pressure,
-    "websocket_connection_limit_reached", "websocket_stream_limit_reached", "max_inflight_exceeded",
+    "context_length_exceeded",            "invalid_prompt",                 "server_error",                 "timeout",
+    "model_unloaded",                     "model_not_found",                "request_not_found",            "steering_not_supported",
+    "loopback_only",                      "invalid_api_key",                "invalid_event",                "invalid_stream_id",
+    "previous_response_not_found",        "request_quarantined",            wait.restarting.code,           wait.loading.code,
+    wait.reload_failed.code,              wait.engine_busy,                 wait.engine_unavailable,        wait.memory_pressure,
+    "websocket_connection_limit_reached", "websocket_stream_limit_reached", "max_inflight_exceeded",        "insufficient_scope",
+    "max_inflight_per_key_exceeded",      "admission_capacity_exceeded",    "requests_per_second_exceeded", "background_limit_exceeded",
+    "reasoning_loop",                     "not_supported",                  "invalid_request_error",
 };
 
 fn listed(list: []const []const u8, text: ?[]const u8) ?[]const u8 {
@@ -114,8 +119,38 @@ pub fn httpBody(a: Allocator, status: u16, body: []const u8, request_id: []const
         code = fieldOf(e, "code");
     }
     const o = try json.newObject(a);
+    if (parsed == .ok and parsed.ok.typeIs("error")) try o.put(a, "type", .{ .string = "error" }); // Anthropic's shape
     try o.put(a, "error", try errorObject(a, status, kind, code, request_id));
     return json.stringify(a, .{ .object = o }, .{}) catch return error.OutOfMemory;
+}
+
+/// An NDJSON error line's text (Ollama's `{"error": "..."}`): the fixed message for its status or its error's class.
+pub fn lineMessage(status: ?u16, e: ?Value) []const u8 {
+    const err = e orelse Value.null;
+    const code = fieldOf(err, "code");
+    return message(status orelse statusOf(null, fieldOf(err, "type"), code), allowedCode(code));
+}
+
+/// A stored response read back after it failed: generated ids, its status fields and the fixed error, nothing echoed.
+pub fn storedFailure(a: Allocator, value: Value, c: *const Conn) Allocator.Error!Value {
+    const e = value.get("error") orelse return value;
+    if (!active() or e == .null or !std.mem.eql(u8, value.strField("status") orelse "", "failed")) return value;
+    const code = fieldOf(e, "code");
+    var id: [32]u8 = undefined;
+    const fixed = try errorObject(a, statusOf(null, fieldOf(e, "type"), code), fieldOf(e, "type"), code, requestId(c, &id));
+    return .{ .object = try failedResponse(a, value, fixed) };
+}
+
+/// A failed response's safe fields: its `resp_` id, object, status and background flag, and `fixed` as its error.
+fn failedResponse(a: Allocator, r: Value, fixed: Value) Allocator.Error!*json.Object {
+    const o = try json.newObject(a);
+    if (r.strField("id")) |id| if (std.mem.startsWith(u8, id, "resp_")) try o.put(a, "id", .{ .string = id });
+    try o.put(a, "object", .{ .string = "response" });
+    try o.put(a, "status", .{ .string = "failed" });
+    if (r.get("background")) |b| if (b == .bool) try o.put(a, "background", b);
+    if (r.get("created_at")) |n| if (n == .int) try o.put(a, "created_at", n);
+    try o.put(a, "error", fixed);
+    return o;
 }
 
 /// A stream or socket error event rebuilt from fixed parts only; any other event as given.
@@ -132,15 +167,11 @@ pub fn event(a: Allocator, value: Value, request_id: []const u8) Allocator.Error
     const fixed = try errorObject(a, statusOf(top.get("status"), kind, code), kind, code, request_id);
     // nothing else of the event is kept: its other fields may echo the request
     const o = try json.newObject(a);
-    if (value.strField("type")) |t| if (listed(&.{ "error", "response.failed" }, t)) |k| try o.put(a, "type", .{ .string = k });
+    const kinds = [_][]const u8{ "error", "response.failed", "response.steer.failed" }; // clients wait on each by type
+    if (value.strField("type")) |t| if (listed(&kinds, t)) |k| try o.put(a, "type", .{ .string = k });
     for ([_][]const u8{ "sequence_number", "status" }) |k| if (top.get(k)) |n| if (n == .int) try o.put(a, k, n);
     if (failed != null) {
-        const r = try json.newObject(a);
-        if (value.get("response").?.strField("id")) |id| if (std.mem.startsWith(u8, id, "resp_")) try r.put(a, "id", .{ .string = id });
-        try r.put(a, "object", .{ .string = "response" });
-        try r.put(a, "status", .{ .string = "failed" });
-        try r.put(a, "error", fixed);
-        try o.put(a, "response", .{ .object = r });
+        try o.put(a, "response", .{ .object = try failedResponse(a, value.get("response").?, fixed) });
     } else if (nested != null) {
         try o.put(a, "error", fixed);
     } else for (fixed.object.keys(), fixed.object.values()) |k, v| if (!std.mem.eql(u8, k, "type")) try o.put(a, k, v);
@@ -165,19 +196,19 @@ fn fieldOf(e: Value, key: []const u8) ?[]const u8 {
 pub fn head(c: *Conn, body: []const u8) Allocator.Error!?[]const u8 {
     var id_buf: [32]u8 = undefined;
     const id = requestId(c, &id_buf);
-    if (c.status < 400) {
+    if (c.hidden.status < 400) {
         flushAccess(c);
         return null;
     }
     var arena = std.heap.ArenaAllocator.init(c.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const text = try httpBody(a, c.status, body, id);
-    if (c.access_due) {
+    const text = try httpBody(a, c.hidden.status, body, id);
+    if (c.hidden.access_due) {
         const e = (json.parse(a, text) catch unreachable).ok.get("error").?;
-        log.confidentialAccess(id, c.status, e.strField("type"), e.strField("code"));
+        log.confidentialAccess(id, c.hidden.status, e.strField("type"), e.strField("code"));
     }
-    c.access_due = false;
+    c.hidden.access_due = false;
     if (std.mem.eql(u8, c.version, "HTTP/0.9")) return try c.gpa.dupe(u8, text); // no head: the body alone
     // the route's Content-Type and Content-Length named its own body: this head names the fixed one
     var lines_out: std.ArrayList(u8) = .empty;
@@ -189,8 +220,9 @@ pub fn head(c: *Conn, body: []const u8) Allocator.Error!?[]const u8 {
         try lines_out.appendSlice(c.gpa, l);
         try lines_out.appendSlice(c.gpa, "\r\n");
     }
+    // a HEAD reply names the fixed body's length and sends none of it
     const sent = if (std.mem.eql(u8, c.method, "HEAD")) "" else text;
-    try lines_out.print(c.gpa, "Content-Type: application/json\r\nContent-Length: {d}\r\n", .{sent.len});
+    try lines_out.print(c.gpa, "Content-Type: application/json\r\nContent-Length: {d}\r\n", .{text.len});
     c.out.clearRetainingCapacity();
     try c.out.appendSlice(c.gpa, lines_out.items);
     return try c.gpa.dupe(u8, sent);

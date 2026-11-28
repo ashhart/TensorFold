@@ -78,10 +78,8 @@ pub const Conn = struct {
     hook: ?StatusHook = null,
     broken: bool = false,
     quiet_log: bool = false,
-    /// --confidential (confidential_output.zig): this request's number, the status sent, an access line still due.
-    serial: u64 = 0,
-    status: u16 = 0,
-    access_due: bool = false,
+    /// --confidential's per-request state (confidential_output.zig).
+    hidden: output.State = .{},
     /// Answers ``peerGone`` in place of the socket probe (a WebSocket session reads its own frames).
     gone_hook: ?GoneHook = null,
 
@@ -251,7 +249,7 @@ pub const Conn = struct {
         c.id = null;
         c.counted = false;
         c.response_complete = false;
-        c.serial = output.nextSerial();
+        c.hidden.serial = output.nextSerial();
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -367,17 +365,15 @@ pub const Conn = struct {
     pub fn startResponse(c: *Conn, code: u16, phrase: ?[]const u8) Allocator.Error!void {
         c.response_complete = false;
         c.out.clearRetainingCapacity();
-        c.status = code;
-        c.access_due = false;
-        if (c.quiet_log) c.quiet_log = false else if (output.active()) c.access_due = true else log.request(c, code);
+        c.hidden = .{ .serial = c.hidden.serial, .status = code };
+        if (c.quiet_log) c.quiet_log = false else if (output.active()) c.hidden.access_due = true else log.request(c, code);
         if (code >= 200 and !c.counted) {
             c.counted = true;
             if (c.hook) |h| h.call(h.ctx, c, code);
         }
         if (std.mem.eql(u8, c.version, "HTTP/0.9")) return;
         var date: [40]u8 = undefined;
-        // under --confidential the standard phrase only: a route's own phrase may quote the request
-        const said = if (output.active()) reason(code) else phrase orelse reason(code);
+        const said = if (output.active()) reason(code) else phrase orelse reason(code); // confidential: standard only
         try c.out.print(c.gpa, "HTTP/1.1 {d} {s}\r\nServer: TensorFold\r\nDate: {s}\r\n", .{ code, said, httpDate(&date) });
         if (c.cors_origin) |origin| {
             try c.addHeader("Access-Control-Allow-Origin", origin);
@@ -496,6 +492,7 @@ fn parseVersion(v: []const u8) ?[2]u64 {
 pub fn reason(code: u16) []const u8 {
     return switch (code) {
         100 => "Continue",
+        101 => "Switching Protocols",
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -504,6 +501,7 @@ pub fn reason(code: u16) []const u8 {
         414 => "URI Too Long",
         429 => "Too Many Requests",
         422 => "Unprocessable Entity",
+        426 => "Upgrade Required",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
