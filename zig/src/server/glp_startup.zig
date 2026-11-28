@@ -301,7 +301,7 @@ pub fn report(a: std.mem.Allocator, v: Vec) void {
 
 /// The site the lane applies the vector at, as the operator reads it: the file's hook, or the residual stream's name.
 fn appliedSite(hook: []const u8) []const u8 {
-    return if (std.mem.eql(u8, hook, "residual_stream")) "the residual stream" else hook;
+    return if (std.mem.eql(u8, hook, "residual_stream") or std.mem.eql(u8, hook, glp.residual_site)) "the residual stream" else hook;
 }
 
 /// The checkpoint the vector was derived from, with its revision when it names one; the file's own words, escaped.

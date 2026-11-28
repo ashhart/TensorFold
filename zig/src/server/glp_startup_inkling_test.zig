@@ -168,6 +168,13 @@ test "a transferred vector's warning names the FFN write the lane applies it at"
     defer log.Test.sink = null;
     serve.report(a, f.g.?);
     try std.testing.expect(has(sink.list.items, "it is applied at ffn_out_pre_residual"));
+
+    var q = try Fixture.make(a, .{ .site = glp.residual_site, .derived_at = glp.ffn_site });
+    defer q.tmp.cleanup();
+    var q_sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&q_sink), .call = Sink.capture };
+    serve.report(a, q.g.?);
+    try std.testing.expect(has(q_sink.list.items, "it is applied at the residual stream"));
 }
 
 test "a width other than 2304 and the DeepSeek paired file are refused" {
