@@ -279,3 +279,61 @@ test "cache budget fallback: evicting a longer old image cannot spend its shorte
     try t.expectEqual(@as(u64, 10240), promise.bytes);
     try t.expectEqual(@as(u64, 1), s.counts.evicted);
 }
+
+fn slotCreditBytes(_: *anyopaque, at: u32) u64 {
+    return if (at > 8192) 32769 else at;
+}
+
+fn keepOthersCredit(slot_bound: bool) !void {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = try words(a, 20000);
+    var f: Fake = .{ .gpa = t.allocator };
+    var vtable = f.snapshots().vtable.*;
+    vtable.bytes = if (slot_bound) slotCreditBytes else bytes;
+    var s = pc.Store.init(t.allocator, .{ .ptr = &f, .vtable = &vtable }, rules, if (slot_bound) 32768 else 14336);
+    defer s.deinit();
+    s.keep_others = true;
+    for ([_]u32{ 2048, 4096 }) |at| {
+        _ = try pass(&f, null, ids[0..at], .{});
+        try t.expect(s.keep(ids, at, null, &.{}, &.{}));
+    }
+    if (slot_bound) s.most = 2;
+    var promise: @import("prompt_cache_reserve.zig").Room = .{};
+    s.reservation_guard = .{ .ctx = &f, .needed = none, .promise = &promise };
+    const restore = s.find(ids, &.{}, &.{}).?;
+    try t.expectEqual(@as(u32, 4096), restore.at);
+    // Ordinary save admission has no restore credit and must keep its stricter rule.
+    try t.expect(!pc.others.fits(&s, restore, ids, 14336, 2));
+    const l = try s.lookupUser(a, ids, 20000, 19986, 0, 0, &.{6144}, &.{}, &.{});
+    var resumed = false;
+    defer if (!resumed) s.release(l.entry.?);
+    try t.expectEqual(restore, l.entry.?);
+    try t.expectEqualSlices(u32, &.{ 6144, 8192 }, l.marks);
+    try t.expectEqual(@as(u64, 1), s.counts.evicted);
+    try t.expectEqual(@as(u64, 0), s.counts.trimmed);
+    try t.expectEqual(@as(u64, 4096), s.held);
+    try t.expectEqual(@as(usize, 1), s.entries.items.len);
+    try t.expectEqual(@as(u64, 10240), promise.bytes);
+    try t.expectEqual(@as(usize, 1), promise.slots);
+    try s.family.vtable.restore(s.family.ptr, null, restore.saved);
+    s.resumed(restore, ids, true);
+    resumed = true;
+    const got = try pass(&f, &s, ids, .{ .from = 4096, .marks = l.marks });
+    var cold: Fake = .{ .gpa = t.allocator };
+    const want = try pass(&cold, null, ids, .{});
+    try t.expectEqualSlices(u8, std.mem.asBytes(&want), std.mem.asBytes(&got));
+    try t.expectEqual(@as(usize, 2), s.entries.items.len);
+    try t.expectEqual(@as(u64, 14336), s.held);
+    try t.expect(s.find(ids, &.{}, &.{}) != null);
+    for (s.entries.items) |e| try t.expect(e.at == 6144 or e.at == 8192);
+}
+
+test "cache budget fallback: KEEP_OTHERS retains admitted marks using restore byte credit" {
+    try keepOthersCredit(false);
+}
+
+test "cache budget fallback: KEEP_OTHERS retains admitted marks using restore slot credit" {
+    try keepOthersCredit(true);
+}

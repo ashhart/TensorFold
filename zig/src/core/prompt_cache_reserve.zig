@@ -147,7 +147,8 @@ fn makeRoom(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, need
     const can = evictable(s, from, prompt);
     if (bytes + can.bytes < need.bytes or slots + can.slots < need.slots) return;
     while (bytes < need.bytes or slots < need.slots) {
-        const i = others.victim(s, from, prompt, born, need.bytes, need.slots) orelse return;
+        // The proof above includes restore credit and promises; the save-side fits check does not.
+        const i = policy.victimIn(s, from, prompt, born, s.keep_others) orelse return;
         bytes += s.entries.items[i].bytes;
         slots += 1;
         s.remove(i);
