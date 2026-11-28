@@ -11,6 +11,8 @@ pub const replay = @import("kernels_replay.zig");
 pub const ops = @import("kernels_ops.zig");
 /// sampling.cu (its own module, loaded by the keyed sampler)
 pub const sampling = @import("sampling_kernels.zig");
+/// glp.cu's launches (--glp): its image loads only when a vector is served (`Kernels.loadGlp`).
+pub const glp = @import("glp_ops.zig");
 
 fn Blob(comptime import_name: []const u8) type {
     return struct {
@@ -61,6 +63,12 @@ const Lin2Blob = struct {
 };
 pub const lin2_image: []const u8 = &Lin2Blob.bytes;
 
+/// glp.cu (ours, --glp): optional (zig/build/dsv41_units.zig), an empty image when the build has none.
+const GlpBlob = struct {
+    pub const bytes align(16) = @embedFile("dsv41_fatbin_dsv41_glp_add").*;
+};
+pub const glp_image: []const u8 = &GlpBlob.bytes;
+
 fn env(name: [:0]const u8) ?[]const u8 {
     const v = std.c.getenv(name) orelse return null;
     return std.mem.span(v);
@@ -73,6 +81,9 @@ pub const Kernels = struct {
     dense: dense.Functions,
     ops: ops.Functions,
     sms: usize,
+    /// glp.cu's module and functions: null until `loadGlp` (an unsteered server never loads them)
+    glp_mod: ?cuda.Module = null,
+    glp_fns: ?glp.Functions = null,
 
     /// Loads every module and resolves every instance the launches can use.
     pub fn load(ctx: *const cuda.Context) !Kernels {
@@ -80,6 +91,8 @@ pub const Kernels = struct {
         if (!available) return error.BuiltWithoutKernels;
         const d = ctx.d;
         var k: Kernels = undefined;
+        k.glp_mod = null;
+        k.glp_fns = null;
         const list = [_][]const u8{ images.exl3_experts, images.x3ld, images.x3pf, images.x3gm, images.linear, images.x3seg, images.dense3, images.attn, images.topk, images.mhc, images.mhc_pf, images.router_gemv, images.pfdense_k8, images.pfdense_k10, images.pfdense_k12, images.pfdense_k16, images.engram_gate, images.l2pace, images.l2pf, images.x3gm_plan, images.topk_keys, images.pointwise, images.kvsplit, images.glue, images.x3gm3, images.pfglue, images.router_glue, images.kv_glue, images.x3ld_epi, images.topk_b };
         comptime std.debug.assert(list.len == @typeInfo(@FieldType(Kernels, "mods")).array.len);
         var loaded: usize = 0;
@@ -115,7 +128,24 @@ pub const Kernels = struct {
         if (mode.cluster) std.log.scoped(.dsv41).info("lin2: dense3's split-K launches of up to 32 rows reduce their partials in a cluster's shared memory (TF_DSV41_LIN2_CLUSTER)", .{});
     }
 
+    /// --glp: glp.cu's module, loaded once before any launch or capture; refused without an image.
+    pub fn loadGlp(k: *Kernels, d: *const cuda.Driver) !void {
+        if (k.glp_fns != null) return;
+        if (glp_image.len == 0) return error.GlpKernelNotBuilt;
+        var m = try cuda.Module.load(d, glp_image);
+        errdefer m.unload();
+        k.glp_fns = try glp.Functions.resolve(m);
+        k.glp_mod = m;
+    }
+
+    /// The steering launches on one stream; null until `loadGlp`.
+    pub fn glpOps(k: *const Kernels, s: cuda.Stream) ?glp.Ops {
+        if (k.glp_fns == null) return null;
+        return .{ .f = &k.glp_fns.?, .s = s };
+    }
+
     pub fn deinit(k: *Kernels) void {
+        if (k.glp_mod) |*m| m.unload();
         if (k.dense.lin2) |*l| l.module.unload();
         for (&k.mods) |*m| m.unload();
     }
@@ -154,6 +184,9 @@ test {
     std.testing.refAllDecls(ops);
     std.testing.refAllDecls(ops.Ops);
     std.testing.refAllDecls(ops.Functions);
+    std.testing.refAllDecls(glp);
+    std.testing.refAllDecls(glp.Ops);
+    std.testing.refAllDecls(glp.Functions);
 }
 
 test {
@@ -162,6 +195,7 @@ test {
     _ = dense;
     _ = exl3;
     _ = kv_glue;
+    _ = glp;
     _ = @import("kernels_shapes.zig");
 }
 

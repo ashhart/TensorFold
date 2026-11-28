@@ -9,6 +9,7 @@ const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
 const qwen27 = @import("qwen27_served.zig");
 const q27_eng = @import("qwen27_engine.zig");
+const steer_served = @import("qwen27_steer_served.zig");
 const q27_witness = @import("qwen27_witness.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
@@ -311,6 +312,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const loop_sn = q27_eng.isSenseNova(t);
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
+    if (steer_served.refusal(o, dense)) |why| return why;
     const supports_v3 = !mem_ctrl.useLegacyPocket() and (std.mem.eql(u8, t, "nemotron_h") or std.mem.eql(u8, t, "qwen3_5") or std.mem.eql(u8, t, "qwen3_5_moe"));
     if (!learners.supports(t) and !supports_v3) if (try o.slideRefusal(a, "Macs")) |why| return why;
     if (@import("qwen27_mtp.zig").refusal(o.mtp_drafts, o.mtp_confidence, o.drafter != null, std.mem.eql(u8, t, "qwen3_5") and dense)) |why| return why;
@@ -352,7 +354,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .spill = o.spill, .slots = spill.slots(o) } else null else null;
     const witness = try q27_witness.begin(gpa, io, o); // before the load: stamps, and the libraries it builds
     defer q27_witness.release(witness);
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafts = if (sn) o.drafts else true, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision, .rope_yarn = if (sn) o.rope_yarn else null, .slide = o.slide }, a, &why) catch |err| {
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafts = if (sn) o.drafts else true, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .glp = o.glp, .learn = learn, .vision = o.vision, .rope_yarn = if (sn) o.rope_yarn else null, .slide = o.slide }, a, &why) catch |err| {
         problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native {s} engine cannot load {s} ({s})", .{ if (sn) "SenseNova" else "Qwen (27B class)", o.dir, @errorName(err) });
         return null;
     };
@@ -428,6 +430,7 @@ test {
     _ = @import("metal_identity.zig");
     _ = @import("qwen27_landing.zig");
     _ = spill;
+    _ = steer_served;
     _ = @import("metal_link.zig");
     _ = metal_shared;
     _ = @import("uocr.zig");

@@ -356,8 +356,8 @@ test "an attached run keeps legacy manifest metadata but saves an unranked recei
     var r = try Run.init(a, &tmp);
     const routes = try a.dupe(fake.Route, &.{
         .{ .method = "GET", .path = "/v1/benchmark/manifest", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", two_ranks)}) },
-        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, false, 4, 15)}) },
-        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, true, 4, 15)}) },
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, false, 4, "")}) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, true, 4, "")}) },
     });
     const f = try fake.Fake.start(std.testing.allocator, routes);
     defer f.stop();
@@ -390,14 +390,16 @@ test "an attached run whose accepted manifest lacks its rank count or revision i
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const completion_reply = try fake.apart(a, false, 4, "");
+    const chat_reply = try fake.apart(a, true, 4, "");
     for ([_][]const u8{ no_rank, no_revision }, 0..) |doc, i| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var r = try Run.init(a, &tmp);
         const routes = try a.dupe(fake.Route, &.{
             .{ .method = "GET", .path = "/v1/benchmark/manifest", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", doc)}) },
-            .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, false, 4, 15)}) },
-            .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, true, 4, 15)}) },
+            .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{completion_reply}) },
+            .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{chat_reply}) },
         });
         const f = try fake.Fake.start(std.testing.allocator, routes);
         defer f.stop();

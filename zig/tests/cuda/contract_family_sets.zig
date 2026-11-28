@@ -35,6 +35,7 @@ pub const Sets = struct {
     idol_decoder: *@import("contract_idol_decoder.zig").Set,
     glm_moe: *@import("contract_glm_moe_direct.zig").Set,
     zonos3: *@import("contract_zonos3.zig").Set,
+    glp: *@import("contract_glp.zig").Set,
     hy4_ihc_hc: *@import("contract_hy4_hc.zig").Set,
     topk_rows: *@import("contract_topk_rows.zig").Set,
     sparse_index: *@import("contract_sparse_index.zig").Set,
@@ -125,6 +126,7 @@ pub const Sets = struct {
             a,
             list,
         );
+        const glp = try @import("contract_glp.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -146,6 +148,7 @@ pub const Sets = struct {
             .prompt = prompt,
             .joint_schema = joint_schema,
             .idol = idol,
+            .glp = glp,
             .muse = muse,
             .a = a,
             .idol_decoder = idol_decoder,
@@ -161,6 +164,7 @@ pub const Sets = struct {
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.glp.deinit();
         sets.hy4_route_rows.deinit();
         sets.sparse_attn.deinit();
         sets.sparse_index.deinit();

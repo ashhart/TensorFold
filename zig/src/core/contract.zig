@@ -10,6 +10,7 @@ pub const attention_pv = @import("contract/attention_pv.zig");
 pub const rows = @import("contract/rows.zig");
 pub const reference_threads = @import("contract/reference_threads.zig");
 pub const affine = @import("contract/affine.zig");
+pub const steer = @import("contract/steer.zig");
 pub const dense = @import("contract/dense.zig");
 pub const bf16_round = @import("bf16_round");
 pub const attention_range = @import("attention_range.zig");
@@ -67,6 +68,7 @@ test {
     _ = @import("contract/affine_gather_records.zig");
     _ = @import("contract/flint_records.zig");
     _ = @import("contract/ling_mla_records.zig");
+    _ = @import("contract/glp_cuda_records.zig");
     _ = spec;
     _ = gates;
     _ = rows;

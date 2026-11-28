@@ -49,6 +49,7 @@ pub const GpuTarget = struct {
     ingest_window: u32 = 0,
     /// each slot's next request's reply budget (`admit`, before its prefill): its pool admission's price
     max_new: [16]?u64 = @splat(null),
+    cached_rows: [16]u64 = @splat(0),
     /// the next `begin`'s admission as the round planner decided it (kv/sched.zig); null: priced at `begin`
     admission: ?Planned = null,
     /// releases wait for `settleReleases` (the rounds: after the next round's admissions are decided)
@@ -70,7 +71,7 @@ pub const GpuTarget = struct {
         return .{ .ptr = t, .vtable = &vtable };
     }
 
-    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .first_mask = firstMask };
+    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .first_mask = firstMask, .resumed = resumed };
 
     fn admit(p: *anyopaque, slot: u32, max_new: u64) void {
         const t = self_(p);
@@ -104,21 +105,34 @@ pub const GpuTarget = struct {
         return @ptrCast(@alignCast(p));
     }
 
+    fn resumed(p: *anyopaque, slot: u32) u64 {
+        const t = self_(p);
+        return if (slot < t.cached_rows.len) t.cached_rows[slot] else 0;
+    }
+
     fn prefill(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self_(p);
         const bits = t.takeFirst(slot);
         if (!available(p, slot)) return error.SlotUnavailable;
+        t.cached_rows[slot] = 0;
+        errdefer t.cached_rows[slot] = 0;
         if (t.rows) |b| try b.beginPrefill(slot) else if (slot != 0) return error.Slots;
         _ = t.takeReplayed(slot);
         const keyed = try t.keyedOf(sampling);
         t.tree.clear();
-        if (t.resume_first) |first| if (t.f.slot.pos == ids.len and t.f.slot.pending == null) return first;
+        if (t.resume_first) |first| {
+            if (t.f.slot.pos == ids.len and t.f.slot.pending == null) {
+                t.cached_rows[slot] = ids.len;
+                return first;
+            }
+        }
         // the request's pool pages, then a saved entry that prefixes the prompt: the slot continues, the rest prefills
         const max_new: ?u64 = if (slot < t.max_new.len) t.max_new[slot] else null;
         if (slot < t.max_new.len) t.max_new[slot] = null;
         // a failed prompt leaves the slot empty on every rank, its pages and reservation back
         errdefer if (t.sessions != null) t.abandon(slot);
         const at: usize = if (t.sessions) |ss| @intCast((try @import("request_admission.zig").resumeRequest(ss, ids, max_new orelse 0)).at) else 0;
+        t.cached_rows[slot] = at;
         const rest = ids[at..];
         if (t.own_prefill and t.prompt_tail == .verify) {
             // the rows before the last token prefill; the last token is the pending row of the first verify window

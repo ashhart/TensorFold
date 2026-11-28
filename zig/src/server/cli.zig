@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
+const glp_startup = @import("glp_startup.zig");
 const Allocator = std.mem.Allocator;
 pub const Kind = enum {
     value, // --flag VALUE or --flag=VALUE
@@ -14,6 +15,8 @@ pub const Flag = struct {
     choices: []const []const u8 = &.{}, // argparse's choices; empty: any value of the flag's type.
     /// This binary honours the flag (and lists it in ``capabilities``); the rest are refused as unsupported.
     native: bool = false,
+    /// Whether ``capabilities`` lists it: a flag this build honours but every valid use refuses is left out.
+    advertised: bool = true,
     native_values: ?[]const []const u8 = null, // The values it honours when only some of the choices.
     /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).
     path: bool = false,
@@ -29,6 +32,12 @@ fn served(comptime name: []const u8) bool {
 fn servedBy(list: []const []const u8, name: []const u8) bool {
     for (list) |x| if (std.mem.eql(u8, x, name)) return true;
     return false;
+}
+
+/// Whether this build can apply a control vector: the Metal engine on macOS, or a Linux server with the CUDA engine.
+pub fn steers() bool {
+    if (builtin.os.tag == .macos) return true;
+    return builtin.os.tag == .linux and !served("--backend=rocm");
 }
 
 /// The CUDA build's own flags and variables (the Metal build refuses them).
@@ -49,7 +58,7 @@ pub const flags = [_]Flag{
     .{ .name = "--chat-template", .path = true, .native = true },
     .{ .name = "--voices", .path = true, .native = true },
     .{ .name = "--default-voice", .native = true },
-} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ [_]Flag{
+} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ glp_startup.flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
@@ -252,6 +261,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     var env_buf: [192]u8 = undefined;
     if (!out.confidential) if (api.prefill_env.problem(&env_buf)) |why| return fail(u, a, "{s}", .{why});
     try spillWith(u, a, out);
+    if (try glp_startup.read(a, &out.glp)) |why| return fail(u, a, "{s}", .{why});
     return out;
 }
 
@@ -323,8 +333,9 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         return if (is(name, "--cors-origin")) repeated.cors.append(a, v) else repeated.origins.append(a, v);
     }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
-    if (try @import("cli_recall.zig").flag(a, out, name, v, u)) return;
+    if (try @import("cli_recall.zig").flag(a, out, name, v, u) or try @import("cli_vision.zig").flag(a, out, name, v, u)) return;
     if (@import("voice_cli.zig").apply(&out.voice, name)) return;
+    if (glp_startup.flag(&out.glp, name, v) catch return fail(u, a, "argument --glp-alpha: expected a finite strength from 0: '{s}'", .{v})) return;
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
     if (is(name, "--voices")) {
@@ -393,24 +404,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-image-share")) out.vision_image_share = if (std.mem.eql(u8, v, "fixed")) .fixed else .request else if (is(name, "--vision-max-images")) {
-        const n = try int(u, a, name, v);
-        if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
-        out.vision_max_images = @intCast(n);
-    } else if (is(name, "--vision-max-videos")) {
-        const n = try int(u, a, name, v);
-        if (n < 1 or n > 16) return fail(u, a, "argument --vision-max-videos: expected 1 to 16 videos: '{s}'", .{v});
-        out.vision_max_videos = @intCast(n);
-    } else if (is(name, "--vision-video-tokens")) {
-        const n = try int(u, a, name, v);
-        if (n < 64 or n > 262144) return fail(u, a, "argument --vision-video-tokens: expected 64 to 262144 tokens: '{s}'", .{v});
-        out.vision_video_tokens = @intCast(n);
-    } else if (is(name, "--vision-image-tokens")) {
-        const n = try int(u, a, name, v);
-        if (n < 16 or n > 262144) return fail(u, a, "argument --vision-image-tokens: expected 16 to 262144 tokens: '{s}'", .{v});
-        out.vision_image_tokens = @intCast(n);
-        out.vision_image_tokens_set = true;
-    } else if (is(name, "--silence-redraws")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-image-share")) out.vision_image_share = if (std.mem.eql(u8, v, "fixed")) .fixed else .request else if (is(name, "--silence-redraws")) {
         out.redraw.max = std.math.cast(u8, try int(u, a, name, v)) orelse return fail(u, a, "argument --silence-redraws: expected 0 to 255 redraws: '{s}'", .{v});
     } else if (is(name, "--silence-redraw-budget-s")) {
         out.redraw.budget_s = try float(u, a, name, v);
@@ -430,6 +424,7 @@ pub fn parallel(text: []const u8) ?u32 {
 pub fn parallelFixed(text: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
 }
+
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
     return @import("drama_cfg.zig").withGuidance(args.cfg, .{
@@ -446,6 +441,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .drafter_bits = args.drafter_bits,
         .rope_yarn = args.rope_yarn,
         .record = args.record,
+        .glp = try glp_startup.engine(a, dir, model_type, args.backend, args.glp),
         .kv8 = std.mem.eql(u8, args.kv_cache, "fp8"),
         .prompt_int8 = std.mem.eql(u8, args.prompt_precision, "int8"),
         .speed_up = args.speed_up,

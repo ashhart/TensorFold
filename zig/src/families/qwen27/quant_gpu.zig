@@ -15,31 +15,16 @@ pub const Sums = struct { ref: Ref, stride: u32 };
 pub var qk_rows: bool = true;
 pub const Key = quant_source.Key;
 pub const Kind = quant_source.Kind;
+pub const steerKey = quant_source.steerKey;
 
 /// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
 pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
     return tensor_units and std.mem.endsWith(u8, name, " Ultra");
 }
 
-test "long prompt dispatches only on an Ultra with tensor units" {
-    _ = quant_source;
-    try std.testing.expect(longPrompt("Apple M5 Ultra", true));
-    try std.testing.expect(!longPrompt("Apple M5 Max", true));
-    try std.testing.expect(!longPrompt("Apple M5 Pro", true));
-    try std.testing.expect(!longPrompt("Apple M3 Ultra", false));
-}
-
 /// Whether a reg projection's `rows` take its long key: prompt rows past `lane.reg_rows` on a `longPrompt` chip.
 pub fn longKey(long_prompt: bool, prompt: bool, rows: u32) bool {
     return long_prompt and prompt and rows > lane.reg_rows;
-}
-
-test "only prompt chunks past 128 rows take the long key" {
-    try std.testing.expect(longKey(true, true, 129));
-    try std.testing.expect(longKey(true, true, 2048));
-    try std.testing.expect(!longKey(true, true, 128));
-    try std.testing.expect(!longKey(true, false, 2048));
-    try std.testing.expect(!longKey(false, true, 2048));
 }
 
 pub const Kernels = struct {
@@ -130,6 +115,7 @@ pub const Kernels = struct {
             .projection => unreachable,
             .xsum => "custom_kernel_q27_xsum_bfloat16_t_int32_t_float",
             .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
+            .norm_steer => "custom_kernel_q27_norm_steer_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float_float_float",
             .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
             .mlp => "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float",
             .mlp_rows => "q27_mlp_rows",
@@ -467,18 +453,30 @@ pub const Kernels = struct {
     }
 
     pub fn normShift(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32, shift: bool) !void {
+        return k.normInner(input_encoder, h, residual, weight, eps, dims, combined, out, xs, width, rows, shift, null, 0);
+    }
+
+    /// The norm with a direction inside it: alpha times the direction is added before the normalisation reads the row.
+    pub fn normSteer(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, dir: mtl.Buffer, alpha: f32, width: u32, rows: u32) !void {
+        return k.normInner(input_encoder, h, residual, weight, eps, dims, combined, out, xs, width, rows, false, dir, alpha);
+    }
+
+    fn normInner(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32, shift: bool, dir: ?mtl.Buffer, alpha: f32) !void {
         var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;
-
         const xs_group = k.xsGroup(width);
-        const xs_on = xs_group != 0;
-        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_on, .xs_group = xs_group, .shift = shift }));
+        const key = if (dir != null) try steerKey(width, xs_group) else Key{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_group != 0, .xs_group = xs_group, .shift = shift };
+        e.setPipeline(try k.get(key));
         if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
-        e.dispatchGroups(mtl.Size.of(1, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
-        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
-            k.sn_xs128 = if (xs_group == 128) .{ .x = out, .sums = .{ .ref = .{ .buf = xs.buffer, .off = xs.offset }, .stride = padded(rows) } } else null;
+        if (dir) |d| {
+            e.setBuffer(d, 0, 8);
+            e.setValue(alpha, 9);
         }
+        e.dispatchGroups(mtl.Size.of(1, if (key.xs) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
+        if (dir == null) if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            k.sn_xs128 = if (xs_group == 128) .{ .x = out, .sums = .{ .ref = .{ .buf = xs.buffer, .off = xs.offset }, .stride = padded(rows) } } else null;
+        };
         k.fits = null;
         // tf_sq_fits's words and tf_sq_prep_h's sums and halves for this output: its prompt rows may take half operands
         if (k.raw_tiles and rows >= half_rows) {
@@ -581,19 +579,17 @@ pub const Kernels = struct {
         try span.end();
     }
 };
-
 /// A norm's output of this many rows or more gets tf_sq_fits's words: prompt chunks, not decode or verify rows.
 pub const half_rows = 64;
-
 /// A norm's output, its rows and width: the words in `Kernels.fits_words` are its.
 const Fits = struct { x: Ref, rows: u32, k: u32 };
-
 pub fn padded(rows: u32) u32 {
     return 16 * ((rows + 15) / 16);
 }
-
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
 }
-
 pub const specializedSource = quant_source.specializedSource;
+test {
+    _ = @import("quant_gpu_test.zig");
+}

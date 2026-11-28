@@ -61,7 +61,7 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
-    if (std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ")) {
+    if (std.mem.startsWith(u8, d.name, "q27 stack ") or std.mem.startsWith(u8, d.name, "q27 qk ") or std.mem.startsWith(u8, d.name, "q27 mixed ") or std.mem.startsWith(u8, d.name, "qwen27 norm steer ")) {
         if (!assemble) return undefined;
         const resolved = try @import("metal_q27_limits.zig").resolve(a, device, d.name, d.offline);
         return .{ .decl = d, .function = fun, .here = resolved.here, .pre_m5 = resolved.pre_m5 };

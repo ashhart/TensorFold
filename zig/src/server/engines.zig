@@ -3,6 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const native = @import("native_engines");
 const cli = @import("cli.zig");
+const glp_startup = @import("glp_startup.zig");
 const build_identity = @import("identity.zig");
 const Allocator = std.mem.Allocator;
 const device = @import("device/support.zig");
@@ -69,12 +70,36 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         problem.* = "--record writes rows from the CUDA engine only so far: serve without --record";
         return null;
     }
+    if (try glpRefusal(a, dir, model_type, args)) |why| {
+        problem.* = why;
+        return null;
+    }
     return native.open(a, gpa, io, try released(a, dir, model_type, args), problem);
+}
+
+/// Whether this binary's engine is the CUDA one: the only engine that applies DeepSeek-V4.1's paired control vector.
+const cuda_build = for (native.backends) |backend| {
+    if (std.mem.eql(u8, backend, "cuda")) break true;
+} else false;
+
+/// Why this checkpoint or engine cannot take --glp's control vector; null: it can, or none was given.
+fn glpRefusal(a: Allocator, dir: []const u8, model_type: []const u8, args: cli.Args) !?[]const u8 {
+    const g = args.glp orelse return null;
+    if (try glp_startup.refusal(a, dir, model_type, args.backend, g)) |why| return why;
+    // `auto` names Linux's CUDA engine, but a ROCm or other build of it has no engine that applies the paired vector.
+    if (std.mem.eql(u8, model_type, glp_startup.deepseek_type) and !cuda_build) {
+        return "--glp: this build has no CUDA engine, which alone steers DeepSeek-V4.1: serve it without --glp";
+    }
+    return null;
 }
 
 /// A tensor-parallel rank above 0 runs rank 0's steps until it stops; false with ``problem`` set when it cannot.
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !bool {
     if (try environment(a, args)) |why| {
+        problem.* = why;
+        return false;
+    }
+    if (try glpRefusal(a, dir, model_type, args)) |why| {
         problem.* = why;
         return false;
     }
