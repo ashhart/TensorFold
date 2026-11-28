@@ -54,8 +54,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM tests: the shared-window check sizes its comparison buffers and per-stream arrays from the engine's window_rows instead of a literal row count, so a stream bringing more rows into a shared verify is reported rather than written past the arrays (#5394). Thanks to @BadAd84.
 
 
-- Tests: the CUDA kernel-contract runner gains opt-in isolated workers (`--jobs N`) and deterministic slices (`--shard K/N`); serial execution stays the default (#3093). Thanks to @BlivionIaG.
-
 ## 1.3.7
 
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
