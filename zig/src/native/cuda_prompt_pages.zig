@@ -78,6 +78,15 @@ pub const Adapter = struct {
         return of(ctx).store.reclaim(want);
     }
 
+    fn resident(ctx: *anyopaque, q: hooks.Query) u32 {
+        const x = of(ctx);
+        if (q.key.len != q.prompt_len) return 0;
+        const ids = identities(x.gpa, q.images) catch return 0;
+        defer x.gpa.free(ids);
+        const found = x.store.find(query(q, ids)) orelse return 0;
+        return found.at();
+    }
+
     fn begin(ctx: *anyopaque, q: hooks.Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!hooks.Plan {
         const x = of(ctx);
         const ids = try identities(x.gpa, q.images);
@@ -113,7 +122,7 @@ pub const Adapter = struct {
         of(ctx).gpa.free(marks);
     }
 
-    const vtable: hooks.Prompts.VTable = .{ .begin = begin, .keep = keep, .report = report, .free = free };
+    const vtable: hooks.Prompts.VTable = .{ .resident = resident, .begin = begin, .keep = keep, .report = report, .free = free };
 };
 
 const testing = std.testing;

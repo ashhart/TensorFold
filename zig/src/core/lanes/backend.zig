@@ -154,6 +154,8 @@ pub const Backend = struct {
         held: ?*const fn (ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void = null,
         /// `prefill` fills `Stream.prompt_rows` for a stream with `prompt_logprobs` (it then starts from 0).
         prompt_rows: bool = false,
+        /// Resident prefix for scheduling only. The first fill rechecks and reports the actual hit.
+        prefill_cached_hint: ?*const fn (ptr: *anyopaque, s: *const Stream) u32 = null,
         /// The backend stores `Stream.fill_at` as its pass runs: the status reader may count its fill totals.
         reports_fill: bool = false,
         /// The stream left the rounds: free its caches and held drafts.

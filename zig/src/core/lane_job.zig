@@ -26,6 +26,7 @@ pub const Job = struct {
     submitted: i96 = 0,
     admitted_ns: ?i96 = null, // first admission only, retained if a background pass later yields
     fill_wait: usize = 0, // chunk choices it has waited since admission or its last chunk
+    prefill_cached_hint: u32 = 0, // at admission, for ranking only until the first fill
     fill_lent_ns: f64 = 0, // decode time its prompt has lent replies (TENSORFOLD_PREFILL_ORDER=srpt)
     began: i96 = 0,
     /// The engine thread says the prompt pass is going: status readers may count this job's fill atomics.
@@ -52,6 +53,15 @@ pub const Job = struct {
     memory_prompt: []u32 = &.{}, // [M virtual prefix zeros ++ stripped user prompt] (gpa-owned)
     memory_refused: bool = false, // its memory prefix could not be restored: it runs its own prompt instead
     memory_version: ?u64 = null, // the published memory version its routing saw, which its reply reports
+
+    /// Fill work at admission. The first fill replaces the estimate with the actually restored prefix.
+    pub fn estimatedPassRows(job: *const Job) u64 {
+        var cached = job.stream.cached;
+        if (!job.fill_began and !job.stream.reuse_failed) {
+            cached = @max(cached, job.prefill_cached_hint);
+        }
+        return job.stream.prompt_len -| cached;
+    }
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {

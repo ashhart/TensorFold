@@ -37,9 +37,13 @@ fn pick(h: *const LaneHost, among: enum { all, short, long }) ?usize {
             if (j.fill_wait > best.fill_wait) found = i;
         } else if (j.request.background != best.request.background) {
             if (!j.request.background) found = i;
-        } else if (remaining(h, j) < remaining(h, best)) found = i;
+        } else if (rankRemaining(h, j) < rankRemaining(h, best)) found = i;
     }
     return found;
+}
+
+fn rankRemaining(h: *const LaneHost, j: *const LaneHost.Job) u64 {
+    return @min(remaining(h, j), j.estimatedPassRows());
 }
 
 fn remaining(h: *const LaneHost, j: *const LaneHost.Job) u64 {
@@ -297,7 +301,7 @@ fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
 
 /// A prompt whose whole pass is at most `short_rows` rows (a long prompt's last rows are not).
 fn short(j: *const LaneHost.Job) bool {
-    return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
+    return j.estimatedPassRows() <= Share.short_rows;
 }
 
 /// Fill chunks' cap: the flag or a default past the threshold, a chunk-invariant family and live decoders; else 0.

@@ -37,6 +37,8 @@ pub const Prompts = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// Resident rows matching this query, without restoring or holding any state.
+        resident: ?*const fn (ctx: *anyopaque, q: Query) u32 = null,
         /// The deepest state `prompt` resumes: its pages into `adopt` (held once more), the rest restored into `owner`.
         begin: *const fn (ctx: *anyopaque, q: Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!Plan,
         /// At `at` the store takes the pages of `mine` it lacks and the state; `path`'s first n replace the stream's.
@@ -45,6 +47,11 @@ pub const Prompts = struct {
         report: *const fn (ctx: *anyopaque, prompt: usize, from: u32, kept: u64) void,
         free: *const fn (ctx: *anyopaque, marks: []const u32) void,
     };
+
+    pub fn resident(p: Prompts, q: Query) u32 {
+        const read = p.vtable.resident orelse return 0;
+        return read(p.ctx, q);
+    }
 
     pub fn begin(p: Prompts, q: Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) !Plan {
         return p.vtable.begin(p.ctx, q, history_len, shared, owner, adopt);

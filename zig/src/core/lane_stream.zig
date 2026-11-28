@@ -125,6 +125,10 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         if (reply_grammar) |g| g.deinit(h.gpa);
         return !h.drop(job, "out of memory");
     };
+    if (h.core.backend.vtable.prefill_cached_hint) |hint| {
+        const at = hint(h.core.backend.ptr, &job.stream);
+        job.prefill_cached_hint = if (at < job.stream.prompt_len) at else 0;
+    }
     job.started = true;
     @import("lane_host_load.zig").began(h, job); // the fill shows here
     job.began = std.Io.Clock.awake.now(h.io).toNanoseconds();

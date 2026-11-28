@@ -24,6 +24,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.prefill(x.inner.ptr, s);
             }
         }.f,
+        .prefill_cached_hint = if (v.prefill_cached_hint != null) struct {
+            fn f(p: *anyopaque, s: *const lanes.Stream) u32 {
+                const x = H.bind(p);
+                return x.inner.vtable.prefill_cached_hint.?(x.inner.ptr, s);
+            }
+        }.f else null,
         .prefill_step = if (v.prefill_step != null) struct {
             fn f(p: *anyopaque, s: *lanes.Stream, max_rows: u32) anyerror!bool {
                 const x = H.bind(p);
@@ -201,6 +207,12 @@ test "each forwarded entry calls the family's entry of the same name, once" {
                 Rec.hit(p, "prefill");
             }
         }.f,
+        .prefill_cached_hint = struct {
+            fn f(p: *anyopaque, _: *const S) u32 {
+                Rec.hit(p, "prefill_cached_hint");
+                return 23;
+            }
+        }.f,
         .prefill_step = struct {
             fn f(p: *anyopaque, _: *S, _: u32) anyerror!bool {
                 Rec.hit(p, "prefill_step");
@@ -329,6 +341,8 @@ test "each forwarded entry calls the family's entry of the same name, once" {
     var out: [0]u32 = .{};
     try w.prefill(p, &s);
     try rec.once("prefill");
+    try std.testing.expectEqual(@as(u32, 23), w.prefill_cached_hint.?(p, &s));
+    try rec.once("prefill_cached_hint");
     _ = try w.prefill_step.?(p, &s, 0);
     try rec.once("prefill_step");
     try std.testing.expect(w.cancel_prefill != null);

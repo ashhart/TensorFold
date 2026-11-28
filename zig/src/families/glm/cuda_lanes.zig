@@ -70,6 +70,7 @@ pub const Lanes = struct {
 
     const whole_vt: be.Backend.VTable = .{
         .prefill = prefillFn,
+        .prefill_cached_hint = prefillCachedHint,
         .prefill_many = prefillManyFn,
         .first = firstFn,
         .queue = queueFn,
@@ -286,7 +287,7 @@ pub const Lanes = struct {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
         const gpa = self.x.e.gpa;
-        const share = self.cached(s);
+        const share = share_mod.storeFor(self.x.e, s) != null;
         var owner: share_mod.Owner = .{};
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(gpa);
@@ -316,9 +317,8 @@ pub const Lanes = struct {
         return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
 
-    /// Whether the shared prompt store keeps this content-keyed pass, with no prompt logprob rows asked.
-    fn cached(self: *const Lanes, s: *const lanes.Stream) bool {
-        return share_mod.of(self.x.e) != null and share_mod.cacheable(s);
+    fn prefillCachedHint(ptr: *anyopaque, s: *const lanes.Stream) u32 {
+        return share_mod.cachedHint(of(ptr).x.e, s);
     }
 
     /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
@@ -366,7 +366,7 @@ pub const Lanes = struct {
     const Sink = @import("cuda_prompt_sink.zig").Sink;
 
     fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *share_mod.Keeps) ?engine.Marks {
-        if (self.cached(s)) {
+        if (share_mod.storeFor(self.x.e, s) != null) {
             const l = self.lanes.getPtr(s) orelse return null;
             return share_mod.marks(self.x.e, l.slot, s, l.marks, keeps);
         }

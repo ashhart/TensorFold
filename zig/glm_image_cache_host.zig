@@ -103,9 +103,17 @@ const Cache = struct {
         var owner: glm.share.Owner = .{};
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(a);
+        const counts = c.store.store.tree.counts;
+        const available = c.pages.pool.available();
+        const restored = c.model.restored;
+        const hint = glm.share.cachedHint(&c.e, s);
+        try t.expectEqualDeep(counts, c.store.store.tree.counts);
+        try t.expectEqual(available, c.pages.pool.available());
+        try t.expectEqual(restored, c.model.restored);
         const plan = try glm.share.begin(&c.e, s, &owner, &adopt);
         defer a.free(plan.marks);
         defer c.pages.give(adopt.items);
+        try t.expectEqual(plan.from, hint);
         if (plan.from > 0) try t.expectEqual(plan.from, owner.pending.?.at);
         return plan.from;
     }

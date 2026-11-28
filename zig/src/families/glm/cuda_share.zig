@@ -101,14 +101,32 @@ pub fn of(e: *const engine.Engine) ?kp.Prompts {
 /// A resume's state: restored by the prompt pass's start on every rank (engine.Resume), once its pages are mapped.
 pub const Owner = struct { pending: ?*engine.Kept = null };
 
+fn query(s: *const Stream, ims: []const kp.Image) !kp.Query {
+    var q: kp.Query = .of(cacheKey(s) orelse return error.ImageCacheKeyRequired);
+    q.images = ims;
+    return q;
+}
+
+/// The shared store for a cacheable pass on this rank.
+pub fn storeFor(e: *const engine.Engine, s: *const Stream) ?kp.Prompts {
+    const prompts = of(e) orelse return null;
+    return if (cacheable(s)) prompts else null;
+}
+
+/// A scheduling hint only. The actual pass rechecks the store before adopting pages.
+pub fn cachedHint(e: *const engine.Engine, s: *const Stream) u32 {
+    const prompts = storeFor(e, s) orelse return 0;
+    const ims = images(e.gpa, s.images) catch return 0;
+    defer e.gpa.free(ims);
+    return prompts.resident(query(s, ims) catch return 0);
+}
+
 /// Before a prompt pass: the deepest kept state's pages in `adopt` (held for the stream), the state in `owner`.
 pub fn begin(e: *engine.Engine, s: *const Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !kp.Plan {
     const prompts = of(e) orelse return error.NoPromptStore;
     const ims = try images(e.gpa, s.images);
     defer e.gpa.free(ims);
-    var q: kp.Query = .of(cacheKey(s) orelse return error.ImageCacheKeyRequired);
-    q.images = ims;
-    const plan = try prompts.begin(q, s.history_len, s.shared_prefixes, owner, adopt);
+    const plan = try prompts.begin(try query(s, ims), s.history_len, s.shared_prefixes, owner, adopt);
     defer prompts.free(plan.marks);
     const mine = e.gpa.dupe(u32, plan.marks) catch |err| { // the lane's own marks, freed by its allocator
         e.pages.?.give(adopt.items);
